@@ -1,2 +1,5 @@
 .claude
 .remember
+.superpowers
+node_modules
+dist
