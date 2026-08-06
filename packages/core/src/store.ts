@@ -144,6 +144,11 @@ export function openStore(path: string): Store {
 
   return {
     createProject(input: { name: string; sleepAfterSeconds: number | null }): Project {
+      // Checked here rather than relying on the UNIQUE constraint's raised error, so callers
+      // always see a HobbyError. Safe today because the daemon is single-process and this
+      // check-then-insert is not interleaved with any other write to the same row; if
+      // concurrent writers are ever introduced, this needs a real transaction or the
+      // constraint violation needs to be caught and translated instead.
       if (getProjectByName(input.name) !== null) {
         throw new HobbyError('name_taken', `project name already taken: ${input.name}`)
       }
@@ -183,6 +188,9 @@ export function openStore(path: string): Store {
       name: string
       config: PostgresConfig
     }): Resource {
+      // Same check-then-insert reasoning as createProject above: deliberate application-level
+      // backstop for the UNIQUE(project_id, name) constraint, not a substitute for a
+      // transaction if concurrent writers are ever added.
       if (getResourceByName(input.projectId, input.name) !== null) {
         throw new HobbyError('name_taken', `resource name already taken: ${input.name}`)
       }
