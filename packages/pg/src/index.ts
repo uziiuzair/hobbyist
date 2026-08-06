@@ -4,3 +4,4 @@
 export * from './postgres.js'
 export * from './readiness.js'
 export * from './connstring.js'
+export * from './activity-guard.js'
