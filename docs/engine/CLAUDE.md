@@ -32,14 +32,22 @@ Postgres, the feature is wrong, not Postgres.
 - Cloning data directories, which is `branching/`
 - Multi-node anything. One host. If it needs a cluster, it is out of scope.
 
+## Decisions made
+
+- **One Postgres process per `postgres` resource**, not one shared Postgres with
+  many databases. Sleep is per resource, resource limits are per resource, and
+  branching clones a data directory, all of which need the process boundary. It
+  costs more memory at rest, which is exactly the cost hibernation exists to pay
+  back.
+- **Containers stay stopped, not removed.** Recreating a container on every wake
+  spends time we do not have in a one second budget.
+
 ## Decisions to make
 
 - Container runtime: Docker, Podman, or containerd directly. Docker is what
   people already have. Podman is rootless by default. Pick for the audience, not
-  for elegance.
-- One Postgres process per project, or one Postgres with many databases. Per
-  project is cleaner for sleep and resource limits, and costs more memory at rest.
-  This choice constrains hibernation and branching, so settle it early.
+  for elegance. Whatever wins sits behind `ComputeRuntime` in `core`, so this is
+  a contained choice rather than a foundational one.
 
 ## Open questions
 

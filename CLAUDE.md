@@ -4,30 +4,56 @@ Read this first, every session. It is the standing context for the whole repo.
 
 ## What this is
 
-**Postgres that feels like Neon, on hardware you own.**
+**A self-hosted platform that feels like Neon and Supabase, on hardware you own.**
 
-Managed Postgres platforms sell convenience: instant provisioning, branching,
-scale-to-zero, a connection string that just works, backups you never think
-about. Every primitive underneath that convenience is already free and mature.
-The convenience itself is what people pay for, and it is the only thing missing
-from the self-hosted world.
+Managed platforms sell convenience: instant provisioning, branching, scale to
+zero, a connection string that just works, a dashboard that makes a database
+legible, a deploy that happens on push. Every primitive underneath that
+convenience is already free and mature. The convenience itself is what people
+pay for, and it is the only thing missing from the self-hosted world.
 
-Hobbyist is that convenience layer. One command gives you a Postgres. Another
-gives you a branch. The database sleeps when nothing is connected and wakes when
-something connects. It runs on one box, with no Kubernetes, and you can walk away
-from it at any time with a single command.
+Hobbyist is that convenience layer. One command gives you a project with a
+Postgres in it. A studio you would actually choose to open. Everything sleeps
+when nothing is using it and wakes when something connects. It runs on one box,
+with no Kubernetes, and you can walk away from it at any time with a single
+command.
 
-**One-liner:** Your Postgres. Your box. Their convenience.
+**One-liner:** Your stack. Your box. Their convenience.
+
+## The wedge
+
+**Everything sleeps, and everything wakes on demand.**
+
+This is the single reason for the project to exist, and every design decision
+serves it. It is also the one thing no self-hostable alternative does:
+
+- **Self-hosted Supabase never sleeps.** It is a large multi-container stack that
+  runs at full cost whether or not anything is using it.
+- **Xata's open-source scale-to-zero plugin cannot wake a database.** In their
+  own words, it "can't handle reactivation because the cluster is no longer
+  running once it's hibernated." Automatic reactivation on connection is what
+  they kept in the paid cloud.
+- **Coolify and Dokploy deploy apps well and do not sleep them.**
+
+Sleep is what makes ten projects fit on one small box. Wake is what makes sleep
+invisible. Neither is useful without the other, and the pair is the product.
+
+When a feature conflicts with the wedge, the wedge wins.
 
 ## What this is not
 
 This is **not a business.** Nobody is expected to pay. There is no cloud offering,
-no hosted tier, no metering, no billing, and no roadmap toward one. The product
-exists so that people who want this option have it.
+no hosted tier, no paid feature, no metering, no billing, and no roadmap toward
+one. Nothing is held back behind a paid guard. The product exists so that people
+who want this option have it, and we are happy knowing it helps people.
 
-That fact is load-bearing, not a disclaimer. It removes multi-tenancy, isolation
-hardening, usage accounting, and quota enforcement from scope, and those removals
-are what make the project buildable by one person.
+**We provide no warranty and take on no liability.** That is stated plainly in
+the licence and it is not a throwaway. It is why we do not ship anything whose
+failure mode is someone else getting owned or losing data quietly.
+
+That not-a-business fact is load-bearing, not a disclaimer. It removes
+multi-tenancy, isolation hardening, usage accounting, and quota enforcement from
+scope, and those removals are what make the project buildable by one person.
 
 **Success metric:** the author is still using it daily in six months. That is the
 only one. Stars, forks and issue count are noise.
@@ -39,17 +65,18 @@ only one. Stars, forks and issue count are noise.
 | Domain | `hobbyist.sh` | Owned |
 | NPM namespace | `@hobby.sh/*` | Owned. Registry showed the scope unclaimed as of 2026-08-06 |
 | Repository | `github.com/uziiuzair/hobbyist` | Live, `main` |
-| CLI binary | `hobby` | The single user-facing entry point |
+| CLI binary | `hobby` | The primary user-facing entry point |
 | Parent | Ooozzy Ltd (product studio) | This is studio infrastructure, not a studio product |
 
-Package layout under the namespace, as capabilities land:
+Six packages under the namespace:
 
 ```
-@hobby.sh/cli      the hobby binary
-@hobby.sh/core     shared types, config, the compute runtime interface
-@hobby.sh/pg       Postgres instance lifecycle
-@hobby.sh/proxy    wake-on-connect wire proxy
-@hobby.sh/mcp      MCP server over the CLI verbs
+@hobby.sh/core     Project and Resource model, state, config, ComputeRuntime interface
+@hobby.sh/pg       the postgres resource kind: lifecycle, data directories, readiness
+@hobby.sh/proxy    the wake router. Postgres wire protocol, HTTP from Phase 2
+@hobby.sh/cli      the hobby binary and the daemon
+@hobby.sh/studio   the web UI and its auth
+@hobby.sh/mcp      MCP tools over the daemon API
 ```
 
 Small, composable, independently versioned. A package that cannot be used without
@@ -60,132 +87,142 @@ three siblings is a module, not a package.
 The stance the whole project serves: **developer ownership over platform
 dependence.** Infrastructure should be something you can leave.
 
-Concretely, that means three promises, in priority order when they conflict:
+Concretely, three promises, in priority order when they conflict:
 
 1. **You can always leave.** The data directory is a plain Postgres data
    directory. `pg_dump` always works. `hobby eject` hands you a
    `docker-compose.yml` and the data, and gets out of the way.
 2. **It runs on one box.** A five dollar VPS, a Mac Mini, an old ThinkPad under a
    desk. If a feature requires a cluster, it is out of scope.
-3. **It feels good.** The reason people pay for managed Postgres is ergonomics.
+3. **It feels good.** The reason people pay for managed platforms is ergonomics.
    Matching the primitives is not enough; matching the feel is the entire job.
 
-## Scope: v1 is Postgres and nothing else
+## Scope
 
-**In scope.** Instance lifecycle, wake-on-connect proxying, idle hibernation,
-copy-on-write branching, backup and restore, an MCP server, and eject.
+A **Project** is a namespace holding typed resources. Phase 1 registers one kind,
+`postgres`. Later phases register more by implementing an interface, and earlier
+phases do not change. That shape is the reason the phases below are additive
+rather than successive rewrites. See ADR 0007.
 
-**Explicitly out of scope,** and not to be added without an ADR that argues the
-case: object storage, workers, edge functions, cron, auth, secrets management,
-DNS, AI compute, a hosted cloud, a web dashboard, multi-tenancy, Kubernetes,
-Terraform providers, and Helm charts.
+| Phase | Ships |
+|---|---|
+| **1** | Studio, Postgres, CLI, MCP |
+| **1.5** | Copy-on-write branching |
+| **2** | Compute: workers and apps, stateless, arbitrary runtimes via containers |
+| **3** | S3-compatible object storage, volumes for compute, React SDK |
 
-That out-of-scope list is the most important paragraph in this file. The failure
-mode for this project is not competition and not lack of revenue, since there is
-no revenue. It is a half-finished ten-service platform that gets abandoned at 40
-percent. Every one of those items is individually reasonable and collectively
-fatal. They earn their way in by being demanded by real daily use, never by
-appearing on a whiteboard.
+Phase 2 compute is deliberately **stateless**. It gets its persistence from
+Postgres. Volumes arrive in Phase 3, which keeps volume lifecycle out of the
+hardest phase.
+
+Backups, restore and `hobby eject` are not phased. Eject is a Phase 1 obligation
+because it is the promise that makes everything else honest.
+
+### Explicitly out of scope
+
+Not to be added without an ADR that argues the case:
+
+- **Kubernetes, clustering, multi-node anything.** One box.
+- **Multi-tenancy across different owners.** Every tenant here is the same person.
+- **A hosted cloud, a paid tier, billing, metering, usage accounting.**
+- **End-user auth as a service.** Studio has an operator credential. We do not
+  ship a GoTrue equivalent for other people's applications.
+- **Realtime subscriptions, global edge execution, DNS management, secrets
+  management, AI compute, Terraform providers, Helm charts.**
+
+This list is shorter than it once was, because the project deliberately got
+wider. It is not weaker. **The failure mode for this project is not competition
+and not lack of revenue, since there is no revenue. It is a half-finished
+platform abandoned at 40 percent.** Every item above is individually reasonable
+and collectively fatal. They earn their way in by being demanded by real daily
+use, never by appearing on a whiteboard.
 
 ## Architecture in one page
 
 ```
-  client (psql, app, ORM)
-        |
+  psql / ORM / app                     browser
+        |                                 |
+        | :5432                           | :443
+        v                                 v
+  hobby proxy  <------ wake ------>  caddy (managed container)
+        |            (the router)         |
+        |                                 v
+        |                            hobby daemon
+        |                            unix socket for cli + mcp
+        |                            loopback tcp for studio
+        v                                 |
+  postgres container                      |
+        |          <---- start/stop ------+
         v
-  hobby proxy            speaks the Postgres wire protocol.
-        |                reads the startup packet, resolves the target project,
-        |                and if that project is asleep, starts it, waits for
-        |                readiness, then forwards the connection through.
-        v
-  postgres container     unmodified Postgres 18+. one per project.
-        |                started and stopped by the daemon. no fork, no patches,
-        |                no extensions required for core function.
-        v
-  data directory         a plain PGDATA on a reflink-capable filesystem.
-                         branching is a filesystem-level copy-on-write clone.
+  data directory     a plain PGDATA on a reflink-capable filesystem
 ```
 
-The daemon owns lifecycle and idle detection. The proxy owns the illusion. The
-data directory owns the escape hatch.
+The **daemon** owns state and lifecycle. The **proxy** owns the illusion, and is
+also the activity sensor that hibernation reads. **Caddy** owns TLS and HTTP
+routing. The **data directory** owns the escape hatch.
 
-### The three decisions that define the shape
+Three seams that are not negotiable:
 
-**No Neon-style storage and compute separation.** Neon replaced Postgres's storage
-substrate with a Rust pageserver that reconstructs any page at any point in WAL
-history, fed by a Paxos-consensus safekeeper tier. It is genuinely excellent and
-it is the part that cost a large team of Postgres specialists years. We are not
-building it. We take the three user-visible behaviors it delivers (branching,
-sleep, durable data across restarts) and get them a cheaper way. See
-`docs/decisions/0001`.
-
-**Containers, not microVMs, for now.** Firecracker isolates untrusted multi-tenant
-workloads. On your own box every tenant is you, so the isolation buys nothing and
-costs a kernel boot, a device model, network plumbing and an image pipeline.
-Containers start faster and are far simpler. The compute runtime sits behind an
-interface so a microVM implementation can land later if multi-tenancy ever
-becomes real. See `docs/decisions/0002`.
-
-**Branching is a filesystem clone, not a storage engine.** PostgreSQL 18's
-`file_copy_method = clone` plus `CREATE DATABASE ... STRATEGY = FILE_COPY` produces
-a copy-on-write clone on reflink-capable filesystems. Published benchmark: a 6GB
-database cloned in 212ms versus roughly 67 seconds with the default WAL_LOG
-strategy. Neon-style branching as a config flag and one SQL statement. See
-`docs/branching/`.
+- **The proxy asks, the engine acts.** The proxy never starts a container. It
+  calls `wake(resource)` and waits, which is what makes wake logic testable
+  against a fake engine with no Docker in the loop.
+- **`core` knows nothing about Docker.** The `ComputeRuntime` interface is the
+  ADR 0002 escape hatch, and the seam Phase 2's `app` and `worker` kinds plug in
+  through.
+- **The daemon API is the only control surface.** CLI, Studio and MCP are three
+  clients of one HTTP API and none of them touches Postgres or Docker directly.
+  That turns "the CLI and MCP must never diverge" from a discipline problem into
+  a structural one.
 
 ## The keystone
 
-**The wake-on-connect proxy is the single component that decides whether this
-project works.** Everything else is orchestration around mature tools. The proxy
-is the piece that turns "your database is stopped" into "your first query was a
-bit slow," and it is the piece every existing project holds back.
+**The wake router is the single component that decides whether this project
+works.** Everything else is orchestration around mature tools. It is the piece
+that turns "your database is stopped" into "your first query was a bit slow," and
+it is the piece every comparable project holds back.
+
+**Cold start budget: under 1 second target, 3 seconds hard ceiling.** Three
+seconds is roughly where common ORM and pool connect timeouts begin firing, so
+anything above it is a release blocker rather than a slow path. Measure on a five
+dollar VPS and a Mac Mini, file results with the hardware stated, and publish
+them.
 
 Build it second, immediately after basic instance lifecycle. Not last. If the
-proxy cannot be made to feel good, the project has no reason to exist and it is
+router cannot be made to feel good, the project has no reason to exist and it is
 better to learn that in week two than month six.
 
 ## Prior art
 
-Read these before building anything. Two of them have already solved parts of
-this and one has solved almost all of it.
+Read these before building anything.
 
 | Project | What to take from it |
 |---|---|
 | **Neon** | The architecture writeups are the best available explanation of serverless Postgres. Read them to understand precisely what we are choosing not to build. |
-| **Xata** | The closest prior art by a wide margin. Apache 2.0, open source: SQL gateway, branch operator, cluster and project services, auth, and scale-to-zero plugins, built on CloudNativePG and OpenEBS with NVMe-over-Fabrics for copy-on-write. **Read their code before writing ours.** |
-| **PostgresAI DBLab Engine** | Thin clones via ZFS and LVM, in production for years. The fallback branching path if the reflink route disappoints. |
-| **pgcat / PgDog / Supavisor** | Reference implementations of the Postgres wire protocol in a proxy. None of them do wake-on-connect. |
+| **Xata** | Closest prior art on the database half. Apache 2.0: SQL gateway, branch operator, cluster and project services, scale-to-zero plugins, on CloudNativePG and OpenEBS. **Read their code before writing ours.** |
+| **Supabase** | The Studio is the reference for what a database dashboard should feel like, and the self-hosted stack is the reference for how heavy this gets if you are not careful. |
+| **Coolify / Dokploy / CapRover** | Now genuinely adjacent, since Phase 2 deploys apps. They deploy well and never sleep. Read them before writing compute. |
+| **PostgresAI DBLab Engine** | Thin clones via ZFS and LVM, in production for years. The fallback branching path if reflinks disappoint. |
+| **pgcat / PgDog / Supavisor** | Reference implementations of the Postgres wire protocol in a proxy. None do wake-on-connect. |
 | **pgBackRest / Barman** | Backups are solved. We are wrapping, not reimplementing. |
-| **Coolify / Dokploy / CapRover** | Adjacent, not competitors. They deploy apps. We do one database well. |
-
-### Why Xata does not make this redundant
-
-Two gaps, and the second is the whole opening.
-
-1. Xata explicitly recommends **against** self-hosting their open source version
-   for a single instance, because it runs on Kubernetes and is overkill. Their
-   words. The single instance is our entire audience.
-2. Their scale-to-zero plugin **cannot wake the database.** From their own
-   writeup: the plugin "can't handle reactivation because the cluster is no longer
-   running once it's hibernated," and automatic reactivation on connection is what
-   they kept in the paid cloud.
-
-Single box, no Kubernetes, wake-on-connect. That is the wedge. It is narrow and it
-is real.
 
 ## Hard constraints
 
-- **PostgreSQL 18 or newer** for the clone-based branching path.
-- **A reflink-capable filesystem** for instant branching: XFS with reflinks
-  enabled, ZFS, or APFS. **ext4 does not support reflinks**, and ext4 is the
-  default image on a lot of the cheap VPS providers our audience uses. Branching
-  degrades to a real copy there. Document this loudly on day one, detect it at
-  `hobby init`, and warn rather than fail.
-- **`CREATE DATABASE ... STRATEGY = FILE_COPY` requires no active connections on
-  the source database.** Branching needs a quiesce, clone, restore sequence or a
-  clone taken from a paused replica. This is real engineering, not a footnote.
-- **Postgres stays unmodified.** No fork, no patched binaries. If a feature needs
-  a patched Postgres, the feature is wrong.
+- **TypeScript everywhere**, shipped as a compiled single binary. See ADR 0006.
+- **Postgres stays unmodified.** No fork, no patched binaries, no required
+  extensions for core function. If a feature needs a patched Postgres, the
+  feature is wrong.
+- **A reflink-capable filesystem for instant branching:** XFS with reflinks, ZFS,
+  or APFS. **ext4 does not support reflinks**, and ext4 is the default image on a
+  lot of the cheap VPS providers our audience uses. Branching degrades to a real
+  copy there. Document it loudly, detect it at `hobby init`, warn rather than
+  fail.
+- **PostgreSQL 18 or newer is required only for cloning a database that is
+  awake.** Cloning a cleanly stopped data directory is version independent, and
+  hibernation means most instances are already stopped. This relaxes what was
+  previously a floor. It is a claim that needs benchmarking before it is relied
+  on: see `docs/branching/research/`.
+- **Studio is exposed to the network**, so its auth is a security boundary rather
+  than a formality. See ADR 0008.
 
 ## Working agreements
 
@@ -211,4 +248,4 @@ is real.
 
 ---
 
-Last Updated: 2026-08-06
+Last Updated: 2026-08-07

@@ -8,8 +8,15 @@ happened later. If a decision is reversed, write a new ADR and mark the old one
 ## Why this folder matters more here than in most repos
 
 The main risk to this project is not competition, and it is not revenue, because
-there is no revenue. **It is scope.** A ten-service platform half-built and
-abandoned is the specific failure mode being guarded against.
+there is no revenue. **It is scope.** A platform half-built and abandoned is the
+specific failure mode being guarded against.
+
+That risk went up, not down, on 2026-08-07. ADR 0007 deliberately widened the
+scope from a Postgres tool to a platform, and said so plainly rather than
+pretending the original argument had been wrong. The guard did not go away, it
+changed form: a shorter out-of-scope list, resource kinds that must be additive,
+a wedge that breaks ties, and a 30-day daily-use gate before Phase 2. This folder
+is where all four are enforced.
 
 So this folder is disproportionately a record of things deliberately **not**
 built. That record is what stops a reasonable-sounding suggestion, six months
@@ -46,3 +53,11 @@ that matters, because it is the difference between a decision and a dogma.
 | [0003](0003-plain-postgres-data-directory.md) | The data directory is always plain Postgres |
 | [0004](0004-no-metering.md) | No metering, no billing, no usage accounting |
 | [0005](0005-branching-via-pg18-clone.md) | Branching via PostgreSQL 18 file clone |
+| [0006](0006-typescript-everywhere.md) | TypeScript everywhere, Bun as the runtime |
+| [0007](0007-hobbyist-is-a-platform.md) | Hobbyist is a platform, not a Postgres tool |
+| [0008](0008-studio-is-network-exposed.md) | Studio is network exposed, with an operator credential |
+| [0009](0009-caddy-as-http-front-door.md) | Caddy as the HTTP front door, run as a managed container |
+
+0007 supersedes the scope section of the original root `CLAUDE.md` and is the one
+to read first if you are wondering why this is bigger than a database tool. 0001
+through 0005 survive it unchanged.

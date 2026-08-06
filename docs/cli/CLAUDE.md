@@ -18,15 +18,25 @@ so the command has to be exceptional.
 
 ```
 hobby init                       prepare the host, check the filesystem, start the daemon
-hobby pg create <name>           new Postgres, returns a connection string
-hobby pg ls                      what exists, what is awake, what is asleep
-hobby pg branch <src> <dst>      copy-on-write branch
-hobby pg connect <name>          open psql against it
-hobby pg rm <name>               destroy, with a confirmation
-hobby eject <name>               emit docker-compose.yml plus data, and stop managing it
+hobby new <name>                 project + postgres + connection string, one command
+hobby ls                         everything, with sleep state
+hobby pg create --project <p>    the explicit form, for a second database
+hobby sleep|wake <target>        manual override
+hobby connect <target>           open psql against it
+hobby studio                     print the URL, open the browser
+hobby studio passwd              set the operator credential, on the box only
+hobby branch <src> <dst>         copy-on-write branch (Phase 1.5)
+hobby rm <target>                destroy, with a confirmation
+hobby eject <project>            emit docker-compose.yml plus data, and stop managing it
 ```
 
 Verb-noun-target. No subcommand deeper than three levels.
+
+**`hobby new` carries the promise.** The root `CLAUDE.md` says one command gives
+you a Postgres, and that has to survive Projects existing. `hobby new blog`
+creates the project, creates the `postgres` resource in it, and prints the
+connection string. Everything else is the explicit form for when you want
+something other than the common case.
 
 ## In scope
 
@@ -44,20 +54,32 @@ Verb-noun-target. No subcommand deeper than three levels.
 - The MCP surface, which is `mcp/`, though it wraps these same verbs and must not
   drift from them
 
-## Decisions to make
+## Decisions made
 
-- Language and runtime. Node keeps it inside the `@hobby.sh` namespace and makes
-  the MCP server trivial. Go or Rust give a single static binary with no runtime
-  dependency, which matters for a tool people install on a bare VPS.
-- Daemon or daemonless. Hibernation needs something always watching, so probably
-  a daemon, but confirm before assuming.
-- Where state lives: a SQLite file, plain JSON, or a Postgres of our own. Prefer
-  the most boring option that survives a hard reboot.
+- **Language and runtime: TypeScript on Bun**, shipped as a compiled single
+  binary. See `docs/decisions/0006`.
+- **Daemon, not daemonless.** Hibernation needs something always watching, and
+  the proxy has to be resident to answer connections at all.
+- **State lives in one SQLite file the daemon owns.** The most boring thing that
+  survives a hard reboot.
+- **`hobby init` warns loudly on ext4 and proceeds.** Refusing to run on the most
+  common VPS filesystem is how a tool gets uninstalled in the first thirty
+  seconds. Branching degrades to a real copy there and says so.
+
+## The daemon API is the only control surface
+
+The daemon serves one HTTP API on two listeners: a **unix socket** for the CLI
+and MCP, where filesystem permissions are the authentication and no credential
+exists to leak, and a **loopback TCP port** for Studio, reached only through
+Caddy and gated by the operator credential (`docs/decisions/0008`).
+
+Same routes for all three clients. This is what makes the "CLI and MCP must never
+diverge" rule in `docs/mcp/CLAUDE.md` structural rather than a matter of
+discipline: there is only one surface to drift from.
 
 ## Open questions
 
-- Does `hobby init` refuse to proceed on ext4, warn, or silently degrade? Leaning
-  warn loudly and proceed, because refusing to run on the most common VPS
-  filesystem is how a tool gets uninstalled in the first thirty seconds.
 - What is the story on macOS? APFS supports reflinks, so a Mac Mini is a valid
   target, but the container runtime differs.
+- Does the daemon supervise itself, or does it hand that to systemd and launchd?
+  Handing it over is less code and worse on the boxes that have neither.
