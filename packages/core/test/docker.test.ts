@@ -113,6 +113,43 @@ test('stop passes the timeout to docker stop -t', async () => {
   assert.deepEqual(calls, [{ cmd: 'docker', args: ['stop', '-t', '30', 'hobby-blog-primary'] }])
 })
 
+test('stop resolves rather than throws when the container does not exist', async () => {
+  const exec: ExecFn = async () => {
+    throw notFoundError('Error: No such container: hobby-blog-primary')
+  }
+
+  const runtime = createDockerRuntime(exec)
+  await assert.doesNotReject(() => runtime.stop('hobby-blog-primary', { timeoutSec: 30 }))
+})
+
+test('remove resolves rather than throws when the container does not exist', async () => {
+  const exec: ExecFn = async () => {
+    throw notFoundError('Error: No such container: hobby-blog-primary')
+  }
+
+  const runtime = createDockerRuntime(exec)
+  await assert.doesNotReject(() => runtime.remove('hobby-blog-primary'))
+})
+
+test('stop surfaces an unexpected failure as a runtime_unavailable HobbyError', async () => {
+  const exec: ExecFn = async () => {
+    throw Object.assign(new Error('Command failed'), {
+      stderr: 'Cannot connect to the Docker daemon',
+      stdout: '',
+    })
+  }
+
+  const runtime = createDockerRuntime(exec)
+  await assert.rejects(
+    () => runtime.stop('hobby-blog-primary', { timeoutSec: 30 }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error)
+      assert.equal((err as { code?: string }).code, 'runtime_unavailable')
+      return true
+    }
+  )
+})
+
 test('ensureNetwork creates the network only when absent', async () => {
   const calls: RecordedCall[] = []
   const exec: ExecFn = async (cmd, args) => {

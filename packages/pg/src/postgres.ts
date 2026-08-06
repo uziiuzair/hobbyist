@@ -32,6 +32,14 @@ export interface PgDeps {
   // optional, so any caller building a PgDeps from just
   // { store, runtime, paths, config } still satisfies this interface.
   probeFactory?: (config: PostgresConfig) => () => Promise<boolean>
+  // Optional seam for tests. Defaults to fs.rm(path, { recursive: true,
+  // force: true }). destroyPostgres needs to be tested against a rm that
+  // genuinely fails (a busy disk, a permission error) to pin down that a
+  // real failure is collected and thrown rather than swallowed; forcing a
+  // real fs.rm to fail deterministically would mean relying on OS-level
+  // permission tricks, which is fragile and platform-dependent. Additive
+  // and optional, same reasoning as probeFactory above.
+  removeDataDir?: (path: string) => Promise<void>
 }
 
 const SUPERUSER = 'postgres'
@@ -205,35 +213,65 @@ export async function stopPostgres(deps: PgDeps, resource: Resource): Promise<vo
   deps.store.setResourceState(resource.id, 'sleeping')
 }
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+async function defaultRemoveDataDir(path: string): Promise<void> {
+  await rm(path, { recursive: true, force: true })
+}
+
 // Teardown is best-effort and resilient step by step: a resource can reach
 // this function having never had a container created at all (e.g.
 // createPostgres failed at mkdir or ensureNetwork, before ensureCreated
-// ever ran), or with a container already gone by some other path. Any
-// single step failing here (stop, remove, or the filesystem rm) must not
-// prevent the remaining steps from running, and the row must always be
-// deleted at the end: it is the source of truth for "this resource exists",
-// and a `failed` row with nothing left to tear down would otherwise be
-// permanently stuck with no path to remove it.
+// ever ran). A missing container or a missing data directory is not a
+// failure: runtime.stop()/remove() both resolve as no-ops for a container
+// that is already gone (see docker.ts), and rm's force: true already
+// swallows "does not exist." A single failing step must not prevent the
+// remaining steps from running, and the row must always be deleted last:
+// it is the source of truth for "this resource exists," and a `failed` row
+// with nothing left to tear down would otherwise be permanently stuck with
+// no path to remove it.
+//
+// But an actual failure (the Docker daemon unreachable, an `rm` blocked by
+// permissions or a busy disk) is a different thing entirely, and must not
+// be discarded: deleting the row while quietly leaving a container or data
+// directory behind would tell the caller their data is gone when it may
+// still be sitting on disk. So each step's real failure is collected, not
+// swallowed; the row is still deleted unconditionally (the record must not
+// survive); and only then, if anything failed, is a single error thrown
+// that names every step that did and says plainly that something may
+// remain on disk. Deleting the row first and throwing second is
+// deliberate, in that order.
 export async function destroyPostgres(deps: PgDeps, resource: Resource): Promise<void> {
+  const failures: string[] = []
+
   try {
     await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
-  } catch {
-    // Nothing to stop, or the runtime is unavailable: either way, remove()
-    // below gets its own chance, and the row still gets deleted.
+  } catch (err) {
+    failures.push(`stop container: ${errorMessage(err)}`)
   }
 
   try {
     await deps.runtime.remove(resource.config.containerName)
-  } catch {
-    // Same reasoning as stop() above: already gone is fine.
+  } catch (err) {
+    failures.push(`remove container: ${errorMessage(err)}`)
   }
 
+  const removeDataDir = deps.removeDataDir ?? defaultRemoveDataDir
   try {
-    await rm(resource.config.dataDir, { recursive: true, force: true })
-  } catch {
-    // force: true already swallows "does not exist"; anything else here is
-    // a filesystem problem the daemon must not let block deleting the row.
+    await removeDataDir(resource.config.dataDir)
+  } catch (err) {
+    failures.push(`remove data directory: ${errorMessage(err)}`)
   }
 
   deps.store.deleteResource(resource.id)
+
+  if (failures.length > 0) {
+    throw new HobbyError(
+      'internal',
+      `resource ${resource.id} is no longer managed, but ${failures.length} teardown step(s) failed: ${failures.join('; ')}`,
+      'a container or the data directory may still remain on disk and may need manual cleanup'
+    )
+  }
 }
