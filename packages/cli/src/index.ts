@@ -31,6 +31,7 @@ export {
   cmdRm,
   cmdSleep,
   cmdWake,
+  connectionEnv,
   resolveTarget,
   type Ctx,
 } from './cli/commands.js'
