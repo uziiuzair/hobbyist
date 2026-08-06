@@ -14,8 +14,18 @@
 // here starts that proxy, see the task report for why that split is
 // deliberate.
 
-import { createDockerRuntime, openStore, type ComputeRuntime, type HobbyConfig, type Paths, type Store } from '@hobby.sh/core'
-import { ActivityTracker } from '@hobby.sh/proxy'
+import {
+  createDockerRuntime,
+  HobbyError,
+  openStore,
+  type ComputeRuntime,
+  type HobbyConfig,
+  type Paths,
+  type Resource,
+  type Store,
+} from '@hobby.sh/core'
+import { startPostgres } from '@hobby.sh/pg'
+import { ActivityTracker, type ProxyDeps, type ProxyTarget } from '@hobby.sh/proxy'
 
 export interface DaemonContext {
   store: Store
@@ -42,4 +52,85 @@ export function createDaemonContext(opts: {
     config: opts.config,
     activity: new ActivityTracker(),
   }
+}
+
+// The real ProxyDeps the wake-on-connect proxy runs against, bound to this
+// DaemonContext. Task 4 left this exact wiring as Task 7's to do (see
+// task-4-report.md's "What Task 7 must wire"): resolve looks a project up
+// by the routing key's project segment and returns its resource's running
+// host, port and database; wake calls startPostgres, which already waits
+// for real readiness before resolving, satisfying ProxyDeps.wake's
+// contract that it must not resolve until Postgres is actually accepting
+// connections.
+//
+// wake's in-flight map is the one piece of real state this function
+// builds. The proxy itself deliberately does not de-duplicate concurrent
+// wakes for the same resource (see packages/proxy/src/proxy.ts's own
+// comment on ProxyDeps.wake); this map is what turns ten simultaneous
+// connections to one sleeping resource into exactly one startPostgres
+// call, with every caller awaiting the same promise. The entry is removed
+// in a `finally` on both success and failure, so one failed wake does not
+// permanently poison the resource for every connection after it.
+export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
+  const inFlightWakes = new Map<string, Promise<void>>()
+
+  async function resolve(projectName: string): Promise<ProxyTarget | null> {
+    const project = ctx.store.getProjectByName(projectName)
+    if (project === null) {
+      return null
+    }
+
+    const resources = ctx.store.listResources(project.id)
+    if (resources.length === 0) {
+      return null
+    }
+    if (resources.length > 1) {
+      // The wire protocol's routing key (core's parseRoutingKey) carries a
+      // project and, optionally, a database, never a resource name: there
+      // is nothing in a Postgres startup packet that can disambiguate which
+      // of several resources under one project a client means. The CLI's
+      // own resolveTarget (packages/cli/src/cli/commands.ts) hits the same
+      // ambiguity for `project/resource` targets and throws the same code;
+      // matching it here keeps one error identity for "this project needs a
+      // specific resource named" across both surfaces. proxy.ts's own
+      // try/catch around deps.resolve turns this into a FATAL error on the
+      // wire rather than crashing the connection handler.
+      throw new HobbyError(
+        'ambiguous_target',
+        `project ${projectName} has more than one resource: ${resources.map((r) => r.name).join(', ')}`,
+        'the wake-on-connect proxy cannot disambiguate resources by database name alone; connect to a project with exactly one resource'
+      )
+    }
+
+    const resource = resources[0] as Resource
+    return {
+      resourceId: resource.id,
+      host: '127.0.0.1',
+      port: resource.config.hostPort,
+      state: resource.state,
+      database: resource.config.database,
+    }
+  }
+
+  function wake(resourceId: string): Promise<void> {
+    const existing = inFlightWakes.get(resourceId)
+    if (existing !== undefined) {
+      return existing
+    }
+
+    const promise = (async (): Promise<void> => {
+      const resource = ctx.store.getResource(resourceId)
+      if (resource === null) {
+        throw new HobbyError('resource_not_found', `no resource with id ${resourceId}`)
+      }
+      await startPostgres(ctx, resource)
+    })().finally(() => {
+      inFlightWakes.delete(resourceId)
+    })
+
+    inFlightWakes.set(resourceId, promise)
+    return promise
+  }
+
+  return { resolve, wake, activity: ctx.activity }
 }

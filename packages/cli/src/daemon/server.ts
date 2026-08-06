@@ -1,19 +1,38 @@
-// Two listeners, one handler. A unix socket for the CLI and MCP (filesystem
-// permissions are the authentication, see docs/cli/CLAUDE.md), and an
-// optional loopback TCP port for Studio once it exists. Neither listener
-// does anything a request handler couldn't: createApp is the single
+// Two control-plane listeners, one handler. A unix socket for the CLI and
+// MCP (filesystem permissions are the authentication, see docs/cli/CLAUDE.md),
+// and an optional loopback TCP port for Studio once it exists. Neither
+// listener does anything a request handler couldn't: createApp is the single
 // function both are built from, so there is exactly one place routing and
 // error handling can live, never two copies that can drift.
+//
+// startDaemon also starts the two pieces that make the product's defining
+// feature real: the wake-on-connect proxy (packages/proxy, the keystone
+// component, see root CLAUDE.md) and the hibernator (hibernator.ts, the
+// sleep half of that same pair). Both are bound to this same DaemonContext,
+// both are torn down as part of this file's own shutdown sequence, and the
+// order that teardown happens in is deliberate: see performShutdown below.
 
 import { existsSync } from 'node:fs'
 import { chmod, rm } from 'node:fs/promises'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import net from 'node:net'
 import { stopPostgres } from '@hobby.sh/pg'
-import type { DaemonContext } from './context.js'
+import { startPgProxy } from '@hobby.sh/proxy'
+import { createProxyDeps, type DaemonContext } from './context.js'
+import { startHibernator } from './hibernator.js'
 import { handleRequest } from './routes.js'
 
 const SOCKET_MODE = 0o600
+
+// How often the hibernator re-checks every resource for a sleep candidate.
+// docs/hibernation/CLAUDE.md cites Xata's CNPG sidecar polling once a minute
+// as the cost envelope to stay inside; this is tighter than that so a short
+// sleepAfterSeconds (a developer testing the feature, e.g.) does not sit up
+// to a full extra minute past its own threshold, while still being far from
+// a meaningful load on a single box (the hibernator's own tick is in-memory
+// ActivityTracker reads for every resource that is not already a sleep
+// candidate, and only one real Postgres round trip for the ones that are).
+const HIBERNATION_TICK_MS = 10_000
 
 // How long to wait for a connection attempt against a possibly-stale socket
 // file before assuming nothing is listening. Generous enough that a real,
@@ -134,6 +153,21 @@ export async function startDaemon(
     await listen(tcpServer, { port: opts.apiPort, host: '127.0.0.1' })
   }
 
+  // The wake-on-connect proxy: the keystone component (see root CLAUDE.md).
+  // Started with the daemon's other listeners, bound to ctx.config.proxyPort,
+  // and using the real ProxyDeps built from this same DaemonContext (see
+  // context.ts's createProxyDeps for exactly what resolve/wake do and why).
+  const proxy = await startPgProxy({
+    port: ctx.config.proxyPort,
+    deps: createProxyDeps(ctx),
+    wakeTimeoutMs: ctx.config.wakeTimeoutMs,
+  })
+
+  // The sleep half of the pair the proxy completes. Reads activity off the
+  // same ActivityTracker instance the proxy just started using (ctx.activity
+  // is one source of truth for both), never polls Postgres on a schedule.
+  const hibernator = startHibernator(ctx, { intervalMs: HIBERNATION_TICK_MS })
+
   let shutdownPromise: Promise<void> | null = null
 
   // Idempotent and shared between the signal handlers and the returned
@@ -151,11 +185,28 @@ export async function startDaemon(
       // free, from node:http itself.
       await Promise.all([closeServer(socketServer), tcpServer ? closeServer(tcpServer) : Promise.resolve()])
 
-      // Only after both listeners are fully closed: stopping a `running`
-      // resource is a clean stop (see stopPostgres / docker.ts), which is
-      // what keeps the next wake out of Postgres crash recovery, landing
-      // inside a user's first query. An unclean daemon exit here is exactly
-      // the failure mode this step exists to prevent.
+      // The hibernator must stop deciding to sleep things before this
+      // function starts explicitly stopping things itself, or the two could
+      // race over the same resource. Synchronous: it only flips a flag and
+      // interrupts the loop's current wait, so there is nothing to await.
+      hibernator.stop()
+
+      // The proxy must close before any resource below is stopped: a proxy
+      // still accepting connections would wake a resource right back up the
+      // instant this loop stopped it, which is the one ordering constraint
+      // called out explicitly for this shutdown sequence.
+      try {
+        await proxy.close()
+      } catch (err) {
+        console.error(`daemon shutdown: failed to close the wake-on-connect proxy cleanly: ${errorMessage(err)}`)
+      }
+
+      // Only after both control-plane listeners and the proxy are fully
+      // closed: stopping a `running` resource is a clean stop (see
+      // stopPostgres / docker.ts), which is what keeps the next wake out of
+      // Postgres crash recovery, landing inside a user's first query. An
+      // unclean daemon exit here is exactly the failure mode this step
+      // exists to prevent.
       const running = ctx.store.listResources().filter((resource) => resource.state === 'running')
       for (const resource of running) {
         try {

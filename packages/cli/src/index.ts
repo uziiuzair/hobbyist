@@ -6,6 +6,7 @@ export * from './daemon/context.js'
 export * from './daemon/server.js'
 export * from './daemon/reconcile.js'
 export * from './daemon/preflight.js'
+export * from './daemon/hibernator.js'
 
 // The command surface (task 5): run/main is the CLI's own entry point
 // (bin/hobby.js calls main directly, not through this barrel, to avoid a
