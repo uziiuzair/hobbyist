@@ -144,15 +144,34 @@ async function tick(
       continue
     }
 
+    // The guard above is a real network round trip, capped at a couple of
+    // seconds: a client can connect through the proxy at any point during
+    // it. ActivityTracker.open() happens the instant the proxy splices the
+    // connection, so `connections` and `idleSeconds` captured before the
+    // guard are only advisory by the time it resolves, not current. The
+    // guard result itself cannot catch this either: a freshly connected
+    // client that has not yet issued a query reads as pg_stat_activity
+    // state 'idle', indistinguishable from nobody being there. So the
+    // live count and the resource's current state are re-read here,
+    // immediately before the one irreversible step, and the sleep is
+    // aborted if either has moved: a connection landed, or the resource
+    // left `running` (a manual stop, a wake racing this same tick) while
+    // the guard was in flight.
+    const freshConnections = ctx.activity.count(resource.id)
+    const freshResource = ctx.store.getResource(resource.id)
+    if (freshConnections !== 0 || freshResource === null || freshResource.state !== 'running') {
+      continue
+    }
+
     try {
-      await stopPostgres(ctx, resource)
+      await stopPostgres(ctx, freshResource)
     } catch (err) {
       console.error(`hibernator: failed to sleep resource ${resource.id}: ${errorMessage(err)}`)
     }
   }
 }
 
-export function startHibernator(ctx: DaemonContext, opts: StartHibernatorOptions): { stop(): void } {
+export function startHibernator(ctx: DaemonContext, opts: StartHibernatorOptions): { stop(): Promise<void> } {
   const now = opts.now ?? Date.now
   const sleepFor = opts.sleepFor ?? defaultSleepFor
   const guard = opts.checkActiveQuery ?? ((resource: Resource): Promise<ActivityGuardResult> => checkActiveQuery(resource.config))
@@ -162,6 +181,14 @@ export function startHibernator(ctx: DaemonContext, opts: StartHibernatorOptions
   const stopSignal = new Promise<void>((resolve) => {
     resolveStopSignal = resolve
   })
+
+  // Tracks whatever tick() call is currently in flight, if any, so stop()
+  // (below) can await it rather than returning while a tick is still
+  // mid-way through deciding to stop a resource. Set synchronously right
+  // before the loop starts awaiting a tick and cleared synchronously right
+  // after, so there is never a window where a tick is genuinely running but
+  // this is null.
+  let currentTick: Promise<void> | null = null
 
   // Races the interval wait against stop(): a stop() call must interrupt a
   // real, possibly long, wait immediately rather than waiting the current
@@ -184,14 +211,16 @@ export function startHibernator(ctx: DaemonContext, opts: StartHibernatorOptions
       if (!sleptFully || stopped) {
         break
       }
-      try {
-        await tick(ctx, now, guard)
-      } catch (err) {
-        // A whole-tick failure (a HobbyError('ambiguous_target') would never
-        // originate here, but a bug elsewhere could) must not kill the loop:
-        // the next interval should still get a chance to try again.
+      // A whole-tick failure (a HobbyError('ambiguous_target') would never
+      // originate here, but a bug elsewhere could) must not kill the loop:
+      // the next interval should still get a chance to try again. Caught
+      // inside the tracked promise itself, not in a try/catch around the
+      // await below, so stop()'s await of currentTick also never rejects.
+      currentTick = tick(ctx, now, guard).catch((err: unknown) => {
         console.error(`hibernator: tick failed: ${errorMessage(err)}`)
-      }
+      })
+      await currentTick
+      currentTick = null
     }
   })()
 
@@ -203,12 +232,20 @@ export function startHibernator(ctx: DaemonContext, opts: StartHibernatorOptions
   })
 
   return {
-    stop(): void {
+    // Returns a promise so a caller (the daemon's shutdown sequence) can
+    // await the currently in-flight tick, if any, draining before it
+    // returns. Without this, a tick that already decided to sleep a
+    // resource could run stopPostgres concurrently with the daemon's own
+    // shutdown loop stopping that same resource. Idempotent: a second call
+    // after the first has already resolved just returns an
+    // already-resolved promise.
+    stop(): Promise<void> {
       if (stopped) {
-        return
+        return currentTick ?? Promise.resolve()
       }
       stopped = true
       resolveStopSignal()
+      return currentTick ?? Promise.resolve()
     },
   }
 }
