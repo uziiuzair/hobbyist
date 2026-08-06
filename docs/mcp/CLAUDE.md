@@ -20,10 +20,19 @@ which is the whole reason it belongs in v1 rather than being deferred.
 
 - Tool surface mirroring the CLI: create, list, branch, connection string,
   destroy, and a guarded query tool
-- Transport and how an agent discovers a local Hobbyist instance
-- Auth, and what an agent is allowed to do without a human present
+- What an agent is allowed to do without a human present
 - Response shaping: what an agent gets back, which is not the same as what a
   terminal gets
+
+## Transport is already decided
+
+The MCP server is a client of the **daemon HTTP API over the unix socket**, the
+same one the CLI uses. Filesystem permissions are the authentication, so there is
+no token to issue, no port to bind, and no credential to leak. An agent discovers
+a local Hobbyist by the socket existing.
+
+This is also what makes the hard rule below structural rather than aspirational:
+there is exactly one surface, and both clients render it.
 
 ## Out of scope
 

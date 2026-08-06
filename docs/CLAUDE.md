@@ -67,20 +67,29 @@ docs/<capability>/
   specs/        what we are building, actionable without reading the conversation
 ```
 
-| Folder | The capability | Order |
+| Folder | The capability | When |
 |---|---|---|
-| [`cli/`](cli/) | The `hobby` binary. Command surface, config resolution, the daemon, output conventions. | 1 |
-| [`engine/`](engine/) | Postgres instance lifecycle. Create, start, stop, destroy, data directories, container runtime. | 1 |
-| [`proxy/`](proxy/) | **The keystone.** Wake-on-connect Postgres wire-protocol proxy and connection pooling. | 2 |
-| [`hibernation/`](hibernation/) | Idle detection and suspend. The sleep half of the pair the proxy completes. | 3 |
-| [`branching/`](branching/) | Copy-on-write branching via PostgreSQL 18 clone. Filesystem detection and fallbacks. | 4 |
-| [`mcp/`](mcp/) | The MCP server exposing the CLI verbs to agents. | 5 |
-| [`backups/`](backups/) | Backup, restore and point-in-time recovery, wrapping existing tools. | 6 |
-| [`portability/`](portability/) | `hobby eject` and the data-format guarantees that make leaving possible. | 6 |
+| [`cli/`](cli/) | The `hobby` binary and the daemon. Command surface, config resolution, the control API, output conventions. | M1 |
+| [`engine/`](engine/) | Postgres instance lifecycle. Create, start, stop, destroy, data directories, container runtime. | M1 |
+| [`portability/`](portability/) | `hobby eject` and the data-format guarantees that make leaving possible. | M1 |
+| [`proxy/`](proxy/) | **The keystone.** The wake router: Postgres wire protocol now, HTTP from Phase 2. | M2 |
+| [`hibernation/`](hibernation/) | Idle detection and suspend. The sleep half of the pair the proxy completes. | M3 |
+| [`studio/`](studio/) | The web UI and its auth. Browse, query, read schema, control plane. | M4 |
+| [`mcp/`](mcp/) | The MCP server exposing the CLI verbs to agents. | M5 |
+| [`branching/`](branching/) | Copy-on-write branching. Filesystem detection and fallbacks. | Phase 1.5 |
+| [`backups/`](backups/) | Backup, restore and point-in-time recovery, wrapping existing tools. | Phase 1.5 |
+| [`compute/`](compute/) | Stateless workers and apps. Build, deploy, wake on request. | Phase 2 |
+| [`storage/`](storage/) | S3-compatible buckets and volumes for compute. | Phase 3 |
+| [`sdk/`](sdk/) | Client libraries, React first, if they earn their place. | Phase 3 |
 
-The order column is the intended build sequence, not a priority ranking. The
+The When column is the intended build sequence, not a priority ranking. The
 proxy is second on purpose: it is the component most likely to prove the whole
-idea unworkable, so it gets tested early rather than late.
+idea unworkable, so it gets tested early rather than late. `portability/` is in
+M1 because ADR 0003's invariants are executable tests that have to exist before
+there is anything to break them.
+
+**Phase 2 is gated.** It does not begin until Phase 1 has been in daily use for
+30 consecutive days. See `docs/decisions/0007`.
 
 `research/` accepts incomplete and even wrong, as long as it is dated. `specs/`
 must be actionable by an engineer who did not read the conversation. When a

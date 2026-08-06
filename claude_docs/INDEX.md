@@ -23,21 +23,27 @@ The routing rule is in `docs/CLAUDE.md`. The project context is in the root
 
 ## docs/
 
-| Folder | Capability | Build order |
+| Folder | Capability | When |
 |---|---|---|
-| `cli/` | The `hobby` binary, config, daemon | 1 |
-| `engine/` | Postgres instance lifecycle | 1 |
-| `proxy/` | Wake-on-connect wire proxy (the keystone) | 2 |
-| `hibernation/` | Idle detection and sleep | 3 |
-| `branching/` | Copy-on-write branches | 4 |
-| `mcp/` | The MCP server | 5 |
-| `backups/` | Backup, restore, PITR | 6 |
-| `portability/` | `hobby eject` and the right to leave | 6 |
+| `cli/` | The `hobby` binary, config, the daemon and its control API | M1 |
+| `engine/` | Postgres instance lifecycle | M1 |
+| `portability/` | `hobby eject` and the right to leave | M1 |
+| `proxy/` | The wake router (the keystone) | M2 |
+| `hibernation/` | Idle detection and sleep | M3 |
+| `studio/` | The web UI and its auth | M4 |
+| `mcp/` | The MCP server | M5 |
+| `branching/` | Copy-on-write branches | Phase 1.5 |
+| `backups/` | Backup, restore, PITR | Phase 1.5 |
+| `compute/` | Stateless workers and apps | Phase 2 |
+| `storage/` | S3-compatible buckets, volumes | Phase 3 |
+| `sdk/` | Client libraries, React first | Phase 3 |
 | `decisions/` | Architecture decision records, numbered and immutable | n/a |
 
-## The five decisions that define the project
+## The nine decisions that define the project
 
-Read these before proposing anything structural.
+Read these before proposing anything structural. **Start with 0007**, which is
+what makes this a platform rather than a database tool, and which supersedes the
+scope section of the original root `CLAUDE.md`.
 
 | ADR | Decision |
 |---|---|
@@ -46,7 +52,17 @@ Read these before proposing anything structural.
 | `docs/decisions/0003` | The data directory is always plain Postgres |
 | `docs/decisions/0004` | No metering, no billing, no usage accounting |
 | `docs/decisions/0005` | Branching via PostgreSQL 18 file clone |
+| `docs/decisions/0006` | TypeScript everywhere, Bun as the runtime |
+| `docs/decisions/0007` | Hobbyist is a platform, not a Postgres tool |
+| `docs/decisions/0008` | Studio is network exposed, with an operator credential |
+| `docs/decisions/0009` | Caddy as the HTTP front door, run as a managed container |
+
+## The one number
+
+**Cold start: under 1 second target, 3 seconds hard ceiling.** Everything sleeps,
+so this is what the project is judged on. It is unmeasured as of this writing,
+and M0 exists to measure it before anything is built on top.
 
 ---
 
-Last Updated: 2026-08-06
+Last Updated: 2026-08-07

@@ -1,8 +1,21 @@
 # `docs/portability/` eject and the right to leave
 
-**Status:** PROPOSED. Nothing built.
+**Status:** PROPOSED. Nothing built. **M1**, not last.
 
 The capability that makes the entire project honest.
+
+It is in M1 because ADR 0003 says its invariants are enforced by a test suite
+that runs on every commit rather than by intention, and a test suite has to exist
+before there is anything capable of breaking it. Retrofitting a portability
+guarantee onto a system that was never tested for it is how the guarantee quietly
+stops being true.
+
+**Every resource kind has to be ejectable, and that gets harder with each phase.**
+A `postgres` resource ejects to a compose file and a data directory. An `app`
+also needs its `Dockerfile` and its Caddy configuration (ADR 0009), because an
+ejected app that no longer serves is not an ejected app. A `bucket` needs its
+object store config and its data. **A kind that cannot be ejected does not
+ship.**
 
 ## The promise
 
