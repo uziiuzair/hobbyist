@@ -40,22 +40,37 @@ function sampleResource(): Resource {
   }
 }
 
-test('connectionString renders the proxy form', () => {
+test('connectionString renders the proxy port for viaProxy: true', () => {
   const result = connectionString(sampleProject(), sampleResource(), {
     host: 'db.example.com',
-    port: 5432,
+    proxyPort: 5432,
     viaProxy: true,
   })
   assert.equal(result, 'postgres://postgres:abc123@db.example.com:5432/blog')
 })
 
-test('connectionString renders the direct form with the host port', () => {
+test('connectionString renders the resource host port for viaProxy: false', () => {
   const result = connectionString(sampleProject(), sampleResource(), {
     host: '127.0.0.1',
-    port: 15432,
+    proxyPort: 5432,
     viaProxy: false,
   })
+  // hostPort (15432) is rendered, not the supplied proxyPort (5432): the
+  // caller no longer picks which port shows up, viaProxy does.
   assert.equal(result, 'postgres://postgres:abc123@127.0.0.1:15432/blog')
+})
+
+test('connectionString renders a different port for each viaProxy value given the same opts.proxyPort', () => {
+  const project = sampleProject()
+  const resource = sampleResource()
+  const opts = { host: 'db.example.com', proxyPort: 5432, viaProxy: true }
+
+  const proxied = connectionString(project, resource, opts)
+  const direct = connectionString(project, resource, { ...opts, viaProxy: false })
+
+  assert.equal(proxied, 'postgres://postgres:abc123@db.example.com:5432/blog')
+  assert.equal(direct, `postgres://postgres:abc123@db.example.com:${resource.config.hostPort}/blog`)
+  assert.notEqual(proxied, direct)
 })
 
 test('connectionString URL-encodes superuser and password', () => {
@@ -65,8 +80,21 @@ test('connectionString URL-encodes superuser and password', () => {
 
   const result = connectionString(project, resource, {
     host: '127.0.0.1',
-    port: 15432,
+    proxyPort: 5432,
     viaProxy: false,
   })
   assert.equal(result, 'postgres://a%20b:p%40ss%2Fword@127.0.0.1:15432/blog')
+})
+
+test('connectionString renders the database from resource.config.database', () => {
+  const project = sampleProject()
+  const resource = sampleResource()
+  resource.config = { ...resource.config, database: 'blog_renamed' }
+
+  const result = connectionString(project, resource, {
+    host: '127.0.0.1',
+    proxyPort: 5432,
+    viaProxy: false,
+  })
+  assert.equal(result, 'postgres://postgres:abc123@127.0.0.1:15432/blog_renamed')
 })

@@ -9,10 +9,11 @@ import {
   createFakeRuntime,
   openStore,
   resolvePaths,
+  type ComputeRuntime,
   type HobbyConfig,
   type PostgresConfig,
 } from '@hobby.sh/core'
-import { createPostgres } from '../src/index.js'
+import { createPostgres, destroyPostgres, startPostgres } from '../src/index.js'
 import { waitReady } from '../src/readiness.js'
 
 function sampleConfig(): PostgresConfig {
@@ -209,6 +210,79 @@ test('createPostgres marks the resource failed when readiness never arrives', as
 
     const resource = store.getResourceByName(project.id, 'primary')
     assert.equal(resource?.state, 'failed')
+  } finally {
+    store.close()
+  }
+})
+
+test('destroyPostgres deletes the row even when the container was never created', async () => {
+  const store = openStore(':memory:')
+  try {
+    const project = store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+    const config: PostgresConfig = { ...sampleConfig(), containerName: 'hobby-blog-primary' }
+    const created = store.createResource({
+      projectId: project.id,
+      kind: 'postgres',
+      name: 'primary',
+      config,
+    })
+    store.setResourceState(created.id, 'failed')
+    const resource = store.getResource(created.id)
+    assert.ok(resource !== null)
+
+    // A fresh fake runtime that was never told about this container via
+    // ensureCreated: this is exactly the state a resource is left in when
+    // createPostgres fails at mkdir or ensureNetwork, before ensureCreated
+    // ever runs. stop() and remove() on the fake now reject for an unknown
+    // name (see runtime.ts), so this test only passes if destroyPostgres
+    // genuinely tolerates that rather than relying on the runtime being
+    // forgiving.
+    const runtime = createFakeRuntime()
+    const paths = resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-pg-test-${randomUUID()}`) })
+
+    await destroyPostgres({ store, runtime, paths, config: testHobbyConfig() }, resource)
+
+    assert.equal(store.getResource(created.id), null)
+  } finally {
+    store.close()
+  }
+})
+
+test('startPostgres marks the resource failed, not starting, when runtime.start throws', async () => {
+  const store = openStore(':memory:')
+  try {
+    const project = store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+    const config: PostgresConfig = { ...sampleConfig(), containerName: 'hobby-blog-primary' }
+    const resource = store.createResource({
+      projectId: project.id,
+      kind: 'postgres',
+      name: 'primary',
+      config,
+    })
+
+    const base = createFakeRuntime()
+    const failingRuntime: ComputeRuntime = {
+      available: base.available,
+      ensureCreated: base.ensureCreated,
+      start: async () => {
+        throw new Error('docker start failed')
+      },
+      stop: base.stop,
+      remove: base.remove,
+      inspect: base.inspect,
+      logs: base.logs,
+      ensureNetwork: base.ensureNetwork,
+      removeNetwork: base.removeNetwork,
+    }
+    const paths = resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-pg-test-${randomUUID()}`) })
+
+    await assert.rejects(() =>
+      startPostgres({ store, runtime: failingRuntime, paths, config: testHobbyConfig() }, resource)
+    )
+
+    const stored = store.getResource(resource.id)
+    assert.equal(stored?.state, 'failed')
+    assert.notEqual(stored?.state, 'starting')
   } finally {
     store.close()
   }
