@@ -1,0 +1,198 @@
+// The postgres resource kind: create, start, stop, destroy. This is the
+// only place in the package that touches the store and the compute runtime
+// together; readiness.ts and connstring.ts are pure helpers this file calls.
+
+import { randomBytes } from 'node:crypto'
+import { mkdir, rm } from 'node:fs/promises'
+import {
+  HobbyError,
+  validateName,
+  type ComputeRuntime,
+  type ContainerSpec,
+  type HobbyConfig,
+  type Paths,
+  type PostgresConfig,
+  type Project,
+  type Resource,
+  type Store,
+} from '@hobby.sh/core'
+import { pgProbe, waitReady } from './readiness.js'
+
+export interface PgDeps {
+  store: Store
+  runtime: ComputeRuntime
+  paths: Paths
+  config: HobbyConfig
+  // Optional seam for tests. Defaults to pgProbe, which opens a real `pg`
+  // connection against the allocated host port. There is no other way to
+  // exercise createPostgres/startPostgres against createFakeRuntime, which
+  // never has an actual Postgres listening on that port: without this, the
+  // readiness wait inside createPostgres would always run out its full
+  // timeout and land the resource in `failed`, not `sleeping`. Additive and
+  // optional, so any caller building a PgDeps from just
+  // { store, runtime, paths, config } still satisfies this interface.
+  probeFactory?: (config: PostgresConfig) => () => Promise<boolean>
+}
+
+const SUPERUSER = 'postgres'
+const POSTGRES_CONTAINER_PORT = 5432
+const PGDATA_CONTAINER_PATH = '/var/lib/postgresql/data'
+
+// Wide open on purpose: leaves headroom below the well-known port range and
+// clear of the daemon's own ports (proxyPort 5432, studioPort 8443, apiPort
+// 7432 from HobbyConfig's defaults).
+const PORT_RANGE_FROM = 15432
+const PORT_RANGE_TO = 25432
+
+// 16 random bytes as hex is exactly 32 characters, matching the brief's "32
+// character random password" precisely rather than approximately (base64
+// would need padding trimmed to hit 32 exactly; hex does not).
+const PASSWORD_BYTES = 16
+
+// Always a clean stop, on a timeout, never a kill: see docker.ts's own
+// comment on why a SIGKILLed Postgres pays for crash recovery on the next
+// wake, inside a user's first query.
+const STOP_TIMEOUT_SEC = 30
+
+function containerSpec(config: PostgresConfig, network: string): ContainerSpec {
+  return {
+    name: config.containerName,
+    image: config.image,
+    env: {
+      POSTGRES_PASSWORD: config.password,
+      POSTGRES_USER: config.superuser,
+      // The database inside is named after the project, not `postgres`,
+      // because the proxy routes on the database name a client sends in its
+      // startup packet (see core's parseRoutingKey). POSTGRES_DB is what
+      // makes the official image's entrypoint create it on first boot.
+      POSTGRES_DB: config.database,
+    },
+    ports: [{ host: config.hostPort, container: POSTGRES_CONTAINER_PORT }],
+    binds: [{ host: config.dataDir, container: PGDATA_CONTAINER_PATH }],
+    network,
+  }
+}
+
+export async function createPostgres(
+  deps: PgDeps,
+  opts: { project: Project; name: string }
+): Promise<Resource> {
+  validateName(opts.name)
+
+  const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
+  const password = randomBytes(PASSWORD_BYTES).toString('hex')
+  const containerName = `hobby-${opts.project.name}-${opts.name}`
+  const dataDir = deps.paths.resourceDataDir(opts.project.name, opts.name)
+
+  const config: PostgresConfig = {
+    image: deps.config.image,
+    containerName,
+    dataDir,
+    hostPort,
+    superuser: SUPERUSER,
+    password,
+    database: opts.project.name,
+  }
+
+  const resource = deps.store.createResource({
+    projectId: opts.project.id,
+    kind: 'postgres',
+    name: opts.name,
+    config,
+  })
+
+  try {
+    // Deliberately no --user on the container we are about to create (see
+    // containerSpec / ContainerSpec: there is no such field, and that is not
+    // an oversight). The data directory below is created by this process, so
+    // it is owned by whoever is running the daemon, while Postgres inside
+    // the container runs as its own uid. The official image's entrypoint
+    // only chowns PGDATA to that uid when it starts as root; passing --user
+    // would skip that chown and turn first boot into a permission-denied
+    // failure on Linux, while looking fine on macOS, where Docker Desktop's
+    // VM masks host/container uid mismatches. Mode 0700 plus no --user is
+    // what lets the entrypoint take ownership correctly on first boot.
+    await mkdir(dataDir, { recursive: true, mode: 0o700 })
+
+    await deps.runtime.ensureNetwork(opts.project.networkName)
+    await deps.runtime.ensureCreated(containerSpec(config, opts.project.networkName))
+    await deps.runtime.start(containerName)
+
+    const probe = (deps.probeFactory ?? pgProbe)(config)
+    const result = await waitReady({
+      config,
+      pollMs: deps.config.readinessPollMs,
+      timeoutMs: deps.config.wakeTimeoutMs,
+      probe,
+    })
+
+    if (!result.ready) {
+      deps.store.setResourceState(resource.id, 'failed')
+      throw new HobbyError(
+        'wake_failed',
+        `postgres for ${opts.project.name}/${opts.name} did not become ready during initial boot`,
+        `waited ${result.waitedMs}ms across ${result.attempts} attempts`
+      )
+    }
+
+    // Boot once so initdb and CREATE DATABASE happen, then stop cleanly.
+    // Sleeping, not running, is the correct resting state for a system whose
+    // entire premise is sleep: a clean stop here is what keeps the *next*
+    // start out of crash recovery.
+    await deps.runtime.stop(containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+    deps.store.setResourceState(resource.id, 'sleeping')
+  } catch (err) {
+    // The wake_failed branch above already recorded `failed`; every other
+    // failure path here (mkdir, ensureNetwork, ensureCreated, start, the
+    // final stop) still needs the row to reflect that creation did not
+    // finish cleanly, so it does not read as `creating` forever.
+    if (!(err instanceof HobbyError && err.code === 'wake_failed')) {
+      deps.store.setResourceState(resource.id, 'failed')
+    }
+    throw err
+  }
+
+  const final = deps.store.getResource(resource.id)
+  if (final === null) {
+    throw new HobbyError('internal', `resource ${resource.id} vanished immediately after creation`)
+  }
+  return final
+}
+
+export async function startPostgres(deps: PgDeps, resource: Resource): Promise<void> {
+  deps.store.setResourceState(resource.id, 'starting')
+  await deps.runtime.start(resource.config.containerName)
+
+  const probe = (deps.probeFactory ?? pgProbe)(resource.config)
+  const result = await waitReady({
+    config: resource.config,
+    pollMs: deps.config.readinessPollMs,
+    timeoutMs: deps.config.wakeTimeoutMs,
+    probe,
+  })
+
+  if (!result.ready) {
+    deps.store.setResourceState(resource.id, 'failed')
+    throw new HobbyError(
+      'wake_timeout',
+      `postgres for resource ${resource.id} did not become ready within ${deps.config.wakeTimeoutMs}ms`,
+      `waited ${result.waitedMs}ms across ${result.attempts} attempts`
+    )
+  }
+
+  deps.store.setResourceState(resource.id, 'running')
+  deps.store.touchResource(resource.id, new Date())
+}
+
+export async function stopPostgres(deps: PgDeps, resource: Resource): Promise<void> {
+  deps.store.setResourceState(resource.id, 'stopping')
+  await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+  deps.store.setResourceState(resource.id, 'sleeping')
+}
+
+export async function destroyPostgres(deps: PgDeps, resource: Resource): Promise<void> {
+  await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+  await deps.runtime.remove(resource.config.containerName)
+  await rm(resource.config.dataDir, { recursive: true, force: true })
+  deps.store.deleteResource(resource.id)
+}
