@@ -5,17 +5,19 @@
 //
 // Wire shapes, all big-endian:
 //
-//   SSLRequest:    Int32(8)  Int32(80877103)
-//   CancelRequest: Int32(16) Int32(80877102) Int32(processId) Int32(secretKey)
-//   StartupMessage: Int32(length) Int32(version)
-//                   { CString(key) CString(value) }*  Byte1(0)
+//   SSLRequest:      Int32(8)  Int32(80877103)
+//   GSSENCRequest:   Int32(8)  Int32(80877104)
+//   CancelRequest:   Int32(16) Int32(80877102) Int32(processId) Int32(secretKey)
+//   StartupMessage:  Int32(length) Int32(version)
+//                    { CString(key) CString(value) }*  Byte1(0)
 //
-// The three share a length-prefixed frame, which is why parseStartup reads
-// the length first and dispatches on it rather than parsing three formats
+// The four share a length-prefixed frame, which is why parseStartup reads
+// the length first and dispatches on it rather than parsing four formats
 // independently.
 
 export const PROTOCOL_3_0 = 196608
 export const SSL_REQUEST_CODE = 80877103
+export const GSS_ENC_REQUEST_CODE = 80877104
 export const CANCEL_REQUEST_CODE = 80877102
 
 // An implausible length is any length that could not be a real startup
@@ -28,14 +30,17 @@ export const CANCEL_REQUEST_CODE = 80877102
 // buffer forever.
 const MAX_PLAUSIBLE_LENGTH = 10000
 
-// The shortest possible frame is CancelRequest's 16 bytes are not the
-// floor: a StartupMessage with zero parameters is Int32(length) Int32(version)
-// Byte1(0), 9 bytes total. Anything shorter than that cannot be any of the
-// three shapes.
-const MIN_PLAUSIBLE_LENGTH = 9
+// The shortest possible frame on the wire is SSLRequest/GSSENCRequest at 8
+// bytes (Int32 length + Int32 code), not CancelRequest's 16 or a
+// zero-param StartupMessage's 9. Anything shorter than 8 cannot be any of
+// the four shapes. Getting this floor wrong is not academic: a floor of 9
+// rejects every SSLRequest outright, and SSLRequest is exactly what a
+// default `psql` (sslmode=prefer) sends first on every single connection.
+const MIN_PLAUSIBLE_LENGTH = 8
 
 export type StartupMessage =
   | { type: 'ssl_request' }
+  | { type: 'gss_enc_request' }
   | { type: 'cancel_request'; processId: number; secretKey: number }
   | { type: 'startup'; version: number; params: Record<string, string> }
 
@@ -66,6 +71,9 @@ export function parseStartup(buf: Buffer): { message: StartupMessage; consumed: 
     const code = buf.readInt32BE(4)
     if (code === SSL_REQUEST_CODE) {
       return { message: { type: 'ssl_request' }, consumed: 8 }
+    }
+    if (code === GSS_ENC_REQUEST_CODE) {
+      return { message: { type: 'gss_enc_request' }, consumed: 8 }
     }
     throw new Error(`unrecognized 8-byte startup frame with code ${code}`)
   }
@@ -129,13 +137,15 @@ export function parseStartup(buf: Buffer): { message: StartupMessage; consumed: 
 }
 
 // The inverse of the 'startup' branch of parseStartup. Used by tests to
-// round-trip the parser and by anything that needs to construct a fresh
-// startup packet from scratch. proxy.ts deliberately does NOT use this on
-// the connect path: the buffered bytes read off the client socket are
-// replayed to the upstream verbatim instead, because reconstructing from
-// parsed params would silently drop any parameter parseStartup did not
-// model and change what the upstream sees.
-export function buildStartupPacket(params: Record<string, string>): Buffer {
+// round-trip the parser, and by proxy.ts for exactly one purpose: rebuilding
+// the startup packet with the `database` parameter substituted for dotted
+// routing (`project.database`), everything else, and its order, carried
+// over unchanged from the parsed params. That is a targeted edit of one
+// already-parsed value, not a reconstruction from scratch: nothing
+// parseStartup captured is dropped, because every key parseStartup saw is
+// still in `params`. `version` defaults to PROTOCOL_3_0 but accepts the
+// client's actual version so a rebuild never silently changes it.
+export function buildStartupPacket(params: Record<string, string>, version: number = PROTOCOL_3_0): Buffer {
   const parts: Buffer[] = []
   for (const [key, value] of Object.entries(params)) {
     parts.push(Buffer.from(key, 'utf8'), Buffer.from([0]), Buffer.from(value, 'utf8'), Buffer.from([0]))
@@ -145,7 +155,7 @@ export function buildStartupPacket(params: Record<string, string>): Buffer {
 
   const header = Buffer.alloc(8)
   header.writeInt32BE(length, 0)
-  header.writeInt32BE(PROTOCOL_3_0, 4)
+  header.writeInt32BE(version, 4)
 
   return Buffer.concat([header, paramsBuf, Buffer.from([0])])
 }

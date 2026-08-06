@@ -1,9 +1,19 @@
-// Written but not executed in this task, see task-6-report.md.
+// Written for Task 6's fix round 1. Unlike the original submission, these
+// ARE executed: see task-6-report.md for the real `node --test` output.
 
 import assert from 'node:assert/strict'
 import net from 'node:net'
 import { test } from 'node:test'
-import { ActivityTracker, buildStartupPacket, startPgProxy, type ProxyDeps, type ProxyTarget } from '../src/index.js'
+import {
+  ActivityTracker,
+  buildStartupPacket,
+  CANCEL_REQUEST_CODE,
+  GSS_ENC_REQUEST_CODE,
+  SSL_REQUEST_CODE,
+  startPgProxy,
+  type ProxyDeps,
+  type ProxyTarget,
+} from '../src/index.js'
 
 // Pulls the SQLSTATE ('C' field) out of a raw ErrorResponse buffer, without
 // depending on any unexported parser: the wire format is simple enough to
@@ -27,10 +37,46 @@ function readAll(socket: net.Socket): Promise<Buffer> {
   })
 }
 
+// Resolves with exactly the next 'data' chunk, for tests that need to
+// inspect one write at a time (e.g. the single 'N' byte answering an
+// SSLRequest) rather than waiting for the whole connection to end.
+function readOneChunk(socket: net.Socket): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    socket.once('data', resolve)
+    socket.once('error', reject)
+  })
+}
+
+function sslRequestBytes(): Buffer {
+  const buf = Buffer.alloc(8)
+  buf.writeInt32BE(8, 0)
+  buf.writeInt32BE(SSL_REQUEST_CODE, 4)
+  return buf
+}
+
+function gssEncRequestBytes(): Buffer {
+  const buf = Buffer.alloc(8)
+  buf.writeInt32BE(8, 0)
+  buf.writeInt32BE(GSS_ENC_REQUEST_CODE, 4)
+  return buf
+}
+
+function cancelRequestBytes(processId: number, secretKey: number): Buffer {
+  const buf = Buffer.alloc(16)
+  buf.writeInt32BE(16, 0)
+  buf.writeInt32BE(CANCEL_REQUEST_CODE, 4)
+  buf.writeInt32BE(processId, 8)
+  buf.writeInt32BE(secretKey, 12)
+  return buf
+}
+
 // A fake upstream Postgres: accepts connections and records the raw bytes
-// each one sends first, which is what the proxy's replayed startup packet
-// arrives as. Never actually speaks Postgres; the proxy is not expected to
-// notice, since it never parses anything upstream of the splice.
+// each one sends first, which is what the proxy's rebuilt startup packet
+// arrives as (every parameter and its order preserved, only `database`
+// possibly substituted; see ProxyTarget.database and Important 1 of the
+// fix-round report). Never actually speaks Postgres; the proxy is not
+// expected to notice, since it never parses anything upstream of the
+// splice.
 function startFakeUpstream(): Promise<{
   port: number
   receivedFirstBytes: () => Promise<Buffer>
@@ -68,6 +114,10 @@ function connectClient(port: number): Promise<net.Socket> {
   })
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 test('an unknown database yields an ErrorResponse with 3D000', async () => {
   const deps: ProxyDeps = {
     resolve: async () => null,
@@ -90,7 +140,7 @@ test('an unknown database yields an ErrorResponse with 3D000', async () => {
   }
 })
 
-test('a sleeping target calls wake exactly once and the upstream receives the startup packet verbatim', async () => {
+test('a sleeping target calls wake exactly once, re-resolves after waking, and dials the post-wake address', async () => {
   const upstream = await startFakeUpstream()
 
   let wakeCalls = 0
@@ -98,16 +148,17 @@ test('a sleeping target calls wake exactly once and the upstream receives the st
   const deps: ProxyDeps = {
     resolve: async (): Promise<ProxyTarget> => {
       resolveCalls += 1
-      // First resolve (pre-wake) reports sleeping; every subsequent
-      // resolve (the re-resolve after wake) reports running. This is what
-      // exercises requirement #4: the proxy must re-resolve rather than
-      // trust the pre-wake address.
-      return {
-        resourceId: 'resource-1',
-        host: '127.0.0.1',
-        port: upstream.port,
-        state: resolveCalls === 1 ? 'sleeping' : 'running',
+      // The pre-wake resolve deliberately points at a port nothing is
+      // listening on: if the proxy dialed this address instead of
+      // re-resolving after the wake, the connection would fail outright.
+      // Only the post-wake (second) resolve points at the real fake
+      // upstream. This is what actually exercises requirement #4, unlike
+      // the original test, which returned the same host/port both times
+      // and would have passed even with no re-resolve at all.
+      if (resolveCalls === 1) {
+        return { resourceId: 'resource-1', host: '127.0.0.1', port: 1, state: 'sleeping', database: 'proj1' }
       }
+      return { resourceId: 'resource-1', host: '127.0.0.1', port: upstream.port, state: 'running', database: 'proj1' }
     },
     wake: async () => {
       wakeCalls += 1
@@ -124,6 +175,52 @@ test('a sleeping target calls wake exactly once and the upstream receives the st
     const receivedByUpstream = await upstream.receivedFirstBytes()
     assert.deepEqual(receivedByUpstream, packet)
     assert.equal(wakeCalls, 1)
+    assert.equal(resolveCalls, 2)
+
+    client.destroy()
+  } finally {
+    await proxy.close()
+    await upstream.close()
+  }
+})
+
+test('a dotted routing key substitutes the sub-database, preserving every other parameter and its order', async () => {
+  const upstream = await startFakeUpstream()
+
+  const deps: ProxyDeps = {
+    resolve: async (): Promise<ProxyTarget> => ({
+      resourceId: 'resource-1',
+      host: '127.0.0.1',
+      port: upstream.port,
+      state: 'running',
+      database: 'blog', // the project's own default database; not used here since the client asked for a sub-database explicitly
+    }),
+    wake: async () => {
+      throw new Error('wake must not be called for a running target')
+    },
+    activity: new ActivityTracker(),
+  }
+
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 1000 })
+  try {
+    const client = await connectClient(proxy.port)
+    // application_name placed before AND after `database` on purpose, to
+    // prove the substitution does not just move `database` to the end.
+    client.write(
+      buildStartupPacket({
+        user: 'bob',
+        database: 'blog.analytics',
+        application_name: 'psql',
+      })
+    )
+
+    const receivedByUpstream = await upstream.receivedFirstBytes()
+    const expected = buildStartupPacket({
+      user: 'bob',
+      database: 'analytics', // substituted: the routing key's sub-database, not the project name
+      application_name: 'psql',
+    })
+    assert.deepEqual(receivedByUpstream, expected)
 
     client.destroy()
   } finally {
@@ -150,6 +247,7 @@ test('activity.close fires exactly once when the client closes before the upstre
       host: '127.0.0.1',
       port: upstream.port,
       state: 'running',
+      database: 'proj1',
     }),
     wake: async () => {
       throw new Error('wake must not be called for a running target')
@@ -168,7 +266,7 @@ test('activity.close fires exactly once when the client closes before the upstre
     // Client closes first.
     client.destroy()
     // Give the proxy's 'close'/'error' handlers a turn before asserting.
-    await new Promise((resolve) => setTimeout(resolve, 10))
+    await sleep(10)
 
     assert.equal(activity.closeCalls, 1)
     assert.equal(activity.count('resource-1'), 0)
@@ -206,6 +304,7 @@ test('activity.close fires exactly once when the upstream closes before the clie
       host: '127.0.0.1',
       port,
       state: 'running',
+      database: 'proj1',
     }),
     wake: async () => {
       throw new Error('wake must not be called for a running target')
@@ -219,7 +318,7 @@ test('activity.close fires exactly once when the upstream closes before the clie
     client.write(buildStartupPacket({ user: 'bob', database: 'proj1' }))
 
     // Wait until the proxy has actually dialed upstream.
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await sleep(20)
     assert.ok(upstreamSocket !== null)
     // TypeScript cannot see past the net.createServer callback that
     // assigns upstreamSocket, so the assert.ok above narrows the read type
@@ -229,7 +328,7 @@ test('activity.close fires exactly once when the upstream closes before the clie
 
     // Upstream closes first.
     upstream.destroy()
-    await new Promise((resolve) => setTimeout(resolve, 10))
+    await sleep(10)
 
     assert.equal(activity.closeCalls, 1)
     assert.equal(activity.count('resource-1'), 0)
@@ -238,6 +337,177 @@ test('activity.close fires exactly once when the upstream closes before the clie
   } finally {
     await proxy.close()
     await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve(undefined))))
+  }
+})
+
+test('SSLRequest is answered with a single N, then a real startup packet on the same socket is routed normally', async () => {
+  const upstream = await startFakeUpstream()
+
+  const deps: ProxyDeps = {
+    resolve: async (): Promise<ProxyTarget> => ({
+      resourceId: 'resource-1',
+      host: '127.0.0.1',
+      port: upstream.port,
+      state: 'running',
+      database: 'proj1',
+    }),
+    wake: async () => {
+      throw new Error('wake must not be called for a running target')
+    },
+    activity: new ActivityTracker(),
+  }
+
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 1000 })
+  try {
+    const client = await connectClient(proxy.port)
+    client.write(sslRequestBytes())
+
+    const sslResponse = await readOneChunk(client)
+    assert.deepEqual(sslResponse, Buffer.from('N', 'ascii'))
+
+    const packet = buildStartupPacket({ user: 'bob', database: 'proj1' })
+    client.write(packet)
+
+    const receivedByUpstream = await upstream.receivedFirstBytes()
+    assert.deepEqual(receivedByUpstream, packet)
+
+    client.destroy()
+  } finally {
+    await proxy.close()
+    await upstream.close()
+  }
+})
+
+test('GSSENCRequest then SSLRequest, libpq real default order, both answered with N before the startup packet lands', async () => {
+  const upstream = await startFakeUpstream()
+
+  const deps: ProxyDeps = {
+    resolve: async (): Promise<ProxyTarget> => ({
+      resourceId: 'resource-1',
+      host: '127.0.0.1',
+      port: upstream.port,
+      state: 'running',
+      database: 'proj1',
+    }),
+    wake: async () => {
+      throw new Error('wake must not be called for a running target')
+    },
+    activity: new ActivityTracker(),
+  }
+
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 1000 })
+  try {
+    const client = await connectClient(proxy.port)
+
+    client.write(gssEncRequestBytes())
+    const gssResponse = await readOneChunk(client)
+    assert.deepEqual(gssResponse, Buffer.from('N', 'ascii'))
+
+    client.write(sslRequestBytes())
+    const sslResponse = await readOneChunk(client)
+    assert.deepEqual(sslResponse, Buffer.from('N', 'ascii'))
+
+    const packet = buildStartupPacket({ user: 'bob', database: 'proj1' })
+    client.write(packet)
+
+    const receivedByUpstream = await upstream.receivedFirstBytes()
+    assert.deepEqual(receivedByUpstream, packet)
+
+    client.destroy()
+  } finally {
+    await proxy.close()
+    await upstream.close()
+  }
+})
+
+test('a startup packet split across two writes is reassembled before routing', async () => {
+  const upstream = await startFakeUpstream()
+
+  const deps: ProxyDeps = {
+    resolve: async (): Promise<ProxyTarget> => ({
+      resourceId: 'resource-1',
+      host: '127.0.0.1',
+      port: upstream.port,
+      state: 'running',
+      database: 'proj1',
+    }),
+    wake: async () => {
+      throw new Error('wake must not be called for a running target')
+    },
+    activity: new ActivityTracker(),
+  }
+
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 1000 })
+  try {
+    const client = await connectClient(proxy.port)
+    const packet = buildStartupPacket({ user: 'bob', database: 'proj1', application_name: 'split-write-test' })
+    const midpoint = Math.floor(packet.length / 2)
+
+    client.write(packet.subarray(0, midpoint))
+    await sleep(10) // force two distinct TCP segments / 'data' events, not one
+    client.write(packet.subarray(midpoint))
+
+    const receivedByUpstream = await upstream.receivedFirstBytes()
+    assert.deepEqual(receivedByUpstream, packet)
+
+    client.destroy()
+  } finally {
+    await proxy.close()
+    await upstream.close()
+  }
+})
+
+test('a CancelRequest is never treated as a wake and simply closes the connection', async () => {
+  let resolveCalls = 0
+  let wakeCalls = 0
+  const deps: ProxyDeps = {
+    resolve: async (): Promise<ProxyTarget> => {
+      resolveCalls += 1
+      return { resourceId: 'resource-1', host: '127.0.0.1', port: 1, state: 'sleeping', database: 'proj1' }
+    },
+    wake: async () => {
+      wakeCalls += 1
+    },
+    activity: new ActivityTracker(),
+  }
+
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 1000 })
+  try {
+    const client = await connectClient(proxy.port)
+    client.write(cancelRequestBytes(4242, 24242))
+
+    const response = await readAll(client)
+    assert.equal(response.length, 0) // closed with no ErrorResponse and no other payload
+    assert.equal(resolveCalls, 0)
+    assert.equal(wakeCalls, 0)
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('a wake that never resolves produces a 57P03 ErrorResponse once wakeTimeoutMs elapses', async () => {
+  const deps: ProxyDeps = {
+    resolve: async (): Promise<ProxyTarget> => ({
+      resourceId: 'resource-1',
+      host: '127.0.0.1',
+      port: 1,
+      state: 'sleeping',
+      database: 'proj1',
+    }),
+    wake: () => new Promise<void>(() => {}), // never resolves, never rejects
+    activity: new ActivityTracker(),
+  }
+
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 100 })
+  try {
+    const client = await connectClient(proxy.port)
+    client.write(buildStartupPacket({ user: 'bob', database: 'proj1' }))
+
+    const response = await readAll(client)
+    assert.equal(response[0], 0x45) // 'E'
+    assert.equal(extractSqlState(response), '57P03')
+  } finally {
+    await proxy.close()
   }
 })
 
@@ -279,8 +549,9 @@ test('ActivityTracker.close is idempotent: closing an already-zero count does no
   assert.equal(tracker.count('r1'), 0)
 
   // Extra closes beyond the matching open must not push the count negative,
-  // nor move lastCloseAt forward on their own.
-  now += 100
+  // nor move lastCloseAt forward on their own. idleSeconds reports seconds,
+  // not milliseconds, hence 100_000ms here to assert a clean 100.
+  now += 100_000
   tracker.close('r1')
   tracker.close('r1')
   assert.equal(tracker.count('r1'), 0)
