@@ -3,8 +3,6 @@
 // core: this file only describes the contract and gives every later task's
 // test suite something to run against without Docker.
 
-import { HobbyError } from './errors.js'
-
 export type ContainerId = string
 
 export interface ContainerSpec {
@@ -65,25 +63,20 @@ export function createFakeRuntime(): ComputeRuntime & {
       state.set(name, { ...current, exists: true, running: true, exitCode: null })
     },
 
-    // Rejects on an unknown name rather than silently succeeding. An
-    // unconditionally forgiving fake hides real bugs: it was exactly this
-    // leniency that let createDockerRuntime's stop() ship without
-    // not-found handling undetected (see docker.ts's own stop() comment).
-    // Application code (destroyPostgres and friends) must tolerate this
-    // itself rather than depend on the runtime being forgiving.
+    // A missing container is a successful no-op here, matching the real
+    // contract: createDockerRuntime's stop() and remove() both treat "no
+    // such container" as success, not failure (see docker.ts). Coverage for
+    // that not-found behavior belongs against the real adapter's injectable
+    // ExecFn, which can produce realistic Docker error text; see
+    // docker.test.ts. This fake staying forgiving here is what keeps it a
+    // faithful stand-in for the real, corrected runtime, not stricter than
+    // production.
     async stop(name: string, _opts: { timeoutSec: number }): Promise<void> {
-      const current = state.get(name)
-      if (current === undefined) {
-        throw new HobbyError('runtime_unavailable', 'docker stop failed', `No such container: ${name}`)
-      }
+      const current = state.get(name) ?? { exists: true, running: false, exitCode: null }
       state.set(name, { ...current, running: false, exitCode: 0 })
     },
 
-    // Same reasoning as stop() above.
     async remove(name: string): Promise<void> {
-      if (!state.has(name)) {
-        throw new HobbyError('runtime_unavailable', 'docker rm failed', `No such object: ${name}`)
-      }
       state.delete(name)
       specs.delete(name)
     },

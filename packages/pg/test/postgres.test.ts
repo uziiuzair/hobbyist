@@ -233,15 +233,72 @@ test('destroyPostgres deletes the row even when the container was never created'
     // A fresh fake runtime that was never told about this container via
     // ensureCreated: this is exactly the state a resource is left in when
     // createPostgres fails at mkdir or ensureNetwork, before ensureCreated
-    // ever runs. stop() and remove() on the fake now reject for an unknown
-    // name (see runtime.ts), so this test only passes if destroyPostgres
-    // genuinely tolerates that rather than relying on the runtime being
-    // forgiving.
+    // ever runs. stop() and remove() on a real (and fake) runtime resolve
+    // as no-ops for a container that never existed, matching Docker's real
+    // contract; this test pins that destroyPostgres still completes and
+    // deletes the row in that case, without needing anything to throw.
     const runtime = createFakeRuntime()
     const paths = resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-pg-test-${randomUUID()}`) })
 
     await destroyPostgres({ store, runtime, paths, config: testHobbyConfig() }, resource)
 
+    assert.equal(store.getResource(created.id), null)
+  } finally {
+    store.close()
+  }
+})
+
+test('destroyPostgres deletes the row and throws when removing the data directory fails', async () => {
+  const store = openStore(':memory:')
+  try {
+    const project = store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+    const config: PostgresConfig = { ...sampleConfig(), containerName: 'hobby-blog-primary' }
+    const created = store.createResource({
+      projectId: project.id,
+      kind: 'postgres',
+      name: 'primary',
+      config,
+    })
+
+    const runtime = createFakeRuntime()
+    await runtime.ensureCreated({
+      name: config.containerName,
+      image: config.image,
+      env: {},
+      ports: [],
+      binds: [],
+    })
+    const paths = resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-pg-test-${randomUUID()}`) })
+
+    await assert.rejects(
+      () =>
+        destroyPostgres(
+          {
+            store,
+            runtime,
+            paths,
+            config: testHobbyConfig(),
+            // Simulates a real, non-not-found failure (a busy disk, a
+            // permission error), which must not be swallowed the way a
+            // missing container or a missing directory is.
+            removeDataDir: async () => {
+              throw new Error('device or resource busy')
+            },
+          },
+          created
+        ),
+      (err: unknown) => {
+        assert.ok(err instanceof Error)
+        assert.equal((err as { code?: string }).code, 'internal')
+        assert.match((err as Error).message, /remove data directory/)
+        assert.match((err as Error).message, /device or resource busy/)
+        return true
+      }
+    )
+
+    // The row is still gone even though the call above threw: the record
+    // must not survive a partial teardown, only the caller must be told
+    // something may remain on disk.
     assert.equal(store.getResource(created.id), null)
   } finally {
     store.close()
