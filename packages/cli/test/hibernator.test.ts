@@ -25,6 +25,7 @@ import {
   type ComputeRuntime,
   type HobbyConfig,
   type PostgresConfig,
+  type Resource,
   type ResourceState,
   type Store,
 } from '@hobby.sh/core'
@@ -319,7 +320,7 @@ test('tick: an idle running resource past its threshold, with an idle guard, get
     assert.equal(guardCalls, 1, 'the guard must be consulted exactly once for a real sleep candidate')
     assert.equal(ctx.store.getResource(resourceId)?.state, 'sleeping')
   } finally {
-    hibernator.stop()
+    await hibernator.stop()
   }
 })
 
@@ -346,7 +347,7 @@ test('tick: a pinned project (sleepAfterSeconds null) never reaches the guard an
     assert.equal(guardCalls, 0, 'a pinned resource must be rejected before the expensive guard ever runs')
     assert.equal(ctx.store.getResource(resourceId)?.state, 'running')
   } finally {
-    hibernator.stop()
+    await hibernator.stop()
   }
 })
 
@@ -368,7 +369,7 @@ test('tick: an active pg_stat_activity guard blocks sleep even past the idle thr
     await step()
     assert.equal(ctx.store.getResource(resourceId)?.state, 'running', 'a direct connection or mid-transaction guard must refuse the sleep')
   } finally {
-    hibernator.stop()
+    await hibernator.stop()
   }
 })
 
@@ -394,7 +395,7 @@ test('tick: an unreachable guard is treated as "do not sleep", not as "no activi
       'a resource whose readiness could not be confirmed must not be read as idle'
     )
   } finally {
-    hibernator.stop()
+    await hibernator.stop()
   }
 })
 
@@ -428,6 +429,152 @@ test('tick: a resource that is not running is skipped entirely, guard never call
     assert.equal(guardCalls, 0)
     assert.equal(ctx.store.getResource(resource.id)?.state, 'starting')
   } finally {
-    hibernator.stop()
+    await hibernator.stop()
   }
+})
+
+// A guard that reports when it has actually been called, and only resolves
+// once the test explicitly releases it. This is what makes it possible to
+// force a deterministic interleaving (open a connection, or call stop(),
+// exactly while a tick is blocked inside the guard's round trip) without
+// any real timer or real network involved.
+function createControllableGuard(): {
+  guard: (resource: Resource) => Promise<ActivityGuardResult>
+  invoked: Promise<void>
+  release: (result: ActivityGuardResult) => void
+} {
+  let resolveInvoked: (() => void) | null = null
+  let resolveGuard: ((result: ActivityGuardResult) => void) | null = null
+  const invoked = new Promise<void>((resolve) => {
+    resolveInvoked = resolve
+  })
+  const guard = (): Promise<ActivityGuardResult> => {
+    resolveInvoked?.()
+    return new Promise<ActivityGuardResult>((resolve) => {
+      resolveGuard = resolve
+    })
+  }
+  return {
+    guard,
+    invoked,
+    release: (result: ActivityGuardResult): void => {
+      resolveGuard?.(result)
+    },
+  }
+}
+
+test('tick: a connection that lands while the guard is still in flight aborts the sleep, even though the guard itself reports idle', async () => {
+  const clock = { nowMs: 1_000_000 }
+  const activity = new ActivityTracker(() => clock.nowMs)
+  const ctx = buildContext(createFakeRuntime(), activity)
+  const { resourceId } = makeIdleRunningResource(ctx, { projectSleepAfterSeconds: 60, hostPort: 25566 })
+
+  activity.open(resourceId)
+  activity.close(resourceId)
+  clock.nowMs += 100_000 // well past the 60s threshold: every cheap, pre-guard check passes
+
+  const { guard, invoked, release } = createControllableGuard()
+
+  const { sleepFor, step } = createStepController()
+  const hibernator = startHibernator(ctx, { intervalMs: 1, now: () => clock.nowMs, sleepFor, checkActiveQuery: guard })
+  try {
+    const stepPromise = step()
+    await invoked // the tick has called the guard and is now blocked on it
+
+    // A client connects through the proxy while the guard's round trip is
+    // still outstanding: the exact race the fix closes. The stale
+    // `connections`/`idleSeconds` captured before the guard call already
+    // said zero/idle and cannot see this; a fresh connection with no query
+    // yet issued also reads pg_stat_activity state 'idle', so the guard
+    // itself cannot see it either.
+    activity.open(resourceId)
+    release('idle')
+    await stepPromise
+
+    assert.equal(
+      ctx.store.getResource(resourceId)?.state,
+      'running',
+      'a connection that landed during the guard round trip must abort the sleep'
+    )
+    assert.equal(activity.count(resourceId), 1)
+  } finally {
+    activity.close(resourceId)
+    await hibernator.stop()
+  }
+})
+
+test('tick: a resource whose state changed away from running while the guard was in flight aborts the sleep', async () => {
+  const clock = { nowMs: 1_000_000 }
+  const activity = new ActivityTracker(() => clock.nowMs)
+  const ctx = buildContext(createFakeRuntime(), activity)
+  const { resourceId } = makeIdleRunningResource(ctx, { projectSleepAfterSeconds: 60, hostPort: 25567 })
+
+  activity.open(resourceId)
+  activity.close(resourceId)
+  clock.nowMs += 100_000
+
+  const { guard, invoked, release } = createControllableGuard()
+
+  const { sleepFor, step } = createStepController()
+  const hibernator = startHibernator(ctx, { intervalMs: 1, now: () => clock.nowMs, sleepFor, checkActiveQuery: guard })
+  try {
+    const stepPromise = step()
+    await invoked
+
+    // Something else (a manual `hobby wake`, a concurrent proxy wake)
+    // moves the resource out of `running` while the guard is still
+    // outstanding.
+    ctx.store.setResourceState(resourceId, 'starting')
+    release('idle')
+    await stepPromise
+
+    assert.equal(ctx.store.getResource(resourceId)?.state, 'starting', 'the tick must not stomp a state change that happened mid-guard')
+  } finally {
+    await hibernator.stop()
+  }
+})
+
+test("stop() awaits an in-flight tick, so it can never run stopPostgres concurrently with the caller's own shutdown loop", async () => {
+  const clock = { nowMs: 1_000_000 }
+  const activity = new ActivityTracker(() => clock.nowMs)
+  const ctx = buildContext(createFakeRuntime(), activity)
+  const { resourceId } = makeIdleRunningResource(ctx, { projectSleepAfterSeconds: 60, hostPort: 25568 })
+
+  activity.open(resourceId)
+  activity.close(resourceId)
+  clock.nowMs += 100_000
+
+  const { guard, invoked, release } = createControllableGuard()
+
+  const { sleepFor, step } = createStepController()
+  const hibernator = startHibernator(ctx, { intervalMs: 1, now: () => clock.nowMs, sleepFor, checkActiveQuery: guard })
+
+  // step()'s own promise is not awaited here: it only resolves once the
+  // loop comes back around and calls sleepFor() for the *next* interval,
+  // but stop() (called below, mid-tick) sets the loop's stopped flag
+  // immediately, so once this tick finishes the loop exits without ever
+  // calling sleepFor() again. That is exactly correct hibernator behavior,
+  // not a bug in it; this test's own signal for "the tick is done" is
+  // stopPromise below, driven directly by stop()'s awaited currentTick,
+  // not by the interval controller.
+  void step()
+  await invoked // the tick has already decided this resource is a sleep candidate and is blocked in the guard
+
+  let stopResolved = false
+  const stopPromise = hibernator.stop().then(() => {
+    stopResolved = true
+  })
+
+  // Give the microtask queue several turns: stop() must not resolve while
+  // the tick it is draining is still waiting on the guard.
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(stopResolved, false, 'stop() must not resolve before the in-flight tick has drained')
+
+  release('idle')
+  await stopPromise
+
+  assert.equal(stopResolved, true)
+  assert.equal(ctx.store.getResource(resourceId)?.state, 'sleeping', 'the drained tick was still allowed to finish its own stopPostgres')
 })
