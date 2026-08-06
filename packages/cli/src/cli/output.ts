@@ -32,6 +32,11 @@ export function renderResourceLine(resource: Resource): string {
   return `${resource.name}  ${resource.kind}  ${resource.state}  port ${resource.config.hostPort}`
 }
 
+// The reflink warning is deliberately not part of this function's output.
+// renderPreflight's lines are all meant for stdout (io.out); a warning
+// belongs on stderr (io.err) instead, so it never corrupts the output of
+// anyone piping or parsing `hobby init`'s stdout. See reflinkWarning below
+// and its caller in commands.ts's cmdInit.
 export function renderPreflight(report: PreflightReport): string[] {
   const lines: string[] = []
   lines.push(`container runtime: ${report.runtimeAvailable ? 'available' : 'NOT AVAILABLE'}`)
@@ -40,14 +45,22 @@ export function renderPreflight(report: PreflightReport): string[] {
       report.filesystem.reflinkSupported ? 'supported' : 'NOT supported'
     }, ${formatBytes(report.filesystem.freeBytes)} free`
   )
-  if (!report.filesystem.reflinkSupported) {
-    lines.push(
-      'warning: this filesystem does not support reflinks. branching will fall back to a full copy ' +
-        'instead of an instant clone. this is expected on ext4, the default on many cheap VPS images. ' +
-        'see docs/branching for detail.'
-    )
-  }
   lines.push(`proxy port ${report.ports.proxy.port}: ${report.ports.proxy.bound ? 'already in use' : 'free'}`)
   lines.push(`studio port ${report.ports.studio.port}: ${report.ports.studio.bound ? 'already in use' : 'free'}`)
   return lines
+}
+
+// null when there is nothing to warn about. Always routed to io.err by the
+// caller, in both --json and human mode, since it is advisory information
+// that must never land on the same stream as the JSON body or the plain
+// report lines above.
+export function reflinkWarning(report: PreflightReport): string | null {
+  if (report.filesystem.reflinkSupported) {
+    return null
+  }
+  return (
+    'warning: this filesystem does not support reflinks. branching will fall back to a full copy ' +
+    'instead of an instant clone. this is expected on ext4, the default on many cheap VPS images. ' +
+    'see docs/branching for detail.'
+  )
 }

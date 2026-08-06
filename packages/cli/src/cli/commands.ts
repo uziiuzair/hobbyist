@@ -16,7 +16,7 @@ import { reconcile } from '../daemon/reconcile.js'
 import { startDaemon } from '../daemon/server.js'
 import type { Api } from './client.js'
 import { exitCodeForError } from './exit.js'
-import { renderPreflight, renderResourceLine } from './output.js'
+import { reflinkWarning, renderPreflight, renderResourceLine } from './output.js'
 
 // Io is defined in main.ts, which owns run() and is the file the brief
 // names for the exported signature `run(argv, io)`; imported here as a
@@ -105,6 +105,14 @@ export async function cmdInit(io: Io, paths: Paths, config: HobbyConfig, json: b
     for (const line of renderPreflight(report)) {
       io.out(line)
     }
+  }
+
+  // Always to stderr, in both --json and human mode: advisory text must
+  // never land on the same stream as the JSON body or corrupt the output of
+  // anyone piping/parsing `hobby init`'s stdout.
+  const warning = reflinkWarning(report)
+  if (warning !== null) {
+    io.err(warning)
   }
 
   if (!report.runtimeAvailable) {
@@ -222,13 +230,41 @@ export async function cmdPg(c: Ctx, positionals: string[], flags: Flags): Promis
   return 0
 }
 
+// Turns a postgres:// connection string into the libpq PG* environment
+// variables psql itself already understands, undoing the encodeURIComponent
+// that connectionString() in packages/pg/src/connstring.ts applied to the
+// user and password segments when it built the string.
+export function connectionEnv(connectionString: string): Record<string, string> {
+  const url = new URL(connectionString)
+  return {
+    PGHOST: decodeURIComponent(url.hostname),
+    PGPORT: url.port,
+    PGUSER: decodeURIComponent(url.username),
+    PGPASSWORD: decodeURIComponent(url.password),
+    PGDATABASE: decodeURIComponent(url.pathname.replace(/^\//, '')),
+  }
+}
+
 // `--json` here prints just the connection string, not the psql session:
 // piping `hobby connect` output somewhere only makes sense before psql ever
-// starts. Without --json, this execs psql against the connection string; if
-// psql is not on PATH, the connection string is still printed (so the human
-// can paste it into whatever client they do have) and a clear line explains
-// why nothing else happened, per the brief's explicit instruction not to
-// fail silently there.
+// starts. Without --json, this execs psql; if psql is not on PATH, the
+// connection string is still printed (so the human can paste it into
+// whatever client they do have) and a clear line explains why nothing else
+// happened, per the brief's explicit instruction not to fail silently
+// there.
+//
+// The connection string is deliberately never passed as a psql argv
+// element (e.g. `spawnSync('psql', [connectionString], ...)`), even though
+// that looks like the obvious, simplest way to write this. A child
+// process's full argv is readable by every other user on the box via
+// `ps aux`, `ps -ef`, and /proc/<pid>/cmdline on Linux, so a URI in argv
+// would hand the generated superuser password to anyone else logged into
+// the same host on every ordinary `hobby connect`, not just some error
+// path. Passing PGHOST/PGPORT/PGUSER/PGDATABASE/PGPASSWORD through the
+// child's environment instead keeps the password out of anything
+// process-listing tools can see. The rest of the environment (io.env) is
+// inherited so the user's own psql settings (PAGER, PSQLRC, PGSSLMODE, and
+// so on) still apply; only the five PG* connection variables are forced.
 export async function cmdConnect(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const target = positionals[0]
   if (target === undefined) {
@@ -242,7 +278,10 @@ export async function cmdConnect(c: Ctx, positionals: string[], flags: Flags): P
     return 0
   }
 
-  const result = spawnSync('psql', [connectionString], { stdio: 'inherit' })
+  const result = spawnSync('psql', [], {
+    stdio: 'inherit',
+    env: { ...c.io.env, ...connectionEnv(connectionString) },
+  })
   if (result.error) {
     const err = result.error as NodeJS.ErrnoException
     if (err.code === 'ENOENT') {

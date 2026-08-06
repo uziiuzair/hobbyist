@@ -7,12 +7,13 @@
 
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { run, type Io } from '../src/cli/main.js'
+import { connectionEnv } from '../src/cli/commands.js'
 import { formatBytes, renderResourceLine } from '../src/cli/output.js'
 
 function makeIo(env: NodeJS.ProcessEnv): { io: Io; outLines: string[]; errLines: string[] } {
@@ -189,6 +190,107 @@ test('rm --yes skips confirmation and deletes the whole project for a bare targe
     await close(server)
     rmSync(home, { recursive: true, force: true })
   }
+})
+
+test('hobby connect never puts the password on the child process argv, only in its environment', async () => {
+  const home = tempHome()
+  const socketPath = join(home, 'hobby.sock')
+  const password = 'super-secret-password'
+
+  const resource = {
+    id: 'r1',
+    projectId: 'p1',
+    kind: 'postgres',
+    name: 'primary',
+    state: 'sleeping',
+    config: {
+      image: 'postgres:18-alpine',
+      containerName: 'hobby-blog-primary',
+      dataDir: '/x/pgdata',
+      hostPort: 15432,
+      superuser: 'postgres',
+      password,
+      database: 'blog',
+    },
+    lastActiveAt: null,
+    createdAt: '2026-01-01T00:00:00.000Z',
+  }
+  const projectDetailBody = {
+    project: { id: 'p1', name: 'blog', networkName: 'hobby-blog', sleepAfterSeconds: 300, createdAt: '2026-01-01T00:00:00.000Z' },
+    resources: [resource],
+  }
+  const connectionString = `postgres://postgres:${password}@127.0.0.1:5432/blog`
+
+  const server = createServer((req, res) => {
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    if (req.method === 'GET' && req.url === '/v1/projects/blog') {
+      res.writeHead(200)
+      res.end(JSON.stringify(projectDetailBody))
+      return
+    }
+    if (req.method === 'GET' && req.url === '/v1/resources/r1/connection') {
+      res.writeHead(200)
+      res.end(JSON.stringify({ connectionString }))
+      return
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: { code: 'usage', message: `unexpected request: ${req.method} ${req.url}` } }))
+  })
+
+  // A fake `psql` that records the argv and environment it was invoked
+  // with, rather than a real one, so this test does not depend on psql
+  // being installed and can assert directly on what the child process saw.
+  const binDir = mkdtempSync(join(tmpdir(), 'hobby-cli-fakepsql-'))
+  const captureFile = join(binDir, 'capture.txt')
+  writeFileSync(
+    join(binDir, 'psql'),
+    [
+      '#!/bin/sh',
+      '{',
+      '  echo "ARGV:$*"',
+      '  echo "PGHOST:$PGHOST"',
+      '  echo "PGPORT:$PGPORT"',
+      '  echo "PGUSER:$PGUSER"',
+      '  echo "PGPASSWORD:$PGPASSWORD"',
+      '  echo "PGDATABASE:$PGDATABASE"',
+      `} > "${captureFile}"`,
+      'exit 0',
+      '',
+    ].join('\n')
+  )
+  chmodSync(join(binDir, 'psql'), 0o700)
+
+  await listen(server, socketPath)
+  try {
+    const { io } = makeIo({ HOBBY_HOME: home, PATH: binDir })
+    const code = await run(['connect', 'blog'], io)
+    assert.equal(code, 0)
+
+    const captured = readFileSync(captureFile, 'utf8')
+    assert.equal(captured, `ARGV:\nPGHOST:127.0.0.1\nPGPORT:5432\nPGUSER:postgres\nPGPASSWORD:${password}\nPGDATABASE:blog\n`)
+    assert.ok(!captured.includes('postgres://'), 'the connection URI must never appear in child process argv')
+  } finally {
+    await close(server)
+    rmSync(home, { recursive: true, force: true })
+    rmSync(binDir, { recursive: true, force: true })
+  }
+})
+
+test('connectionEnv recovers PG* variables from a connection string, including a password with reserved characters', () => {
+  // encodeURIComponent('p@ss/word%25!') is what connectionString() in
+  // packages/pg/src/connstring.ts would have produced for a password
+  // containing characters that are reserved in a URI; connectionEnv must
+  // hand psql back the raw, decoded value, not the percent-encoded one.
+  const rawPassword = 'p@ss/word%25!'
+  const encodedPassword = encodeURIComponent(rawPassword)
+  const connectionString = `postgres://postgres:${encodedPassword}@127.0.0.1:5432/blog`
+
+  const env = connectionEnv(connectionString)
+  assert.equal(env.PGHOST, '127.0.0.1')
+  assert.equal(env.PGPORT, '5432')
+  assert.equal(env.PGUSER, 'postgres')
+  assert.equal(env.PGPASSWORD, rawPassword)
+  assert.equal(env.PGDATABASE, 'blog')
 })
 
 test('formatBytes renders human units', () => {

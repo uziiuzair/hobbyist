@@ -57,44 +57,35 @@ test('parseArgs: rejects giving a boolean flag a value via =', () => {
   assert.throws(() => parseArgs(['--json=true'], { bool: ['json'] }), UsageError)
 })
 
-// Every ErrorCode in @hobby.sh/core, kept as an explicit literal list here
-// (rather than derived from the type, which cannot be enumerated at
-// runtime) so this test fails loudly if core adds a new one and this list
-// is not updated to match. exitCodeForError itself is additionally backed
-// by TypeScript's own exhaustiveness check on Record<ErrorCode, number> in
-// exit.ts: a code missing there is a compile error, not just a test
-// failure.
-const ALL_ERROR_CODES: ErrorCode[] = [
-  'project_not_found',
-  'resource_not_found',
-  'name_taken',
-  'invalid_name',
-  'ambiguous_target',
-  'runtime_unavailable',
-  'wake_failed',
-  'wake_timeout',
-  'not_ready',
-  'conflict',
-  'usage',
-  'unauthorized',
-  'internal',
-]
+// Every ErrorCode in @hobby.sh/core, paired with its exact expected exit
+// code (not just "one of the six valid ones"), kept as an explicit literal
+// table here rather than derived from the type, which cannot be enumerated
+// at runtime, so this test fails loudly if core adds a new ErrorCode and
+// this table is not updated to match. This table is the same one documented
+// in exit.ts's own comment; a wrong mapping there (e.g. two codes silently
+// swapped) fails here even though TypeScript's Record<ErrorCode, number>
+// exhaustiveness check would not catch it, since that check only proves
+// every key is present, never that its value is the right one.
+const EXPECTED_EXIT_CODE: Record<ErrorCode, number> = {
+  project_not_found: 3,
+  resource_not_found: 3,
+  name_taken: 4,
+  conflict: 4,
+  invalid_name: 2,
+  ambiguous_target: 2,
+  usage: 2,
+  runtime_unavailable: 1,
+  wake_failed: 1,
+  wake_timeout: 1,
+  not_ready: 1,
+  unauthorized: 1,
+  internal: 1,
+}
 
-test('exitCodeForError: every ErrorCode maps to one of the six documented exit codes', () => {
-  for (const code of ALL_ERROR_CODES) {
-    const exitCode = exitCodeForError(code)
-    assert.ok([0, 1, 2, 3, 4, 5].includes(exitCode), `${code} mapped to unexpected exit code ${exitCode}`)
+test('exitCodeForError: every ErrorCode maps to its exact documented exit code', () => {
+  for (const [code, expected] of Object.entries(EXPECTED_EXIT_CODE) as Array<[ErrorCode, number]>) {
+    assert.equal(exitCodeForError(code), expected, `${code} should map to exit ${expected}`)
   }
-})
-
-test('exitCodeForError: the specific mappings the brief calls out by name', () => {
-  assert.equal(exitCodeForError('project_not_found'), 3)
-  assert.equal(exitCodeForError('resource_not_found'), 3)
-  assert.equal(exitCodeForError('name_taken'), 4)
-  assert.equal(exitCodeForError('conflict'), 4)
-  assert.equal(exitCodeForError('usage'), 2)
-  assert.equal(exitCodeForError('invalid_name'), 2)
-  assert.equal(exitCodeForError('ambiguous_target'), 2)
 })
 
 test('parseTarget: a bare project has no resource segment', () => {
