@@ -133,8 +133,23 @@ export function createDockerRuntime(exec: ExecFn = defaultExec): ComputeRuntime 
     // Always a clean shutdown, never docker kill: a SIGKILLed Postgres does
     // recovery on the next start, and that recovery would land inside a
     // user's first query against the wake-on-connect budget.
+    //
+    // Stopping a container that does not exist is a no-op, exactly like
+    // remove() below: teardown must be idempotent, and asking to stop
+    // something that is already gone is success, not failure. Without this,
+    // a resource whose container was never created (e.g. createPostgres
+    // failed at mkdir, before ensureCreated ever ran) would be permanently
+    // undestroyable, since destroy's first step would throw.
     async stop(name: string, opts: { timeoutSec: number }): Promise<void> {
-      await run(['stop', '-t', String(opts.timeoutSec), name])
+      try {
+        await exec('docker', ['stop', '-t', String(opts.timeoutSec), name])
+      } catch (err) {
+        const e = errorOf(err)
+        if (isNotFound(e.stderr)) {
+          return
+        }
+        throw toRuntimeUnavailable('docker stop', err)
+      }
     },
 
     async remove(name: string): Promise<void> {

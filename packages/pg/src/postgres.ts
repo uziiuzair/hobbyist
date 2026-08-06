@@ -161,7 +161,17 @@ export async function createPostgres(
 
 export async function startPostgres(deps: PgDeps, resource: Resource): Promise<void> {
   deps.store.setResourceState(resource.id, 'starting')
-  await deps.runtime.start(resource.config.containerName)
+
+  // A `starting` (or, in stopPostgres below, `stopping`) state that outlives
+  // the operation that set it is a lie the reconcile and hibernation tasks
+  // will believe. Any throw here, not just a failed readiness wait, must
+  // record `failed` before propagating.
+  try {
+    await deps.runtime.start(resource.config.containerName)
+  } catch (err) {
+    deps.store.setResourceState(resource.id, 'failed')
+    throw err
+  }
 
   const probe = (deps.probeFactory ?? pgProbe)(resource.config)
   const result = await waitReady({
@@ -186,13 +196,44 @@ export async function startPostgres(deps: PgDeps, resource: Resource): Promise<v
 
 export async function stopPostgres(deps: PgDeps, resource: Resource): Promise<void> {
   deps.store.setResourceState(resource.id, 'stopping')
-  await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+  try {
+    await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+  } catch (err) {
+    deps.store.setResourceState(resource.id, 'failed')
+    throw err
+  }
   deps.store.setResourceState(resource.id, 'sleeping')
 }
 
+// Teardown is best-effort and resilient step by step: a resource can reach
+// this function having never had a container created at all (e.g.
+// createPostgres failed at mkdir or ensureNetwork, before ensureCreated
+// ever ran), or with a container already gone by some other path. Any
+// single step failing here (stop, remove, or the filesystem rm) must not
+// prevent the remaining steps from running, and the row must always be
+// deleted at the end: it is the source of truth for "this resource exists",
+// and a `failed` row with nothing left to tear down would otherwise be
+// permanently stuck with no path to remove it.
 export async function destroyPostgres(deps: PgDeps, resource: Resource): Promise<void> {
-  await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
-  await deps.runtime.remove(resource.config.containerName)
-  await rm(resource.config.dataDir, { recursive: true, force: true })
+  try {
+    await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+  } catch {
+    // Nothing to stop, or the runtime is unavailable: either way, remove()
+    // below gets its own chance, and the row still gets deleted.
+  }
+
+  try {
+    await deps.runtime.remove(resource.config.containerName)
+  } catch {
+    // Same reasoning as stop() above: already gone is fine.
+  }
+
+  try {
+    await rm(resource.config.dataDir, { recursive: true, force: true })
+  } catch {
+    // force: true already swallows "does not exist"; anything else here is
+    // a filesystem problem the daemon must not let block deleting the row.
+  }
+
   deps.store.deleteResource(resource.id)
 }
