@@ -20,6 +20,7 @@ The routing rule is in `docs/CLAUDE.md`. The project context is in the root
 | `INDEX.md` | This file. |
 | `ACTIVE_CONTEXT.md` | What is happening right now. Current state, in-flight work, immediate next step. |
 | `PROGRESS.md` | Append-only history. What shipped, when, and what it cost. |
+| `plans/` | Implementation plans, one per milestone, `YYYY-MM-DD-<name>.md`. Working state, deleted or left stale once the milestone lands. The durable record of what a milestone was for lives in its `docs/<capability>/specs/` file, not here. |
 
 ## docs/
 
