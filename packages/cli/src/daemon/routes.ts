@@ -257,7 +257,13 @@ function renderCompose(resources: Resource[]): string {
     // to notice it for them.
     lines.push(`      - "${DEFAULT_PORT_BIND}:${cfg.hostPort}:5432"`)
     lines.push('    volumes:')
-    lines.push(`      - "${cfg.dataDir}:/var/lib/postgresql/data"`)
+    // The postgres home directory, not PGDATA itself: postgres 18's image
+    // refuses to start when the bind mount lands directly at
+    // /var/lib/postgresql/data (see docs/decisions/0003's 2026-08-07
+    // amendment). A compose file mounted at the old path would hand a
+    // departing user a stack that exits 1 on `docker compose up`, which
+    // would break eject's whole reason to exist.
+    lines.push(`      - "${cfg.dataDir}:/var/lib/postgresql"`)
   }
   return `${lines.join('\n')}\n`
 }

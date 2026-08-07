@@ -26,7 +26,7 @@ function sampleSpec(): ContainerSpec {
     image: 'postgres:18-alpine',
     env: { POSTGRES_PASSWORD: 'secret' },
     ports: [{ host: 15432, container: 5432 }],
-    binds: [{ host: '/data/blog/pgdata', container: '/var/lib/postgresql/data' }],
+    binds: [{ host: '/data/blog/pgdata', container: '/var/lib/postgresql' }],
     network: 'hobby-blog',
   }
 }
@@ -67,7 +67,7 @@ test('ensureCreated issues docker create with the exact expected argv when absen
       '-p',
       '127.0.0.1:15432:5432',
       '-v',
-      '/data/blog/pgdata:/var/lib/postgresql/data',
+      '/data/blog/pgdata:/var/lib/postgresql',
       '--network',
       'hobby-blog',
       'postgres:18-alpine',

@@ -17,7 +17,11 @@ export async function create(opts: CreateOpts): Promise<void> {
     '--name', opts.name,
     '-e', `POSTGRES_PASSWORD=${opts.password}`,
     '-p', `${opts.hostPort}:5432`,
-    '-v', `${opts.dataDir}:/var/lib/postgresql/data`,
+    // The postgres home directory, not PGDATA itself: postgres 18's image
+    // exits 1 when the bind mount lands directly at
+    // /var/lib/postgresql/data. The entrypoint places the real data
+    // directory at <dataDir>/18/docker underneath this mount.
+    '-v', `${opts.dataDir}:/var/lib/postgresql`,
     opts.image,
   ])
 }

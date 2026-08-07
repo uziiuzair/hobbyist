@@ -41,3 +41,36 @@ These are enforced by a test suite that runs on every commit, not by intention.
 Nothing. This one is not up for negotiation, and that inflexibility is the point.
 A feature that requires breaking this invariant is the wrong feature, and the
 correct response is to drop the feature.
+
+## Amendment, 2026-08-07: invariant 2 resolves to a subdirectory
+
+This does not change the decision above. It corrects a mistaken assumption made
+while implementing it, discovered by running the integration test suite against
+a real Docker daemon for the first time, after the code had already been
+written against a fake runtime that accepted an argv no real Docker would.
+
+The original implementation bind-mounted the host data directory straight at
+`/var/lib/postgresql/data`. Against real Docker, `postgres:18-alpine` exits 1
+on that mount and logs that the suggested configuration for Postgres 18 and
+newer is a single mount at `/var/lib/postgresql`, with Postgres placing its
+data in a subdirectory beneath it. The corrected mount is
+`<host data directory>:/var/lib/postgresql`; the container's entrypoint then
+creates the real PGDATA at `<host data directory>/18/docker`.
+
+**Consequence for invariant 2.** "A stock upstream `postgres` binary, pointed
+at the directory, starts it" still holds, but "the directory" is no longer the
+host data directory Hobbyist creates and bind-mounts. It is that directory's
+`18/docker` subdirectory. Point a stock binary at:
+
+```
+<host data directory>/18/docker
+```
+
+not at the host data directory itself. `pg_dump` is unaffected: it connects
+over the wire like any other client and never touches the data directory
+path directly.
+
+Invariants 1 and 3 are unchanged. `packages/core/src/config.ts` now exports
+`resolvePgdataPath(hostDataDir)`, the one place this subdirectory pattern is
+written down, and `hobby eject` prints the resolved path alongside each data
+directory rather than leaving a departing user to guess it.

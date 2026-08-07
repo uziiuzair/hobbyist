@@ -30,6 +30,21 @@ export function resolvePaths(env: NodeJS.ProcessEnv = process.env): Paths {
   }
 }
 
+// PostgreSQL 18's official image refuses to start when a bind mount lands
+// directly at what used to be PGDATA (see docs/decisions/0003's 2026-08-07
+// amendment). The corrected mount point, POSTGRES_HOME_CONTAINER_PATH in
+// packages/pg/src/postgres.ts, is the postgres home directory, and the
+// entrypoint places the real data directory in a subdirectory named after
+// the major version: <mount>/<major>/docker. This is the one place that
+// pattern is written down. Every caller that needs the true on-disk PGDATA
+// path, not just the mount source, derives it from here rather than
+// hardcoding the subdirectory itself.
+const POSTGRES_MAJOR_VERSION = '18'
+
+export function resolvePgdataPath(hostDataDir: string): string {
+  return join(hostDataDir, POSTGRES_MAJOR_VERSION, 'docker')
+}
+
 export interface HobbyConfig {
   image: string
   proxyPort: number

@@ -174,7 +174,7 @@ test('createPostgres against the fake runtime leaves the resource sleeping with 
     assert.ok(spec !== undefined)
     assert.equal(spec?.network, project.networkName)
     assert.deepEqual(spec?.binds, [
-      { host: resource.config.dataDir, container: '/var/lib/postgresql/data' },
+      { host: resource.config.dataDir, container: '/var/lib/postgresql' },
     ])
     assert.deepEqual(spec?.env.POSTGRES_DB, 'blog')
   } finally {

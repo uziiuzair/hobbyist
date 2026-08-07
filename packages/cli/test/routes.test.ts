@@ -638,7 +638,7 @@ test('POST /v1/projects/:name/eject renders a compose file grounded in the real 
     // database on every interface would hand the departing user a strictly
     // more exposed setup than the one they were running.
     assert.match(body.compose, /"127\.0\.0\.1:25555:5432"/)
-    assert.match(body.compose, /pgdata:\/var\/lib\/postgresql\/data/)
+    assert.match(body.compose, /pgdata:\/var\/lib\/postgresql"/)
     assert.deepEqual(body.dataDirs, ['/home/user/.hobby/projects/blog/primary/pgdata'])
   })
 })
