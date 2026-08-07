@@ -221,6 +221,11 @@ body {
 .rail-link svg { flex: none; opacity: 0.75; }
 .rail-link .count { margin-left: auto; color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
 
+/* The database's own views, nested under it. Indented and quieter than the
+   service they belong to, so the hierarchy is legible without a second panel. */
+.rail-sub { margin: 2px 0 2px 12px; padding-left: 10px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 1px; }
+.rail-link-sub { padding: 5px 8px; font-size: 13px; }
+
 .rail-foot { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); }
 
 /* project switcher */
@@ -647,13 +652,19 @@ kbd {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-  padding: 12px 14px 0;
+  padding: 10px 12px 12px;
   gap: 10px;
 }
 
 /* The grid takes whatever height is left and scrolls inside itself, so the
    filter bar and the row range stay put while the rows move. */
-.wb-main .table-scroll { flex: 1; max-height: none; min-height: 0; border-radius: var(--radius); }
+.wb-main .table-scroll {
+  flex: 1;
+  max-height: none;
+  min-height: 0;
+  overflow: auto;
+  border-radius: var(--radius);
+}
 .wb-main .grid-table thead th { position: sticky; top: 0; z-index: 2; }
 .wb-main .grid-bar { flex: none; padding-bottom: 12px; }
 
@@ -661,20 +672,6 @@ kbd {
   .workbench-body { grid-template-columns: minmax(0, 1fr); }
   .wb-side { border-right: 0; border-bottom: 1px solid var(--line); max-height: 34vh; }
 }
-
-/* Navigation lives in the sidebar, not as a tab strip above the content, so
-   the grid can start at the top of the page. */
-.wb-nav { display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; border-bottom: 1px solid var(--line); }
-.wb-nav-link {
-  display: flex; align-items: center; gap: 9px;
-  padding: 7px 8px; border-radius: var(--radius-sm);
-  color: var(--ink-2); text-decoration: none; font-size: 13.5px;
-}
-.wb-nav-link:hover { background: var(--surface-2); color: var(--ink); }
-.wb-nav-link[aria-current="page"] { background: var(--accent-dim); color: var(--ink); }
-.wb-nav-link[aria-current="page"] svg { color: var(--accent); }
-.wb-nav-link svg { flex: none; opacity: 0.75; }
-.wb-nav-link[aria-current="page"] svg { opacity: 1; }
 
 /* One toolbar rather than a full width filter bar stacked on a pager. */
 .grid-toolbar { display: flex; align-items: center; gap: 8px; flex: none; }
