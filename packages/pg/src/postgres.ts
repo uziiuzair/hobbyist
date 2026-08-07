@@ -347,6 +347,44 @@ function createDefaultRemoveDataDir(
 // that names every step that did and says plainly that something may
 // remain on disk. Deleting the row first and throwing second is
 // deliberate, in that order.
+// Hand this resource over: stop it, remove the container, forget the row, and
+// leave the data directory exactly where it is. This is destroyPostgres minus
+// the one step that loses data, and it exists because "you can always leave"
+// (CLAUDE.md, promise one of three) needs a way for Hobbyist to stop managing
+// something without also deleting it. The container has to go, not just stop,
+// because a departing user's docker-compose.yml cannot bind the same port or
+// the same data directory while Hobbyist's container still holds them.
+//
+// Same failure discipline as destroyPostgres and for the same reason, with
+// one difference in what a failure means: here nothing has been deleted, so a
+// caller who sees this throw still has their data and can retry.
+export async function releasePostgres(deps: PgDeps, resource: Resource): Promise<void> {
+  const failures: string[] = []
+
+  try {
+    await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+  } catch (err) {
+    failures.push(`stop container: ${errorMessage(err)}`)
+  }
+
+  try {
+    await deps.runtime.remove(resource.config.containerName)
+  } catch (err) {
+    failures.push(`remove container: ${errorMessage(err)}`)
+  }
+
+  deps.store.deleteResource(resource.id)
+  deps.activity?.reset(resource.id)
+
+  if (failures.length > 0) {
+    throw new HobbyError(
+      'internal',
+      `resource ${resource.id} is no longer managed, but ${failures.length} handover step(s) failed: ${failures.join('; ')}`,
+      'the data directory is untouched; a container may still be running and may need to be stopped by hand before the compose file can start'
+    )
+  }
+}
+
 export async function destroyPostgres(deps: PgDeps, resource: Resource): Promise<void> {
   const failures: string[] = []
 

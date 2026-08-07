@@ -426,7 +426,8 @@ export async function cmdEject(c: Ctx, positionals: string[], flags: Flags): Pro
   if (project === undefined) {
     throw new UsageError('usage: hobby eject <project>')
   }
-  const result = await c.api.eject(project)
+  const release = flags.release === true
+  const result = await c.api.eject(project, { release })
 
   if (flags.json) {
     c.io.out(JSON.stringify(result))
@@ -448,10 +449,17 @@ export async function cmdEject(c: Ctx, positionals: string[], flags: Flags): Pro
   for (const dir of result.dataDirs) {
     c.io.err(`  ${resolvePgdataPath(dir)}`)
   }
-  c.io.err(
-    'this is a snapshot of current state; hobby is still managing this project. moving the data out and ' +
-      'stopping management here is not yet automated, see docs/portability.'
-  )
+  if (release) {
+    c.io.err(
+      `hobby is no longer managing ${project}: its containers and network are gone and its rows are ` +
+        'deleted. the data directories above are untouched, and the compose file on stdout starts them.'
+    )
+  } else {
+    c.io.err(
+      'this is a snapshot of current state; hobby is still managing this project. pass --release to hand ' +
+        'it over: containers and network removed, rows deleted, data left exactly where it is.'
+    )
+  }
   return 0
 }
 
