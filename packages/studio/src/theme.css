@@ -697,14 +697,6 @@ kbd {
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
 
-.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
-.tab {
-  padding: 8px 12px; font-size: 13.5px; color: var(--ink-2); text-decoration: none;
-  border-bottom: 2px solid transparent; margin-bottom: -1px;
-}
-.tab:hover { color: var(--ink); }
-.tab[aria-current="page"], .tab.active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 500; }
-
 .row { display: flex; align-items: center; gap: 10px; }
 .stack { display: flex; flex-direction: column; gap: 10px; }
 .dim { color: var(--ink-3); }
@@ -732,9 +724,6 @@ kbd {
   min-height: 0;
   overflow: hidden;
 }
-.workbench-tabs { padding-top: 14px; flex: none; }
-.workbench-tabs .tabs { margin-bottom: 0; }
-
 .workbench-body {
   flex: 1;
   display: grid;
@@ -1027,8 +1016,50 @@ kbd {
 .side-list-item > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .side-list-item .hint-text { margin-left: auto; flex: none; font-size: 11px; }
 
-.schema-table { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); margin-bottom: 14px; overflow: hidden; }
-.schema-table-name { font-weight: 600; font-size: 13.5px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+/* ---------- schema ----------
+   The selected table rendered as the statements that would create it.
+   Postgres prints these strings itself (format_type, pg_get_constraintdef,
+   indexdef), so the page shows the server's own words. Rank is carried by ink
+   weight rather than by syntax colour: green already means action and state
+   here, and a third meaning would cost more than the readability it buys. */
+
+.schema-bar { display: flex; align-items: center; gap: 10px; flex: none; font-size: 12.5px; }
+.schema-name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--ink); }
+.schema-tag {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+  color: var(--ink-3); border: 1px solid var(--line); border-radius: var(--radius-bar); padding: 1px 5px;
+}
+.schema-bar-right { margin-left: auto; display: flex; gap: 6px; }
+
+.schema-body { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 8px; }
+
+.ddl-section + .ddl-section { margin-top: 18px; }
+.ddl-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 7px; }
+.ddl-title {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--ink-3); font-weight: 600;
+}
+.ddl-count { color: var(--ink-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+.ddl-block { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); overflow: hidden; }
+
+/* One statement per row, wrapping rather than truncating: a constraint you
+   cannot read the end of is a constraint you have to go elsewhere to check. */
+.ddl-line {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.ddl-line:last-child { border-bottom: 0; }
+.ddl-line:hover { background: var(--surface-2); }
+
+.ddl-name { color: var(--ink); font-weight: 600; }
+.ddl-type { color: var(--ink-2); }
+.ddl-mod { color: var(--ink-3); }
+.ddl-kw { color: var(--ink-3); }
+.ddl-line .key-tag, .ddl-line .fk-tag { margin-left: auto; }
 
 .pager { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 13px; color: var(--ink-2); }
 
