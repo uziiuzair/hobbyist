@@ -17,7 +17,15 @@ import {
   type Project,
   type Resource,
 } from '@hobby.sh/core'
-import { connectionString, createPostgres, destroyPostgres, runQuery, startPostgres, stopPostgres } from '@hobby.sh/pg'
+import {
+  connectionString,
+  createPostgres,
+  destroyPostgres,
+  releasePostgres,
+  runQuery,
+  startPostgres,
+  stopPostgres,
+} from '@hobby.sh/pg'
 import { getOrCreateWake, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
 import { toWireResource, toWireResources } from './wire.js'
@@ -134,13 +142,26 @@ async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<Rou
     }
   }
 
+  // The project's network goes with it. Nothing else ever removed one, so
+  // every project ever created left a network behind on the box: harmless
+  // individually, and a growing list in `docker network ls` that the user
+  // cannot attribute to anything still running. Attempted after the
+  // containers, because a network with an attached container cannot be
+  // removed, and collected rather than thrown for the same reason as the
+  // resource failures above.
+  try {
+    await ctx.runtime.removeNetwork(project.networkName)
+  } catch (err) {
+    failures.push(`remove network ${project.networkName}: ${errorMessage(err)}`)
+  }
+
   ctx.store.deleteProject(project.id)
 
   if (failures.length > 0) {
     throw new HobbyError(
       'internal',
-      `project ${name} was deleted, but ${failures.length} resource(s) did not tear down cleanly: ${failures.join('; ')}`,
-      'a container or data directory may still remain on disk and may need manual cleanup'
+      `project ${name} was deleted, but ${failures.length} teardown step(s) did not complete cleanly: ${failures.join('; ')}`,
+      'a container, network or data directory may still remain and may need manual cleanup'
     )
   }
 
@@ -340,16 +361,65 @@ async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string):
   }
 }
 
-function ejectRoute(ctx: DaemonContext, name: string): RouteResult {
+// Two calls in one route, and the order is the whole design.
+//
+// Without `release` this is what it has always been: a pure read that renders
+// a compose file from real state, writes nothing, stops nothing, and leaves
+// the project managed. That stays the default, because the common use is
+// looking at the file.
+//
+// With `release` it also performs the handover CLAUDE.md's first promise
+// actually requires: containers stopped and removed, the project's network
+// removed, the project forgotten. The data directories are not touched, and
+// they are the reason the compose file above is worth anything.
+//
+// The compose file is rendered before any of that runs. It is rendered from
+// the store rows, credentials included, and once the project is forgotten
+// there is nothing left to render it from. Releasing first would hand back an
+// empty services list at exactly the moment the file is the only thing the
+// user has left.
+async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): Promise<RouteResult> {
   const project = getProjectByNameOrThrow(ctx, name)
   const resources = ctx.store.listResources(project.id)
-  return {
-    status: 200,
-    body: {
-      compose: renderCompose(resources),
-      dataDirs: resources.map((resource) => resource.config.dataDir),
-    },
+  const body = {
+    compose: renderCompose(resources),
+    dataDirs: resources.map((resource) => resource.config.dataDir),
+    released: release,
   }
+
+  if (!release) {
+    return { status: 200, body }
+  }
+
+  const failures: string[] = []
+  for (const resource of resources) {
+    try {
+      await releasePostgres(ctx, resource)
+    } catch (err) {
+      failures.push(`${resource.name}: ${errorMessage(err)}`)
+    }
+  }
+
+  // The network is Hobbyist's, not the departing project's: compose creates
+  // its own. Leaving it behind is how a box accumulates one dead network per
+  // project ever created.
+  try {
+    await ctx.runtime.removeNetwork(project.networkName)
+  } catch (err) {
+    failures.push(`remove network ${project.networkName}: ${errorMessage(err)}`)
+  }
+
+  ctx.store.deleteProject(project.id)
+
+  if (failures.length > 0) {
+    throw new HobbyError(
+      'internal',
+      `project ${name} is no longer managed, but ${failures.length} handover step(s) failed: ${failures.join('; ')}`,
+      'the data directories are untouched; a container or network may still exist and may need to be removed by hand before the compose file can start'
+    )
+  }
+
+  return { status: 200, body }
 }
 
 async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<RouteResult> {
@@ -389,7 +459,10 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
 
     if (segments.length === 4 && method === 'POST' && segments[3] === 'eject') {
       const name = decodeURIComponent(segments[2] as string)
-      return ejectRoute(ctx, name)
+      // Opt-in by an explicit query parameter, matching how ?force=true works
+      // on delete: the destructive reading of a verb is never the default one
+      // a bare request gets.
+      return await ejectRoute(ctx, name, url.searchParams.get('release') === 'true')
     }
   }
 

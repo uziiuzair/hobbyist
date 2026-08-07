@@ -859,3 +859,81 @@ test('reconcile resumes a resource recorded destroying and removes it', async ()
   assert.equal(status.exists, false)
   ctx.store.close()
 })
+
+// ---------------------------------------------------------------------------
+// eject: the read, and the handover. CLAUDE.md's first promise is "you can
+// always leave," so what these pin is that the file you leave with is
+// complete, and that leaving actually stops Hobbyist managing the project
+// without touching the data that makes the file worth having.
+// ---------------------------------------------------------------------------
+
+async function seedProject(ctx: DaemonContext): Promise<{ projectId: string; config: PostgresConfig }> {
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const config = samplePostgresConfig()
+  const resource = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config })
+  ctx.store.setResourceState(resource.id, 'running')
+  await ctx.runtime.ensureNetwork(project.networkName)
+  await ctx.runtime.ensureCreated({ name: config.containerName, image: config.image, env: {}, ports: [], binds: [] })
+  await ctx.runtime.start(config.containerName)
+  return { projectId: project.id, config }
+}
+
+test('POST /v1/projects/:name/eject without release changes nothing', async () => {
+  const runtime = createFakeRuntime()
+  const ctx = buildContext(runtime)
+  const { projectId, config } = await seedProject(ctx)
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', '/v1/projects/blog/eject')
+    assert.equal(res.status, 200)
+    const body = res.body as { compose: string; dataDirs: string[]; released: boolean }
+    assert.equal(body.released, false)
+    assert.match(body.compose, /POSTGRES_PASSWORD: secret/)
+    assert.deepEqual(body.dataDirs, [config.dataDir])
+
+    // Inside the server scope: withServer closes the store on the way out.
+    assert.notEqual(ctx.store.getProject(projectId), null, 'the project is still managed')
+    assert.equal(runtime._state.get(config.containerName)?.running, true, 'the container is still running')
+  })
+})
+
+test('POST /v1/projects/:name/eject?release=true hands the project over and keeps the data', async () => {
+  const runtime = createFakeRuntime()
+  const ctx = buildContext(runtime)
+  const { projectId, config } = await seedProject(ctx)
+  const networkName = ctx.store.getProject(projectId)?.networkName as string
+  assert.equal(runtime._networks.has(networkName), true)
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', '/v1/projects/blog/eject?release=true')
+    assert.equal(res.status, 200)
+    const body = res.body as { compose: string; dataDirs: string[]; released: boolean }
+    assert.equal(body.released, true)
+    // Rendered before the release, from rows that no longer exist by the time
+    // this assertion runs. A compose file with no services is the failure
+    // this ordering exists to prevent.
+    assert.match(body.compose, /services:\n {2}primary:/)
+    assert.match(body.compose, /POSTGRES_PASSWORD: secret/)
+    assert.deepEqual(body.dataDirs, [config.dataDir])
+
+    assert.equal(ctx.store.getProject(projectId), null, 'the project is forgotten')
+    const status = await runtime.inspect(config.containerName)
+    assert.equal(status.exists, false, 'the container is removed, not merely stopped')
+    assert.equal(runtime._networks.has(networkName), false, 'the network is removed rather than leaked')
+  })
+})
+
+test('DELETE /v1/projects/:name removes the project network rather than leaking it', async () => {
+  const runtime = createFakeRuntime()
+  const ctx = buildContext(runtime)
+  const { projectId } = await seedProject(ctx)
+  const networkName = ctx.store.getProject(projectId)?.networkName as string
+  assert.equal(runtime._networks.has(networkName), true)
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'DELETE', '/v1/projects/blog?force=true')
+    assert.equal(res.status, 200)
+    assert.equal(ctx.store.getProject(projectId), null)
+    assert.equal(runtime._networks.has(networkName), false, 'nothing else ever removed a project network')
+  })
+})
