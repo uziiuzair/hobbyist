@@ -88,9 +88,9 @@ export function ActivityChart({ samples, windowMs }: { samples: Sample[]; window
   return (
     <div className="chart" ref={ref}>
       {width > 0 && (
-        <svg width={width} height={HEIGHT} role="img" aria-label="Connections over time, with the periods asleep marked">
+        <svg width={width} height={HEIGHT} role="img" aria-label="Connections over time, with the idle periods marked">
           <defs>
-            <pattern id="asleep-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <pattern id="idle-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
               <line x1="0" y1="0" x2="0" y2="6" stroke="var(--line-strong)" strokeWidth="1.6" />
             </pattern>
           </defs>
@@ -114,7 +114,7 @@ export function ActivityChart({ samples, windowMs }: { samples: Sample[]; window
               y={PAD_TOP}
               width={Math.max(1.5, xFor(band.to) - xFor(band.from))}
               height={plotH}
-              fill="url(#asleep-hatch)"
+              fill="url(#idle-hatch)"
               opacity="0.5"
             />
           ))}
@@ -145,7 +145,7 @@ export function ActivityChart({ samples, windowMs }: { samples: Sample[]; window
       <div className="chart-legend">
         <span className="legend-item">
           <span className="legend-hatch" aria-hidden="true" />
-          Asleep
+          Idle
         </span>
         <span className="legend-item">
           <span className="legend-line" aria-hidden="true" />
