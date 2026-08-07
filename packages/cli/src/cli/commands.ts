@@ -9,7 +9,14 @@
 
 import { spawnSync } from 'node:child_process'
 import { chmod, mkdir } from 'node:fs/promises'
-import { HobbyError, parseTarget, type HobbyConfig, type Paths, type Project } from '@hobby.sh/core'
+import {
+  HobbyError,
+  parseTarget,
+  resolvePgdataPath,
+  type HobbyConfig,
+  type Paths,
+  type Project,
+} from '@hobby.sh/core'
 import { createDaemonContext } from '../daemon/context.js'
 import { runPreflight } from '../daemon/preflight.js'
 import { reconcile } from '../daemon/reconcile.js'
@@ -429,6 +436,16 @@ export async function cmdEject(c: Ctx, positionals: string[], flags: Flags): Pro
   c.io.err('data directories:')
   for (const dir of result.dataDirs) {
     c.io.err(`  ${dir}`)
+  }
+  // Each directory above is the postgres home directory the compose file
+  // mounts, not PGDATA itself: postgres 18's image places the real data
+  // directory in a subdirectory named after the major version (see
+  // docs/decisions/0003's 2026-08-07 amendment). A stock `postgres` binary,
+  // or pg_dump/pg_ctl run by hand outside Hobbyist, must point at that
+  // subdirectory, not the directory listed above.
+  c.io.err('a stock postgres binary or pg_ctl points at the subdirectory beneath each one, for example:')
+  for (const dir of result.dataDirs) {
+    c.io.err(`  ${resolvePgdataPath(dir)}`)
   }
   c.io.err(
     'this is a snapshot of current state; hobby is still managing this project. moving the data out and ' +

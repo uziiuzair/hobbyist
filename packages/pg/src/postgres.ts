@@ -55,7 +55,13 @@ export interface PgDeps {
 
 const SUPERUSER = 'postgres'
 const POSTGRES_CONTAINER_PORT = 5432
-const PGDATA_CONTAINER_PATH = '/var/lib/postgresql/data'
+// Not PGDATA itself. PostgreSQL 18's official image refuses to start when a
+// bind mount lands directly at /var/lib/postgresql/data (exit 1, log says to
+// mount the home directory instead); the entrypoint then places the real
+// data directory at <mount>/18/docker. See docs/decisions/0003's 2026-08-07
+// amendment and core's resolvePgdataPath, which derives that subdirectory
+// for anyone who needs the true on-disk PGDATA rather than this mount point.
+const POSTGRES_HOME_CONTAINER_PATH = '/var/lib/postgresql'
 
 // Wide open on purpose: leaves headroom below the well-known port range and
 // clear of the daemon's own ports (proxyPort 5432, studioPort 8443, apiPort
@@ -87,7 +93,7 @@ function containerSpec(config: PostgresConfig, network: string): ContainerSpec {
       POSTGRES_DB: config.database,
     },
     ports: [{ host: config.hostPort, container: POSTGRES_CONTAINER_PORT }],
-    binds: [{ host: config.dataDir, container: PGDATA_CONTAINER_PATH }],
+    binds: [{ host: config.dataDir, container: POSTGRES_HOME_CONTAINER_PATH }],
     network,
   }
 }
