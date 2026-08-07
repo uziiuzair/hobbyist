@@ -1,0 +1,252 @@
+import { useCallback, useEffect, useState } from 'react'
+import * as api from '../api.js'
+import { navigate } from '../lib/router.js'
+import { useResource } from '../lib/useResource.js'
+import { useWakeAwareRun } from '../lib/useWaking.js'
+import { WakingBanner } from '../components/WakingBanner.js'
+import { ResourceTabs } from '../components/ResourceTabs.js'
+import { quoteIdentifier } from '../lib/identifiers.js'
+import { loadSchema, type TableInfo } from '../lib/schema.js'
+
+const PAGE_SIZE = 50
+
+export function Tables({
+  projectName,
+  resourceName,
+  tableName,
+}: {
+  projectName: string
+  resourceName: string
+  tableName: string | undefined
+}) {
+  const { resource, error: resourceError } = useResource(projectName, resourceName)
+  const { snapshot, run } = useWakeAwareRun()
+
+  const [tables, setTables] = useState<TableInfo[] | null>(null)
+  const [schemaError, setSchemaError] = useState<string | null>(null)
+
+  const [rows, setRows] = useState<Array<Record<string, unknown>> | null>(null)
+  const [page, setPage] = useState(0)
+  const [filter, setFilter] = useState('')
+  const [appliedFilter, setAppliedFilter] = useState('')
+  const [rowsError, setRowsError] = useState<string | null>(null)
+  const [editing, setEditing] = useState<{ rowIndex: number; column: string } | null>(null)
+  const [editValue, setEditValue] = useState('')
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  const base = `/projects/${encodeURIComponent(projectName)}/resources/${encodeURIComponent(resourceName)}/tables`
+
+  useEffect(() => {
+    if (resource === null) return
+    run(resource.id, resource.state, () => loadSchema((sql, params) => api.runQuery(resource.id, sql, params)))
+      .then(setTables)
+      .catch((err: unknown) => setSchemaError(err instanceof api.ApiError ? err.message : 'failed to load tables'))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resource?.id])
+
+  const active = tableName ?? tables?.[0]?.name
+
+  const loadRows = useCallback(
+    (pageToLoad: number, filterToApply: string) => {
+      if (resource === null || active === undefined) return
+      const table = tables?.find((t) => t.name === active)
+      const columnNames = table !== undefined ? table.columns.map((c) => c.name) : ['*']
+      const selectList = table !== undefined ? columnNames.map(quoteIdentifier).join(', ') : '*'
+      let sql = `select ${selectList} from ${quoteIdentifier(active)}`
+      if (filterToApply.trim().length > 0) sql += ` where ${filterToApply}`
+      sql += ` limit $1 offset $2`
+      setRowsError(null)
+      run(resource.id, resource.state, () => api.runQuery(resource.id, sql, [PAGE_SIZE, pageToLoad * PAGE_SIZE]))
+        .then((result) => setRows(result.rows))
+        .catch((err: unknown) => setRowsError(err instanceof api.ApiError ? err.message : 'query failed'))
+    },
+    [resource, active, tables, run]
+  )
+
+  useEffect(() => {
+    setPage(0)
+    setAppliedFilter('')
+    setFilter('')
+    if (active !== undefined) loadRows(0, '')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, resource?.id])
+
+  if (resourceError !== null) {
+    return <div className="error-banner">{resourceError}</div>
+  }
+  if (resource === null) {
+    return <div className="hint-text">Loading {resourceName}...</div>
+  }
+
+  const currentTable = tables?.find((t) => t.name === active)
+
+  function handleSelectTable(name: string): void {
+    navigate(`${base}/${encodeURIComponent(name)}`)
+  }
+
+  function handleApplyFilter(): void {
+    setAppliedFilter(filter)
+    setPage(0)
+    loadRows(0, filter)
+  }
+
+  function handlePage(delta: number): void {
+    const next = Math.max(0, page + delta)
+    setPage(next)
+    loadRows(next, appliedFilter)
+  }
+
+  function startEdit(rowIndex: number, column: string, currentValue: unknown): void {
+    if (currentTable === undefined || currentTable.primaryKey.length === 0) return
+    setEditing({ rowIndex, column })
+    setEditValue(currentValue === null || currentValue === undefined ? '' : String(currentValue))
+    setSaveError(null)
+  }
+
+  async function commitEdit(): Promise<void> {
+    if (resource === null || editing === null || rows === null || currentTable === undefined || active === undefined) return
+    const row = rows[editing.rowIndex]
+    if (row === undefined) return
+    const pk = currentTable.primaryKey
+    if (pk.length === 0) return
+
+    const setSql = `${quoteIdentifier(editing.column)} = $1`
+    const whereSql = pk.map((col, i) => `${quoteIdentifier(col)} = $${i + 2}`).join(' and ')
+    const returningSql = currentTable.columns.map((c) => quoteIdentifier(c.name)).join(', ')
+    const sql = `update ${quoteIdentifier(active)} set ${setSql} where ${whereSql} returning ${returningSql}`
+    const params: unknown[] = [editValue, ...pk.map((col) => row[col])]
+
+    try {
+      const result = await run(resource.id, resource.state, () => api.runQuery(resource.id, sql, params))
+      const updated = result.rows[0]
+      if (updated !== undefined) {
+        setRows((prev) => (prev === null ? prev : prev.map((r, i) => (i === editing.rowIndex ? updated : r))))
+      }
+      setEditing(null)
+      setSaveError(null)
+    } catch (err) {
+      setSaveError(err instanceof api.ApiError ? err.message : 'failed to save the edit')
+    }
+  }
+
+  return (
+    <div className="stack">
+      <ResourceTabs projectName={projectName} resourceName={resourceName} active="tables" />
+      <WakingBanner resourceName={resourceName} snapshot={snapshot} />
+      {schemaError !== null && <div className="error-banner">{schemaError}</div>}
+
+      <div className="sql-editor-shell">
+        <div>
+          <div className="side-list-title">Tables</div>
+          <div className="side-list">
+            {tables === null && <span className="hint-text">Loading...</span>}
+            {tables?.length === 0 && <span className="hint-text">No tables in public schema.</span>}
+            {tables?.map((t) => (
+              <div
+                key={t.name}
+                className={`side-list-item${t.name === active ? ' active' : ''}`}
+                onClick={() => handleSelectTable(t.name)}
+              >
+                <span>{t.name}</span>
+                {t.primaryKey.length === 0 && <span className="hint-text">no pk</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="stack">
+          {active === undefined ? (
+            <div className="empty-state">Pick a table.</div>
+          ) : (
+            <>
+              <div className="row">
+                <input
+                  className="input"
+                  style={{ flex: 1 }}
+                  placeholder="filter, a SQL boolean expression (e.g. status = 'active')"
+                  value={filter}
+                  onChange={(event) => setFilter(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') handleApplyFilter()
+                  }}
+                />
+                <button type="button" className="btn btn-small" onClick={handleApplyFilter}>
+                  Apply
+                </button>
+              </div>
+
+              {rowsError !== null && <div className="error-banner">{rowsError}</div>}
+              {saveError !== null && <div className="error-banner">{saveError}</div>}
+              {currentTable !== undefined && currentTable.primaryKey.length === 0 && (
+                <div className="hint-text">No primary key found on this table: edits are disabled to avoid an ambiguous update.</div>
+              )}
+
+              {rows === null ? (
+                <div className="hint-text">Loading rows...</div>
+              ) : rows.length === 0 ? (
+                <div className="empty-state">No rows.</div>
+              ) : (
+                <div className="table-scroll">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        {Object.keys(rows[0] ?? {}).map((col) => (
+                          <th key={col}>{col}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((row, rowIndex) => (
+                        <tr key={rowIndex}>
+                          {Object.entries(row).map(([col, value]) => {
+                            const isEditing = editing !== null && editing.rowIndex === rowIndex && editing.column === col
+                            const editable = currentTable !== undefined && currentTable.primaryKey.length > 0
+                            return (
+                              <td
+                                key={col}
+                                className={editable ? 'editable' : ''}
+                                onClick={() => !isEditing && startEdit(rowIndex, col, value)}
+                              >
+                                {isEditing ? (
+                                  <input
+                                    className="input"
+                                    autoFocus
+                                    value={editValue}
+                                    onChange={(event) => setEditValue(event.target.value)}
+                                    onBlur={() => void commitEdit()}
+                                    onKeyDown={(event) => {
+                                      if (event.key === 'Enter') void commitEdit()
+                                      if (event.key === 'Escape') setEditing(null)
+                                    }}
+                                  />
+                                ) : value === null ? (
+                                  <span className="cell-null">null</span>
+                                ) : (
+                                  String(value)
+                                )}
+                              </td>
+                            )
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              <div className="pager">
+                <button type="button" className="btn btn-small" disabled={page === 0} onClick={() => handlePage(-1)}>
+                  Previous
+                </button>
+                <span>page {page + 1}</span>
+                <button type="button" className="btn btn-small" disabled={rows === null || rows.length < PAGE_SIZE} onClick={() => handlePage(1)}>
+                  Next
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
