@@ -569,6 +569,16 @@ hue's border, dim wash and text together.
   context.
 - **Don't** put a form inline in a page.
 
+## Verified
+
+The light theme has been viewed and works. The dark theme is the default and
+the one most of this was designed in, but both are real and neither is a
+fallback.
+
+Still unverified by anyone: how the interface behaves with a database in the
+`failed` state, and with a table wide enough or a result set long enough to
+test the scroll containers.
+
 ## Failure modes this build actually suffered
 
 Read this before editing `src/theme.css`. These are specific and repeatable.
@@ -582,30 +592,22 @@ still rendered; they rendered wrong. **Edit `theme.css` additively.** If you mus
 restructure it, run the class audit against the result before you look at
 anything else.
 
-**The class audit.** It greps every class name used in `src/` against the
-selectors defined in `theme.css` and prints anything used but never defined. Run
-it from `packages/studio`:
+**The class audit.** It checks every class the components reference against the
+selectors defined in `theme.css`, and fails the build if any is missing. It runs
+as part of `npm run build`, so a stylesheet edit that drops a class cannot ship
+quietly. To run it alone, from `packages/studio`:
 
 ```sh
-node -e '
-const fs=require("fs");
-const css=fs.readFileSync("src/theme.css","utf8");
-const defined=new Set([...css.matchAll(/\.([a-zA-Z][\w-]*)/g)].map(m=>m[1]));
-const files=[];(function walk(d){for(const e of fs.readdirSync(d,{withFileTypes:true})){const p=d+"/"+e.name;e.isDirectory()?walk(p):/\.tsx$/.test(p)&&files.push(p)}})("src");
-const used=new Set();
-for(const f of files){const s=fs.readFileSync(f,"utf8");
-  for(const m of s.matchAll(/className=(?:"([^"]*)"|\{`([^`]*)`\})/g)){
-    const raw=(m[1]||m[2]||"");
-    for(const t of raw.split(/[\s{}$`?:'"'"']+/)) if(/^[a-z][\w-]*$/.test(t)) used.add(t);}}
-const missing=[...used].filter(c=>!defined.has(c)).sort();
-console.log(missing.length?"MISSING:\n"+missing.join("\n"):"all classes defined");
-'
+npm run audit:classes
 ```
 
-Template interpolation leaks the ternary's variable names (`anyAwake`, `awake`,
-`cls`); those three are known false positives. Anything else it prints is a
+The source is `scripts/audit-classes.mjs`. It strips `${...}` interpolations
+while keeping the literal strings inside their branches, so
+`` `card${active ? ' active' : ''}` `` yields both `card` and `active` rather
+than being skipped. That shape matters: the dead active-tab highlight lived
+inside exactly it. There are no known false positives. Anything it prints is a
 class a view uses and the stylesheet does not define, which means that element
-is currently unstyled in the browser.
+is unstyled in the browser right now.
 
 **The gutter mistake.** Because `.page` carries only `padding-block`, a view
 that forgets `.measure` looks nearly right in a narrow window and renders flush
@@ -614,3 +616,12 @@ against the rail on a wide one. It has happened once in every inner view.
 **The overflow mistake.** A grid child without `min-width: 0` does not clip; it
 grows, and the visible symptom is the rail sliding off the left edge, which
 looks like a rail bug rather than a table bug.
+
+**The stale-state mistake.** Running a query wakes the database, but the views
+hold their own copy of the resource and the shell holds the project list, so
+nothing noticed. The interface said "Sleeping" next to a database that was
+awake and serving until the page was reloaded. Anything that can change a
+resource's state must call back: `useWakeAwareRun` takes an `onWoke` for
+exactly this, and the inner views pass a callback that refreshes both their own
+resource and the app-level list. A state label that lies is worse than no state
+label, because the whole product is the state.

@@ -33,8 +33,15 @@ const POLL_INTERVAL_MS = 700
 
 const IDLE: WakingSnapshot = { phase: 'idle', elapsedMs: 0, resourceState: null }
 
-export function useWakeAwareRun(): { snapshot: WakingSnapshot; run: <T>(resourceId: string, initialState: Resource['state'], task: () => Promise<T>) => Promise<T> } {
+// onWoke fires once a run that began against a sleeping database settles,
+// whether it succeeded or failed. Without it the database is genuinely awake
+// and every state label in the interface still says sleeping until a reload:
+// the query wakes the container, but nothing tells the views or the rail that
+// the world changed underneath them.
+export function useWakeAwareRun(onWoke?: () => void): { snapshot: WakingSnapshot; run: <T>(resourceId: string, initialState: Resource['state'], task: () => Promise<T>) => Promise<T> } {
   const [snapshot, setSnapshot] = useState<WakingSnapshot>(IDLE)
+  const wokeRef = useRef(onWoke)
+  wokeRef.current = onWoke
 
   // Views legitimately fire more than one request at once: Tables loads the
   // table list and the first page of rows together, and both can be the call
@@ -109,12 +116,16 @@ export function useWakeAwareRun(): { snapshot: WakingSnapshot; run: <T>(resource
       try {
         const result = await task()
         if (settle()) setSnapshot(IDLE)
+        if (startedAsleep) wokeRef.current?.()
         return result
       } catch (err) {
         const elapsed = Date.now() - anchor
         // A failed wake keeps its narrative. Clearing it here left the user with
         // a bare error and no account of the twenty seconds that preceded it.
         if (settle()) setSnapshot({ phase: 'error', elapsedMs: elapsed, resourceState: null })
+        // Still refresh: a failed wake usually leaves the resource in a state
+        // worth seeing, and showing the old one would be a second lie.
+        if (startedAsleep) wokeRef.current?.()
         throw err
       }
     },

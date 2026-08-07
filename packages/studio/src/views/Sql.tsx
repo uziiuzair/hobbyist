@@ -20,9 +20,12 @@ function randomId(): string {
   return typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`
 }
 
-export function Sql({ projectName, resourceName }: { projectName: string; resourceName: string }) {
-  const { resource, error: resourceError } = useResource(projectName, resourceName)
-  const { snapshot, run } = useWakeAwareRun()
+export function Sql({ projectName, resourceName, onChanged }: { projectName: string; resourceName: string; onChanged?: () => void }) {
+  const { resource, error: resourceError, refresh } = useResource(projectName, resourceName)
+  const { snapshot, run } = useWakeAwareRun(() => {
+    refresh()
+    onChanged?.()
+  })
 
   const [sql, setSql] = useState('')
   const [result, setResult] = useState<api.QueryResult | null>(null)

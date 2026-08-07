@@ -11,9 +11,12 @@ import { loadSchema, type TableInfo } from '../lib/schema.js'
 // migrations, and getting that wrong damages real data. Nothing here ever
 // issues a write.
 
-export function Schema({ projectName, resourceName }: { projectName: string; resourceName: string }) {
-  const { resource, error: resourceError } = useResource(projectName, resourceName)
-  const { snapshot, run } = useWakeAwareRun()
+export function Schema({ projectName, resourceName, onChanged }: { projectName: string; resourceName: string; onChanged?: () => void }) {
+  const { resource, error: resourceError, refresh } = useResource(projectName, resourceName)
+  const { snapshot, run } = useWakeAwareRun(() => {
+    refresh()
+    onChanged?.()
+  })
   const [tables, setTables] = useState<TableInfo[] | null>(null)
   const [error, setError] = useState<string | null>(null)
 

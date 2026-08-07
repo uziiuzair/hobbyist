@@ -165,13 +165,13 @@ function Route({
   }
 
   if (tab === 'tables') {
-    return <Tables projectName={projectName} resourceName={resourceName} tableName={segments[5]} />
+    return <Tables projectName={projectName} resourceName={resourceName} tableName={segments[5]} onChanged={onChanged} />
   }
   if (tab === 'sql') {
-    return <Sql projectName={projectName} resourceName={resourceName} />
+    return <Sql projectName={projectName} resourceName={resourceName} onChanged={onChanged} />
   }
   if (tab === 'schema') {
-    return <Schema projectName={projectName} resourceName={resourceName} />
+    return <Schema projectName={projectName} resourceName={resourceName} onChanged={onChanged} />
   }
 
   return <Project projectName={projectName} onChanged={onChanged} />

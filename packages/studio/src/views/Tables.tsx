@@ -14,13 +14,18 @@ export function Tables({
   projectName,
   resourceName,
   tableName,
+  onChanged,
 }: {
   projectName: string
   resourceName: string
   tableName: string | undefined
+  onChanged?: () => void
 }) {
-  const { resource, error: resourceError } = useResource(projectName, resourceName)
-  const { snapshot, run } = useWakeAwareRun()
+  const { resource, error: resourceError, refresh } = useResource(projectName, resourceName)
+  const { snapshot, run } = useWakeAwareRun(() => {
+    refresh()
+    onChanged?.()
+  })
 
   const [tables, setTables] = useState<TableInfo[] | null>(null)
   const [schemaError, setSchemaError] = useState<string | null>(null)
