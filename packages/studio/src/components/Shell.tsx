@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import type { Project, Resource } from '@hobby.sh/core'
 import { navigate } from '../lib/router.js'
+import { State } from './State.js'
 
 // The rail is the Cloudflare idea sized honestly to what exists. Cloudflare
 // can carry four labelled groups because it has roughly fifteen destinations.
@@ -131,6 +132,42 @@ const DB_VIEWS: Array<{ id: RailSection; label: string }> = [
   { id: 'schema', label: 'Schema' },
 ]
 
+// The caret a Cloudflare style group carries: it points right when the group
+// is closed and rotates down when it opens, so the rail reads as a tree that
+// is currently folded rather than a list that mysteriously grew.
+function Caret() {
+  return (
+    <svg className="caret" width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+      <path d="M3.5 1.5 7 5l-3.5 3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+// A disclosure is a destination and a group at once: the label navigates, the
+// caret folds. Splitting them means clicking "Databases" never surprises you
+// by doing the other thing.
+function Disclosure({
+  open,
+  onToggle,
+  label,
+}: {
+  open: boolean
+  onToggle: () => void
+  label: string
+}) {
+  return (
+    <button
+      type="button"
+      className={`rail-toggle${open ? ' is-open' : ''}`}
+      aria-expanded={open}
+      aria-label={`${open ? 'Collapse' : 'Expand'} ${label}`}
+      onClick={onToggle}
+    >
+      <Caret />
+    </button>
+  )
+}
+
 export function Shell({
   projects,
   currentProject,
@@ -156,6 +193,16 @@ export function Shell({
   const active = projects.find((row) => row.project.name === currentProject)
   const databases = active?.resources.filter((r) => r.kind === 'postgres') ?? []
 
+  // Each node remembers whether it was folded, falling back to a default the
+  // route decides: the database you are inside starts open, the rest start
+  // closed. Storing the override rather than seeding state from the route
+  // matters, because the route changes on every click and would otherwise keep
+  // reopening a group you deliberately folded.
+  const [folds, setFolds] = useState<Record<string, boolean>>({})
+  const isOpen = (key: string, fallback: boolean): boolean => folds[key] ?? fallback
+  const toggle = (key: string, fallback: boolean) => () =>
+    setFolds((prev) => ({ ...prev, [key]: !(prev[key] ?? fallback) }))
+
   return (
     <div className="shell">
       <nav className="rail" aria-label="main">
@@ -180,33 +227,62 @@ export function Shell({
         ) : (
           <div className="rail-group">
             <div className="rail-label">Services</div>
-            <a
-              className="rail-link"
-              href={`#/projects/${encodeURIComponent(currentProject)}`}
-              aria-current={currentSection === 'databases' && currentResource === undefined ? 'page' : undefined}
-            >
-              <DatabaseIcon />
-              Databases
-              <span className="count">{databases.length}</span>
-            </a>
 
-            {/* The database's own views nest under it, the way Neon nests
-                Tables and SQL Editor under a Postgres database, rather than
-                sitting as a tab strip above the content. They only appear
-                once you are inside a database, because outside one they lead
-                nowhere. */}
-            {currentResource !== undefined && (
+            {/* Cloudflare's rail is a tree you can fold, not a list that
+                changes shape as you navigate. Every database is present at
+                every moment, and its views hang off it, so the rail answers
+                "what else is in here" without making you leave the page you
+                are on. */}
+            <div className="rail-row">
+              <a
+                className="rail-link"
+                href={`#/projects/${encodeURIComponent(currentProject)}`}
+                aria-current={currentSection === 'databases' && currentResource === undefined ? 'page' : undefined}
+              >
+                <DatabaseIcon />
+                Databases
+                <span className="count">{databases.length}</span>
+              </a>
+              {databases.length > 0 && (
+                <Disclosure open={isOpen('databases', true)} onToggle={toggle('databases', true)} label="Databases" />
+              )}
+            </div>
+
+            {databases.length > 0 && isOpen('databases', true) && (
               <div className="rail-sub">
-                {DB_VIEWS.map((view) => (
-                  <a
-                    key={view.id}
-                    className="rail-link rail-link-sub"
-                    href={`#/projects/${encodeURIComponent(currentProject)}/resources/${encodeURIComponent(currentResource)}/${view.id}`}
-                    aria-current={currentView === view.id ? 'page' : undefined}
-                  >
-                    {view.label}
-                  </a>
-                ))}
+                {databases.map((db) => {
+                  const key = `db:${db.name}`
+                  const here = db.name === currentResource
+                  const open = isOpen(key, here)
+                  const base = `#/projects/${encodeURIComponent(currentProject)}/resources/${encodeURIComponent(db.name)}`
+                  return (
+                    <div className="rail-node" key={db.name}>
+                      <div className="rail-row">
+                        <a
+                          className={`rail-link rail-link-sub${here ? ' is-trail' : ''}`}
+                          href={`${base}/tables`}
+                        >
+                          <State state={db.state} label={db.name} />
+                        </a>
+                        <Disclosure open={open} onToggle={toggle(key, here)} label={db.name} />
+                      </div>
+                      {open && (
+                        <div className="rail-sub">
+                          {DB_VIEWS.map((view) => (
+                            <a
+                              key={view.id}
+                              className="rail-link rail-link-sub"
+                              href={`${base}/${view.id}`}
+                              aria-current={here && currentView === view.id ? 'page' : undefined}
+                            >
+                              {view.label}
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>
