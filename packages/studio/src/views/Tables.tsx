@@ -136,34 +136,36 @@ export function Tables({
       {schemaError !== null && <div className="error-banner">{schemaError}</div>}
 
       <div className="sql-editor-shell">
-        <div>
-          <div className="side-list-title">Tables</div>
+        <div className="side-index">
           <div className="side-list">
-            {tables === null && <span className="hint-text">Loading...</span>}
-            {tables?.length === 0 && <span className="hint-text">No tables in public schema.</span>}
+            <div className="side-list-title">Tables</div>
+            {tables === null && <div className="side-list-empty">Loading</div>}
+            {tables?.length === 0 && <div className="side-list-empty">No tables in the public schema</div>}
             {tables?.map((t) => (
-              <div
+              <button
+                type="button"
                 key={t.name}
-                className={`side-list-item${t.name === active ? ' active' : ''}`}
+                className={`side-list-item mono${t.name === active ? ' active' : ''}`}
+                aria-current={t.name === active ? 'page' : undefined}
                 onClick={() => handleSelectTable(t.name)}
               >
                 <span>{t.name}</span>
                 {t.primaryKey.length === 0 && <span className="hint-text">no pk</span>}
-              </div>
+              </button>
             ))}
           </div>
         </div>
 
         <div className="stack">
           {active === undefined ? (
-            <div className="empty-state">Pick a table.</div>
+            <div className="empty"><h3>Pick a table</h3><p>Choose a table on the left to browse its rows.</p></div>
           ) : (
             <>
               <div className="row">
                 <input
                   className="input"
                   style={{ flex: 1 }}
-                  placeholder="filter, a SQL boolean expression (e.g. status = 'active')"
+                  placeholder="Filter rows: a SQL boolean expression, such as status = 'active'"
                   value={filter}
                   onChange={(event) => setFilter(event.target.value)}
                   onKeyDown={(event) => {

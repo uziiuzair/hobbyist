@@ -97,34 +97,44 @@ export function Sql({ projectName, resourceName }: { projectName: string; resour
       <WakingBanner resourceName={resourceName} snapshot={snapshot} />
 
       <div className="sql-editor-shell">
-        <div>
-          <div className="side-list-title">Snippets</div>
+        <div className="side-index">
           <div className="side-list">
-            {snippets.length === 0 && <span className="hint-text">None saved yet.</span>}
+            <div className="side-list-title">Snippets</div>
+            {snippets.length === 0 && <div className="side-list-empty">Nothing saved yet</div>}
             {snippets.map((s) => (
-              <div key={s.id} className="side-list-item" onClick={() => loadIntoEditor(s.sql)}>
-                <span>{s.name}</span>
+              <div key={s.id} className="side-list-row">
+                <button type="button" className="side-list-item mono" onClick={() => loadIntoEditor(s.sql)}>
+                  <span>{s.name}</span>
+                </button>
                 <button
                   type="button"
-                  className="btn btn-small"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    handleDeleteSnippet(s.id)
-                  }}
+                  className="side-list-remove"
+                  aria-label={`Delete snippet ${s.name}`}
+                  title="Delete snippet"
+                  onClick={() => handleDeleteSnippet(s.id)}
                 >
-                  x
+                  <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true">
+                    <path d="M2 2l7 7M9 2l-7 7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                  </svg>
                 </button>
               </div>
             ))}
           </div>
 
-          <div className="side-list-title">History</div>
           <div className="side-list">
-            {history.length === 0 && <span className="hint-text">No queries run yet.</span>}
+            <div className="side-list-title">History</div>
+            {history.length === 0 && <div className="side-list-empty">No queries run yet</div>}
             {history.map((h) => (
-              <div key={h.id} className="side-list-item" onClick={() => loadIntoEditor(h.sql)} title={h.sql}>
-                <span className={h.ok ? '' : 'error-text'}>{h.sql.slice(0, 40)}</span>
-              </div>
+              <button
+                type="button"
+                key={h.id}
+                className="side-list-item mono"
+                onClick={() => loadIntoEditor(h.sql)}
+                title={h.sql}
+              >
+                {!h.ok && <span className="dot-failed" aria-label="Failed" />}
+                <span>{h.sql.replace(/\s+/g, ' ').slice(0, 44)}</span>
+              </button>
             ))}
           </div>
         </div>
@@ -141,7 +151,7 @@ export function Sql({ projectName, resourceName }: { projectName: string; resour
           />
           <div className="row">
             <button type="button" className="btn btn-primary" disabled={sql.trim().length === 0} onClick={() => void handleRun()}>
-              Run (Cmd/Ctrl + Enter)
+              Run
             </button>
             <button type="button" className="btn" disabled={sql.trim().length === 0} onClick={handleSaveSnippet}>
               Save snippet
