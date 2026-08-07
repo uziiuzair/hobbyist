@@ -685,6 +685,67 @@ kbd {
 .grid-filter { max-width: 340px; font-family: var(--font-mono); font-size: 12.5px; }
 .grid-toolbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
 
+/* ---------- the sql editor ----------
+   Editor on top, a status strip that says what the database is actually
+   doing, results below. Both panes scroll inside themselves so the frame
+   never moves. */
+
+.editor-pane { flex: 0 0 auto; height: 34vh; min-height: 150px; display: flex; }
+.sql-editor {
+  width: 100%;
+  resize: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.65;
+  padding: 12px 14px;
+  tab-size: 2;
+}
+.sql-editor:focus { outline: none; border-color: var(--accent-line); }
+
+.editor-bar { display: flex; align-items: center; gap: 12px; flex: none; font-size: 12.5px; }
+
+.result-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.result-pane .table-scroll { flex: 1; min-height: 0; max-height: none; overflow: auto; }
+.result-summary { font-size: 12.5px; color: var(--ink-2); font-family: var(--font-mono); flex: none; }
+.result-idle {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+  font-size: 13px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+}
+
+/* Saved queries and history: the query itself is the label, because a name
+   you chose three weeks ago tells you less than the first line of the sql. */
+.q-item { display: flex; align-items: stretch; }
+.q-open {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 7px 8px; border: 0; background: none; cursor: pointer;
+  border-radius: var(--radius-sm); text-align: left; color: var(--ink-2);
+  font: inherit;
+}
+.q-open:hover { background: var(--surface-2); color: var(--ink); }
+.q-name { font-size: 13px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-sql {
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.q-sql-lead { display: flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 12px; }
+.q-time { font-size: 11px; color: var(--ink-3); }
+
 /* ---------- the data grid ----------
    A row browser is not a content table: it is a grid, and it earns vertical
    rules because a value has to be attributable to a column at a glance across

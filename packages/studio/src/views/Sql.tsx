@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import * as api from '../api.js'
+import { formatSince } from '../lib/format.js'
 import { useResource } from '../lib/useResource.js'
 import { useWakeAwareRun } from '../lib/useWaking.js'
 import { WakingBanner } from '../components/WakingBanner.js'
 import { Modal } from '../components/Modal.js'
+import { Workbench } from '../components/Workbench.js'
+import { State } from '../components/State.js'
 import { ResourceTabs } from '../components/ResourceTabs.js'
 import {
   loadHistory,
@@ -34,6 +37,8 @@ export function Sql({ projectName, resourceName, onChanged }: { projectName: str
   const [snippets, setSnippets] = useState<Snippet[]>([])
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const [namingSnippet, setNamingSnippet] = useState(false)
+  const [pane, setPane] = useState<'saved' | 'history'>('history')
+  const [ranMs, setRanMs] = useState<number | null>(null)
 
   useEffect(() => {
     if (resource === null) return
@@ -42,11 +47,13 @@ export function Sql({ projectName, resourceName, onChanged }: { projectName: str
   }, [resource?.id])
 
   async function handleRun(): Promise<void> {
+    const startedAt = Date.now()
     if (resource === null || sql.trim().length === 0) return
     setQueryError(null)
     try {
       const queryResult = await run(resource.id, resource.state, () => api.runQuery(resource.id, sql))
       setResult(queryResult)
+      setRanMs(Date.now() - startedAt)
       const entry: HistoryEntry = { id: randomId(), resourceId: resource.id, sql, ranAt: new Date().toISOString(), ok: true }
       setHistory(pushHistory(window.localStorage, entry))
     } catch (err) {
@@ -110,111 +117,153 @@ export function Sql({ projectName, resourceName, onChanged }: { projectName: str
   }
 
   return (
-    <div className="page measure stack">
-      <ResourceTabs projectName={projectName} resourceName={resourceName} active="sql" />
-      <WakingBanner resourceName={resourceName} snapshot={snapshot} />
-
-      {namingSnippet && <SnippetNameModal onClose={() => setNamingSnippet(false)} onSave={commitSnippet} />}
-
-      <div className="sql-editor-shell">
-        <div className="side-index">
-          <div className="side-list">
-            <div className="side-list-title">Snippets</div>
-            {snippets.length === 0 && <div className="side-list-empty">Nothing saved yet</div>}
-            {snippets.map((s) => (
-              <div key={s.id} className="side-list-row">
-                <button type="button" className="side-list-item mono" onClick={() => loadIntoEditor(s.sql)}>
-                  <span>{s.name}</span>
-                </button>
+    <Workbench
+      sidebar={
+        <>
+          <div className="wb-side-head">
+            <span className="wb-side-title">SQL</span>
+          </div>
+          <div className="wb-side-search">
+            <div className="segmented" role="group" aria-label="Show saved or history">
+              <button type="button" className="segment" aria-pressed={pane === 'saved'} onClick={() => setPane('saved')}>
+                Saved
+              </button>
+              <button type="button" className="segment" aria-pressed={pane === 'history'} onClick={() => setPane('history')}>
+                History
+              </button>
+            </div>
+          </div>
+          <div className="wb-side-list">
+            {pane === 'saved' ? (
+              snippets.length === 0 ? (
+                <div className="side-list-empty">Nothing saved yet</div>
+              ) : (
+                snippets.map((snippet) => (
+                  <div key={snippet.id} className="q-item">
+                    <button type="button" className="q-open" onClick={() => loadIntoEditor(snippet.sql)}>
+                      <span className="q-name">{snippet.name}</span>
+                      <span className="q-sql">{snippet.sql.replace(/\s+/g, ' ').slice(0, 52)}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="side-list-remove"
+                      aria-label={`Delete snippet ${snippet.name}`}
+                      onClick={() => handleDeleteSnippet(snippet.id)}
+                    >
+                      <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true">
+                        <path d="M2 2l7 7M9 2l-7 7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                      </svg>
+                    </button>
+                  </div>
+                ))
+              )
+            ) : history.length === 0 ? (
+              <div className="side-list-empty">No queries run yet</div>
+            ) : (
+              history.map((entry) => (
                 <button
                   type="button"
-                  className="side-list-remove"
-                  aria-label={`Delete snippet ${s.name}`}
-                  title="Delete snippet"
-                  onClick={() => handleDeleteSnippet(s.id)}
+                  key={entry.id}
+                  className="q-open"
+                  onClick={() => loadIntoEditor(entry.sql)}
+                  title={entry.sql}
                 >
-                  <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true">
-                    <path d="M2 2l7 7M9 2l-7 7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-                  </svg>
+                  <span className="q-sql q-sql-lead">
+                    {!entry.ok && <span className="dot-failed" aria-label="Failed" />}
+                    {entry.sql.replace(/\s+/g, ' ').slice(0, 52)}
+                  </span>
+                  <span className="q-time">{formatSince(entry.ranAt)}</span>
                 </button>
-              </div>
-            ))}
+              ))
+            )}
           </div>
+        </>
+      }
+    >
+      {namingSnippet && <SnippetNameModal onClose={() => setNamingSnippet(false)} onSave={commitSnippet} />}
+      <WakingBanner resourceName={resourceName} snapshot={snapshot} />
 
-          <div className="side-list">
-            <div className="side-list-title">History</div>
-            {history.length === 0 && <div className="side-list-empty">No queries run yet</div>}
-            {history.map((h) => (
-              <button
-                type="button"
-                key={h.id}
-                className="side-list-item mono"
-                onClick={() => loadIntoEditor(h.sql)}
-                title={h.sql}
-              >
-                {!h.ok && <span className="dot-failed" aria-label="Failed" />}
-                <span>{h.sql.replace(/\s+/g, ' ').slice(0, 44)}</span>
-              </button>
-            ))}
-          </div>
-        </div>
+      <div className="editor-pane">
+        <textarea
+          ref={textareaRef}
+          className="sql-editor"
+          placeholder="select * from ..."
+          value={sql}
+          onChange={(event) => setSql(event.target.value)}
+          onKeyDown={handleKeyDown}
+          spellCheck={false}
+        />
+      </div>
 
-        <div className="stack">
-          <textarea
-            ref={textareaRef}
-            className="input sql-editor"
-            placeholder="select * from ..."
-            value={sql}
-            onChange={(event) => setSql(event.target.value)}
-            onKeyDown={handleKeyDown}
-            spellCheck={false}
-          />
-          <div className="row">
-            <button type="button" className="btn btn-primary" disabled={sql.trim().length === 0} onClick={() => void handleRun()}>
-              Run
-            </button>
-            <button type="button" className="btn" disabled={sql.trim().length === 0} onClick={handleSaveSnippet}>
-              Save snippet
-            </button>
-          </div>
-
-          {queryError !== null && <div className="error-banner">{queryError}</div>}
-
-          {result !== null && (
-            <div className="stack">
-              <div className="hint-text">
-                {result.command} - {result.rowCount} row{result.rowCount === 1 ? '' : 's'}
-              </div>
-              {result.rows.length > 0 && (
-                <div className="table-scroll">
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        {result.columns.map((col) => (
-                          <th key={col.name}>
-                            {col.name}
-                            <span className="hint-text"> {col.dataType}</span>
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {result.rows.map((row, i) => (
-                        <tr key={i}>
-                          {result.columns.map((col) => (
-                            <td key={col.name}>{row[col.name] === null ? <span className="cell-null">null</span> : String(row[col.name])}</td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          )}
+      {/* Where Neon says "Ready to connect", we can say the thing we actually
+          know: whether this database is awake, and that running will wake it. */}
+      <div className="editor-bar">
+        <State state={resource.state} />
+        {resource.state !== 'running' && <span className="dim">Running a query will wake it</span>}
+        <div className="row" style={{ marginLeft: 'auto', gap: 8 }}>
+          {ranMs !== null && <span className="grid-timing">{ranMs}ms</span>}
+          <button type="button" className="btn btn-sm" disabled={sql.trim().length === 0} onClick={handleSaveSnippet}>
+            Save snippet
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            disabled={sql.trim().length === 0}
+            onClick={() => void handleRun()}
+          >
+            Run <kbd>{navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}</kbd>
+            <kbd>{'\u21B5'}</kbd>
+          </button>
         </div>
       </div>
-    </div>
+
+      <div className="result-pane">
+        {queryError !== null && <div className="error-banner">{queryError}</div>}
+        {queryError === null && result === null && (
+          <div className="result-idle">Results appear here once you run something.</div>
+        )}
+        {result !== null && (
+          <>
+            <div className="result-summary">
+              {result.command} · {result.rowCount} row{result.rowCount === 1 ? '' : 's'}
+            </div>
+            {result.rows.length > 0 && (
+              <div className="table-scroll">
+                <table className="data-table grid-table">
+                  <thead>
+                    <tr>
+                      {result.columns.map((col) => (
+                        <th key={col.name}>
+                          <span className="col-name">{col.name}</span>
+                          <span className="col-type">{col.dataType}</span>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.rows.map((row, i) => (
+                      <tr key={i}>
+                        {result.columns.map((col) => (
+                          <td key={col.name}>
+                            {row[col.name] === null ? (
+                              <span className="cell-null">NULL</span>
+                            ) : (
+                              <span className="cell-value" title={String(row[col.name])}>
+                                {String(row[col.name])}
+                              </span>
+                            )}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </Workbench>
   )
 }
 
