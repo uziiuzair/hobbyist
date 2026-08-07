@@ -928,10 +928,8 @@ kbd {
 
 /* Long identifiers should not push the header row wider than the body. */
 .data-table th, table.data th { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
-.error-banner { border: 1px solid var(--danger); background: var(--danger-dim); color: var(--danger); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; }
 .error-text { color: var(--danger); font-size: 13px; }
 .hint-text { color: var(--ink-3); font-size: 13px; }
-.empty-state { border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: 34px 22px; text-align: center; color: var(--ink-2); }
 
 .key-tag, .fk-tag {
   display: inline-block; font-size: 10.5px; letter-spacing: 0.04em; text-transform: uppercase;
