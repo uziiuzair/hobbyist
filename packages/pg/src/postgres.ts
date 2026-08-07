@@ -2,8 +2,11 @@
 // only place in the package that touches the store and the compute runtime
 // together; readiness.ts and connstring.ts are pure helpers this file calls.
 
+import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdir, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
+import { basename, dirname } from 'node:path'
 import {
   HobbyError,
   validateName,
@@ -43,13 +46,17 @@ export interface PgDeps {
   // optional, so any caller building a PgDeps from just
   // { store, runtime, paths, config } still satisfies this interface.
   probeFactory?: (config: PostgresConfig) => () => Promise<boolean>
-  // Optional seam for tests. Defaults to fs.rm(path, { recursive: true,
-  // force: true }). destroyPostgres needs to be tested against a rm that
-  // genuinely fails (a busy disk, a permission error) to pin down that a
-  // real failure is collected and thrown rather than swallowed; forcing a
-  // real fs.rm to fail deterministically would mean relying on OS-level
-  // permission tricks, which is fragile and platform-dependent. Additive
-  // and optional, same reasoning as probeFactory above.
+  // Optional seam for tests. Defaults to createDefaultRemoveDataDir's
+  // container-based removal below, not a plain fs.rm: on Linux the data
+  // directory ends up owned by root or by the container's postgres uid (see
+  // createDefaultRemoveDataDir's comment), so the host user running the
+  // daemon cannot unlink its contents directly. destroyPostgres also needs
+  // to be tested against a removeDataDir that genuinely fails (a busy disk,
+  // a permission error) to pin down that a real failure is collected and
+  // thrown rather than swallowed; forcing the real container-based removal
+  // to fail deterministically would mean relying on OS-level or Docker-level
+  // tricks, which is fragile and platform-dependent. Additive and optional,
+  // same reasoning as probeFactory above.
   removeDataDir?: (path: string) => Promise<void>
 }
 
@@ -129,15 +136,27 @@ export async function createPostgres(
   try {
     // Deliberately no --user on the container we are about to create (see
     // containerSpec / ContainerSpec: there is no such field, and that is not
-    // an oversight). The data directory below is created by this process, so
-    // it is owned by whoever is running the daemon, while Postgres inside
-    // the container runs as its own uid. The official image's entrypoint
-    // only chowns PGDATA to that uid when it starts as root; passing --user
-    // would skip that chown and turn first boot into a permission-denied
-    // failure on Linux, while looking fine on macOS, where Docker Desktop's
-    // VM masks host/container uid mismatches. Mode 0700 plus no --user is
-    // what lets the entrypoint take ownership correctly on first boot.
-    await mkdir(dataDir, { recursive: true, mode: 0o700 })
+    // an oversight), and deliberately no pre-created dataDir either. Verified
+    // against real Linux: this process pre-creating dataDir with mode 0700
+    // makes it owned by whoever runs the daemon, but the official image's
+    // entrypoint starts as root, creates a version subdirectory inside it,
+    // and only then re-execs as its own uid (70, `postgres`, on alpine).
+    // That uid cannot write into a 0700 directory someone else owns, so the
+    // very next boot dies with "mkdir: can't create directory '/var/lib/
+    // postgresql/18/': Permission denied". This looks fine on macOS only
+    // because Docker Desktop and OrbStack mask host/container uid mismatches
+    // inside their VM; it is real and fatal on Linux, which is every VPS
+    // this project targets.
+    //
+    // The fix is to not create dataDir at all and instead create only its
+    // ancestor (the project/resource directory this process does own), then
+    // let Docker create the bind mount's source directory itself when the
+    // container is created below. Docker does that as root, so the
+    // entrypoint's own chown of PGDATA to its uid succeeds on first boot.
+    // destroyPostgres's createDefaultRemoveDataDir is the matching other
+    // half: since Docker, not this process, now owns dataDir, an ordinary
+    // fs.rm as the host user can no longer remove it on Linux either.
+    await mkdir(dirname(dataDir), { recursive: true })
 
     await deps.runtime.ensureNetwork(opts.project.networkName)
     await deps.runtime.ensureCreated(containerSpec(config, opts.project.networkName))
@@ -244,8 +263,65 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-async function defaultRemoveDataDir(path: string): Promise<void> {
-  await rm(path, { recursive: true, force: true })
+type ExecFn = (cmd: string, args: string[]) => Promise<{ stdout: string; stderr: string }>
+
+function defaultExec(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(error)
+        return
+      }
+      resolve({ stdout, stderr })
+    })
+  })
+}
+
+// Docker, not this process, created dataDir (see createPostgres's comment on
+// why it stopped pre-creating that directory). The official image's
+// entrypoint starts as root and chowns PGDATA to its own uid on first boot,
+// so on Linux the tree ends up owned by root, by the container's postgres
+// uid (70 on alpine), or both, never by whoever is running the daemon. An
+// ordinary fs.rm as that host user then fails with EACCES, because removing
+// a directory's entries requires write permission on the directory holding
+// them, and the host user has none. Left uncaught, that failure was still
+// being collected and rethrown by destroyPostgres below, which meant the
+// resource row was deleted while root-owned data sat on disk forever, with
+// no path to remove it short of sudo.
+//
+// The fix runs the removal inside a throwaway container that, like every
+// container this project creates, runs as root by default: it bind-mounts
+// the *parent* of dataDir (never dataDir's own container mount point, which
+// the postgres entrypoint already claimed) and rm -rf's the one entry that
+// belongs to this resource. It reuses the resource's own postgres image
+// rather than pulling a separate cleanup image, since that image is already
+// local by the time a resource exists to destroy. Skipping the container
+// entirely when dataDir does not exist matters for the same reason
+// fs.rm(..., { force: true }) used to: a resource can reach destroyPostgres
+// having failed in createPostgres before Docker ever created dataDir, and
+// that must stay a no-op rather than a docker run that may try (and, on an
+// offline box, fail) to pull an image nothing else needs yet.
+function createDefaultRemoveDataDir(
+  image: string,
+  exec: ExecFn = defaultExec
+): (path: string) => Promise<void> {
+  return async function removeDataDir(path: string): Promise<void> {
+    if (!existsSync(path)) {
+      return
+    }
+    const parent = dirname(path)
+    const target = basename(path)
+    await exec('docker', [
+      'run',
+      '--rm',
+      '-v',
+      `${parent}:/hobby-remove`,
+      image,
+      'rm',
+      '-rf',
+      `/hobby-remove/${target}`,
+    ])
+  }
 }
 
 // Teardown is best-effort and resilient step by step: a resource can reach
@@ -253,8 +329,9 @@ async function defaultRemoveDataDir(path: string): Promise<void> {
 // createPostgres failed at mkdir or ensureNetwork, before ensureCreated
 // ever ran). A missing container or a missing data directory is not a
 // failure: runtime.stop()/remove() both resolve as no-ops for a container
-// that is already gone (see docker.ts), and rm's force: true already
-// swallows "does not exist." A single failing step must not prevent the
+// that is already gone (see docker.ts), and createDefaultRemoveDataDir
+// already skips its own container run and returns cleanly when dataDir does
+// not exist. A single failing step must not prevent the
 // remaining steps from running, and the row must always be deleted last:
 // it is the source of truth for "this resource exists," and a `failed` row
 // with nothing left to tear down would otherwise be permanently stuck with
@@ -285,7 +362,7 @@ export async function destroyPostgres(deps: PgDeps, resource: Resource): Promise
     failures.push(`remove container: ${errorMessage(err)}`)
   }
 
-  const removeDataDir = deps.removeDataDir ?? defaultRemoveDataDir
+  const removeDataDir = deps.removeDataDir ?? createDefaultRemoveDataDir(resource.config.image)
   try {
     await removeDataDir(resource.config.dataDir)
   } catch (err) {
