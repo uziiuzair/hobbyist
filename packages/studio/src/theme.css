@@ -212,19 +212,53 @@ body {
   border: 1px solid transparent;
 }
 .rail-link:hover { background: var(--surface-2); color: var(--ink); }
+
+/* Where you are gets a quiet fill and a bar down its leading edge, not a ring.
+   A ring reads as a control you can press, and at two levels of nesting the
+   rings competed with each other instead of ranking the tree. The bar is the
+   one thing that survives being read at a glance from across the room. */
 .rail-link[aria-current="page"] {
   background: var(--accent-dim);
   color: var(--ink);
-  border-color: var(--accent-line);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .rail-link[aria-current="page"] svg { color: var(--accent); opacity: 1; }
 .rail-link svg { flex: none; opacity: 0.75; }
 .rail-link .count { margin-left: auto; color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
 
+/* A row is a destination and a fold sitting together. The label owns the
+   click, the caret owns the fold, so neither one surprises you. */
+.rail-row { display: flex; align-items: center; gap: 2px; }
+.rail-row .rail-link { flex: 1; min-width: 0; }
+
+.rail-toggle {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-3);
+  cursor: pointer;
+  padding: 0;
+}
+.rail-toggle:hover { background: var(--surface-2); color: var(--ink); }
+.rail-toggle .caret { transition: transform 120ms ease; }
+.rail-toggle.is-open .caret { transform: rotate(90deg); }
+
 /* The database's own views, nested under it. Indented and quieter than the
    service they belong to, so the hierarchy is legible without a second panel. */
 .rail-sub { margin: 2px 0 2px 12px; padding-left: 10px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 1px; }
+.rail-node { display: flex; flex-direction: column; }
 .rail-link-sub { padding: 5px 8px; font-size: 13px; }
+
+/* The database you are inside is not the current page (one of its views is),
+   so it is marked as the trail rather than the destination. */
+.rail-link.is-trail { color: var(--ink); }
+.rail-link .state { color: inherit; font-size: inherit; min-width: 0; overflow: hidden; }
+.rail-link .state-failed { color: var(--danger); }
 
 .rail-foot { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); }
 
@@ -1033,6 +1067,11 @@ kbd {
   }
   .rail-group, .rail-foot { margin: 0; padding: 0; border: 0; display: flex; align-items: center; gap: 6px; }
   .rail-label { display: none; }
+  /* The tree lies down: the same nodes, chained left to right, since a
+     vertical tree inside a horizontal strip has nowhere to grow. */
+  .rail-sub { margin: 0; padding-left: 6px; border-left: 0; flex-direction: row; align-items: center; gap: 4px; }
+  .rail-node { flex-direction: row; align-items: center; gap: 4px; }
+  .rail-link { white-space: nowrap; }
   .switcher { min-width: 180px; }
   .page { padding: 18px 14px 48px; }
 }
