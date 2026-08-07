@@ -13,6 +13,28 @@ import type { PostgresConfig } from '@hobby.sh/core'
 // means the next poll tries again.
 const PROBE_CONNECTION_TIMEOUT_MS = 1000
 
+// client.end() performs a graceful protocol termination, which can itself
+// hang on a socket that is open but unresponsive. Unbounded, that turns one
+// poll of a wake into an await with no ceiling, and this probe sits on the
+// daemon's startup path through reconcile as well as inside every wake. The
+// result carries no information the probe needs, so it gets its own deadline
+// and the answer is returned regardless. Same reasoning, same numbers as
+// checkActiveQuery's GUARD_END_TIMEOUT_MS in activity-guard.ts; the two are
+// siblings and this one was left unfixed when that was.
+// Precautionary rather than observed: against a port that accepts and then
+// stays silent, end() returns immediately today (readiness.test.ts covers
+// that case). The bound is here because a wedged socket is the one shape
+// where it would not, and because the sibling path already carries it.
+const PROBE_END_TIMEOUT_MS = 1000
+
+function deadline(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    // Never let this timer be the reason the process stays alive.
+    timer.unref?.()
+  })
+}
+
 export function pgProbe(config: PostgresConfig): () => Promise<boolean> {
   return async (): Promise<boolean> => {
     const client = new Client({
@@ -31,11 +53,12 @@ export function pgProbe(config: PostgresConfig): () => Promise<boolean> {
     } finally {
       // client.end() can itself throw if connect() never succeeded (no
       // socket to close); that failure carries no information we need.
-      try {
-        await client.end()
-      } catch {
-        // ignore
-      }
+      await Promise.race([
+        client.end().catch(() => {
+          // ignore
+        }),
+        deadline(PROBE_END_TIMEOUT_MS),
+      ])
     }
   }
 }

@@ -161,6 +161,9 @@ export interface LogsResponse {
 export interface EjectResponse {
   compose: string
   dataDirs: string[]
+  // True when this call also performed the handover: containers removed, the
+  // network removed, the project forgotten, data left alone.
+  released: boolean
 }
 
 export interface Api {
@@ -176,7 +179,7 @@ export interface Api {
   stopResource(id: string): Promise<ResourceResponse>
   getConnection(id: string): Promise<ConnectionResponse>
   getLogs(id: string, tail?: number): Promise<LogsResponse>
-  eject(project: string): Promise<EjectResponse>
+  eject(project: string, opts?: { release?: boolean }): Promise<EjectResponse>
 }
 
 export function createApi(socketPath: string): Api {
@@ -197,6 +200,7 @@ export function createApi(socketPath: string): Api {
     getConnection: (id) => call(client, 'GET', `/v1/resources/${p(id)}/connection`),
     getLogs: (id, tail) =>
       call(client, 'GET', `/v1/resources/${p(id)}/logs${tail === undefined ? '' : `?tail=${tail}`}`),
-    eject: (project) => call(client, 'POST', `/v1/projects/${p(project)}/eject`),
+    eject: (project, opts) =>
+      call(client, 'POST', `/v1/projects/${p(project)}/eject${opts?.release === true ? '?release=true' : ''}`),
   }
 }

@@ -32,7 +32,7 @@ import {
   type Store,
 } from '@hobby.sh/core'
 import { startPostgres, stopPostgres, type ActivityGuardResult } from '@hobby.sh/pg'
-import { ActivityTracker } from '@hobby.sh/proxy'
+import { ActivityTracker, type ConnectionHandle } from '@hobby.sh/proxy'
 import { createApp, createProxyDeps, shouldSleep, startHibernator, type DaemonContext } from '../src/index.js'
 
 function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
@@ -305,8 +305,7 @@ test('tick: an idle running resource past its threshold, with an idle guard, get
   const ctx = buildContext(createFakeRuntime(), activity)
   const { resourceId } = makeIdleRunningResource(ctx, { projectSleepAfterSeconds: 120, hostPort: 25561 })
 
-  activity.open(resourceId)
-  activity.close(resourceId) // idle starting at clock.nowMs (1_000_000)
+  activity.close(activity.open(resourceId)) // idle starting at clock.nowMs (1_000_000)
   clock.nowMs += 130_000 // 130s idle, past the 120s threshold
 
   let guardCalls = 0
@@ -332,8 +331,7 @@ test('tick: a pinned project (sleepAfterSeconds null) never reaches the guard an
   const ctx = buildContext(createFakeRuntime(), activity)
   const { resourceId } = makeIdleRunningResource(ctx, { projectSleepAfterSeconds: null, hostPort: 25562 })
 
-  activity.open(resourceId)
-  activity.close(resourceId)
+  activity.close(activity.open(resourceId))
   clock.nowMs += 10_000_000 // absurdly idle; must not matter for a pinned project
 
   let guardCalls = 0
@@ -359,8 +357,7 @@ test('tick: an active pg_stat_activity guard blocks sleep even past the idle thr
   const ctx = buildContext(createFakeRuntime(), activity)
   const { resourceId } = makeIdleRunningResource(ctx, { projectSleepAfterSeconds: 60, hostPort: 25563 })
 
-  activity.open(resourceId)
-  activity.close(resourceId)
+  activity.close(activity.open(resourceId))
   clock.nowMs += 100_000
 
   const guard = async (): Promise<ActivityGuardResult> => 'active'
@@ -381,8 +378,7 @@ test('tick: an unreachable guard is treated as "do not sleep", not as "no activi
   const ctx = buildContext(createFakeRuntime(), activity)
   const { resourceId } = makeIdleRunningResource(ctx, { projectSleepAfterSeconds: 60, hostPort: 25564 })
 
-  activity.open(resourceId)
-  activity.close(resourceId)
+  activity.close(activity.open(resourceId))
   clock.nowMs += 100_000
 
   const guard = async (): Promise<ActivityGuardResult> => 'unreachable'
@@ -414,8 +410,7 @@ test('tick: a resource that is not running is skipped entirely, guard never call
   })
   ctx.store.setResourceState(resource.id, 'starting')
 
-  activity.open(resource.id)
-  activity.close(resource.id)
+  activity.close(activity.open(resource.id))
   clock.nowMs += 100_000
 
   let guardCalls = 0
@@ -471,14 +466,14 @@ test('tick: a connection that lands while the guard is still in flight aborts th
   const ctx = buildContext(createFakeRuntime(), activity)
   const { resourceId } = makeIdleRunningResource(ctx, { projectSleepAfterSeconds: 60, hostPort: 25566 })
 
-  activity.open(resourceId)
-  activity.close(resourceId)
+  activity.close(activity.open(resourceId))
   clock.nowMs += 100_000 // well past the 60s threshold: every cheap, pre-guard check passes
 
   const { guard, invoked, release } = createControllableGuard()
 
   const { sleepFor, step } = createStepController()
   const hibernator = startHibernator(ctx, { intervalMs: 1, now: () => clock.nowMs, sleepFor, checkActiveQuery: guard })
+  let late: ConnectionHandle | null = null
   try {
     const stepPromise = step()
     await invoked // the tick has called the guard and is now blocked on it
@@ -489,7 +484,7 @@ test('tick: a connection that lands while the guard is still in flight aborts th
     // said zero/idle and cannot see this; a fresh connection with no query
     // yet issued also reads pg_stat_activity state 'idle', so the guard
     // itself cannot see it either.
-    activity.open(resourceId)
+    late = activity.open(resourceId)
     release('idle')
     await stepPromise
 
@@ -500,7 +495,7 @@ test('tick: a connection that lands while the guard is still in flight aborts th
     )
     assert.equal(activity.count(resourceId), 1)
   } finally {
-    activity.close(resourceId)
+    if (late !== null) activity.close(late)
     await hibernator.stop()
   }
 })
@@ -511,8 +506,7 @@ test('tick: a resource whose state changed away from running while the guard was
   const ctx = buildContext(createFakeRuntime(), activity)
   const { resourceId } = makeIdleRunningResource(ctx, { projectSleepAfterSeconds: 60, hostPort: 25567 })
 
-  activity.open(resourceId)
-  activity.close(resourceId)
+  activity.close(activity.open(resourceId))
   clock.nowMs += 100_000
 
   const { guard, invoked, release } = createControllableGuard()
@@ -608,8 +602,7 @@ test('stopping a resource clears its idle clock, so the next wake is not slept o
 
   // A full proxy connection, opened and closed: the tracker now holds an
   // idle timestamp for this resource.
-  activity.open(resource.id)
-  activity.close(resource.id)
+  activity.close(activity.open(resource.id))
   clock.nowMs += 10_000_000 // absurdly long ago
 
   await stopPostgres(ctx, resource)
@@ -650,8 +643,7 @@ test('a query through the control API counts as activity, so the next tick does 
   ctx.store.setResourceState(resource.id, 'running')
 
   // Long idle: on the numbers alone this resource is a sleep candidate.
-  activity.open(resource.id)
-  activity.close(resource.id)
+  activity.close(activity.open(resource.id))
   clock.nowMs += 100_000
 
   const server = createServer(createApp(ctx))
@@ -701,8 +693,7 @@ test("stop() awaits an in-flight tick, so it can never run stopPostgres concurre
   const ctx = buildContext(createFakeRuntime(), activity)
   const { resourceId } = makeIdleRunningResource(ctx, { projectSleepAfterSeconds: 60, hostPort: 25568 })
 
-  activity.open(resourceId)
-  activity.close(resourceId)
+  activity.close(activity.open(resourceId))
   clock.nowMs += 100_000
 
   const { guard, invoked, release } = createControllableGuard()

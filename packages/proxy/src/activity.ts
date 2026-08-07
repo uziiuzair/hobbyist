@@ -19,45 +19,67 @@
 
 import type { ActivitySink } from '@hobby.sh/core'
 
+// What open() hands back and close() takes: the identity of one connection,
+// not merely the resource it belongs to. See the comment on close() for the
+// bug that a bare count could not express.
+export interface ConnectionHandle {
+  readonly resourceId: string
+  readonly id: number
+}
+
 export class ActivityTracker implements ActivitySink {
-  private readonly counts = new Map<string, number>()
+  // Live connection identities per resource, rather than a count. An empty
+  // set is a resource this tracker knows about with nothing connected, which
+  // is what puts it in resources() and distinguishes it from one that was
+  // never seen at all.
+  private readonly live = new Map<string, Set<number>>()
   // When this resource's current idle stretch began: set when its last
   // connection closes, and by touch() when something else used it. Absent
   // means "no idle clock," which is either a live connection right now or a
   // resource this tracker knows nothing about.
   private readonly idleSince = new Map<string, number>()
+  private nextId = 0
 
   // now is injectable, same pattern as readiness.ts's waitReady, so
   // idleSeconds is testable against a fake clock with zero real waiting:
   // a test can advance `now` without a setTimeout in sight.
   constructor(private readonly now: () => number = Date.now) {}
 
-  open(resourceId: string): void {
-    this.counts.set(resourceId, (this.counts.get(resourceId) ?? 0) + 1)
+  open(resourceId: string): ConnectionHandle {
+    const id = ++this.nextId
+    const live = this.live.get(resourceId) ?? new Set<number>()
+    live.add(id)
+    this.live.set(resourceId, live)
     // A resource with at least one open connection is not idle, whatever
     // its previous close time was. Clearing it here is what makes
     // idleSeconds return null the instant a new connection lands, rather
     // than reporting a stale idle duration for a resource that is active
     // again.
     this.idleSince.delete(resourceId)
+    return { resourceId, id }
   }
 
-  // Guarded so a resource that is already at zero cannot go negative. This
-  // is the tracker's own defense, independent of proxy.ts's close-once
-  // guard on the connection: the two guards protect different things. The
-  // connection's guard flag makes sure THIS connection's close is reported
-  // at most once. This one makes sure that even if it somehow were reported
-  // twice, the count could not undercount into the negatives and produce a
-  // false "idle" reading for a resource that still has a connection open.
-  close(resourceId: string): void {
-    const count = this.counts.get(resourceId) ?? 0
-    if (count <= 0) {
+  // Takes the handle open() returned, and this is the whole reason handles
+  // exist. With a bare count, reset() discarding a non-zero count left every
+  // still-open connection able to decrement a later one:
+  //
+  //   connection A opens        count 1
+  //   stop is requested         reset() drops the count
+  //   connection B opens        count 1, though A and B are both attached
+  //   A finally closes          count 0, and the idle clock starts
+  //
+  // Hibernation then reads a resource as idle while B is still connected,
+  // and the pre-stop re-read that guards it reads the same wrong number. A
+  // close can now only remove the connection it belongs to: A's handle is
+  // not in the set reset() replaced, so its close is a no-op, exactly like
+  // the double-close it also protects against.
+  close(handle: ConnectionHandle): void {
+    const live = this.live.get(handle.resourceId)
+    if (live === undefined || !live.delete(handle.id)) {
       return
     }
-    const next = count - 1
-    this.counts.set(resourceId, next)
-    if (next === 0) {
-      this.idleSince.set(resourceId, this.now())
+    if (live.size === 0) {
+      this.idleSince.set(handle.resourceId, this.now())
     }
   }
 
@@ -71,7 +93,7 @@ export class ActivityTracker implements ActivitySink {
   // is what puts it in resources() below, so a caller enumerating the
   // tracker sees it at all.
   touch(resourceId: string): void {
-    this.counts.set(resourceId, this.counts.get(resourceId) ?? 0)
+    this.live.set(resourceId, this.live.get(resourceId) ?? new Set<number>())
     this.idleSince.set(resourceId, this.now())
   }
 
@@ -83,12 +105,12 @@ export class ActivityTracker implements ActivitySink {
   // next hibernation tick, on an idle time measured against a container
   // that had already been stopped and started since.
   reset(resourceId: string): void {
-    this.counts.delete(resourceId)
+    this.live.delete(resourceId)
     this.idleSince.delete(resourceId)
   }
 
   count(resourceId: string): number {
-    return this.counts.get(resourceId) ?? 0
+    return this.live.get(resourceId)?.size ?? 0
   }
 
   // null means "not idle, or nothing known": either the count is above zero
@@ -112,6 +134,6 @@ export class ActivityTracker implements ActivitySink {
   // is idle. Hibernation's poll loop uses this to know what to check,
   // rather than needing its own registry of resources.
   resources(): string[] {
-    return [...this.counts.keys()]
+    return [...this.live.keys()]
   }
 }

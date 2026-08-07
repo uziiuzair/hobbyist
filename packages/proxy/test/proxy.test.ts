@@ -11,6 +11,7 @@ import {
   GSS_ENC_REQUEST_CODE,
   SSL_REQUEST_CODE,
   startPgProxy,
+  type ConnectionHandle,
   type ProxyDeps,
   type ProxyTarget,
 } from '../src/index.js'
@@ -234,9 +235,9 @@ test('activity.close fires exactly once when the client closes before the upstre
 
   class CountingActivityTracker extends ActivityTracker {
     closeCalls = 0
-    close(resourceId: string): void {
+    close(handle: ConnectionHandle): void {
       this.closeCalls += 1
-      super.close(resourceId)
+      super.close(handle)
     }
   }
   const activity = new CountingActivityTracker()
@@ -281,9 +282,9 @@ test('activity.close fires exactly once when the upstream closes before the clie
 
   class CountingActivityTracker extends ActivityTracker {
     closeCalls = 0
-    close(resourceId: string): void {
+    close(handle: ConnectionHandle): void {
       this.closeCalls += 1
-      super.close(resourceId)
+      super.close(handle)
     }
   }
   const activity = new CountingActivityTracker()
@@ -518,19 +519,19 @@ test('ActivityTracker counts opens and closes and reports idle seconds only when
   assert.equal(tracker.count('r1'), 0)
   assert.equal(tracker.idleSeconds('r1'), null)
 
-  tracker.open('r1')
+  const first = tracker.open('r1')
   assert.equal(tracker.count('r1'), 1)
   assert.equal(tracker.idleSeconds('r1'), null) // still active, not idle
 
-  tracker.open('r1')
+  const second = tracker.open('r1')
   assert.equal(tracker.count('r1'), 2)
 
-  tracker.close('r1')
+  tracker.close(first)
   assert.equal(tracker.count('r1'), 1)
   assert.equal(tracker.idleSeconds('r1'), null) // one connection still open
 
   now += 5_000 // 5 real seconds later, but still not idle
-  tracker.close('r1')
+  tracker.close(second)
   assert.equal(tracker.count('r1'), 0)
   assert.equal(tracker.idleSeconds('r1'), 0) // just closed, at the moment it closed
 
@@ -540,20 +541,49 @@ test('ActivityTracker counts opens and closes and reports idle seconds only when
   assert.deepEqual(tracker.resources(), ['r1'])
 })
 
-test('ActivityTracker.close is idempotent: closing an already-zero count does not go negative', () => {
+test('ActivityTracker.close is idempotent: closing the same connection twice changes nothing', () => {
   let now = 0
   const tracker = new ActivityTracker(() => now)
 
-  tracker.open('r1')
-  tracker.close('r1')
+  const handle = tracker.open('r1')
+  tracker.close(handle)
   assert.equal(tracker.count('r1'), 0)
 
-  // Extra closes beyond the matching open must not push the count negative,
-  // nor move lastCloseAt forward on their own. idleSeconds reports seconds,
-  // not milliseconds, hence 100_000ms here to assert a clean 100.
+  // Extra closes of a connection already accounted for must not move the idle
+  // clock forward on their own. idleSeconds reports seconds, not
+  // milliseconds, hence 100_000ms here to assert a clean 100.
   now += 100_000
-  tracker.close('r1')
-  tracker.close('r1')
+  tracker.close(handle)
+  tracker.close(handle)
   assert.equal(tracker.count('r1'), 0)
   assert.equal(tracker.idleSeconds('r1'), 100)
+})
+
+// The race the handle exists for. A bare count could not tell A's close from
+// B's, so a reset landing between them left the tracker reporting zero with a
+// live client attached, and hibernation slept a connected database.
+test('ActivityTracker: a connection that outlives a reset cannot zero the count of one that follows it', () => {
+  let now = 0
+  const tracker = new ActivityTracker(() => now)
+
+  const stale = tracker.open('r1')
+  assert.equal(tracker.count('r1'), 1)
+
+  // stopPostgres or destroyPostgres reports the resource gone while the old
+  // connection is still attached.
+  tracker.reset('r1')
+  assert.equal(tracker.count('r1'), 0)
+
+  const live = tracker.open('r1')
+  assert.equal(tracker.count('r1'), 1)
+
+  now += 10_000
+  tracker.close(stale)
+
+  assert.equal(tracker.count('r1'), 1, 'the live connection is still attached')
+  assert.equal(tracker.idleSeconds('r1'), null, 'a connected resource is never idle')
+
+  tracker.close(live)
+  assert.equal(tracker.count('r1'), 0)
+  assert.equal(tracker.idleSeconds('r1'), 0)
 })
