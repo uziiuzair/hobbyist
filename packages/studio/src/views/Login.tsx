@@ -54,7 +54,7 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
         </div>
         </div>
         <p className="dim" style={{ fontSize: 12, marginTop: 14, lineHeight: 1.5 }}>
-          Set on the box with <code className="mono">hobby studio passwd</code>. there is no
+          Set on the box with <code className="mono">hobby studio passwd</code>. There is no
           reset link and no recovery, on purpose.
         </p>
       </form>

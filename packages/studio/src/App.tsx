@@ -116,12 +116,12 @@ export function App() {
       onLogout={handleLogout}
     >
       {loadError !== null && (
-        <div className="page" style={{ paddingBottom: 0 }}>
+        <div className="page measure" style={{ paddingBottom: 0 }}>
           <div className="notice notice-danger">{loadError}</div>
         </div>
       )}
       {rows === null ? (
-        <div className="page">
+        <div className="page measure">
           <span className="dim">Loading</span>
         </div>
       ) : (

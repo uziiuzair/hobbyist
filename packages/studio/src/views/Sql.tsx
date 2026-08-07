@@ -4,6 +4,7 @@ import * as api from '../api.js'
 import { useResource } from '../lib/useResource.js'
 import { useWakeAwareRun } from '../lib/useWaking.js'
 import { WakingBanner } from '../components/WakingBanner.js'
+import { Modal } from '../components/Modal.js'
 import { ResourceTabs } from '../components/ResourceTabs.js'
 import {
   loadHistory,
@@ -29,6 +30,7 @@ export function Sql({ projectName, resourceName }: { projectName: string; resour
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [snippets, setSnippets] = useState<Snippet[]>([])
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const [namingSnippet, setNamingSnippet] = useState(false)
 
   useEffect(() => {
     if (resource === null) return
@@ -67,12 +69,17 @@ export function Sql({ projectName, resourceName }: { projectName: string; resour
     }
   }
 
+  // PRODUCT.md: every form lives in a modal. window.prompt is a form with no
+  // styling, no validation and no escape from the browser's own chrome.
   function handleSaveSnippet(): void {
     if (sql.trim().length === 0) return
-    const name = window.prompt('Snippet name')
-    if (name === null || name.trim().length === 0) return
+    setNamingSnippet(true)
+  }
+
+  function commitSnippet(name: string): void {
     const snippet: Snippet = { id: randomId(), name: name.trim(), sql, savedAt: new Date().toISOString() }
     setSnippets(saveSnippet(window.localStorage, snippet))
+    setNamingSnippet(false)
   }
 
   function handleDeleteSnippet(id: string): void {
@@ -85,16 +92,26 @@ export function Sql({ projectName, resourceName }: { projectName: string; resour
   }
 
   if (resourceError !== null) {
-    return <div className="error-banner">{resourceError}</div>
+    return (
+      <div className="page measure">
+        <div className="error-banner">{resourceError}</div>
+      </div>
+    )
   }
   if (resource === null) {
-    return <div className="hint-text">Loading {resourceName}...</div>
+    return (
+      <div className="page measure">
+        <span className="hint-text">Loading {resourceName}</span>
+      </div>
+    )
   }
 
   return (
     <div className="page measure stack">
       <ResourceTabs projectName={projectName} resourceName={resourceName} active="sql" />
       <WakingBanner resourceName={resourceName} snapshot={snapshot} />
+
+      {namingSnippet && <SnippetNameModal onClose={() => setNamingSnippet(false)} onSave={commitSnippet} />}
 
       <div className="sql-editor-shell">
         <div className="side-index">
@@ -195,5 +212,50 @@ export function Sql({ projectName, resourceName }: { projectName: string; resour
         </div>
       </div>
     </div>
+  )
+}
+
+function SnippetNameModal({ onClose, onSave }: { onClose: () => void; onSave: (name: string) => void }) {
+  const [name, setName] = useState('')
+  return (
+    <Modal
+      title="Save snippet"
+      description="Saved snippets live in this browser only. They are not stored on the server."
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" className="btn btn-ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            type="submit"
+            form="snippet-name-form"
+            className="btn btn-primary"
+            disabled={name.trim().length === 0}
+          >
+            Save snippet
+          </button>
+        </>
+      }
+    >
+      <form
+        id="snippet-name-form"
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (name.trim().length > 0) onSave(name)
+        }}
+      >
+        <div className="field">
+          <label htmlFor="snippet-name">Name</label>
+          <input
+            id="snippet-name"
+            className="input"
+            value={name}
+            autoComplete="off"
+            onChange={(event) => setName(event.target.value)}
+          />
+        </div>
+      </form>
+    </Modal>
   )
 }

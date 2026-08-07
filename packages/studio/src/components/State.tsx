@@ -9,13 +9,16 @@ import type { ResourceState } from '@hobby.sh/core'
 // read by someone who cannot separate the hues.
 
 const LABELS: Record<string, string> = {
-  running: 'awake',
-  sleeping: 'sleeping',
-  starting: 'waking',
-  creating: 'creating',
-  stopping: 'sleeping',
-  failed: 'failed',
-  destroying: 'removing',
+  running: 'Awake',
+  sleeping: 'Sleeping',
+  starting: 'Waking',
+  creating: 'Creating',
+  // Labelled for what it is doing rather than where it is heading: calling a
+  // stopping database "sleeping" while showing it a transition animation was
+  // the label and the styling telling two different stories.
+  stopping: 'Stopping',
+  failed: 'Failed',
+  destroying: 'Removing',
 }
 
 const CLASSES: Record<string, string> = {
@@ -40,11 +43,11 @@ export function State({ state, label }: { state: ResourceState | string; label?:
 }
 
 export function summarise(states: string[]): { state: string; label: string } {
-  if (states.length === 0) return { state: 'sleeping', label: 'no databases' }
-  if (states.some((s) => s === 'failed')) return { state: 'failed', label: 'failed' }
-  if (states.some((s) => s === 'starting' || s === 'creating')) return { state: 'starting', label: 'waking' }
+  if (states.length === 0) return { state: 'sleeping', label: 'No databases' }
+  if (states.some((s) => s === 'failed')) return { state: 'failed', label: 'Failed' }
+  if (states.some((s) => s === 'starting' || s === 'creating')) return { state: 'starting', label: 'Waking' }
   const awake = states.filter((s) => s === 'running').length
-  if (awake === 0) return { state: 'sleeping', label: 'sleeping' }
-  if (awake === states.length) return { state: 'running', label: 'awake' }
+  if (awake === 0) return { state: 'sleeping', label: 'Sleeping' }
+  if (awake === states.length) return { state: 'running', label: 'Awake' }
   return { state: 'running', label: `${awake} of ${states.length} awake` }
 }
