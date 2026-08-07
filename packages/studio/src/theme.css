@@ -549,6 +549,57 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
 
 .pager { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 13px; color: var(--ink-2); }
 
+/* ---------- modals: every form lives in one ---------- */
+
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+.modal {
+  width: 100%;
+  max-width: 440px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+  animation: modal-in 120ms ease-out;
+}
+
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .modal { animation: none; }
+}
+
+.modal-head { padding: 16px 18px 0; }
+.modal-title { margin: 0; font-size: 15.5px; font-weight: 600; letter-spacing: -0.01em; }
+.modal-desc { margin: 5px 0 0; color: var(--ink-2); font-size: 13px; line-height: 1.5; }
+.modal-body { padding: 14px 18px 16px; }
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+
+@media (max-width: 560px) {
+  .modal-scrim { padding: 0; place-items: end stretch; }
+  .modal { max-width: none; border-radius: var(--radius) var(--radius) 0 0; }
+}
+
 /* ---------- login ---------- */
 
 .login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }

@@ -81,7 +81,7 @@ export function App() {
   if (session === 'checking') {
     return (
       <div className="login-wrap">
-        <span className="dim">loading</span>
+        <span className="dim">Loading</span>
       </div>
     )
   }
@@ -100,7 +100,7 @@ export function App() {
       crumbs={
         <>
           <Crumb href="#/" here={projectName === undefined}>
-            projects
+            Projects
           </Crumb>
           {projectName !== undefined && (
             <Crumb
@@ -122,7 +122,7 @@ export function App() {
       )}
       {rows === null ? (
         <div className="page">
-          <span className="dim">loading</span>
+          <span className="dim">Loading</span>
         </div>
       ) : (
         <Route

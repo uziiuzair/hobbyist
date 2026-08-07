@@ -64,7 +64,7 @@ function ProjectSwitcher({ projects, current }: { projects: RailProject[]; curre
     }
   }, [open])
 
-  const label = current ?? 'all projects'
+  const label = current ?? 'All projects'
 
   return (
     <div className="switcher" ref={ref}>
@@ -94,7 +94,7 @@ function ProjectSwitcher({ projects, current }: { projects: RailProject[]; curre
             }}
           >
             <GridIcon />
-            all projects
+            All projects
           </button>
           {projects.map((row) => {
             const awake = row.resources.some((r) => r.state === 'running')
@@ -149,30 +149,30 @@ export function Shell({
           <span className={`rail-mark${anyAwake ? ' is-awake' : ''}`} aria-hidden="true">
             <i />
           </span>
-          hobbyist
+          Hobbyist
         </a>
 
         <ProjectSwitcher projects={projects} current={currentProject} />
 
         {currentProject === undefined ? (
           <div className="rail-group">
-            <div className="rail-label">organisation</div>
+            <div className="rail-label">Organisation</div>
             <a className="rail-link" href="#/" aria-current="page">
               <GridIcon />
-              projects
+              Projects
               <span className="count">{projects.length}</span>
             </a>
           </div>
         ) : (
           <div className="rail-group">
-            <div className="rail-label">services</div>
+            <div className="rail-label">Services</div>
             <a
               className="rail-link"
               href={`#/projects/${encodeURIComponent(currentProject)}`}
               aria-current={currentSection === 'databases' ? 'page' : undefined}
             >
               <DatabaseIcon />
-              databases
+              Databases
               <span className="count">{databases.length}</span>
             </a>
           </div>
@@ -180,7 +180,7 @@ export function Shell({
 
         <div className="rail-foot">
           <button type="button" className="rail-link" onClick={onLogout} style={{ width: '100%', cursor: 'pointer', background: 'none', font: 'inherit', textAlign: 'left' }}>
-            sign out
+            Sign out
           </button>
         </div>
       </nav>

@@ -4,6 +4,7 @@ import * as api from '../api.js'
 import { navigate } from '../lib/router.js'
 import { formatBytes, formatSince, readStats } from '../lib/format.js'
 import { State } from '../components/State.js'
+import { Modal } from '../components/Modal.js'
 
 export function Project({ projectName, onChanged }: { projectName: string; onChanged: () => void }) {
   const [project, setProject] = useState<ProjectModel | null>(null)
@@ -19,7 +20,7 @@ export function Project({ projectName, onChanged }: { projectName: string; onCha
         setError(null)
       })
       .catch((err: unknown) =>
-        setError(err instanceof api.ApiError ? err.message : 'could not reach the daemon'),
+        setError(err instanceof api.ApiError ? err.message : 'Could not reach the daemon'),
       )
   }, [projectName])
 
@@ -41,7 +42,7 @@ export function Project({ projectName, onChanged }: { projectName: string; onCha
   if (resources === null || project === null) {
     return (
       <div className="page measure">
-        <span className="dim">loading</span>
+        <span className="dim">Loading</span>
       </div>
     )
   }
@@ -55,8 +56,8 @@ export function Project({ projectName, onChanged }: { projectName: string; onCha
           <h1 className="page-title">{project.name}</h1>
           <p className="page-sub">
             {idleMinutes === null
-              ? 'pinned awake, never sleeps on its own'
-              : `sleeps after ${idleMinutes} minute${idleMinutes === 1 ? '' : 's'} with nothing connected`}
+              ? 'Pinned awake, never sleeps on its own'
+              : `Sleeps after ${idleMinutes} minute${idleMinutes === 1 ? '' : 's'} with nothing connected`}
           </p>
         </div>
         <div className="page-actions">
@@ -64,12 +65,12 @@ export function Project({ projectName, onChanged }: { projectName: string; onCha
         </div>
       </div>
 
-      <h2 className="section-title">databases</h2>
+      <h2 className="section-title">Databases</h2>
 
       {resources.length === 0 ? (
         <div className="empty">
-          <h3>no databases in this project</h3>
-          <p>a project with no database has nothing to connect to yet.</p>
+          <h3>No databases in this project</h3>
+          <p>A project with no database has nothing to connect to yet.</p>
         </div>
       ) : (
         <div className="stack">
@@ -112,7 +113,7 @@ function DatabaseRow({
       else await api.sleepResource(resource.id)
       onChanged()
     } catch (err) {
-      setActionError(err instanceof api.ApiError ? err.message : `failed to ${kind}`)
+      setActionError(err instanceof api.ApiError ? err.message : `Could not ${kind} this database`)
     } finally {
       setBusy(null)
     }
@@ -126,7 +127,7 @@ function DatabaseRow({
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1600)
     } catch (err) {
-      setActionError(err instanceof api.ApiError ? err.message : 'could not read the connection string')
+      setActionError(err instanceof api.ApiError ? err.message : 'Could not read the connection string')
     }
   }
 
@@ -136,8 +137,8 @@ function DatabaseRow({
         <div style={{ minWidth: 0 }}>
           <div className="card-title">{resource.name}</div>
           <div className="card-meta">
-            postgres · {formatBytes(stats.sizeBytes)} · {stats.connectionCount ?? 0} connection
-            {(stats.connectionCount ?? 0) === 1 ? '' : 's'} · active {formatSince(stats.lastActiveAt)}
+            Postgres · {formatBytes(stats.sizeBytes)} · {stats.connectionCount ?? 0} connection
+            {(stats.connectionCount ?? 0) === 1 ? '' : 's'} · Active {formatSince(stats.lastActiveAt)}
           </div>
         </div>
         <State state={resource.state} />
@@ -160,7 +161,7 @@ function DatabaseRow({
         <div className="connstring">
           <code>{conn ?? `postgres://...@127.0.0.1:5432/${projectName}`}</code>
           <button type="button" className="btn btn-sm btn-ghost" onClick={copy}>
-            {copied ? 'copied' : 'copy'}
+            {copied ? 'Copied' : 'Copy'}
           </button>
         </div>
       </div>
@@ -173,13 +174,13 @@ function DatabaseRow({
 
       <div className="card-foot">
         <a className="btn btn-sm btn-ghost" href={`${base}/tables`}>
-          tables
+          Tables
         </a>
         <a className="btn btn-sm btn-ghost" href={`${base}/sql`}>
-          sql
+          SQL
         </a>
         <a className="btn btn-sm btn-ghost" href={`${base}/schema`}>
-          schema
+          Schema
         </a>
       </div>
     </div>
@@ -192,53 +193,64 @@ function DestroyProject({ name, onDone }: { name: string; onDone: () => void }) 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  if (!open) {
-    return (
-      <button type="button" className="btn btn-danger" onClick={() => setOpen(true)}>
-        delete project
-      </button>
-    )
+  function destroy(): void {
+    setBusy(true)
+    setError(null)
+    api
+      .deleteProject(name, { force: true })
+      .then(() => {
+        onDone()
+        navigate('/')
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof api.ApiError ? err.message : 'Could not delete this project')
+        setBusy(false)
+      })
   }
 
   return (
-    <div className="panel" style={{ minWidth: 300 }}>
-      <p style={{ margin: '0 0 10px', fontSize: 13 }}>
-        this destroys the database and its data directory. type <strong>{name}</strong> to confirm.
-      </p>
-      <input
-        className="input"
-        value={typed}
-        autoFocus
-        onChange={(e) => setTyped(e.target.value)}
-        aria-label={`type ${name} to confirm`}
-      />
-      {error !== null && <div className="notice notice-danger" style={{ marginTop: 10 }}>{error}</div>}
-      <div className="row" style={{ marginTop: 10 }}>
-        <button
-          type="button"
-          className="btn btn-danger"
-          disabled={typed !== name || busy}
-          onClick={() => {
-            setBusy(true)
-            api
-              .deleteProject(name, { force: true })
-              .then(() => {
-                onDone()
-                navigate('/')
-              })
-              .catch((err: unknown) =>
-                setError(err instanceof api.ApiError ? err.message : 'could not delete'),
-              )
-              .finally(() => setBusy(false))
-          }}
+    <>
+      <button type="button" className="btn btn-danger" onClick={() => setOpen(true)}>
+        Delete project
+      </button>
+
+      {open && (
+        <Modal
+          title="Delete this project"
+          description="This destroys the database and its data directory on disk. It cannot be undone."
+          onClose={busy ? () => undefined : () => setOpen(false)}
+          footer={
+            <>
+              <button type="button" className="btn btn-ghost" onClick={() => setOpen(false)} disabled={busy}>
+                Cancel
+              </button>
+              <button type="button" className="btn btn-danger" disabled={typed !== name || busy} onClick={destroy}>
+                {busy && <span className="spinner" />}
+                {busy ? 'Deleting' : 'Delete project'}
+              </button>
+            </>
+          }
         >
-          {busy && <span className="spinner" />}
-          delete
-        </button>
-        <button type="button" className="btn btn-ghost" onClick={() => setOpen(false)} disabled={busy}>
-          cancel
-        </button>
-      </div>
-    </div>
+          <div className="field">
+            <label htmlFor="confirm-delete">
+              Type <span className="mono">{name}</span> to confirm
+            </label>
+            <input
+              id="confirm-delete"
+              className="input mono"
+              value={typed}
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(e) => setTyped(e.target.value)}
+            />
+          </div>
+          {error !== null && (
+            <div className="notice notice-danger" style={{ marginTop: 12 }}>
+              {error}
+            </div>
+          )}
+        </Modal>
+      )}
+    </>
   )
 }
