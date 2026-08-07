@@ -70,6 +70,10 @@
   /* The scrim is not a palette colour: it is an absence, and it must stay
      black in both themes or a light-mode modal floats on nothing. */
   --scrim: rgba(0, 0, 0, 0.55);
+  /* A key cap sitting on the accent surface: derived from the accent's own ink
+     so it works in both themes rather than assuming a dark button. */
+  --on-accent-line: color-mix(in srgb, var(--accent-ink) 26%, transparent);
+  --on-accent-fill: color-mix(in srgb, var(--accent-ink) 13%, transparent);
   --rail: 248px;
   --topbar: 52px;
 
@@ -465,9 +469,75 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
 .null { color: var(--ink-3); font-style: italic; }
 
 /* An editable cell has to look editable or the feature does not exist. */
-.editable { cursor: text; border-radius: 3px; }
+.editable { cursor: text; position: relative; }
 .editable:hover { box-shadow: inset 0 0 0 1px var(--line-strong); background: var(--surface-2); }
-.editable:focus-within { box-shadow: inset 0 0 0 1px var(--accent); }
+
+/* The editor fills the cell exactly rather than sitting inside it as a second
+   rounded box: a nested input inside a bordered cell reads as two controls. */
+.cell-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  border: 0;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  padding: 6px 10px;
+  border-radius: 0;
+}
+
+.cell-popout {
+  position: absolute;
+  top: -1px;
+  left: -1px;
+  z-index: 20;
+  width: min(680px, 60vw);
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-pop);
+  display: flex;
+  flex-direction: column;
+}
+.cell-popout-area {
+  width: 100%;
+  min-height: 168px;
+  resize: vertical;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+}
+.cell-popout-area:focus { outline: none; }
+.cell-popout-foot {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+
+kbd {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  padding: 0 4px;
+  margin-left: 4px;
+  color: var(--ink-3);
+  background: var(--surface-3);
+}
+.btn-primary kbd { border-color: var(--on-accent-line); color: var(--accent-ink); background: var(--on-accent-fill); }
+
+/* A cell holding an open editor must not clip it. */
+.grid-table td:has(.cell-popout) { overflow: visible; position: relative; z-index: 20; }
 
 /* ---------- misc ---------- */
 
@@ -592,6 +662,25 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
   .wb-side { border-right: 0; border-bottom: 1px solid var(--line); max-height: 34vh; }
 }
 
+/* Navigation lives in the sidebar, not as a tab strip above the content, so
+   the grid can start at the top of the page. */
+.wb-nav { display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; border-bottom: 1px solid var(--line); }
+.wb-nav-link {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 8px; border-radius: var(--radius-sm);
+  color: var(--ink-2); text-decoration: none; font-size: 13.5px;
+}
+.wb-nav-link:hover { background: var(--surface-2); color: var(--ink); }
+.wb-nav-link[aria-current="page"] { background: var(--accent-dim); color: var(--ink); }
+.wb-nav-link[aria-current="page"] svg { color: var(--accent); }
+.wb-nav-link svg { flex: none; opacity: 0.75; }
+.wb-nav-link[aria-current="page"] svg { opacity: 1; }
+
+/* One toolbar rather than a full width filter bar stacked on a pager. */
+.grid-toolbar { display: flex; align-items: center; gap: 8px; flex: none; }
+.grid-filter { max-width: 340px; font-family: var(--font-mono); font-size: 12.5px; }
+.grid-toolbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+
 /* ---------- the data grid ----------
    A row browser is not a content table: it is a grid, and it earns vertical
    rules because a value has to be attributable to a column at a glance across
@@ -611,7 +700,15 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
 .grid-timing { font-family: var(--font-mono); font-size: 12px; color: var(--ink-3); }
 .grid-nav { margin-left: auto; display: flex; gap: 6px; }
 
-.grid-table { font-family: var(--font-mono); font-size: 12.5px; }
+.grid-table {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  /* Take the width the columns actually need and let the container scroll.
+     width: 100% squeezed fifteen columns into the viewport, so there was
+     never anything to scroll horizontally. */
+  width: max-content;
+  min-width: 100%;
+}
 .grid-table th, .grid-table td { border-right: 1px solid var(--line); }
 .grid-table th:last-child, .grid-table td:last-child { border-right: 0; }
 .grid-table th { text-transform: none; letter-spacing: 0; font-size: 12px; padding: 7px 10px; }
