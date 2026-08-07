@@ -11,8 +11,9 @@
    STORY: the operator sees which of their databases are awake, what the box
    has left, and opens one to work in it.
    FIRST VIEWPORT: fixed left rail with project switcher and scoped services,
-   projects as cards on the left three quarters, the machine's real capacity
-   panel on the right, primary action top right.
+   a topbar carrying only the breadcrumb, projects as cards on the left three
+   quarters, the machine's real capacity panel on the right, primary action in
+   the page head beside the title.
    FORM: developer console, brief-pinned (Cloudflare, Supabase, Neon), seed
    c8a5138b.
    FINISH: unreviewed and undocumented is unfinished; this build ends with the
@@ -295,7 +296,6 @@ body {
 .crumbs a:hover { color: var(--accent); }
 .crumbs .here { color: var(--ink); }
 
-.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 
 .page { padding-block: 26px 64px; }
 .page-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
