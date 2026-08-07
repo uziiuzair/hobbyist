@@ -1,0 +1,33 @@
+{
+  // Studio's tests existed from the first commit and had never once run. This
+  // config was written for them and never wired up: the app tsconfig is
+  // noEmit (vite owns the bundle) and does not include test/, the root
+  // tsconfig did not reference this file, and the root test script globbed
+  // only packages/*/dist/test/*.test.js, which Studio never produced. Both
+  // ends are connected now, and the pushHistory bug those tests should have
+  // caught is the reason.
+  //
+  // Deliberately not extending ./tsconfig.json: that one is configured for a
+  // bundler (module ESNext, moduleResolution Bundler), and this output is
+  // executed by Node directly. Scope is the pure, DOM-free modules the tests
+  // import plus the tests themselves. Components stay out: nothing here
+  // renders React, and pulling .tsx in would mean a DOM harness this repo
+  // does not have and does not need to test a storage round-trip.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "composite": true,
+    "declaration": true,
+    "outDir": "dist-test",
+    "rootDir": "."
+  },
+  "include": ["src/api.ts", "src/lib", "test"],
+  "references": [{ "path": "../core" }]
+}

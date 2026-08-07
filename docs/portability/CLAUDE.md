@@ -42,7 +42,17 @@ why it constrains other capabilities:
   Not a custom format, not a page-versioned blob store, not a proprietary
   manifest. See `docs/decisions/0003`.
 - **`pg_dump` always works**, at any moment, without Hobbyist running.
-- **Pointing a stock `postgres` binary at the directory always works.**
+- **Pointing a stock `postgres` binary at the directory always works,** where
+  "the directory" is the `18/docker` subdirectory beneath the host directory
+  Hobbyist creates and bind-mounts, not that directory itself. Postgres 18's
+  official image refuses to start when the bind mount lands directly at what
+  used to be PGDATA; the corrected mount is the postgres home directory, and
+  the image places the real data directory in a subdirectory named after the
+  major version. See `docs/decisions/0003`'s 2026-08-07 amendment, found by
+  running the integration suite against real Docker rather than the fake
+  runtime the unit tests drive. `resolvePgdataPath` in
+  `packages/core/src/config.ts` is the one place that subdirectory pattern is
+  derived rather than hardcoded.
 
 Any feature that would break one of those three loses to the guarantee. There is
 no negotiation on this, and that is deliberate: this is the one place where being
