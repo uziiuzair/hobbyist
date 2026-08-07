@@ -273,13 +273,13 @@ function raceTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => Error)
 // what stops the other side from being left half-open forever once its
 // peer is gone.
 function spliceAndTrackActivity(client: net.Socket, upstream: net.Socket, activity: ActivityTracker, resourceId: string): void {
-  activity.open(resourceId)
+  const handle = activity.open(resourceId)
   let closed = false
 
   const finish = (): void => {
     if (closed) return
     closed = true
-    activity.close(resourceId)
+    activity.close(handle)
     client.destroy()
     upstream.destroy()
   }
