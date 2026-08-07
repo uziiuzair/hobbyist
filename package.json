@@ -7,7 +7,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --build --force",
-    "test": "tsc --build && node --test packages/*/dist/test/*.test.js"
+    "test": "tsc --build && node --test packages/*/dist/test/*.test.js packages/studio/dist-test/test/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

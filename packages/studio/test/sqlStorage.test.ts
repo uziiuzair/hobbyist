@@ -39,6 +39,23 @@ test('history round-trips through storage, newest first', () => {
   assert.deepEqual(loadHistory(storage, 'res-a'), [second, first])
 })
 
+// The SQL editor sets pushHistory's return value straight into state, so if
+// it hands back every resource's history the sidebar starts listing other
+// databases' queries the moment you run one. It did exactly that.
+test('pushHistory returns only the resource it wrote to', () => {
+  const storage = fakeStorage()
+  pushHistory(storage, { id: '1', resourceId: 'res-a', sql: 'select 1', ranAt: 't1', ok: true })
+  pushHistory(storage, { id: '2', resourceId: 'res-b', sql: 'select 2', ranAt: 't2', ok: true })
+
+  const afterA = pushHistory(storage, { id: '3', resourceId: 'res-a', sql: 'select 3', ranAt: 't3', ok: true })
+
+  assert.deepEqual(
+    afterA.map((e) => e.id),
+    ['3', '1']
+  )
+  assert.deepEqual(loadHistory(storage).length, 3)
+})
+
 test('history is filterable by resourceId, since one browser can hold many projects', () => {
   const storage = fakeStorage()
   pushHistory(storage, { id: '1', resourceId: 'res-a', sql: 'select 1', ranAt: 't1', ok: true })
