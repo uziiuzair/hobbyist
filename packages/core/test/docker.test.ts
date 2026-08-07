@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createDockerRuntime, type ExecFn } from '../src/index.js'
+import { createDockerRuntime, createFakeRuntime, type ExecFn } from '../src/index.js'
 import type { ContainerSpec } from '../src/index.js'
 
 interface RecordedCall {
@@ -57,8 +57,15 @@ test('ensureCreated issues docker create with the exact expected argv when absen
       'hobby-blog-primary',
       '-e',
       'POSTGRES_PASSWORD=secret',
+      // With an explicit loopback bind address, never a bare
+      // "15432:5432": that shorthand means 0.0.0.0 and publishes the
+      // database on every interface, reachable by anyone who can route to
+      // the box using the superuser password from the store, with the
+      // wake-on-connect proxy bypassed entirely. Docker's own iptables
+      // rules sit ahead of the host firewall, so `ufw` does not close it
+      // either. This assertion is the regression test for that.
       '-p',
-      '15432:5432',
+      '127.0.0.1:15432:5432',
       '-v',
       '/data/blog/pgdata:/var/lib/postgresql/data',
       '--network',
@@ -66,6 +73,42 @@ test('ensureCreated issues docker create with the exact expected argv when absen
       'postgres:18-alpine',
     ],
   })
+})
+
+test('ensureCreated publishes every port on loopback unless the spec names an address', async () => {
+  const calls: RecordedCall[] = []
+  const exec: ExecFn = async (cmd, args) => {
+    calls.push({ cmd, args })
+    if (args[0] === 'inspect') {
+      throw notFoundError('Error: No such object: hobby-blog-primary')
+    }
+    return { stdout: '', stderr: '' }
+  }
+
+  const runtime = createDockerRuntime(exec)
+  await runtime.ensureCreated({
+    ...sampleSpec(),
+    ports: [
+      { host: 15432, container: 5432 },
+      // The escape hatch, for a port genuinely meant to be public. Nothing
+      // in the product sets this today; it exists so that the loopback
+      // default is a default rather than a hard-coded value someone later
+      // rips out wholesale when they need one public port.
+      { host: 8080, container: 80, bind: '0.0.0.0' },
+    ],
+  })
+
+  const createArgs = calls[1]?.args ?? []
+  const published = createArgs.filter((_arg, index) => createArgs[index - 1] === '-p')
+  assert.deepEqual(published, ['127.0.0.1:15432:5432', '0.0.0.0:8080:80'])
+})
+
+test('the fake runtime records the same loopback default the real adapter emits', async () => {
+  const runtime = createFakeRuntime()
+  await runtime.ensureCreated(sampleSpec())
+  assert.deepEqual(runtime._specs.get('hobby-blog-primary')?.ports, [
+    { host: 15432, container: 5432, bind: '127.0.0.1' },
+  ])
 })
 
 test('ensureCreated issues no create when the container already exists', async () => {

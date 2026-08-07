@@ -6,6 +6,7 @@
 
 import { execFile } from 'node:child_process'
 import { HobbyError } from './errors.js'
+import { DEFAULT_PORT_BIND } from './runtime.js'
 import type { ComputeRuntime, ContainerId, ContainerSpec, ContainerStatus } from './runtime.js'
 
 export type ExecFn = (cmd: string, args: string[]) => Promise<{ stdout: string; stderr: string }>
@@ -86,7 +87,14 @@ function buildCreateArgs(spec: ContainerSpec): string[] {
     args.push('-e', `${key}=${value}`)
   }
   for (const port of spec.ports) {
-    args.push('-p', `${port.host}:${port.container}`)
+    // Always with an explicit bind address. `-p 15432:5432` (no address) is
+    // shorthand for 0.0.0.0, which publishes the database on every
+    // interface: anyone who can route to the box can then connect straight
+    // to Postgres with the superuser password from the store, with the
+    // wake-on-connect proxy, its idle accounting and its routing all
+    // bypassed. See DEFAULT_PORT_BIND in runtime.ts for why a host firewall
+    // is not a substitute here.
+    args.push('-p', `${port.bind ?? DEFAULT_PORT_BIND}:${port.host}:${port.container}`)
   }
   for (const bind of spec.binds) {
     args.push('-v', `${bind.host}:${bind.container}`)

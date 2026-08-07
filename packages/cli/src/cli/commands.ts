@@ -8,7 +8,7 @@
 // for a failure path.
 
 import { spawnSync } from 'node:child_process'
-import { mkdir } from 'node:fs/promises'
+import { chmod, mkdir } from 'node:fs/promises'
 import { HobbyError, parseTarget, type HobbyConfig, type Paths, type Project } from '@hobby.sh/core'
 import { createDaemonContext } from '../daemon/context.js'
 import { runPreflight } from '../daemon/preflight.js'
@@ -35,6 +35,26 @@ export interface Ctx {
 }
 
 export class UsageError extends Error {}
+
+// Owner-only, on both ~/.hobby and ~/.hobby/projects. Everything under
+// there is a secret or a database: state.db holds every resource's
+// superuser password as plaintext JSON, studio-credential holds the
+// operator hash, hobby.sock is the unauthenticated control plane, and
+// projects/ holds the PGDATA directories themselves. Created without an
+// explicit mode, these landed 0755 and every local user could read the lot.
+// The socket and the credential file already reasoned this way; the
+// directories holding them did not.
+const HOME_DIR_MODE = 0o700
+
+// mkdir's `mode` is masked by the process umask, and POSIX ignores it
+// entirely for a directory that already exists, which is the case that
+// matters most here: an install created by an earlier build already has a
+// 0755 ~/.hobby, and only an explicit chmod fixes it. Both calls together
+// make the mode true on a fresh install and on an upgrade alike.
+async function ensurePrivateDir(path: string): Promise<void> {
+  await mkdir(path, { recursive: true, mode: HOME_DIR_MODE })
+  await chmod(path, HOME_DIR_MODE)
+}
 
 function flagString(flags: Flags, name: string): string | undefined {
   const value = flags[name]
@@ -89,8 +109,8 @@ export async function resolveTarget(api: Api, target: string): Promise<{ project
 // out as an open question in docs/cli/CLAUDE.md, not something this task
 // resolves.
 export async function cmdInit(io: Io, paths: Paths, config: HobbyConfig, json: boolean): Promise<number> {
-  await mkdir(paths.home, { recursive: true })
-  await mkdir(paths.projectsDir, { recursive: true })
+  await ensurePrivateDir(paths.home)
+  await ensurePrivateDir(paths.projectsDir)
 
   const ctx = createDaemonContext({ paths, config })
   let report
@@ -137,8 +157,8 @@ export async function cmdInit(io: Io, paths: Paths, config: HobbyConfig, json: b
 // throws before ever binding (a live daemon already on the socket, a port
 // already bound), in which case that throw propagates normally.
 export async function cmdDaemon(io: Io, paths: Paths, config: HobbyConfig): Promise<number> {
-  await mkdir(paths.home, { recursive: true })
-  await mkdir(paths.projectsDir, { recursive: true })
+  await ensurePrivateDir(paths.home)
+  await ensurePrivateDir(paths.projectsDir)
 
   const ctx = createDaemonContext({ paths, config })
   await reconcile(ctx)

@@ -11,6 +11,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import {
+  DEFAULT_PORT_BIND,
   HobbyError,
   validateName,
   type Project,
@@ -246,7 +247,15 @@ function renderCompose(resources: Resource[]): string {
     lines.push(`      POSTGRES_PASSWORD: ${cfg.password}`)
     lines.push(`      POSTGRES_DB: ${cfg.database}`)
     lines.push('    ports:')
-    lines.push(`      - "${cfg.hostPort}:5432"`)
+    // With the same explicit loopback bind the daemon itself publishes this
+    // container with (packages/core/src/docker.ts's buildCreateArgs, and
+    // DEFAULT_PORT_BIND for why). This function's whole contract is that it
+    // is a literal rendering of what Hobbyist actually asked Docker to
+    // create, so a bare "25555:5432" here would hand the departing user a
+    // compose file that publishes their database on every interface when
+    // Hobbyist never did, at exactly the moment they stop having Hobbyist
+    // to notice it for them.
+    lines.push(`      - "${DEFAULT_PORT_BIND}:${cfg.hostPort}:5432"`)
     lines.push('    volumes:')
     lines.push(`      - "${cfg.dataDir}:/var/lib/postgresql/data"`)
   }
@@ -302,8 +311,22 @@ async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string):
   // matching that is cheap insurance against relying on a config snapshot
   // that raced a concurrent change).
   const ready = getResourceOrThrow(ctx, id)
-  const result = await runQuery(ready.config, sql, params)
-  return { status: 200, body: result }
+  // A query is activity, exactly as much as a proxy connection is, and the
+  // hibernator has to hear about it from here because nothing else will:
+  // Studio's Tables, Sql and Schema views never open a proxy connection.
+  // Marked before the query runs so a hibernator tick that starts while a
+  // long query is in flight already sees the resource as active, and again
+  // in the finally so the idle threshold is measured from when the query
+  // finished rather than from when it started. The finally also covers a
+  // failed query: a statement that errored is still someone using this
+  // database right now.
+  ctx.activity.touch(ready.id)
+  try {
+    const result = await runQuery(ready.config, sql, params)
+    return { status: 200, body: result }
+  } finally {
+    ctx.activity.touch(ready.id)
+  }
 }
 
 function ejectRoute(ctx: DaemonContext, name: string): RouteResult {

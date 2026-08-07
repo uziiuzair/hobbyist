@@ -633,7 +633,11 @@ test('POST /v1/projects/:name/eject renders a compose file grounded in the real 
     assert.equal(res.status, 200)
     const body = res.body as { compose: string; dataDirs: string[] }
     assert.match(body.compose, /container_name: hobby-blog-primary/)
-    assert.match(body.compose, /"25555:5432"/)
+    // Loopback-bound, exactly as the daemon itself publishes the container
+    // (packages/core/src/docker.ts): a compose file that published the
+    // database on every interface would hand the departing user a strictly
+    // more exposed setup than the one they were running.
+    assert.match(body.compose, /"127\.0\.0\.1:25555:5432"/)
     assert.match(body.compose, /pgdata:\/var\/lib\/postgresql\/data/)
     assert.deepEqual(body.dataDirs, ['/home/user/.hobby/projects/blog/primary/pgdata'])
   })
@@ -701,8 +705,11 @@ test('reconcile leaves a resource recorded sleeping whose container is stopped, 
   ctx.store.close()
 })
 
-test('reconcile promotes a resource recorded sleeping whose container is actually running, to running', async () => {
+test('reconcile promotes a resource recorded sleeping whose container is running AND whose postgres answers, to running', async () => {
   const ctx = buildContext()
+  // A Postgres that accepts connections. Without this the container being
+  // up proves nothing: see the next test.
+  ctx.probeFactory = () => async (): Promise<boolean> => true
   const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
   const config = samplePostgresConfig()
   const resource = ctx.store.createResource({
@@ -719,6 +726,74 @@ test('reconcile promotes a resource recorded sleeping whose container is actuall
 
   const after = ctx.store.getResource(resource.id)
   assert.equal(after?.state, 'running')
+  // And it now has an idle clock. The activity tracker is in-memory, so a
+  // daemon restart wipes it; without this touch, every resource that
+  // survived a restart reported idleSeconds null forever and the
+  // hibernator skipped it on every single tick, so nothing ever slept
+  // again until a proxy connection happened to open and close.
+  assert.notEqual(ctx.activity.idleSeconds(resource.id), null)
+  ctx.store.close()
+})
+
+test('reconcile does NOT report running for a container that is up before postgres accepts connections', async () => {
+  const ctx = buildContext()
+  // The real case this closes: a container's published port accepts TCP the
+  // instant it starts, while the postmaster is still in crash recovery. The
+  // probe is the only thing that can tell the difference, and a false probe
+  // is exactly what a still-booting Postgres produces.
+  ctx.probeFactory = () => async (): Promise<boolean> => false
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const config = samplePostgresConfig()
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config,
+  })
+  ctx.store.setResourceState(resource.id, 'running')
+  await ctx.runtime.ensureCreated({ name: config.containerName, image: config.image, env: {}, ports: [], binds: [] })
+  await ctx.runtime.start(config.containerName)
+
+  await reconcile(ctx)
+
+  const after = ctx.store.getResource(resource.id)
+  // `starting`, not `running`: the proxy skips the wake for a `running`
+  // target (packages/proxy/src/proxy.ts's handleStartup) and would splice
+  // the client straight into a Postgres that answers `FATAL: the database
+  // system is starting up`. Any state other than `running` makes the proxy
+  // wake it and wait for real readiness first.
+  assert.notEqual(after?.state, 'running')
+  assert.equal(after?.state, 'starting')
+  ctx.store.close()
+})
+
+test('reconcile bounds its readiness probing: an exhausted budget records starting rather than blocking', async () => {
+  const ctx = buildContext()
+  let probeCalls = 0
+  ctx.probeFactory = () => async (): Promise<boolean> => {
+    probeCalls += 1
+    return true
+  }
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const config = samplePostgresConfig()
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config,
+  })
+  ctx.store.setResourceState(resource.id, 'running')
+  await ctx.runtime.ensureCreated({ name: config.containerName, image: config.image, env: {}, ports: [], binds: [] })
+  await ctx.runtime.start(config.containerName)
+
+  // Zero budget: reconcile runs before the daemon accepts a single request,
+  // so it must never spend unbounded time probing a box full of wedged
+  // containers. Spent budget means "do not probe," and not probing means
+  // the conservative answer, never an unverified `running`.
+  await reconcile(ctx, { probeBudgetMs: 0 })
+
+  assert.equal(probeCalls, 0, 'no probe may run once the budget is spent')
+  assert.equal(ctx.store.getResource(resource.id)?.state, 'starting')
   ctx.store.close()
 })
 

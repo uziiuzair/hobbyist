@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, statSync } from 'node:fs'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -23,6 +23,7 @@ import {
   readOperatorCredential,
   SessionStore,
   setOperatorPassword,
+  throttleKey,
   verifyPassword,
   type DaemonContext,
 } from '../src/index.js'
@@ -172,8 +173,13 @@ interface JsonResponse {
   headers: Headers
 }
 
-async function call(baseUrl: string, method: string, path: string, opts: { body?: unknown; cookie?: string } = {}): Promise<JsonResponse> {
-  const headers: Record<string, string> = {}
+async function call(
+  baseUrl: string,
+  method: string,
+  path: string,
+  opts: { body?: unknown; cookie?: string; headers?: Record<string, string> } = {}
+): Promise<JsonResponse> {
+  const headers: Record<string, string> = { ...opts.headers }
   if (opts.body !== undefined) headers['content-type'] = 'application/json'
   if (opts.cookie !== undefined) headers['cookie'] = opts.cookie
   const res = await fetch(`${baseUrl}${path}`, {
@@ -183,6 +189,39 @@ async function call(baseUrl: string, method: string, path: string, opts: { body?
   })
   const text = await res.text()
   return { status: res.status, body: text.length > 0 ? JSON.parse(text) : undefined, headers: res.headers }
+}
+
+// fetch() runs its argument through the WHATWG URL parser, which normalizes
+// the path before a byte reaches the wire: `/.//v1/projects` would leave as
+// `//v1/projects` and `/v1/../v1/projects` as `/v1/projects`. That is
+// exactly the normalization these tests must NOT rely on, because a real
+// attacker writes the request line by hand and Caddy may or may not clean it
+// up first. node:http's `path` option is passed through verbatim, so this
+// helper is the only way to prove the gate is correct on its own.
+async function rawCall(
+  baseUrl: string,
+  method: string,
+  path: string,
+  opts: { cookie?: string; headers?: Record<string, string> } = {}
+): Promise<{ status: number; body: unknown }> {
+  const url = new URL(baseUrl)
+  return new Promise((resolve, reject) => {
+    const headers: Record<string, string> = { ...opts.headers }
+    if (opts.cookie !== undefined) headers['cookie'] = opts.cookie
+    const req = httpRequest(
+      { hostname: url.hostname, port: url.port, method, path, headers },
+      (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (chunk: Buffer) => chunks.push(chunk))
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8')
+          resolve({ status: res.statusCode ?? 0, body: text.length > 0 ? JSON.parse(text) : undefined })
+        })
+      }
+    )
+    req.on('error', reject)
+    req.end()
+  })
 }
 
 function cookieFrom(res: JsonResponse): string {
@@ -301,6 +340,95 @@ test('GET /v1/health stays reachable on the studio-fronted listener without a se
   })
 })
 
+// --- the gate itself: path normalization ---------------------------------
+//
+// The bypass these cover, demonstrated against running code before the fix:
+// the gate asked `url.pathname.startsWith('/v1/')` while the control plane's
+// own dispatch (packages/cli/src/daemon/routes.ts) routes on
+// `pathname.split('/').filter(s => s.length > 0)`. `GET /.//v1/projects` has
+// a pathname of `//v1/projects`, which fails the prefix test and was waved
+// through, and then dispatch dropped the empty segment and served
+// /v1/projects anyway. GET /v1/projects returned 401 while
+// GET /.//v1/projects returned 200, and POST /.//v1/projects created a
+// project. The same door reached project deletion, arbitrary SQL as
+// superuser (POST /v1/resources/:id/query) and the routes that return the
+// cleartext superuser password.
+
+const BYPASS_PATHS: Array<[string, string]> = [
+  ['/.//v1/projects', 'a single-dot segment, the exact shape that was proven exploitable'],
+  ['/v1/../v1/projects', 'a dot-dot segment that resolves back to the same route'],
+  ['/v1/projects/', 'a trailing slash, which is the same route to dispatch'],
+  ['/%2e//v1/projects', 'a percent-encoded dot, decoded by the URL parser before the gate ever sees it'],
+  ['//v1/projects', 'a doubled leading slash'],
+  ['/v1//projects', 'a doubled interior slash'],
+]
+
+test('every path variant that dispatch still routes to /v1/projects requires a session', async () => {
+  const ctx = buildContext()
+  await setOperatorPassword(ctx.paths, 'correct horse battery staple')
+
+  await withStudioServer(ctx, async (baseUrl) => {
+    for (const [path, why] of BYPASS_PATHS) {
+      const res = await rawCall(baseUrl, 'GET', path)
+      assert.equal(res.status, 401, `GET ${path} (${why}) must be rejected, got ${res.status}`)
+      const body = res.body as { error: { code: string } }
+      assert.equal(body.error.code, 'unauthorized')
+    }
+  })
+})
+
+test('POST /.//v1/projects without a session neither succeeds nor creates a project', async () => {
+  const ctx = buildContext()
+  await setOperatorPassword(ctx.paths, 'correct horse battery staple')
+
+  await withStudioServer(ctx, async (baseUrl) => {
+    const res = await rawCall(baseUrl, 'POST', '/.//v1/projects', {
+      headers: { 'content-type': 'application/json' },
+    })
+    assert.equal(res.status, 401)
+    // The status alone would not prove the write never happened, so assert
+    // the store directly: this is the difference between a rejected request
+    // and a rejected request that still had a side effect.
+    assert.deepEqual(ctx.store.listProjects(), [])
+  })
+})
+
+test('the same normalized path IS served, with a session, so the gate matches what dispatch routes', async () => {
+  const ctx = buildContext()
+  await setOperatorPassword(ctx.paths, 'correct horse battery staple')
+
+  await withStudioServer(ctx, async (baseUrl) => {
+    const login = await call(baseUrl, 'POST', '/studio/login', {
+      body: { password: 'correct horse battery staple' },
+    })
+    const cookie = cookieFrom(login)
+
+    // Proves the gate is not merely blanket-denying odd-looking paths: it
+    // resolves them to the same route dispatch does, and then applies the
+    // session check to that. A gate that got this wrong in the other
+    // direction (denying a path the router serves) would be a bug too.
+    const res = await rawCall(baseUrl, 'GET', '/.//v1/projects', { cookie })
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.body, { projects: [] })
+  })
+})
+
+test('an unmapped path is denied by default rather than passed through', async () => {
+  const ctx = buildContext()
+  await setOperatorPassword(ctx.paths, 'correct horse battery staple')
+
+  await withStudioServer(ctx, async (baseUrl) => {
+    // Nothing under /v2/ or / exists today. The old gate let both straight
+    // through to the control plane unauthenticated because they were not
+    // under the /v1/ prefix; the point of default-deny is that a route
+    // added later cannot be born unauthenticated by accident.
+    for (const path of ['/v2/projects', '/', '/anything']) {
+      const res = await rawCall(baseUrl, 'GET', path)
+      assert.equal(res.status, 401, `GET ${path} must require a session`)
+    }
+  })
+})
+
 test('repeated failed logins from the same source eventually get throttled', async () => {
   const ctx = buildContext()
   await setOperatorPassword(ctx.paths, 'correct horse battery staple')
@@ -319,6 +447,51 @@ test('repeated failed logins from the same source eventually get throttled', asy
       }
     }
     assert.equal(lastStatus, 401)
+  })
+})
+
+// --- the login throttle's key --------------------------------------------
+
+test('throttleKey takes the last X-Forwarded-For hop, the one the trusted proxy wrote', () => {
+  // Caddy appends the address of the peer it received the request from, so
+  // a client that sends `X-Forwarded-For: 10.0.0.1` has its own real
+  // address appended after it. Reading the first element read a value the
+  // remote client chose, which let an attacker pick a fresh throttle key
+  // on every request so the backoff never engaged at all.
+  assert.equal(throttleKey('10.0.0.1, 203.0.113.9', '127.0.0.1'), '203.0.113.9')
+  assert.equal(throttleKey('10.0.0.1,10.0.0.2, 203.0.113.9', '127.0.0.1'), '203.0.113.9')
+  // Repeated headers, which node may surface as an array.
+  assert.equal(throttleKey(['10.0.0.1', '203.0.113.9'], '127.0.0.1'), '203.0.113.9')
+  // No proxy in front: the socket's own remote address is the only honest
+  // answer.
+  assert.equal(throttleKey(undefined, '198.51.100.4'), '198.51.100.4')
+  assert.equal(throttleKey('', '198.51.100.4'), '198.51.100.4')
+  assert.equal(throttleKey('   ', '198.51.100.4'), '198.51.100.4')
+  assert.equal(throttleKey(undefined, undefined), 'unknown')
+})
+
+test('a client rotating its own X-Forwarded-For value still gets throttled', async () => {
+  const ctx = buildContext()
+  await setOperatorPassword(ctx.paths, 'correct horse battery staple')
+
+  await withStudioServer(ctx, async (baseUrl) => {
+    let throttled = false
+    for (let i = 0; i < 8; i += 1) {
+      // Exactly what Caddy forwards when a remote attacker sets the header
+      // themselves and rotates it every request: their forged value first,
+      // their real address appended last.
+      const res = await call(baseUrl, 'POST', '/studio/login', {
+        body: { password: 'wrong' },
+        headers: { 'x-forwarded-for': `10.0.0.${i}, 203.0.113.9` },
+      })
+      assert.equal(res.status, 401)
+      const body = res.body as { error: { hint?: string } }
+      if (body.error.hint !== undefined && /retry in/.test(body.error.hint)) {
+        throttled = true
+        break
+      }
+    }
+    assert.equal(throttled, true, 'rotating the client-supplied hop must not reset the backoff')
   })
 })
 

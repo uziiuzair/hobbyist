@@ -21,6 +21,7 @@ import {
   type ComputeRuntime,
   type HobbyConfig,
   type Paths,
+  type PostgresConfig,
   type Resource,
   type Store,
 } from '@hobby.sh/core'
@@ -33,6 +34,15 @@ export interface DaemonContext {
   paths: Paths
   config: HobbyConfig
   activity: ActivityTracker
+  // Optional test seam, identical in shape and reasoning to
+  // PgDeps.probeFactory (packages/pg/src/postgres.ts) and read by exactly
+  // that code, since a DaemonContext structurally IS a PgDeps. Declaring it
+  // here is what lets a daemon-level test (routes, hibernator, reconcile)
+  // simulate a Postgres that genuinely answers, rather than having every
+  // wake run out its readiness timeout against a fake runtime with nothing
+  // listening. reconcile.ts reads the same field for its own readiness
+  // probe. Production never sets it and gets pgProbe, a real connection.
+  probeFactory?: (config: PostgresConfig) => () => Promise<boolean>
 }
 
 // A convenience factory for the real, production wiring: opens the real

@@ -6,6 +6,7 @@
 // expected and not suppressed.
 
 import { randomUUID } from 'node:crypto'
+import { chmodSync, existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { HobbyError } from './errors.js'
 import type {
@@ -109,10 +110,34 @@ function rowToResource(row: ResourceRow): Resource {
   }
 }
 
+// Owner-only. Every resource row's `config` column is plaintext JSON
+// holding that database's superuser password (see PostgresConfig.password),
+// and sqlite creates its files 0644, which makes every password on the box
+// readable by every local user. Same reasoning that already gives the
+// daemon socket and the studio credential file 0600. The -wal and -shm
+// sidecars carry the same rows in flight, so they get the same mode; both
+// exist by the time this runs, because the schema exec above has already
+// written through the WAL.
+const STATE_FILE_MODE = 0o600
+
+function restrictStateFiles(path: string): void {
+  // ':memory:' (every test's store) is not a file at all, and neither are
+  // sqlite's other special names; chmod on them would throw ENOENT.
+  if (path === ':memory:' || path === '') {
+    return
+  }
+  for (const file of [path, `${path}-wal`, `${path}-shm`]) {
+    if (existsSync(file)) {
+      chmodSync(file, STATE_FILE_MODE)
+    }
+  }
+}
+
 export function openStore(path: string): Store {
   const db = new DatabaseSync(path)
   db.exec('PRAGMA journal_mode = WAL;')
   db.exec(SCHEMA)
+  restrictStateFiles(path)
 
   function getProject(id: ProjectId): Project | null {
     const row = db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as

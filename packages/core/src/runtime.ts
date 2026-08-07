@@ -5,11 +5,31 @@
 
 export type ContainerId = string
 
+// The host address a published port binds to when a spec does not name one.
+// Loopback, never 0.0.0.0: a Postgres container published on every
+// interface is directly reachable by anyone who can route to the box, with
+// the superuser password sitting in the store, which bypasses the
+// wake-on-connect proxy and every guarantee that hangs off it. Docker
+// installs its own iptables rules ahead of the host firewall, so a `ufw
+// deny` does not close that hole either; the bind address is the only thing
+// that does. The daemon's own Studio listener already reasons this way, see
+// packages/cli/src/daemon/server.ts's 127.0.0.1 listen call.
+export const DEFAULT_PORT_BIND = '127.0.0.1'
+
+export interface PortMapping {
+  host: number
+  container: number
+  // Host address to publish on. Omitted means DEFAULT_PORT_BIND, applied at
+  // the emit site (packages/core/src/docker.ts's buildCreateArgs). Set this
+  // explicitly only for a port genuinely meant to be reachable off the box.
+  bind?: string
+}
+
 export interface ContainerSpec {
   name: string
   image: string
   env: Record<string, string>
-  ports: Array<{ host: number; container: number }>
+  ports: PortMapping[]
   binds: Array<{ host: string; container: string }>
   network?: string
 }
@@ -51,7 +71,15 @@ export function createFakeRuntime(): ComputeRuntime & {
     },
 
     async ensureCreated(spec: ContainerSpec): Promise<ContainerId> {
-      specs.set(spec.name, spec)
+      // Stored with the same default bind address the real adapter emits
+      // (docker.ts's buildCreateArgs), so a test reading _specs sees what
+      // would actually be published rather than the pre-default shape. A
+      // fake that hides the default would make it possible to regress the
+      // loopback bind without a single test noticing.
+      specs.set(spec.name, {
+        ...spec,
+        ports: spec.ports.map((port) => ({ ...port, bind: port.bind ?? DEFAULT_PORT_BIND })),
+      })
       if (!state.has(spec.name)) {
         state.set(spec.name, { exists: true, running: false, exitCode: null })
       }

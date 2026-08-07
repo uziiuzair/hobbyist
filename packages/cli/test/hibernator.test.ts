@@ -15,6 +15,8 @@
 
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -29,9 +31,9 @@ import {
   type ResourceState,
   type Store,
 } from '@hobby.sh/core'
-import type { ActivityGuardResult } from '@hobby.sh/pg'
+import { startPostgres, stopPostgres, type ActivityGuardResult } from '@hobby.sh/pg'
 import { ActivityTracker } from '@hobby.sh/proxy'
-import { createProxyDeps, shouldSleep, startHibernator, type DaemonContext } from '../src/index.js'
+import { createApp, createProxyDeps, shouldSleep, startHibernator, type DaemonContext } from '../src/index.js'
 
 function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
   return {
@@ -531,6 +533,159 @@ test('tick: a resource whose state changed away from running while the guard was
     assert.equal(ctx.store.getResource(resourceId)?.state, 'starting', 'the tick must not stomp a state change that happened mid-guard')
   } finally {
     await hibernator.stop()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Activity has one meaning, for the proxy, the control API and the
+// hibernator alike. Before this, ActivityTracker.open() was called from
+// exactly one place (the proxy's splice), so a resource woken by `hobby
+// wake` or by Studio was never reported to the tracker at all: idleSeconds
+// returned null forever, the hibernator read null as "skip," and that
+// resource ran until the daemon died. The mirror of it: the idle clock was
+// never cleared when a resource stopped, so a resource that had once cycled
+// through the proxy could be woken and then slept again on the very next
+// tick, on an idle time measured against the previous run.
+// ---------------------------------------------------------------------------
+
+test('a wake that came from the CLI or Studio, with no proxy connection at all, eventually sleeps', async () => {
+  const clock = { nowMs: 1_000_000 }
+  const activity = new ActivityTracker(() => clock.nowMs)
+  const ctx = buildContext(createFakeRuntime(), activity)
+  // A Postgres that actually answers, so startPostgres reaches `running`
+  // rather than running out its readiness timeout.
+  ctx.probeFactory = () => async (): Promise<boolean> => true
+
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 60 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig({ hostPort: 25569 }),
+  })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+
+  // The wake path `hobby wake` and Studio both use (context.ts's
+  // getOrCreateWake, which POST /v1/resources/:id/start reaches through
+  // startPostgres). No proxy connection is ever opened here, which is the
+  // whole point: this is the case that used to run forever.
+  await startPostgres(ctx, resource)
+  assert.equal(ctx.store.getResource(resource.id)?.state, 'running')
+  assert.equal(activity.idleSeconds(resource.id), 0, 'a wake must start the idle clock at the moment of the wake')
+
+  const guard = async (): Promise<ActivityGuardResult> => 'idle'
+  const { sleepFor, step } = createStepController()
+  const hibernator = startHibernator(ctx, { intervalMs: 1, now: () => clock.nowMs, sleepFor, checkActiveQuery: guard })
+  try {
+    // Not yet: the resource has only been idle for 30 of its 60 seconds.
+    clock.nowMs += 30_000
+    await step()
+    assert.equal(ctx.store.getResource(resource.id)?.state, 'running', 'must not sleep before its own threshold')
+
+    // Past the threshold now.
+    clock.nowMs += 40_000
+    await step()
+    assert.equal(ctx.store.getResource(resource.id)?.state, 'sleeping')
+  } finally {
+    await hibernator.stop()
+  }
+})
+
+test('stopping a resource clears its idle clock, so the next wake is not slept on the previous run\'s idle time', async () => {
+  const clock = { nowMs: 1_000_000 }
+  const activity = new ActivityTracker(() => clock.nowMs)
+  const ctx = buildContext(createFakeRuntime(), activity)
+  ctx.probeFactory = () => async (): Promise<boolean> => true
+
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 60 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig({ hostPort: 25570 }),
+  })
+  ctx.store.setResourceState(resource.id, 'running')
+
+  // A full proxy connection, opened and closed: the tracker now holds an
+  // idle timestamp for this resource.
+  activity.open(resource.id)
+  activity.close(resource.id)
+  clock.nowMs += 10_000_000 // absurdly long ago
+
+  await stopPostgres(ctx, resource)
+  assert.equal(activity.idleSeconds(resource.id), null, 'a stopped resource has no idle clock to reason from')
+
+  // Now something wakes it again (Studio's query route, `hobby wake`).
+  const woken = ctx.store.getResource(resource.id)
+  assert.ok(woken !== null)
+  await startPostgres(ctx, woken)
+  assert.equal(ctx.store.getResource(resource.id)?.state, 'running')
+
+  const guard = async (): Promise<ActivityGuardResult> => 'idle'
+  const { sleepFor, step } = createStepController()
+  const hibernator = startHibernator(ctx, { intervalMs: 1, now: () => clock.nowMs, sleepFor, checkActiveQuery: guard })
+  try {
+    await step()
+    assert.equal(
+      ctx.store.getResource(resource.id)?.state,
+      'running',
+      'the very next tick must not sleep a just-woken resource on an idle time from its previous run'
+    )
+  } finally {
+    await hibernator.stop()
+  }
+})
+
+test('a query through the control API counts as activity, so the next tick does not sleep the resource', async () => {
+  const clock = { nowMs: 1_000_000 }
+  const activity = new ActivityTracker(() => clock.nowMs)
+  const ctx = buildContext(createFakeRuntime(), activity)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 60 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig({ hostPort: 25571 }),
+  })
+  ctx.store.setResourceState(resource.id, 'running')
+
+  // Long idle: on the numbers alone this resource is a sleep candidate.
+  activity.open(resource.id)
+  activity.close(resource.id)
+  clock.nowMs += 100_000
+
+  const server = createServer(createApp(ctx))
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const address = server.address() as AddressInfo
+
+  const guard = async (): Promise<ActivityGuardResult> => 'idle'
+  const { sleepFor, step } = createStepController()
+  const hibernator = startHibernator(ctx, { intervalMs: 1, now: () => clock.nowMs, sleepFor, checkActiveQuery: guard })
+  try {
+    // The query itself fails: nothing is listening on the fake resource's
+    // host port, and the resource is already `running` so no wake is
+    // attempted. That is deliberate. A failed statement is still someone
+    // using this database right now, and the marking must not depend on the
+    // query succeeding, or a user's failing query would be the one thing
+    // that lets the database be slept out from under them.
+    const res = await fetch(`http://127.0.0.1:${address.port}/v1/resources/${resource.id}/query`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sql: 'SELECT 1' }),
+    })
+    await res.text()
+
+    assert.equal(activity.idleSeconds(resource.id), 0, 'a query must reset the idle clock to this instant')
+
+    await step()
+    assert.equal(
+      ctx.store.getResource(resource.id)?.state,
+      'running',
+      'a resource queried a moment ago must not be slept on the very next tick'
+    )
+  } finally {
+    await hibernator.stop()
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
   }
 })
 
