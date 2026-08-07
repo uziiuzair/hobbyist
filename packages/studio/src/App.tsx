@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import * as api from './api.js'
 import { navigate, useHashRoute } from './lib/router.js'
+import { Shell, Crumb } from './components/Shell.js'
+import type { RailProject } from './components/Shell.js'
 import { Login } from './views/Login.js'
 import { Projects } from './views/Projects.js'
 import { Project } from './views/Project.js'
@@ -14,12 +16,49 @@ export function App() {
   const [session, setSession] = useState<SessionState>('checking')
   const segments = useHashRoute()
 
+  // The rail and every page read one copy of the project list, so the
+  // switcher can never disagree with the page it is sitting next to.
+  const [rows, setRows] = useState<RailProject[] | null>(null)
+  const [freeBytes, setFreeBytes] = useState<number | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+
+  const load = useCallback(() => {
+    api
+      .listProjects()
+      .then(async ({ projects }) => {
+        const detailed = await Promise.all(
+          projects.map(async (project): Promise<RailProject> => {
+            try {
+              const detail = await api.getProject(project.name)
+              return { project: detail.project, resources: detail.resources }
+            } catch {
+              return { project, resources: [] }
+            }
+          }),
+        )
+        setRows(detailed)
+        setLoadError(null)
+      })
+      .catch((err: unknown) => {
+        setRows([])
+        setLoadError(err instanceof Error ? err.message : String(err))
+      })
+    api
+      .preflight()
+      .then((report) => setFreeBytes(report.filesystem.freeBytes))
+      .catch(() => setFreeBytes(null))
+  }, [])
+
   useEffect(() => {
     api
       .session()
       .then((result) => setSession(result.authenticated ? 'authenticated' : 'anonymous'))
       .catch(() => setSession('anonymous'))
   }, [])
+
+  useEffect(() => {
+    if (session === 'authenticated') load()
+  }, [session, load])
 
   const handleLoggedIn = useCallback(() => {
     setSession('authenticated')
@@ -30,106 +69,110 @@ export function App() {
     api
       .logout()
       .catch(() => {
-        // Logging out is best-effort client side regardless: drop the
-        // local session view so the login gate reappears either way.
+        // Best effort: drop the local session view either way so the gate returns.
       })
       .finally(() => {
         setSession('anonymous')
+        setRows(null)
         navigate('/')
       })
   }, [])
 
   if (session === 'checking') {
     return (
-      <div className="login-shell">
-        <span className="hint-text">Loading Studio...</span>
+      <div className="login-wrap">
+        <span className="dim">loading</span>
       </div>
     )
   }
 
-  if (session === 'anonymous') {
-    return <Login onLoggedIn={handleLoggedIn} />
-  }
+  if (session === 'anonymous') return <Login onLoggedIn={handleLoggedIn} />
+
+  const projectName = segments[0] === 'projects' ? segments[1] : undefined
+  const resourceName = segments[2] === 'resources' ? segments[3] : undefined
+  const tab = segments[4]
 
   return (
-    <div className="app-shell">
-      <Topbar segments={segments} onLogout={handleLogout} />
-      <div className="main">
-        <Router segments={segments} />
-      </div>
-    </div>
+    <Shell
+      projects={rows ?? []}
+      currentProject={projectName}
+      currentSection={projectName === undefined ? undefined : 'databases'}
+      crumbs={
+        <>
+          <Crumb href="#/" here={projectName === undefined}>
+            projects
+          </Crumb>
+          {projectName !== undefined && (
+            <Crumb
+              href={`#/projects/${encodeURIComponent(projectName)}`}
+              here={resourceName === undefined}
+            >
+              {projectName}
+            </Crumb>
+          )}
+          {resourceName !== undefined && <Crumb here>{resourceName}</Crumb>}
+        </>
+      }
+      onLogout={handleLogout}
+    >
+      {loadError !== null && (
+        <div className="page" style={{ paddingBottom: 0 }}>
+          <div className="notice notice-danger">{loadError}</div>
+        </div>
+      )}
+      {rows === null ? (
+        <div className="page">
+          <span className="dim">loading</span>
+        </div>
+      ) : (
+        <Route
+          segments={segments}
+          rows={rows}
+          freeBytes={freeBytes}
+          onChanged={load}
+          projectName={projectName}
+          resourceName={resourceName}
+          tab={tab}
+        />
+      )}
+    </Shell>
   )
 }
 
-function Topbar({ segments, onLogout }: { segments: string[]; onLogout: () => void }) {
-  const project = segments[0] === 'projects' ? segments[1] : undefined
-  const resource = segments[2] === 'resources' ? segments[3] : undefined
-
-  return (
-    <header className="topbar">
-      <a href="#/" className="topbar-brand">
-        Hobbyist Studio
-      </a>
-      <nav className="topbar-crumbs">
-        {project !== undefined && (
-          <>
-            <span>/</span>
-            <a href={`#/projects/${encodeURIComponent(project)}`}>{project}</a>
-          </>
-        )}
-        {resource !== undefined && (
-          <>
-            <span>/</span>
-            <span>{resource}</span>
-          </>
-        )}
-      </nav>
-      <div className="topbar-spacer" />
-      <button type="button" className="btn btn-small" onClick={onLogout}>
-        Log out
-      </button>
-    </header>
-  )
-}
-
-// Six views, matched by hand against a small, fixed set of hash shapes.
-// Resources are addressed by name in the URL for legibility and resolved
-// to an id by the view itself (via getProject), the same way the CLI
-// resolves project/resource targets; see docs/cli/specs.
-function Router({ segments }: { segments: string[] }) {
-  if (segments.length === 0) {
-    return <Projects />
+function Route({
+  rows,
+  freeBytes,
+  onChanged,
+  projectName,
+  resourceName,
+  tab,
+  segments,
+}: {
+  rows: RailProject[]
+  freeBytes: number | null
+  onChanged: () => void
+  projectName?: string
+  resourceName?: string
+  tab?: string
+  segments: string[]
+}) {
+  if (projectName === undefined) {
+    return <Projects rows={rows} freeBytes={freeBytes} onChanged={onChanged} />
   }
 
-  if (segments[0] === 'projects' && segments[1] !== undefined) {
-    const projectName = segments[1]
-
-    if (segments.length === 2) {
-      return <Project projectName={projectName} />
-    }
-
-    if (segments[2] === 'resources' && segments[3] !== undefined) {
-      const resourceName = segments[3]
-      const tab = segments[4]
-
-      if (tab === 'tables') {
-        return <Tables projectName={projectName} resourceName={resourceName} tableName={segments[5]} />
-      }
-      if (tab === 'sql') {
-        return <Sql projectName={projectName} resourceName={resourceName} />
-      }
-      if (tab === 'schema') {
-        return <Schema projectName={projectName} resourceName={resourceName} />
-      }
-    }
+  if (resourceName === undefined) {
+    return <Project projectName={projectName} onChanged={onChanged} />
   }
 
-  return (
-    <div className="empty-state">
-      Nothing here.
-      <div style={{ marginTop: 8 }}>
-        <a href="#/">Back to projects</a>
-      </div>
-    </div>
-  )
+  if (tab === 'tables') {
+    return <Tables projectName={projectName} resourceName={resourceName} tableName={segments[5]} />
+  }
+  if (tab === 'sql') {
+    return <Sql projectName={projectName} resourceName={resourceName} />
+  }
+  if (tab === 'schema') {
+    return <Schema projectName={projectName} resourceName={resourceName} />
+  }
+
+  return <Project projectName={projectName} onChanged={onChanged} />
 }

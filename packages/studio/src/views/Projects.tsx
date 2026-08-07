@@ -1,155 +1,241 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import type { Project, Resource } from '@hobby.sh/core'
 import * as api from '../api.js'
 import { navigate } from '../lib/router.js'
-import { ResourceBadge, formatBytes } from '../components/ResourceBadge.js'
+import { formatBytes, formatSince, readStats } from '../lib/format.js'
+import { State, summarise } from '../components/State.js'
+import type { RailProject } from '../components/Shell.js'
 
-// GET /v1/projects returns bare Project rows: no resource, no state, no
-// size, no connection count (see packages/core/src/types.ts). Everything
-// this view needs beyond the name comes from GET /v1/projects/:name, one
-// call per project, run in parallel. That is an existing route used N+1
-// times, not an invented one; see the report for why a list-shaped route
-// that embeds a resource summary would be worth adding once project counts
-// grow past a screenful.
-interface ProjectRow {
-  project: Project
-  resources: Resource[]
-  error?: string
+interface Props {
+  rows: RailProject[]
+  freeBytes: number | null
+  onChanged: () => void
 }
 
-// sizeBytes and connectionCount are not yet part of Resource's wire shape
-// (packages/core/src/types.ts has no such fields). Read them defensively
-// off the JSON in case the daemon starts sending them before core's type
-// catches up; render a dash otherwise. See the report.
-interface ResourceStats {
-  sizeBytes?: number
-  connectionCount?: number
-}
+type Filter = 'all' | 'awake' | 'sleeping'
 
-function asStats(resource: Resource): ResourceStats {
-  return resource as unknown as ResourceStats
-}
-
-export function Projects() {
-  const [rows, setRows] = useState<ProjectRow[] | null>(null)
-  const [loadError, setLoadError] = useState<string | null>(null)
+export function Projects({ rows, freeBytes, onChanged }: Props) {
+  const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState<Filter>('all')
   const [creating, setCreating] = useState(false)
-  const [newName, setNewName] = useState('')
-  const [createError, setCreateError] = useState<string | null>(null)
+  const [name, setName] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
 
-  const load = useCallback(() => {
-    setLoadError(null)
-    api
-      .listProjects()
-      .then(async ({ projects }) => {
-        const detailed = await Promise.all(
-          projects.map(async (project): Promise<ProjectRow> => {
-            try {
-              const detail = await api.getProject(project.name)
-              return { project: detail.project, resources: detail.resources }
-            } catch (err) {
-              return { project, resources: [], error: err instanceof api.ApiError ? err.message : 'failed to load' }
-            }
-          })
-        )
-        setRows(detailed)
-      })
-      .catch((err: unknown) => {
-        setLoadError(err instanceof api.ApiError ? err.message : 'could not reach the daemon')
-        setRows([])
-      })
-  }, [])
+  const visible = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    return rows.filter((row) => {
+      if (needle.length > 0 && !row.project.name.toLowerCase().includes(needle)) return false
+      const awake = row.resources.some((r) => r.state === 'running')
+      if (filter === 'awake') return awake
+      if (filter === 'sleeping') return !awake
+      return true
+    })
+  }, [rows, query, filter])
 
-  useEffect(() => {
-    load()
-  }, [load])
+  const totals = useMemo(() => {
+    const resources = rows.flatMap((row) => row.resources)
+    return {
+      databases: resources.length,
+      awake: resources.filter((r) => r.state === 'running').length,
+      bytes: resources.reduce((sum, r) => sum + (readStats(r).sizeBytes ?? 0), 0),
+    }
+  }, [rows])
 
-  async function handleCreate(event: FormEvent): Promise<void> {
+  function submit(event: FormEvent): void {
     event.preventDefault()
-    const name = newName.trim()
-    if (name.length === 0 || creating) return
-    setCreating(true)
-    setCreateError(null)
-    try {
-      const { project } = await api.createProject(name)
-      // Mirrors `hobby new`: a project alone is not the promise, a
-      // project with a ready postgres resource is. See docs/cli/specs.
-      await api.createResource(project.name, 'primary')
-      setNewName('')
-      load()
-      navigate(`/projects/${encodeURIComponent(project.name)}`)
-    } catch (err) {
-      setCreateError(err instanceof api.ApiError ? err.message : 'failed to create project')
-    } finally {
-      setCreating(false)
-    }
-  }
-
-  async function handleCopyConnection(resource: Resource): Promise<void> {
-    try {
-      const { connectionString } = await api.connectionString(resource.id)
-      await navigator.clipboard.writeText(connectionString)
-    } catch {
-      // Clipboard access can be denied by the browser; there is nothing
-      // useful to recover into beyond leaving the string uncopied.
-    }
+    const trimmed = name.trim()
+    if (trimmed.length === 0) return
+    setBusy(true)
+    setError(null)
+    api
+      .createProject(trimmed)
+      .then(() => api.createResource(trimmed, 'primary'))
+      .then(() => {
+        setCreating(false)
+        setName('')
+        onChanged()
+        navigate(`/projects/${encodeURIComponent(trimmed)}`)
+      })
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setBusy(false))
   }
 
   return (
-    <div className="stack">
-      <form className="card row" onSubmit={(event) => void handleCreate(event)}>
-        <div className="field" style={{ flex: 1 }}>
-          <label htmlFor="new-project">New project</label>
-          <input
-            id="new-project"
-            className="input"
-            placeholder="project name"
-            value={newName}
-            onChange={(event) => setNewName(event.target.value)}
-          />
+    <div className="page">
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">projects</h1>
+          <p className="page-sub">
+            {rows.length === 0
+              ? 'nothing here yet'
+              : `${rows.length} project${rows.length === 1 ? '' : 's'}, ${totals.awake} awake`}
+          </p>
         </div>
-        <button type="submit" className="btn btn-primary" disabled={creating || newName.trim().length === 0}>
-          {creating ? 'Creating...' : 'Create'}
-        </button>
-      </form>
-      {createError !== null && <div className="error-banner">{createError}</div>}
-      {loadError !== null && <div className="error-banner">{loadError}</div>}
+        <div className="page-actions">
+          <button type="button" className="btn btn-primary" onClick={() => setCreating((v) => !v)}>
+            new project
+          </button>
+        </div>
+      </div>
 
-      {rows === null ? (
-        <div className="hint-text">Loading projects...</div>
-      ) : rows.length === 0 ? (
-        <div className="empty-state">No projects yet. Create one above.</div>
-      ) : (
-        <div className="project-grid">
-          {rows.map(({ project, resources, error }) => {
-            const primary = resources[0]
-            const stats = primary !== undefined ? asStats(primary) : undefined
-            return (
-              <div key={project.id} className="card project-card-wrap">
-                <a className="project-card" href={`#/projects/${encodeURIComponent(project.name)}`}>
-                  <div className="project-card-name">{project.name}</div>
-                  <div className="project-card-meta">
-                    {primary !== undefined ? (
-                      <ResourceBadge state={primary.state} />
-                    ) : (
-                      <span className="hint-text">no resources</span>
-                    )}
-                    <span>{stats?.sizeBytes !== undefined ? formatBytes(stats.sizeBytes) : '-'}</span>
-                    <span>{stats?.connectionCount !== undefined ? `${stats.connectionCount} conn` : '- conn'}</span>
-                  </div>
-                  {error !== undefined && <div className="error-text">{error}</div>}
-                </a>
-                {primary !== undefined && (
-                  <button type="button" className="btn btn-small" onClick={() => void handleCopyConnection(primary)}>
-                    Copy connection string
-                  </button>
-                )}
-              </div>
-            )
-          })}
-        </div>
+      {creating && (
+        <form className="panel" onSubmit={submit} style={{ marginBottom: 16, maxWidth: 460 }}>
+          <div className="field">
+            <label htmlFor="new-project">name</label>
+            <input
+              id="new-project"
+              className="input"
+              value={name}
+              autoFocus
+              placeholder="blog"
+              onChange={(e) => setName(e.target.value)}
+            />
+            <p className="dim" style={{ margin: 0, fontSize: 12.5 }}>
+              lowercase letters, numbers and dashes. this becomes the database name in your
+              connection string.
+            </p>
+          </div>
+          {error !== null && <div className="notice notice-danger" style={{ marginTop: 10 }}>{error}</div>}
+          <div className="row" style={{ marginTop: 12 }}>
+            <button type="submit" className="btn btn-primary" disabled={busy || name.trim().length === 0}>
+              {busy && <span className="spinner" />}
+              {busy ? 'creating' : 'create'}
+            </button>
+            <button type="button" className="btn btn-ghost" onClick={() => setCreating(false)} disabled={busy}>
+              cancel
+            </button>
+          </div>
+        </form>
       )}
+
+      <div className="projects-layout">
+        <div>
+          {rows.length > 0 && (
+            <div className="row" style={{ marginBottom: 12 }}>
+              <div className="search" style={{ flex: 1, maxWidth: 320 }}>
+                <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
+                  <circle cx="5.6" cy="5.6" r="3.9" stroke="currentColor" strokeWidth="1.3" />
+                  <path d="M8.6 8.6 11.3 11.3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                </svg>
+                <input
+                  className="input"
+                  placeholder="search projects"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  aria-label="search projects"
+                />
+              </div>
+              <div className="segmented" role="group" aria-label="filter by state">
+                {(['all', 'awake', 'sleeping'] as Filter[]).map((value) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className="segment"
+                    aria-pressed={filter === value}
+                    onClick={() => setFilter(value)}
+                  >
+                    {value}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {rows.length === 0 ? (
+            <div className="empty">
+              <h3>no projects yet</h3>
+              <p>
+                a project holds your databases. creating one gives you a postgres and a
+                connection string, and it goes to sleep on its own when nothing is using it.
+              </p>
+              <button type="button" className="btn btn-primary" style={{ marginTop: 14 }} onClick={() => setCreating(true)}>
+                new project
+              </button>
+            </div>
+          ) : visible.length === 0 ? (
+            <div className="empty">
+              <h3>nothing matches</h3>
+              <p>no project matches that search and filter.</p>
+            </div>
+          ) : (
+            <div className="grid">
+              {visible.map((row) => {
+                const stats = row.resources.map((r) => readStats(r))
+                const summary = summarise(row.resources.map((r) => r.state))
+                const bytes = stats.reduce((sum, s) => sum + (s.sizeBytes ?? 0), 0)
+                const lastActive = stats
+                  .map((s) => s.lastActiveAt ?? null)
+                  .filter((v): v is string => v !== null)
+                  .sort()
+                  .pop()
+                return (
+                  <a className="card" key={row.project.id} href={`#/projects/${encodeURIComponent(row.project.name)}`}>
+                    <div className="card-body">
+                      <div className="card-title">{row.project.name}</div>
+                      <div className="card-meta">
+                        {row.resources.length === 0
+                          ? 'no databases'
+                          : `${row.resources.length} database${row.resources.length === 1 ? '' : 's'}, ${formatBytes(bytes)}`}
+                      </div>
+                    </div>
+                    <div className="card-foot">
+                      <State state={summary.state} label={summary.label} />
+                      <span className="dim" style={{ marginLeft: 'auto', fontSize: 12 }}>
+                        {formatSince(lastActive)}
+                      </span>
+                    </div>
+                  </a>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Where a hosted product shows plan quota, the honest local answer is
+            the machine itself. These are the only capacity numbers that exist
+            without inventing one: RAM headroom needs a daemon field that does
+            not exist yet, so it is not shown rather than estimated. */}
+        <aside className="panel capacity">
+          <div className="panel-head">
+            <span className="panel-title">this machine</span>
+            <span className="panel-note">live</span>
+          </div>
+
+          <div className="meter-row">
+            <div className="meter-head">
+              <span className="meter-label">awake</span>
+              <span className="meter-value">
+                {totals.awake} <span className="of">of {totals.databases}</span>
+              </span>
+            </div>
+            <div className="meter-track">
+              <div
+                className="meter-fill is-awake"
+                style={{ width: totals.databases === 0 ? '0%' : `${(totals.awake / totals.databases) * 100}%` }}
+              />
+            </div>
+          </div>
+
+          <div className="meter-row">
+            <div className="meter-head">
+              <span className="meter-label">data on disk</span>
+              <span className="meter-value">{formatBytes(totals.bytes)}</span>
+            </div>
+          </div>
+
+          <div className="meter-row">
+            <div className="meter-head">
+              <span className="meter-label">disk free</span>
+              <span className="meter-value">{freeBytes === null ? '--' : formatBytes(freeBytes)}</span>
+            </div>
+          </div>
+
+          <p className="dim" style={{ margin: '12px 0 0', fontSize: 12, lineHeight: 1.45 }}>
+            sleeping databases use no memory and no cpu. they cost only the disk they sit on.
+          </p>
+        </aside>
+      </div>
     </div>
   )
 }
