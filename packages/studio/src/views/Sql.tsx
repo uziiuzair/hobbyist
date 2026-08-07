@@ -8,7 +8,6 @@ import { WakingBanner } from '../components/WakingBanner.js'
 import { Modal } from '../components/Modal.js'
 import { Workbench } from '../components/Workbench.js'
 import { State } from '../components/State.js'
-import { ResourceTabs } from '../components/ResourceTabs.js'
 import {
   loadHistory,
   loadSnippets,
