@@ -31,12 +31,12 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
       <form className="login-card" onSubmit={(event) => void handleSubmit(event)}>
         <div className="login-brand">
           <span className="rail-mark" aria-hidden="true"><i /></span>
-          hobbyist studio
+          Hobbyist Studio
         </div>
         <div className="card" style={{ padding: 18 }}>
         <div className="stack">
           <div className="field">
-            <label htmlFor="password">operator password</label>
+            <label htmlFor="password">Operator password</label>
             <input
               id="password"
               className="input"
@@ -54,7 +54,7 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
         </div>
         </div>
         <p className="dim" style={{ fontSize: 12, marginTop: 14, lineHeight: 1.5 }}>
-          set on the box with <code className="mono">hobby studio passwd</code>. there is no
+          Set on the box with <code className="mono">hobby studio passwd</code>. there is no
           reset link and no recovery, on purpose.
         </p>
       </form>

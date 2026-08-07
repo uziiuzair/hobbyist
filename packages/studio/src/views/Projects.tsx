@@ -4,6 +4,7 @@ import * as api from '../api.js'
 import { navigate } from '../lib/router.js'
 import { formatBytes, formatSince, readStats } from '../lib/format.js'
 import { State, summarise } from '../components/State.js'
+import { Modal } from '../components/Modal.js'
 import type { RailProject } from '../components/Shell.js'
 
 interface Props {
@@ -18,9 +19,6 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [creating, setCreating] = useState(false)
-  const [name, setName] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -42,71 +40,33 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
     }
   }, [rows])
 
-  function submit(event: FormEvent): void {
-    event.preventDefault()
-    const trimmed = name.trim()
-    if (trimmed.length === 0) return
-    setBusy(true)
-    setError(null)
-    api
-      .createProject(trimmed)
-      .then(() => api.createResource(trimmed, 'primary'))
-      .then(() => {
-        setCreating(false)
-        setName('')
-        onChanged()
-        navigate(`/projects/${encodeURIComponent(trimmed)}`)
-      })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
-      .finally(() => setBusy(false))
-  }
-
   return (
     <div className="page measure">
       <div className="page-head">
         <div>
-          <h1 className="page-title">projects</h1>
+          <h1 className="page-title">Projects</h1>
           <p className="page-sub">
             {rows.length === 0
-              ? 'nothing here yet'
+              ? 'Nothing here yet'
               : `${rows.length} project${rows.length === 1 ? '' : 's'}, ${totals.awake} awake`}
           </p>
         </div>
         <div className="page-actions">
-          <button type="button" className="btn btn-primary" onClick={() => setCreating((v) => !v)}>
-            new project
+          <button type="button" className="btn btn-primary" onClick={() => setCreating(true)}>
+            New project
           </button>
         </div>
       </div>
 
       {creating && (
-        <form className="panel" onSubmit={submit} style={{ marginBottom: 16, maxWidth: 460 }}>
-          <div className="field">
-            <label htmlFor="new-project">name</label>
-            <input
-              id="new-project"
-              className="input"
-              value={name}
-              autoFocus
-              placeholder="blog"
-              onChange={(e) => setName(e.target.value)}
-            />
-            <p className="dim" style={{ margin: 0, fontSize: 12.5 }}>
-              lowercase letters, numbers and dashes. this becomes the database name in your
-              connection string.
-            </p>
-          </div>
-          {error !== null && <div className="notice notice-danger" style={{ marginTop: 10 }}>{error}</div>}
-          <div className="row" style={{ marginTop: 12 }}>
-            <button type="submit" className="btn btn-primary" disabled={busy || name.trim().length === 0}>
-              {busy && <span className="spinner" />}
-              {busy ? 'creating' : 'create'}
-            </button>
-            <button type="button" className="btn btn-ghost" onClick={() => setCreating(false)} disabled={busy}>
-              cancel
-            </button>
-          </div>
-        </form>
+        <NewProjectModal
+          onClose={() => setCreating(false)}
+          onCreated={(name) => {
+            setCreating(false)
+            onChanged()
+            navigate(`/projects/${encodeURIComponent(name)}`)
+          }}
+        />
       )}
 
       <div className="projects-layout">
@@ -120,14 +80,20 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
                 </svg>
                 <input
                   className="input"
-                  placeholder="search projects"
+                  placeholder="Search projects"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  aria-label="search projects"
+                  aria-label="Search projects"
                 />
               </div>
-              <div className="segmented" role="group" aria-label="filter by state">
-                {(['all', 'awake', 'sleeping'] as Filter[]).map((value) => (
+              <div className="segmented" role="group" aria-label="Filter by state">
+                {(
+                  [
+                    ['all', 'All'],
+                    ['awake', 'Awake'],
+                    ['sleeping', 'Sleeping'],
+                  ] as [Filter, string][]
+                ).map(([value, label]) => (
                   <button
                     key={value}
                     type="button"
@@ -135,7 +101,7 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
                     aria-pressed={filter === value}
                     onClick={() => setFilter(value)}
                   >
-                    {value}
+                    {label}
                   </button>
                 ))}
               </div>
@@ -144,19 +110,19 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
 
           {rows.length === 0 ? (
             <div className="empty">
-              <h3>no projects yet</h3>
+              <h3>No projects yet</h3>
               <p>
-                a project holds your databases. creating one gives you a postgres and a
+                A project holds your databases. Creating one gives you a Postgres and a
                 connection string, and it goes to sleep on its own when nothing is using it.
               </p>
               <button type="button" className="btn btn-primary" style={{ marginTop: 14 }} onClick={() => setCreating(true)}>
-                new project
+                New project
               </button>
             </div>
           ) : visible.length === 0 ? (
             <div className="empty">
-              <h3>nothing matches</h3>
-              <p>no project matches that search and filter.</p>
+              <h3>Nothing matches</h3>
+              <p>No project matches that search and filter.</p>
             </div>
           ) : (
             <div className="grid">
@@ -172,11 +138,13 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
                 return (
                   <a className="card" key={row.project.id} href={`#/projects/${encodeURIComponent(row.project.name)}`}>
                     <div className="card-body">
+                      {/* The project name is data, not chrome: validateName in core
+                          enforces lowercase, so it is shown exactly as it is stored. */}
                       <div className="card-title">{row.project.name}</div>
                       <div className="card-meta">
                         {row.resources.length === 0
-                          ? 'no databases'
-                          : `${row.resources.length} database${row.resources.length === 1 ? '' : 's'}, ${formatBytes(bytes)}`}
+                          ? 'No databases'
+                          : `${row.resources.length} database${row.resources.length === 1 ? '' : 's'} · ${formatBytes(bytes)}`}
                       </div>
                     </div>
                     <div className="card-foot">
@@ -198,13 +166,13 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
             not exist yet, so it is not shown rather than estimated. */}
         <aside className="panel capacity">
           <div className="panel-head">
-            <span className="panel-title">this machine</span>
-            <span className="panel-note">live</span>
+            <span className="panel-title">This machine</span>
+            <span className="panel-note">Live</span>
           </div>
 
           <div className="meter-row">
             <div className="meter-head">
-              <span className="meter-label">awake</span>
+              <span className="meter-label">Awake</span>
               <span className="meter-value">
                 {totals.awake} <span className="of">of {totals.databases}</span>
               </span>
@@ -219,23 +187,88 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
 
           <div className="meter-row">
             <div className="meter-head">
-              <span className="meter-label">data on disk</span>
+              <span className="meter-label">Data on disk</span>
               <span className="meter-value">{formatBytes(totals.bytes)}</span>
             </div>
           </div>
 
           <div className="meter-row">
             <div className="meter-head">
-              <span className="meter-label">disk free</span>
+              <span className="meter-label">Disk free</span>
               <span className="meter-value">{freeBytes === null ? '--' : formatBytes(freeBytes)}</span>
             </div>
           </div>
 
           <p className="dim" style={{ margin: '12px 0 0', fontSize: 12, lineHeight: 1.45 }}>
-            sleeping databases use no memory and no cpu. they cost only the disk they sit on.
+            Sleeping databases use no memory and no CPU. They cost only the disk they sit on.
           </p>
         </aside>
       </div>
     </div>
+  )
+}
+
+function NewProjectModal({ onClose, onCreated }: { onClose: () => void; onCreated: (name: string) => void }) {
+  const [name, setName] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  function submit(event: FormEvent): void {
+    event.preventDefault()
+    const trimmed = name.trim()
+    if (trimmed.length === 0 || busy) return
+    setBusy(true)
+    setError(null)
+    api
+      .createProject(trimmed)
+      .then(() => api.createResource(trimmed, 'primary'))
+      .then(() => onCreated(trimmed))
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : String(err))
+        setBusy(false)
+      })
+  }
+
+  return (
+    <Modal
+      title="New project"
+      description="A project holds your databases. This one starts with a Postgres named primary."
+      onClose={busy ? () => undefined : onClose}
+      footer={
+        <>
+          <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button type="submit" form="new-project-form" className="btn btn-primary" disabled={busy || name.trim().length === 0}>
+            {busy && <span className="spinner" />}
+            {busy ? 'Creating' : 'Create project'}
+          </button>
+        </>
+      }
+    >
+      <form id="new-project-form" onSubmit={submit}>
+        <div className="field">
+          <label htmlFor="new-project-name">Name</label>
+          <input
+            id="new-project-name"
+            className="input mono"
+            value={name}
+            placeholder="blog"
+            spellCheck={false}
+            autoComplete="off"
+            onChange={(e) => setName(e.target.value)}
+          />
+          <p className="dim" style={{ margin: 0, fontSize: 12.5, lineHeight: 1.45 }}>
+            Lowercase letters, numbers and dashes. This becomes the database name in your
+            connection string.
+          </p>
+        </div>
+        {error !== null && (
+          <div className="notice notice-danger" style={{ marginTop: 12 }}>
+            {error}
+          </div>
+        )}
+      </form>
+    </Modal>
   )
 }

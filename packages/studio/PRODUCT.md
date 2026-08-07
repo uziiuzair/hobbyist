@@ -75,9 +75,31 @@ fit on one small box.
 
 ## Voice
 
-Plain, lowercase where the CLI is lowercase, no exclamation, no emoji, no
-em-dashes. Errors name the problem and the exact command that fixes it. The
-tagline is "your stack, your box, their convenience."
+Plain, no exclamation, no emoji, no em-dashes. Errors name the problem and the
+exact command that fixes it. The tagline is "your stack, your box, their
+convenience."
+
+**Sentence case for interface chrome.** Page titles, buttons, labels, table
+headers and navigation are capitalised normally: "Projects", "New project",
+"Databases", "Sleeping". An all-lowercase interface reads as an unfinished
+stylesheet rather than a considered voice.
+
+**Literal strings keep their real casing**, because they are data rather than
+chrome: project and database names (`validateName` in core enforces
+`^[a-z][a-z0-9-]{1,62}$`, so they are genuinely lowercase), connection strings,
+SQL, file paths, and CLI commands such as `hobby studio passwd`.
+
+## Interaction conventions
+
+**Every form lives in a modal.** New project, delete confirmation, and anything
+added later. An inline form pushes the page around as it opens and closes,
+which loses the reader's place, and it competes with the content it sits
+inside instead of owning the one decision being made. Modals trap focus,
+restore it on close, close on Escape and on a scrim click, and become a bottom
+sheet under 560px.
+
+**Destructive actions require the name typed back**, matching the CLI's own
+`hobby rm` behaviour, and they say what is destroyed on disk.
 
 ## Open
 
