@@ -128,6 +128,7 @@ function printHelp(io: Io): void {
   io.out('  hobby logs <target> [--tail N]        tail its logs')
   io.out('  hobby rm <target> [--yes]              destroy, with confirmation')
   io.out('  hobby eject <project>                 emit docker-compose.yml plus data')
+  io.out('  hobby eject <project> --release       the same, and stop managing it')
   io.out('  hobby studio passwd                   set the studio operator password')
   io.out('  hobby studio                          print the studio URL and open it')
   io.out('')
@@ -238,7 +239,12 @@ export async function run(argv: string[], io: Io): Promise<number> {
         return await cmdRm(ctx, positionals, flags)
       }
       case 'eject': {
-        const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+        // --release is its own gate and there is no confirmation prompt, a
+        // deliberate difference from `rm --yes`. Nothing is deleted: the data
+        // directories survive and the compose file that restarts them is on
+        // stdout in the same breath. A prompt would also have to be written to
+        // stdout, straight into `hobby eject blog --release > docker-compose.yml`.
+        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'release'] })
         return await cmdEject(ctx, positionals, flags)
       }
       default: {

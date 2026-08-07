@@ -57,6 +57,7 @@ const NOT_FOUND_STATUS: ContainerStatus = { exists: false, running: false, exitC
 export function createFakeRuntime(): ComputeRuntime & {
   _state: Map<string, ContainerStatus>
   _specs: Map<string, ContainerSpec>
+  _networks: Set<string>
 } {
   const state = new Map<string, ContainerStatus>()
   const specs = new Map<string, ContainerSpec>()
@@ -65,6 +66,10 @@ export function createFakeRuntime(): ComputeRuntime & {
   return {
     _state: state,
     _specs: specs,
+    // Exposed for the same reason _specs is: a network that is created and
+    // never removed is invisible to every assertion unless a test can see the
+    // set. That leak is exactly what eject --release had to stop doing.
+    _networks: networks,
 
     async available(): Promise<boolean> {
       return true
