@@ -217,6 +217,13 @@ reserved for transitions and a red reserved for failure.
   destruction only. Error banners, failed dots, the delete affordance on a
   side-list row, and the danger button's text and hover wash.
 
+### Utility
+- **Scrim** (`--scrim`, rgba(0,0,0,0.55) in both themes): the modal backdrop.
+  Deliberately not themed: a light-mode modal over a pale scrim floats on
+  nothing.
+- **Bar radius** (`--radius-bar`, 2px): the meter track and fill only. A 4px
+  tall bar cannot take the 5px radius without reading as a lozenge.
+
 ### Neutral
 - **Ground** (#0b0c0d dark, #f7f7f6 light): the page behind everything.
 - **Surface** (#121415 / #ffffff): cards, panels, tables, the rail, modals.

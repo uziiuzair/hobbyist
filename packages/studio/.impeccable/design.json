@@ -9,40 +9,105 @@
         "displayName": "Near-Black Ground",
         "canonical": "#0b0c0d",
         "lightTheme": "#f7f7f6",
-        "tonalRamp": ["#232629", "#3d4248", "#565e66", "#707a85", "#8e969f", "#acb2b9", "#cdd1d5", "#eef0f1"]
+        "tonalRamp": [
+          "#232629",
+          "#3d4248",
+          "#565e66",
+          "#707a85",
+          "#8e969f",
+          "#acb2b9",
+          "#cdd1d5",
+          "#eef0f1"
+        ]
       },
       "surface": {
         "role": "neutral",
         "displayName": "Panel Surface",
         "canonical": "#121415",
         "lightTheme": "#ffffff",
-        "tonalRamp": ["#232729", "#3d4447", "#576166", "#717e84", "#8e999e", "#adb4b8", "#ced2d5", "#eff0f1"]
+        "tonalRamp": [
+          "#232729",
+          "#3d4447",
+          "#576166",
+          "#717e84",
+          "#8e999e",
+          "#adb4b8",
+          "#ced2d5",
+          "#eff0f1"
+        ]
       },
-      "surface-2": { "role": "neutral", "displayName": "Control Surface", "canonical": "#171a1c", "lightTheme": "#fbfbfa" },
-      "surface-3": { "role": "neutral", "displayName": "Inset Surface", "canonical": "#1e2225", "lightTheme": "#f1f1ef" },
+      "surface-2": {
+        "role": "neutral",
+        "displayName": "Control Surface",
+        "canonical": "#171a1c",
+        "lightTheme": "#fbfbfa"
+      },
+      "surface-3": {
+        "role": "neutral",
+        "displayName": "Inset Surface",
+        "canonical": "#1e2225",
+        "lightTheme": "#f1f1ef"
+      },
       "line": {
         "role": "neutral",
         "displayName": "Hairline",
         "canonical": "#24282b",
         "lightTheme": "#e3e3e0",
-        "tonalRamp": ["#23272a", "#3c4348", "#566067", "#707c85", "#8d98a0", "#acb3b9", "#cdd2d5", "#eef0f1"]
+        "tonalRamp": [
+          "#23272a",
+          "#3c4348",
+          "#566067",
+          "#707c85",
+          "#8d98a0",
+          "#acb3b9",
+          "#cdd2d5",
+          "#eef0f1"
+        ]
       },
-      "line-strong": { "role": "neutral", "displayName": "Found Edge", "canonical": "#32373b", "lightTheme": "#cfcfcb" },
+      "line-strong": {
+        "role": "neutral",
+        "displayName": "Found Edge",
+        "canonical": "#32373b",
+        "lightTheme": "#cfcfcb"
+      },
       "ink": {
         "role": "neutral",
         "displayName": "Primary Ink",
         "canonical": "#e8eaec",
         "lightTheme": "#16181a",
-        "tonalRamp": ["#23262a", "#3c4249", "#555e67", "#6f7a86", "#8c96a0", "#abb2ba", "#cdd1d5", "#eef0f1"]
+        "tonalRamp": [
+          "#23262a",
+          "#3c4249",
+          "#555e67",
+          "#6f7a86",
+          "#8c96a0",
+          "#abb2ba",
+          "#cdd1d5",
+          "#eef0f1"
+        ]
       },
-      "ink-2": { "role": "neutral", "displayName": "Secondary Ink", "canonical": "#a2a8ad", "lightTheme": "#5c6166" },
+      "ink-2": {
+        "role": "neutral",
+        "displayName": "Secondary Ink",
+        "canonical": "#a2a8ad",
+        "lightTheme": "#5c6166"
+      },
       "ink-3": {
         "role": "neutral",
         "displayName": "Tertiary Ink",
         "canonical": "#878d93",
         "lightTheme": "#6b7075",
         "contrast": "5.84:1 on ground dark, 4.66:1 on ground light. The dimmest text the system permits.",
-        "tonalRamp": ["#242628", "#3f4246", "#595e63", "#747a81", "#91969c", "#aeb2b7", "#cfd1d4", "#eff0f1"]
+        "tonalRamp": [
+          "#242628",
+          "#3f4246",
+          "#595e63",
+          "#747a81",
+          "#91969c",
+          "#aeb2b7",
+          "#cfd1d4",
+          "#eff0f1"
+        ]
       },
       "accent": {
         "role": "primary",
@@ -50,7 +115,16 @@
         "canonical": "#3ecf8e",
         "lightTheme": "#10794f",
         "note": "One hue serves both action and state. --awake resolves to var(--accent) in both themes.",
-        "tonalRamp": ["#0f3d29", "#1a6a46", "#269764", "#31c482", "#58d59d", "#84e1b7", "#b5edd4", "#e6f9f1"]
+        "tonalRamp": [
+          "#0f3d29",
+          "#1a6a46",
+          "#269764",
+          "#31c482",
+          "#58d59d",
+          "#84e1b7",
+          "#b5edd4",
+          "#e6f9f1"
+        ]
       },
       "waking": {
         "role": "secondary",
@@ -58,7 +132,16 @@
         "canonical": "#f0c674",
         "lightTheme": "#9a6410",
         "note": "Transitions only: waking, starting, stopping, creating, removing. Never a resting state.",
-        "tonalRamp": ["#453007", "#78540d", "#aa7712", "#dd9a18", "#ebb242", "#f0c675", "#f6ddac", "#fcf4e3"]
+        "tonalRamp": [
+          "#453007",
+          "#78540d",
+          "#aa7712",
+          "#dd9a18",
+          "#ebb242",
+          "#f0c675",
+          "#f6ddac",
+          "#fcf4e3"
+        ]
       },
       "danger": {
         "role": "tertiary",
@@ -66,47 +149,154 @@
         "canonical": "#f0857a",
         "lightTheme": "#b3392c",
         "note": "Failure and destruction only. The one state whose label text takes its colour.",
-        "tonalRamp": ["#450d08", "#77170d", "#aa2113", "#dc2b19", "#ea5343", "#ef8176", "#f6b3ad", "#fce6e4"]
+        "tonalRamp": [
+          "#450d08",
+          "#77170d",
+          "#aa2113",
+          "#dc2b19",
+          "#ea5343",
+          "#ef8176",
+          "#f6b3ad",
+          "#fce6e4"
+        ]
       }
     },
     "typographyMeta": {
-      "display": { "displayName": "Page Title", "purpose": "One per view, 21px/600 with -0.015em tracking." },
-      "title": { "displayName": "Modal Title", "purpose": "Dialog headings and empty-state headings." },
-      "subtitle": { "displayName": "Card Title", "purpose": "Card headings, truncated with an ellipsis." },
-      "body": { "displayName": "Body", "purpose": "Document default set on body at 14px/1.5." },
-      "body-secondary": { "displayName": "Secondary Body", "purpose": "Page subtitles, rail links, inputs, empty-state copy capped at 42ch." },
-      "label": { "displayName": "Label", "purpose": "Buttons, table cells, state text, breadcrumbs, card meta." },
-      "micro": { "displayName": "Micro Label", "purpose": "The only uppercase register: rail groups, section titles, table headers, meter labels, key tags." },
-      "mono": { "displayName": "Mono", "purpose": "Connection strings, the SQL editor, numeric cells, query timings, the waking clock." }
+      "display": {
+        "displayName": "Page Title",
+        "purpose": "One per view, 21px/600 with -0.015em tracking."
+      },
+      "title": {
+        "displayName": "Modal Title",
+        "purpose": "Dialog headings and empty-state headings."
+      },
+      "subtitle": {
+        "displayName": "Card Title",
+        "purpose": "Card headings, truncated with an ellipsis."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Document default set on body at 14px/1.5."
+      },
+      "body-secondary": {
+        "displayName": "Secondary Body",
+        "purpose": "Page subtitles, rail links, inputs, empty-state copy capped at 42ch."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Buttons, table cells, state text, breadcrumbs, card meta."
+      },
+      "micro": {
+        "displayName": "Micro Label",
+        "purpose": "The only uppercase register: rail groups, section titles, table headers, meter labels, key tags."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Connection strings, the SQL editor, numeric cells, query timings, the waking clock."
+      }
     },
     "shadows": [
-      { "name": "shadow-card", "value": "0 1px 0 rgba(255,255,255,0.02) inset, 0 1px 2px rgba(0,0,0,0.4)", "purpose": "Seats a card on the ground. Structural, not lift. Light theme: 0 1px 2px rgba(0,0,0,0.05)." },
-      { "name": "shadow-pop", "value": "0 8px 28px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.4)", "purpose": "Only for elements above the document flow: the project switcher menu and modals." },
-      { "name": "state-halo", "value": "0 0 0 3px var(--awake-dim)", "purpose": "Flat 3px ring around a 7-8px status dot. The only glow in the system." },
-      { "name": "cell-ring-hover", "value": "inset 0 0 0 1px var(--line-strong)", "purpose": "Marks an editable table cell on hover." },
-      { "name": "cell-ring-focus", "value": "inset 0 0 0 1px var(--accent)", "purpose": "Marks an editable table cell on focus-within." },
-      { "name": "segment-pressed", "value": "inset 0 -2px 0 var(--accent)", "purpose": "The pressed edge of a segmented control." }
+      {
+        "name": "shadow-card",
+        "value": "0 1px 0 rgba(255,255,255,0.02) inset, 0 1px 2px rgba(0,0,0,0.4)",
+        "purpose": "Seats a card on the ground. Structural, not lift. Light theme: 0 1px 2px rgba(0,0,0,0.05)."
+      },
+      {
+        "name": "shadow-pop",
+        "value": "0 8px 28px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.4)",
+        "purpose": "Only for elements above the document flow: the project switcher menu and modals."
+      },
+      {
+        "name": "state-halo",
+        "value": "0 0 0 3px var(--awake-dim)",
+        "purpose": "Flat 3px ring around a 7-8px status dot. The only glow in the system."
+      },
+      {
+        "name": "cell-ring-hover",
+        "value": "inset 0 0 0 1px var(--line-strong)",
+        "purpose": "Marks an editable table cell on hover."
+      },
+      {
+        "name": "cell-ring-focus",
+        "value": "inset 0 0 0 1px var(--accent)",
+        "purpose": "Marks an editable table cell on focus-within."
+      },
+      {
+        "name": "segment-pressed",
+        "value": "inset 0 -2px 0 var(--accent)",
+        "purpose": "The pressed edge of a segmented control."
+      }
     ],
     "motion": [
-      { "name": "pulse", "value": "pulse 1.1s ease-in-out infinite (opacity 1 to 0.35)", "purpose": "Waking and transitional status dots. Disabled under prefers-reduced-motion." },
-      { "name": "spin", "value": "spin 0.7s linear infinite", "purpose": "The 13px spinner. Slowed to 2.4s under prefers-reduced-motion rather than stopped." },
-      { "name": "modal-in", "value": "modal-in 120ms ease-out (opacity 0 to 1, translateY -4px to 0)", "purpose": "Modal entrance. None under prefers-reduced-motion." },
-      { "name": "waking-threshold", "value": "350ms", "purpose": "A wake banner does not render until the wait exceeds this, so a fast wake never flashes." },
-      { "name": "subtle-threshold", "value": "900ms", "purpose": "An already-running slow request gets the quieter banner only after this." }
+      {
+        "name": "pulse",
+        "value": "pulse 1.1s ease-in-out infinite (opacity 1 to 0.35)",
+        "purpose": "Waking and transitional status dots. Disabled under prefers-reduced-motion."
+      },
+      {
+        "name": "spin",
+        "value": "spin 0.7s linear infinite",
+        "purpose": "The 13px spinner. Slowed to 2.4s under prefers-reduced-motion rather than stopped."
+      },
+      {
+        "name": "modal-in",
+        "value": "modal-in 120ms ease-out (opacity 0 to 1, translateY -4px to 0)",
+        "purpose": "Modal entrance. None under prefers-reduced-motion."
+      },
+      {
+        "name": "waking-threshold",
+        "value": "350ms",
+        "purpose": "A wake banner does not render until the wait exceeds this, so a fast wake never flashes."
+      },
+      {
+        "name": "subtle-threshold",
+        "value": "900ms",
+        "purpose": "An already-running slow request gets the quieter banner only after this."
+      }
     ],
     "breakpoints": [
-      { "name": "capacity-stack", "value": "1040px" },
-      { "name": "rail-strip", "value": "900px" },
-      { "name": "workspace-stack", "value": "860px" },
-      { "name": "bottom-sheet", "value": "560px" }
+      {
+        "name": "capacity-stack",
+        "value": "1040px"
+      },
+      {
+        "name": "rail-strip",
+        "value": "900px"
+      },
+      {
+        "name": "workspace-stack",
+        "value": "860px"
+      },
+      {
+        "name": "bottom-sheet",
+        "value": "560px"
+      }
     ],
     "layout": [
-      { "name": "rail", "value": "248px" },
-      { "name": "topbar", "value": "52px" },
-      { "name": "measure", "value": "max-width 1180px, margin-inline auto, padding-inline 24px, min-width 0" },
-      { "name": "capacity-panel", "value": "268px" },
-      { "name": "side-index", "value": "216px" },
-      { "name": "card-min", "value": "280px" }
+      {
+        "name": "rail",
+        "value": "248px"
+      },
+      {
+        "name": "topbar",
+        "value": "52px"
+      },
+      {
+        "name": "measure",
+        "value": "max-width 1180px, margin-inline auto, padding-inline 24px, min-width 0"
+      },
+      {
+        "name": "capacity-panel",
+        "value": "268px"
+      },
+      {
+        "name": "side-index",
+        "value": "216px"
+      },
+      {
+        "name": "card-min",
+        "value": "280px"
+      }
     ]
   },
   "components": [
@@ -203,18 +393,66 @@
       "Flat by default; two shadows exist and both are structural"
     ],
     "rules": [
-      { "name": "The One Green Rule", "body": "There is one chromatic hue in normal operation and it resolves from a single token. Do not introduce a second accent, and do not fork --awake away from --accent; if action and state need to be told apart, that is form's job, not hue's.", "section": "colors" },
-      { "name": "The Action/State Form Rule", "body": "Action is a large filled surface or an edge: a primary button, a 2px tab underline, a focus outline, a tinted active row. State is small and glowing or a bar: a 7px dot with a 3px halo, a 4px meter fill. A green rectangle you can press and a green dot you cannot are never confusable because their form differs, not their colour.", "section": "colors" },
-      { "name": "The Sleeping-Is-Not-A-Warning Rule", "body": "Sleeping carries no chroma at all: a transparent dot with a 1.5px --ink-3 ring and neutral label text. It is never amber, never red, never dimmed to look broken. Sleeping is the product working.", "section": "colors" },
-      { "name": "The Colour-Is-Never-The-Label Rule", "body": "Every state renders a word beside its mark, and the mark's shape (filled, hollow ring, pulsing, solid red) carries the same distinction the colour does. Nothing in this interface is legible only to someone who can separate the hues.", "section": "colors" },
-      { "name": "The Ink 3 Floor Rule", "body": "--ink-3 is the dimmest text in the system and it is tuned to pass WCAG AA as body text in both themes. Nothing dimmer exists. Do not add a fourth ink step, and do not place --ink-3 text on --surface-3 in the light theme, where it falls to 4.42:1.", "section": "colors" },
-      { "name": "The Tabular Figures Rule", "body": "Any number that can change in place gets font-variant-numeric: tabular-nums: the waking clock, meter values, result counts, card meta, rail counts, numeric table cells. A jittering digit reads as instability in a product whose whole claim is that waiting is fine.", "section": "typography" },
-      { "name": "The One Uppercase Register Rule", "body": "Uppercase exists only at 10.5-11px with 0.06-0.08em tracking, as a structural label above or beside content. Titles, buttons and body copy are never uppercased.", "section": "typography" },
-      { "name": "The Shared Measure Rule", "body": "Every page root is a div carrying both page and measure, and the topbar's inner wrapper is measure. A view that carries page alone renders flush against the rail with no gutter. This mistake has already been made once in every inner view; it is the first thing to check on a new view.", "section": "layout" },
-      { "name": "The min-width: 0 Rule", "body": "Every grid or flex child that can receive unbounded content declares min-width: 0. Without it one long connection string or one wide table takes its intrinsic width, widens the document, and pushes the rail off screen. Truncation is overflow hidden plus text-overflow ellipsis plus white-space nowrap on the text node itself, never a fixed width.", "section": "layout" },
-      { "name": "The Flat-By-Default Rule", "body": "A new container gets --surface, a 1px --line border and --radius. It does not get a shadow. --shadow-pop is reserved for elements in a stacking context above the page (z-index 40+); if it is in the document flow, it is flat.", "section": "elevation" },
-      { "name": "The Halo-Not-Glow Rule", "body": "The only glow in the system is a 3px flat ring of a 13-20% alpha colour around a 7-8px dot. It marks live state. It is never applied to text, buttons, cards or borders.", "section": "elevation" },
-      { "name": "The Hairline Rule", "body": "Every border in the build is exactly 1px. Emphasis comes from choosing --line-strong over --line, never from a thicker rule. The two exceptions are deliberate marks, not borders: the 1.5px sleeping ring and the 2px active tab underline.", "section": "shapes" }
+      {
+        "name": "The One Green Rule",
+        "body": "There is one chromatic hue in normal operation and it resolves from a single token. Do not introduce a second accent, and do not fork --awake away from --accent; if action and state need to be told apart, that is form's job, not hue's.",
+        "section": "colors"
+      },
+      {
+        "name": "The Action/State Form Rule",
+        "body": "Action is a large filled surface or an edge: a primary button, a 2px tab underline, a focus outline, a tinted active row. State is small and glowing or a bar: a 7px dot with a 3px halo, a 4px meter fill. A green rectangle you can press and a green dot you cannot are never confusable because their form differs, not their colour.",
+        "section": "colors"
+      },
+      {
+        "name": "The Sleeping-Is-Not-A-Warning Rule",
+        "body": "Sleeping carries no chroma at all: a transparent dot with a 1.5px --ink-3 ring and neutral label text. It is never amber, never red, never dimmed to look broken. Sleeping is the product working.",
+        "section": "colors"
+      },
+      {
+        "name": "The Colour-Is-Never-The-Label Rule",
+        "body": "Every state renders a word beside its mark, and the mark's shape (filled, hollow ring, pulsing, solid red) carries the same distinction the colour does. Nothing in this interface is legible only to someone who can separate the hues.",
+        "section": "colors"
+      },
+      {
+        "name": "The Ink 3 Floor Rule",
+        "body": "--ink-3 is the dimmest text in the system and it is tuned to pass WCAG AA as body text in both themes. Nothing dimmer exists. Do not add a fourth ink step, and do not place --ink-3 text on --surface-3 in the light theme, where it falls to 4.42:1.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tabular Figures Rule",
+        "body": "Any number that can change in place gets font-variant-numeric: tabular-nums: the waking clock, meter values, result counts, card meta, rail counts, numeric table cells. A jittering digit reads as instability in a product whose whole claim is that waiting is fine.",
+        "section": "typography"
+      },
+      {
+        "name": "The One Uppercase Register Rule",
+        "body": "Uppercase exists only at 10.5-11px with 0.06-0.08em tracking, as a structural label above or beside content. Titles, buttons and body copy are never uppercased.",
+        "section": "typography"
+      },
+      {
+        "name": "The Shared Measure Rule",
+        "body": "Every page root is a div carrying both page and measure, and the topbar's inner wrapper is measure. A view that carries page alone renders flush against the rail with no gutter. This mistake has already been made once in every inner view; it is the first thing to check on a new view.",
+        "section": "layout"
+      },
+      {
+        "name": "The min-width: 0 Rule",
+        "body": "Every grid or flex child that can receive unbounded content declares min-width: 0. Without it one long connection string or one wide table takes its intrinsic width, widens the document, and pushes the rail off screen. Truncation is overflow hidden plus text-overflow ellipsis plus white-space nowrap on the text node itself, never a fixed width.",
+        "section": "layout"
+      },
+      {
+        "name": "The Flat-By-Default Rule",
+        "body": "A new container gets --surface, a 1px --line border and --radius. It does not get a shadow. --shadow-pop is reserved for elements in a stacking context above the page (z-index 40+); if it is in the document flow, it is flat.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Halo-Not-Glow Rule",
+        "body": "The only glow in the system is a 3px flat ring of a 13-20% alpha colour around a 7-8px dot. It marks live state. It is never applied to text, buttons, cards or borders.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Hairline Rule",
+        "body": "Every border in the build is exactly 1px. Emphasis comes from choosing --line-strong over --line, never from a thicker rule. The two exceptions are deliberate marks, not borders: the 1.5px sleeping ring and the 2px active tab underline.",
+        "section": "shapes"
+      }
     ],
     "dos": [
       "Do open every view with a root div carrying both page and measure, and run the class audit before you finish.",
@@ -239,5 +477,10 @@
       "Don't let a failed operation's banner vanish; the elapsed time is the context.",
       "Don't put a form inline in a page."
     ]
+  },
+  "radius": {
+    "bar": "2px",
+    "sm": "5px",
+    "base": "8px"
   }
 }
