@@ -200,9 +200,11 @@ export async function startDaemon(
 
       // The hibernator must stop deciding to sleep things before this
       // function starts explicitly stopping things itself, or the two could
-      // race over the same resource. Synchronous: it only flips a flag and
-      // interrupts the loop's current wait, so there is nothing to await.
-      hibernator.stop()
+      // race over the same resource. stop() interrupts the loop's current
+      // wait immediately, but if a tick had already decided to sleep a
+      // resource and is running stopPostgres, this awaits that tick's
+      // drain so it can never run concurrently with the loop below.
+      await hibernator.stop()
 
       // The proxy must close before any resource below is stopped: a proxy
       // still accepting connections would wake a resource right back up the
