@@ -233,7 +233,12 @@ function renderCompose(resources: Resource[]): string {
     const cfg = resource.config
     lines.push(`  ${resource.name}:`)
     lines.push(`    image: ${cfg.image}`)
-    lines.push(`    container_name: ${cfg.containerName}`)
+    // Deliberately no container_name. Pinning it to the name Hobbyist uses
+    // means the emitted file cannot start while Hobbyist still manages this
+    // project, which is exactly the state eject leaves you in today. Verified
+    // against real Docker: compose refuses with a name conflict, and the whole
+    // point of eject is that the result stands on its own. Letting compose
+    // derive the name costs nothing and makes the file genuinely independent.
     lines.push('    restart: unless-stopped')
     lines.push('    environment:')
     lines.push(`      POSTGRES_USER: ${cfg.superuser}`)
