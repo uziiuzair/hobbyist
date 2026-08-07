@@ -44,6 +44,10 @@ export interface Ctx {
 
 export class UsageError extends Error {}
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
 // Owner-only, on both ~/.hobby and ~/.hobby/projects. Everything under
 // there is a secret or a database: state.db holds every resource's
 // superuser password as plaintext JSON, studio-credential holds the
@@ -190,8 +194,41 @@ export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promi
     throw new UsageError('usage: hobby new <name>')
   }
 
+  // Three calls, one promise. `hobby new blog` is the command CLAUDE.md's
+  // "one command gives you a project with a Postgres in it" refers to, so a
+  // half-finished result is not a partial success, it is a failure that has
+  // to clean up after itself.
+  //
+  // Without this, a resource that failed to boot (an image still pulling past
+  // the readiness timeout, a port that could not bind) left the project
+  // behind, and the obvious next thing to type, the same command again, got
+  // 409 name_taken. The user's way out was to work out that `hobby rm` was
+  // needed on a project they never successfully created.
+  //
+  // Only ever rolls back a project this call created: createProject would
+  // have failed with name_taken if it already existed, so there is no path
+  // here that deletes someone's existing work. The resource never reached
+  // ready, so what this removes is at most an empty cluster initdb made
+  // moments ago.
   const { project } = await c.api.createProject(name)
-  const { resource } = await c.api.createResource(project.name, { kind: 'postgres', name: 'primary' })
+  let resource
+  try {
+    ;({ resource } = await c.api.createResource(project.name, { kind: 'postgres', name: 'primary' }))
+  } catch (err) {
+    try {
+      await c.api.deleteProject(project.name)
+    } catch (cleanupErr) {
+      // The original failure is the one worth reporting, so the cleanup
+      // failure is reported alongside it rather than replacing it: the user
+      // now has a project that neither works nor was removed, and needs to
+      // know it is there.
+      c.io.err(
+        `could not roll back the half-created project ${project.name}: ${errorMessage(cleanupErr)}. ` +
+          `remove it with: hobby rm ${project.name}`
+      )
+    }
+    throw err
+  }
   const { connectionString } = await c.api.getConnection(resource.id)
 
   if (flags.json) {

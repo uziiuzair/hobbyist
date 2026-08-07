@@ -459,9 +459,8 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
 
     if (segments.length === 4 && method === 'POST' && segments[3] === 'eject') {
       const name = decodeURIComponent(segments[2] as string)
-      // Opt-in by an explicit query parameter, matching how ?force=true works
-      // on delete: the destructive reading of a verb is never the default one
-      // a bare request gets.
+      // Opt-in by an explicit query parameter: the destructive reading of a
+      // verb is never the one a bare request gets.
       return await ejectRoute(ctx, name, url.searchParams.get('release') === 'true')
     }
   }
