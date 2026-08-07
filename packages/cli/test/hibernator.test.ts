@@ -685,7 +685,13 @@ test('a query through the control API counts as activity, so the next tick does 
     )
   } finally {
     await hibernator.stop()
-    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+    // See routes.test.ts's withServer for why: without forcing lingering
+    // keep-alive sockets closed, server.close()'s callback can wait forever
+    // on a connection the client already finished with but never
+    // explicitly closed, hanging this file's own test process.
+    const closed = new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+    server.closeAllConnections()
+    await closed
   }
 })
 

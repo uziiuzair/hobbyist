@@ -25,6 +25,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { DaemonContext } from '../context.js'
 import { DUMMY_CREDENTIAL_HASH, LoginThrottle, readOperatorCredential, verifyPassword } from './auth.js'
 import { readSessionCookie, serializeClearCookie, serializeSessionCookie, SessionStore } from './session.js'
+import { resolveStudioDistDir, serveStudioStatic } from './static.js'
 
 interface RouteResult {
   status: number
@@ -288,8 +289,10 @@ export function isAuthenticated(ctx: DaemonContext, req: IncomingMessage): boole
 }
 
 // Reduces a request to exactly the identity ../routes.ts's `dispatch` routes
-// on: URL pathname, split on '/', empty segments dropped, joined back with
-// single slashes and no leading one.
+// on: URL pathname, split on '/', empty segments dropped. Returns null only
+// when req.url itself cannot be parsed at all, which every caller below
+// treats as "cannot be classified as anything," the same default-deny
+// outcome an unmapped path already gets.
 //
 // This is the fix for a real bypass, so it is worth stating precisely. The
 // gate used to ask `url.pathname.startsWith('/v1/')`, while dispatch routes
@@ -302,46 +305,63 @@ export function isAuthenticated(ctx: DaemonContext, req: IncomingMessage): boole
 // superuser passwords. Any gate that parses a path differently from the
 // thing that routes it is a bypass waiting to be found, so this parses it
 // once, the same way, and decides from segments rather than from a prefix.
+// static.ts's own path-traversal defense is handed these same segments for
+// the same reason: one normalization, trusted by every consumer, rather
+// than a second copy that could drift.
 //
 // Two properties this must keep: it must not depend on Caddy normalizing
 // the path first (the daemon's TCP listener has to be correct on its own,
 // and the unix socket has no Caddy in front of it at all), and it must be
 // default-deny, so a path shape nobody anticipated needs a session rather
 // than skipping the check.
-function pathKey(req: IncomingMessage): string {
+function pathSegments(req: IncomingMessage): string[] | null {
   let pathname: string
   try {
     pathname = new URL(req.url ?? '/', 'http://localhost').pathname
   } catch {
-    // An unparseable target cannot be matched against the allowlist, so it
-    // is denied, same as anything else not on it.
-    return ''
+    return null
   }
-  return pathname
-    .split('/')
-    .filter((segment) => segment.length > 0)
-    .join('/')
+  return pathname.split('/').filter((segment) => segment.length > 0)
+}
+
+function pathKey(segments: string[] | null): string {
+  return segments === null ? '' : segments.join('/')
 }
 
 function requiresAuth(key: string): boolean {
   return !UNAUTHENTICATED_PATHS.has(key)
 }
 
+export interface CreateStudioAppOptions {
+  // Test seam, same shape and reasoning as DaemonContext.probeFactory
+  // (packages/cli/src/daemon/context.ts): production never sets this and
+  // gets the real sibling-package resolution (static.ts's
+  // resolveStudioDistDir), tests point it at a small fixture directory
+  // instead of requiring a real `npm run build -w @hobby.sh/studio` to have
+  // run first.
+  studioDistDir?: string
+}
+
 // The handler actually bound to the loopback TCP listener (see server.ts):
-// tries Studio's own three routes first, then requires a valid session for
-// everything that is not on UNAUTHENTICATED_PATHS before ever calling
-// `next` (the daemon's existing control-plane app, unmodified). The unix
-// socket listener keeps using `next` directly and never sees this wrapper
-// at all, per this file's header comment.
+// tries Studio's own three routes first, then classifies everything else by
+// its normalized segments (see pathSegments above). A /v1/... or /studio/...
+// path requires a valid session before ever reaching `next` (the daemon's
+// existing control-plane app, unmodified). Everything else is Studio's own
+// built bundle (static.ts's serveStudioStatic), served with no session at
+// all: see that file's header for why that is deliberate rather than a gap.
+// The unix socket listener keeps using `next` directly and never sees this
+// wrapper, or the static bundle, at all, per this file's header comment.
 export function createStudioApp(
   ctx: DaemonContext,
-  next: (req: IncomingMessage, res: ServerResponse) => void
+  next: (req: IncomingMessage, res: ServerResponse) => void,
+  opts: CreateStudioAppOptions = {}
 ): (req: IncomingMessage, res: ServerResponse) => void {
   const router = createRouter()
   mountStudioRoutes(router, ctx)
+  const studioDistDir = opts.studioDistDir ?? resolveStudioDistDir()
 
   return (req, res) => {
-    handle(ctx, router, req, res, next).catch((err: unknown) => {
+    handle(ctx, router, req, res, next, studioDistDir).catch((err: unknown) => {
       console.error(`studio: request handling failed outside the normal error path: ${errorMessage(err)}`)
       if (!res.headersSent) {
         res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
@@ -357,19 +377,45 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+// A path belongs to the control plane (and therefore needs the session gate
+// below) only if its first normalized segment is exactly "v1" or "studio".
+// Everything else, including the bare root and every path an unmapped route
+// used to be default-denied on, is Studio's own static bundle now, per this
+// file's header on why that is safe: the bundle carries no secret, and
+// nothing this branch reaches ever touches ctx.store or ctx.runtime.
+function isControlPlanePath(segments: string[] | null): boolean {
+  if (segments === null || segments.length === 0) {
+    return false
+  }
+  return segments[0] === 'v1' || segments[0] === 'studio'
+}
+
 async function handle(
   ctx: DaemonContext,
   router: DispatchableRouter,
   req: IncomingMessage,
   res: ServerResponse,
-  next: (req: IncomingMessage, res: ServerResponse) => void
+  next: (req: IncomingMessage, res: ServerResponse) => void,
+  studioDistDir: string
 ): Promise<void> {
   const handled = await router.dispatch(ctx, req, res)
   if (handled) {
     return
   }
 
-  if (!requiresAuth(pathKey(req))) {
+  const segments = pathSegments(req)
+
+  if (!isControlPlanePath(segments)) {
+    // segments is never null here (isControlPlanePath already returned
+    // false for null), and static serving only understands GET; anything
+    // else falls through exactly like an unmapped control-plane path always
+    // has, gated and then 400'd by `next` as an unknown route.
+    if (segments !== null && serveStudioStatic(req, res, segments, studioDistDir)) {
+      return
+    }
+  }
+
+  if (!requiresAuth(pathKey(segments))) {
     next(req, res)
     return
   }

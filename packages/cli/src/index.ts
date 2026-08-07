@@ -20,6 +20,7 @@ export * from './daemon/wire.js'
 export * from './daemon/studio/auth.js'
 export * from './daemon/studio/session.js'
 export * from './daemon/studio/routes.js'
+export * from './daemon/studio/static.js'
 
 // The command surface (task 5): run/main is the CLI's own entry point
 // (bin/hobby.js calls main directly, not through this barrel, to avoid a
@@ -44,9 +45,12 @@ export {
   cmdPg,
   cmdRm,
   cmdSleep,
+  cmdStudio,
+  cmdStudioPasswd,
   cmdWake,
   connectionEnv,
   resolveTarget,
+  type BrowserOpener,
   type Ctx,
 } from './cli/commands.js'
 export * from './cli/output.js'
