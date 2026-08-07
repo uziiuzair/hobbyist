@@ -103,7 +103,7 @@ export function Sql({ projectName, resourceName, onChanged }: { projectName: str
   if (resourceError !== null) {
     return (
       <div className="page measure">
-        <div className="error-banner">{resourceError}</div>
+        <div className="notice notice-danger">{resourceError}</div>
       </div>
     )
   }
@@ -217,7 +217,7 @@ export function Sql({ projectName, resourceName, onChanged }: { projectName: str
       </div>
 
       <div className="result-pane">
-        {queryError !== null && <div className="error-banner">{queryError}</div>}
+        {queryError !== null && <div className="notice notice-danger">{queryError}</div>}
         {queryError === null && result === null && (
           <div className="result-idle">Results appear here once you run something.</div>
         )}

@@ -88,7 +88,7 @@ export function Tables({
   if (resourceError !== null) {
     return (
       <div className="page measure">
-        <div className="error-banner">{resourceError}</div>
+        <div className="notice notice-danger">{resourceError}</div>
       </div>
     )
   }
@@ -208,7 +208,7 @@ export function Tables({
       }
     >
       <WakingBanner resourceName={resourceName} snapshot={snapshot} />
-      {schemaError !== null && <div className="error-banner">{schemaError}</div>}
+      {schemaError !== null && <div className="notice notice-danger">{schemaError}</div>}
           {active === undefined ? (
             <div className="empty"><h3>Pick a table</h3><p>Choose a table on the left to browse its rows.</p></div>
           ) : (
@@ -258,8 +258,8 @@ export function Tables({
                 </div>
               </div>
 
-              {rowsError !== null && <div className="error-banner">{rowsError}</div>}
-              {saveError !== null && <div className="error-banner">{saveError}</div>}
+              {rowsError !== null && <div className="notice notice-danger">{rowsError}</div>}
+              {saveError !== null && <div className="notice notice-danger">{saveError}</div>}
               {currentTable !== undefined && currentTable.primaryKey.length === 0 && (
                 <div className="hint-text">No primary key found on this table: edits are disabled to avoid an ambiguous update.</div>
               )}
@@ -267,7 +267,7 @@ export function Tables({
               {rows === null ? (
                 <div className="hint-text">Loading rows</div>
               ) : rows.length === 0 ? (
-                <div className="empty-state">No rows.</div>
+                <div className="empty">No rows.</div>
               ) : (
                 <div className="table-scroll">
                   <table className="data-table grid-table">
