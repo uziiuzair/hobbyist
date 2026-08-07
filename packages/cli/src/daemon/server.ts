@@ -21,6 +21,7 @@ import { startPgProxy } from '@hobby.sh/proxy'
 import { createProxyDeps, type DaemonContext } from './context.js'
 import { startHibernator } from './hibernator.js'
 import { handleRequest } from './routes.js'
+import { createStudioApp } from './studio/routes.js'
 
 const SOCKET_MODE = 0o600
 
@@ -143,13 +144,25 @@ export async function startDaemon(
 
   let tcpServer: http.Server | null = null
   if (opts.apiPort !== null) {
-    tcpServer = http.createServer(app)
-    // 127.0.0.1 only, never 0.0.0.0: this is an unauthenticated database
-    // control plane, and Studio is the only client meant to reach the TCP
-    // listener at all, always through Caddy on the same box (see
-    // docs/cli/specs/2026-08-07-m1-daemon-control-api-and-verbs.md). A
-    // public bind here would expose create/destroy/start/stop on every
-    // Postgres on the box to the network.
+    // Wrapped in createStudioApp, unlike the unix socket above: this is the
+    // listener Caddy is the sole intended caller of (ADR 0008), so it is
+    // the one place login, logout, session-check and the session gate for
+    // every other /v1/ route actually apply. The unix socket keeps using
+    // the bare `app` from createApp, completely unaffected: filesystem
+    // permissions remain its whole authentication story, exactly as task 4
+    // built it, and createApp's own tests keep asserting that with no
+    // studio code in the loop at all.
+    const studioApp = createStudioApp(ctx, app)
+    tcpServer = http.createServer(studioApp)
+    // 127.0.0.1 only, never 0.0.0.0: this is a database control plane that
+    // is unauthenticated on this listener only in the sense that the unix
+    // socket's filesystem permissions do not apply to it; Studio's session
+    // gate above is what actually authenticates it. Studio is the only
+    // client meant to reach the TCP listener at all, always through Caddy
+    // on the same box (see docs/cli/specs/2026-08-07-m1-daemon-control-api-
+    // and-verbs.md). A public bind here would expose create/destroy/
+    // start/stop on every Postgres on the box to the network regardless of
+    // the session gate holding.
     await listen(tcpServer, { port: opts.apiPort, host: '127.0.0.1' })
   }
 

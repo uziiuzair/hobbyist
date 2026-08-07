@@ -17,6 +17,7 @@
   "dependencies": {
     "@hobby.sh/core": "*",
     "@hobby.sh/pg": "*",
-    "@hobby.sh/proxy": "*"
+    "@hobby.sh/proxy": "*",
+    "argon2": "^0.45.1"
   }
 }

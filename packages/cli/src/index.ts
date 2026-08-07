@@ -7,6 +7,18 @@ export * from './daemon/server.js'
 export * from './daemon/reconcile.js'
 export * from './daemon/preflight.js'
 export * from './daemon/hibernator.js'
+export * from './daemon/caddy.js'
+
+// Studio's server side (task 10): the operator credential, sessions, and
+// the route-mounting/gate machinery the loopback TCP listener uses (see
+// daemon/server.ts). Exported here, not just used internally, because
+// `hobby studio passwd` is a CLI verb owned by packages/cli/src/cli (a
+// different task) and must call setOperatorPassword from this same public
+// surface rather than reaching into daemon/studio directly; see the task
+// report for the exact call it needs to make.
+export * from './daemon/studio/auth.js'
+export * from './daemon/studio/session.js'
+export * from './daemon/studio/routes.js'
 
 // The command surface (task 5): run/main is the CLI's own entry point
 // (bin/hobby.js calls main directly, not through this barrel, to avoid a
