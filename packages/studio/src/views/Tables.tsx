@@ -31,6 +31,7 @@ export function Tables({
   const [schemaError, setSchemaError] = useState<string | null>(null)
 
   const [rows, setRows] = useState<Array<Record<string, unknown>> | null>(null)
+  const [queryMs, setQueryMs] = useState<number | null>(null)
   const [page, setPage] = useState(0)
   const [filter, setFilter] = useState('')
   const [appliedFilter, setAppliedFilter] = useState('')
@@ -61,8 +62,15 @@ export function Tables({
       if (filterToApply.trim().length > 0) sql += ` where ${filterToApply}`
       sql += ` limit $1 offset $2`
       setRowsError(null)
+      const startedAt = Date.now()
       run(resource.id, resource.state, () => api.runQuery(resource.id, sql, [PAGE_SIZE, pageToLoad * PAGE_SIZE]))
-        .then((result) => setRows(result.rows))
+        .then((result) => {
+          setRows(result.rows)
+          // Measured client side because the daemon does not report timing.
+          // It therefore includes the wake, which is the honest number: it is
+          // what the query cost you, not what the planner cost.
+          setQueryMs(Date.now() - startedAt)
+        })
         .catch((err: unknown) => setRowsError(err instanceof api.ApiError ? err.message : 'query failed'))
     },
     [resource, active, tables, run]
@@ -202,12 +210,19 @@ export function Tables({
                 <div className="empty-state">No rows.</div>
               ) : (
                 <div className="table-scroll">
-                  <table className="data-table">
+                  <table className="data-table grid-table">
                     <thead>
                       <tr>
-                        {Object.keys(rows[0] ?? {}).map((col) => (
-                          <th key={col}>{col}</th>
-                        ))}
+                        {Object.keys(rows[0] ?? {}).map((col) => {
+                          const meta = currentTable?.columns.find((c) => c.name === col)
+                          return (
+                            <th key={col}>
+                              <span className="col-name">{col}</span>
+                              {meta !== undefined && <span className="col-type">{meta.dataType}</span>}
+                              {meta?.isPrimaryKey === true && <span className="key-tag">PK</span>}
+                            </th>
+                          )
+                        })}
                       </tr>
                     </thead>
                     <tbody>
@@ -235,9 +250,16 @@ export function Tables({
                                     }}
                                   />
                                 ) : value === null ? (
-                                  <span className="cell-null">null</span>
+                                  <span className="cell-null">NULL</span>
                                 ) : (
-                                  String(value)
+                                  // Truncation lives on a span rather than the
+                                  // cell so an open editor is never clipped by
+                                  // it. title carries the whole value, since a
+                                  // column of json blobs is otherwise either
+                                  // unreadable or a kilometre wide.
+                                  <span className="cell-value" title={String(value)}>
+                                    {String(value)}
+                                  </span>
                                 )}
                               </td>
                             )
@@ -249,14 +271,33 @@ export function Tables({
                 </div>
               )}
 
-              <div className="pager">
-                <button type="button" className="btn btn-small" disabled={page === 0} onClick={() => handlePage(-1)}>
-                  Previous
-                </button>
-                <span>page {page + 1}</span>
-                <button type="button" className="btn btn-small" disabled={rows === null || rows.length < PAGE_SIZE} onClick={() => handlePage(1)}>
-                  Next
-                </button>
+              <div className="grid-bar">
+                <span className="grid-range">
+                  {rows === null || rows.length === 0
+                    ? 'No rows'
+                    : `${page * PAGE_SIZE + 1} to ${page * PAGE_SIZE + rows.length}`}
+                </span>
+                {queryMs !== null && <span className="grid-timing">{queryMs}ms</span>}
+                <div className="grid-nav">
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    aria-label="Previous page"
+                    disabled={page === 0}
+                    onClick={() => handlePage(-1)}
+                  >
+                    Previous
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    aria-label="Next page"
+                    disabled={rows === null || rows.length < PAGE_SIZE}
+                    onClick={() => handlePage(1)}
+                  >
+                    Next
+                  </button>
+                </div>
               </div>
             </>
           )}
