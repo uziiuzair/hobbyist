@@ -99,6 +99,7 @@ export function App() {
       currentSection={projectName === undefined ? undefined : 'databases'}
       currentResource={resourceName}
       currentView={tab === 'tables' || tab === 'sql' || tab === 'schema' ? tab : undefined}
+      wide={resourceName !== undefined}
       crumbs={
         <>
           <Crumb href="#/" here={projectName === undefined}>

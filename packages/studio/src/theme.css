@@ -307,7 +307,10 @@ body {
 
 .crumbs { font-size: 12.5px; }
 
-.topbar .measure { display: flex; align-items: center; gap: 12px; }
+.topbar .measure, .topbar .bleed { display: flex; align-items: center; gap: 12px; }
+
+/* Full bleed pages get a bar that starts where their content starts. */
+.bleed { width: 100%; min-width: 0; padding-inline: 14px; }
 
 .crumbs { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink-3); min-width: 0; }
 .crumbs a { color: var(--ink-2); text-decoration: none; }
