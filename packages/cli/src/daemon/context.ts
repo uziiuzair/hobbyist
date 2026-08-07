@@ -54,6 +54,65 @@ export function createDaemonContext(opts: {
   }
 }
 
+// The one real, idempotent wake function for a given DaemonContext:
+// concurrent callers for the same resourceId all await the same in-flight
+// startPostgres call, tracked in a Map private to this closure. The proxy
+// itself deliberately does not de-duplicate concurrent wakes for the same
+// resource (see packages/proxy/src/proxy.ts's own comment on
+// ProxyDeps.wake); this is what turns ten simultaneous connections to one
+// sleeping resource into exactly one startPostgres call, with every caller
+// awaiting the same promise. The entry is removed in a `finally` on both
+// success and failure, so one failed wake does not permanently poison the
+// resource for every connection after it.
+function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
+  const inFlightWakes = new Map<string, Promise<void>>()
+
+  return function wake(resourceId: string): Promise<void> {
+    const existing = inFlightWakes.get(resourceId)
+    if (existing !== undefined) {
+      return existing
+    }
+
+    const promise = (async (): Promise<void> => {
+      const resource = ctx.store.getResource(resourceId)
+      if (resource === null) {
+        throw new HobbyError('resource_not_found', `no resource with id ${resourceId}`)
+      }
+      await startPostgres(ctx, resource)
+    })().finally(() => {
+      inFlightWakes.delete(resourceId)
+    })
+
+    inFlightWakes.set(resourceId, promise)
+    return promise
+  }
+}
+
+const wakeRegistry = new WeakMap<DaemonContext, (resourceId: string) => Promise<void>>()
+
+// Memoized per DaemonContext in a WeakMap, the same pattern
+// studio/routes.ts uses for its own per-context session state: this is what
+// lets createProxyDeps (below, the proxy's own caller) and
+// packages/cli/src/daemon/routes.ts's queryRoute (POST
+// /v1/resources/:id/query) share the exact same wake function, and the
+// exact same in-flight map, whenever they are handed the same ctx, which in
+// production they always are, one DaemonContext per running daemon. That is
+// what makes the query route's wake genuinely "the same idempotent wake
+// path the proxy uses" rather than a second, independent implementation of
+// the same idea: a client connecting through the proxy and Studio calling
+// the query route for the same sleeping resource at the same moment await
+// the one real startPostgres call in flight, not two. A fresh ctx (every
+// test's own buildContext()) gets its own independent function and map, so
+// tests stay isolated from each other and from production.
+export function getOrCreateWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
+  let wake = wakeRegistry.get(ctx)
+  if (wake === undefined) {
+    wake = buildWake(ctx)
+    wakeRegistry.set(ctx, wake)
+  }
+  return wake
+}
+
 // The real ProxyDeps the wake-on-connect proxy runs against, bound to this
 // DaemonContext. Task 4 left this exact wiring as Task 7's to do (see
 // task-4-report.md's "What Task 7 must wire"): resolve looks a project up
@@ -62,18 +121,7 @@ export function createDaemonContext(opts: {
 // for real readiness before resolving, satisfying ProxyDeps.wake's
 // contract that it must not resolve until Postgres is actually accepting
 // connections.
-//
-// wake's in-flight map is the one piece of real state this function
-// builds. The proxy itself deliberately does not de-duplicate concurrent
-// wakes for the same resource (see packages/proxy/src/proxy.ts's own
-// comment on ProxyDeps.wake); this map is what turns ten simultaneous
-// connections to one sleeping resource into exactly one startPostgres
-// call, with every caller awaiting the same promise. The entry is removed
-// in a `finally` on both success and failure, so one failed wake does not
-// permanently poison the resource for every connection after it.
 export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
-  const inFlightWakes = new Map<string, Promise<void>>()
-
   async function resolve(projectName: string): Promise<ProxyTarget | null> {
     const project = ctx.store.getProjectByName(projectName)
     if (project === null) {
@@ -112,25 +160,5 @@ export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
     }
   }
 
-  function wake(resourceId: string): Promise<void> {
-    const existing = inFlightWakes.get(resourceId)
-    if (existing !== undefined) {
-      return existing
-    }
-
-    const promise = (async (): Promise<void> => {
-      const resource = ctx.store.getResource(resourceId)
-      if (resource === null) {
-        throw new HobbyError('resource_not_found', `no resource with id ${resourceId}`)
-      }
-      await startPostgres(ctx, resource)
-    })().finally(() => {
-      inFlightWakes.delete(resourceId)
-    })
-
-    inFlightWakes.set(resourceId, promise)
-    return promise
-  }
-
-  return { resolve, wake, activity: ctx.activity }
+  return { resolve, wake: getOrCreateWake(ctx), activity: ctx.activity }
 }

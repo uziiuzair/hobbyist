@@ -8,6 +8,7 @@ export * from './daemon/reconcile.js'
 export * from './daemon/preflight.js'
 export * from './daemon/hibernator.js'
 export * from './daemon/caddy.js'
+export * from './daemon/wire.js'
 
 // Studio's server side (task 10): the operator credential, sessions, and
 // the route-mounting/gate machinery the loopback TCP listener uses (see

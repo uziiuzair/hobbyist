@@ -15,7 +15,7 @@
 // would be more type-widening than the requirement is worth.
 
 import type { PreflightReport } from '../daemon/preflight.js'
-import type { Resource } from '@hobby.sh/core'
+import type { WireResource } from '../daemon/wire.js'
 
 export function formatBytes(bytes: number): string {
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -28,7 +28,7 @@ export function formatBytes(bytes: number): string {
   return `${value.toFixed(1)} ${units[unitIndex]}`
 }
 
-export function renderResourceLine(resource: Resource): string {
+export function renderResourceLine(resource: WireResource): string {
   return `${resource.name}  ${resource.kind}  ${resource.state}  port ${resource.config.hostPort}`
 }
 

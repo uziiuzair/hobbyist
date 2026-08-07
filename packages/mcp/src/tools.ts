@@ -11,7 +11,7 @@
 // both already exercised by packages/cli/src/cli/commands.ts. No handler
 // invents a new route or a new capability.
 
-import { HobbyError, parseTarget, type Resource } from '@hobby.sh/core'
+import { HobbyError, parseTarget } from '@hobby.sh/core'
 import { DaemonUnreachableError, resolveTarget, type Api } from '@hobby.sh/cli'
 
 // The MCP SDK's CallToolResult shape, reproduced by hand rather than
@@ -57,24 +57,6 @@ async function run(fn: () => Promise<unknown>): Promise<ToolResult> {
   }
 }
 
-// Strips the plaintext superuser password out of a Resource before it
-// leaves this package in any tool's output except hobby_connection_string.
-// PostgresConfig.password (packages/core/src/types.ts) sits right next to
-// every other field on a Resource, so every route that returns a Resource
-// returns the password too; that is the known, separately-tracked leak the
-// task brief describes. This does not fix the daemon's wire shape (out of
-// scope here), it only keeps the MCP surface from repeating the leak in
-// every tool that happens to echo back a resource.
-function redactResource(resource: Resource): Resource {
-  return {
-    ...resource,
-    config: {
-      ...resource.config,
-      password: '[redacted, call hobby_connection_string for the real value]',
-    },
-  }
-}
-
 export interface ListArgs {
   [key: string]: never
 }
@@ -99,18 +81,22 @@ export interface RmArgs {
 
 // Mirrors `hobby ls`: every project, with every resource's current state.
 // getProject is called once per project because, same as cmdLs, no single
-// route already returns "everything, with sleep state" in one call. Every
-// resource is redacted; the whole point of a list is orientation, not
-// credentials.
+// route already returns "everything, with sleep state" in one call.
+//
+// No redaction happens in this file: every resource the daemon Api hands
+// back is already the wire shape (WireResource, see
+// packages/cli/src/daemon/wire.ts), which never carries a password field at
+// all. This package used to blank it out a second time on its own; that is
+// gone now that the daemon itself never sends it, per the task report on
+// keeping the two redaction points consistent rather than one contradicting
+// the other (a placeholder string would have re-added a `password` key the
+// wire response no longer has).
 export async function listTool(api: Api): Promise<ToolResult> {
   return run(async () => {
     const { projects } = await api.listProjects()
     const details = await Promise.all(projects.map((project) => api.getProject(project.name)))
     return {
-      projects: details.map(({ project, resources }) => ({
-        project,
-        resources: resources.map(redactResource),
-      })),
+      projects: details.map(({ project, resources }) => ({ project, resources })),
     }
   })
 }
@@ -121,15 +107,16 @@ export async function listTool(api: Api): Promise<ToolResult> {
 // That is a deliberate narrowing for this surface, not a semantic drift:
 // the task's password decision says the password must be returned only
 // from the dedicated connection endpoint (hobby_connection_string), so an
-// agent using hobby_new gets the created project and resource (redacted)
-// and a hint pointing at the tool that actually carries the credential.
+// agent using hobby_new gets the created project and resource (already
+// password-free, see listTool's comment above) and a hint pointing at the
+// tool that actually carries the credential.
 export async function newTool(api: Api, args: NewArgs): Promise<ToolResult> {
   return run(async () => {
     const { project } = await api.createProject(args.name)
     const { resource } = await api.createResource(project.name, { kind: 'postgres', name: 'primary' })
     return {
       project,
-      resource: redactResource(resource),
+      resource,
       hint: `call hobby_connection_string with target "${project.name}" to get the connection string`,
     }
   })
@@ -155,7 +142,7 @@ export async function sleepTool(api: Api, args: TargetArgs): Promise<ToolResult>
   return run(async () => {
     const { resource } = await resolveTarget(api, args.target)
     const result = await api.stopResource(resource.id)
-    return { resource: redactResource(result.resource) }
+    return { resource: result.resource }
   })
 }
 
@@ -164,7 +151,7 @@ export async function wakeTool(api: Api, args: TargetArgs): Promise<ToolResult> 
   return run(async () => {
     const { resource } = await resolveTarget(api, args.target)
     const result = await api.startResource(resource.id)
-    return { resource: redactResource(result.resource) }
+    return { resource: result.resource }
   })
 }
 

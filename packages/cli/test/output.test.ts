@@ -312,9 +312,14 @@ test('renderResourceLine includes name, kind, state and port', () => {
       dataDir: '/x',
       hostPort: 15432,
       superuser: 'postgres',
-      password: 'secret',
+      // No `password` here: renderResourceLine takes the daemon's wire
+      // shape (WireResource, packages/cli/src/daemon/wire.ts), which never
+      // carries one. See routes.test.ts for the test asserting that omission
+      // end to end against a real response body.
       database: 'blog',
     },
+    sizeBytes: null,
+    connectionCount: 0,
     lastActiveAt: null,
     createdAt: new Date(),
   })

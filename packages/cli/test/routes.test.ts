@@ -199,6 +199,30 @@ test('GET /v1/projects/:name returns the project with its resources', async () =
   })
 })
 
+// The same Item 1 guarantee, but for the list-shaped route: a project's
+// resources array is a second, independent place a password could have
+// leaked back in (a different code path than the single-resource route
+// above), so it gets its own real-body assertion rather than trusting that
+// fixing one route's shape implies the other.
+test('GET /v1/projects/:name never leaks config.password on any resource in the list', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig({ password: 'this-must-never-cross-the-wire-either' }),
+  })
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/v1/projects/blog`)
+    const text = await res.text()
+    assert.equal(res.status, 200)
+    assert.ok(!text.includes('this-must-never-cross-the-wire-either'))
+    assert.ok(!text.includes('"password"'))
+  })
+})
+
 test('DELETE /v1/projects/:name deletes the project and its resources', async () => {
   const ctx = buildContext()
   const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
@@ -309,6 +333,65 @@ test('GET /v1/resources/:id returns the resource', async () => {
   })
 })
 
+// Item 1's own test, per the task brief: the password must be absent from a
+// real response body, not merely shown to work in isolation against
+// toWireResource. This asserts on the raw bytes the server actually sent
+// (never even reaching JSON.parse for the string-contents half of the
+// check) as well as on the parsed shape, so neither a key rename nor a
+// value hidden inside some other field could slip past.
+test('GET /v1/resources/:id never leaks config.password, in the raw body or the parsed shape', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig({ password: 'this-must-never-cross-the-wire' }),
+  })
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/v1/resources/${resource.id}`)
+    const text = await res.text()
+    assert.equal(res.status, 200)
+    assert.ok(!text.includes('this-must-never-cross-the-wire'), 'the raw response body must never contain the real password')
+    assert.ok(!text.includes('"password"'), 'the raw response body must never contain a password key at all')
+
+    const body = JSON.parse(text) as { resource: { config: Record<string, unknown> } }
+    assert.equal(body.resource.config.password, undefined)
+    assert.ok(!('password' in body.resource.config), 'config must not carry a password key, not even a blanked one')
+  })
+})
+
+// Item 3's own test for the two computed fields, on the same route: a
+// freshly created resource (state `creating`, per store.ts) has never run,
+// so sizeBytes is null (no cached figure exists yet, and this state is not
+// `running` so nothing is queried); connectionCount reflects the daemon's
+// own ActivityTracker directly, with no proxy or Postgres involved at all.
+test('GET /v1/resources/:id includes sizeBytes (null, nothing cached yet) and connectionCount from the ActivityTracker', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig(),
+  })
+
+  await withServer(ctx, async (baseUrl) => {
+    const before = await call(baseUrl, 'GET', `/v1/resources/${resource.id}`)
+    const beforeBody = before.body as { resource: { sizeBytes: number | null; connectionCount: number } }
+    assert.equal(beforeBody.resource.sizeBytes, null)
+    assert.equal(beforeBody.resource.connectionCount, 0)
+
+    ctx.activity.open(resource.id)
+    ctx.activity.open(resource.id)
+
+    const after = await call(baseUrl, 'GET', `/v1/resources/${resource.id}`)
+    const afterBody = after.body as { resource: { connectionCount: number } }
+    assert.equal(afterBody.resource.connectionCount, 2)
+  })
+})
+
 test('POST /v1/resources/:id/stop stops a resource against a fake runtime', async () => {
   // Unlike start, stopPostgres never waits on a readiness probe (see
   // packages/pg/src/postgres.ts): it only calls runtime.stop(), which the
@@ -395,6 +478,113 @@ test('GET /v1/resources/:id/logs returns the container logs', async () => {
     assert.equal(res.status, 200)
     const body = res.body as { logs: string }
     assert.equal(typeof body.logs, 'string')
+  })
+})
+
+// --- Item 2: POST /v1/resources/:id/query ---------------------------------
+
+test('POST /v1/resources/:id/query for an unknown id returns 404 resource_not_found', async () => {
+  await withServer(buildContext(), async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', '/v1/resources/does-not-exist/query', { sql: 'select 1' })
+    assert.equal(res.status, 404)
+    const body = res.body as { error: { code: string } }
+    assert.equal(body.error.code, 'resource_not_found')
+  })
+})
+
+test('POST /v1/resources/:id/query without sql returns 400 usage', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig(),
+  })
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/query`, {})
+    assert.equal(res.status, 400)
+    const body = res.body as { error: { code: string } }
+    assert.equal(body.error.code, 'usage')
+  })
+})
+
+test('POST /v1/resources/:id/query with a non-array params returns 400 usage', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig(),
+  })
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/query`, { sql: 'select 1', params: 'nope' })
+    assert.equal(res.status, 400)
+    const body = res.body as { error: { code: string } }
+    assert.equal(body.error.code, 'usage')
+  })
+})
+
+// The wake-before-query contract from the task brief, pinned the same way
+// the existing start-route test above pins startPostgres's own readiness
+// wait: against a fake runtime, nothing is really listening on the
+// allocated host port, so waking a sleeping resource can only ever time
+// out. Seeing that exact wake_timeout / 504 here, for a route that never
+// calls startResource itself, is what proves queryRoute actually attempts
+// to wake the resource (through the same getOrCreateWake path the proxy
+// uses, see context.ts) before ever trying to run the query, rather than
+// either querying a container that is not there or silently skipping the
+// wake.
+test('POST /v1/resources/:id/query against a sleeping resource wakes it first, and surfaces a real wake failure honestly', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig(),
+  })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/query`, { sql: 'select 1' })
+    assert.equal(res.status, 504)
+    const body = res.body as { error: { code: string } }
+    assert.equal(body.error.code, 'wake_timeout')
+
+    // The wake attempt itself must have actually run (and left the
+    // resource `failed`, per startPostgres's own contract on a readiness
+    // timeout, packages/pg/src/postgres.ts), not been silently skipped.
+    const after = ctx.store.getResource(resource.id)
+    assert.equal(after?.state, 'failed')
+  })
+})
+
+test('POST /v1/resources/:id/query does not attempt to wake a resource that is already running', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig({ hostPort: 1 }),
+  })
+  ctx.store.setResourceState(resource.id, 'running')
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/query`, { sql: 'select 1' })
+    // Never reaches wake_timeout/wake_failed: the resource never leaves
+    // `running`, which it would if startPostgres had been called (it
+    // transitions through `starting` first). Instead the query itself
+    // fails fast because nothing is listening on the (deliberately
+    // unroutable) hostPort, surfacing as not_ready from runQuery.
+    const body = res.body as { error?: { code: string } }
+    assert.notEqual(body.error?.code, 'wake_timeout')
+    assert.notEqual(body.error?.code, 'wake_failed')
+    assert.equal(ctx.store.getResource(resource.id)?.state, 'running')
   })
 })
 
