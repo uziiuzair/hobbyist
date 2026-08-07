@@ -455,9 +455,98 @@ a.card:hover { border-color: var(--accent-line); background: var(--surface-2); }
 
 .section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-3); font-weight: 600; margin: 0 0 10px; }
 
-.db-head { display: flex; align-items: center; gap: 14px; padding: 14px 15px 12px; flex-wrap: wrap; }
-.db-head > :last-child { margin-left: auto; }
-.db-conn { padding: 0 15px 13px; }
+/* ---------- project dashboard ---------- */
+
+/* The strip a hosted product fills with billable units. Everything here is
+   read off the machine at request time, which is why there are five figures
+   and not fifteen: these are the ones that exist. */
+.stats {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 15px 16px 13px;
+  margin-bottom: 16px;
+}
+.stat-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; }
+.stat { min-width: 0; }
+.stat-label {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--ink-3); font-weight: 600; margin-bottom: 5px;
+}
+/* The display step, the same size as the page title. A figure row is a
+   different register from a heading, not a louder one, and the system's type
+   range tops out here on purpose. */
+.stat-value {
+  font-size: 21px; font-weight: 600; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums; display: flex; align-items: baseline; gap: 6px;
+}
+/* Awake is the only figure that is green, and only when it is not zero. A
+   dashboard where every number is coloured has no way left to say "this one". */
+.stat-value.is-live { color: var(--accent); }
+.stat-unit { font-size: 12.5px; font-weight: 400; color: var(--ink-3); letter-spacing: 0; }
+.stats-note {
+  margin: 14px 0 0; padding-top: 11px; border-top: 1px solid var(--line);
+  color: var(--ink-3); font-size: 12px; line-height: 1.5;
+}
+
+/* Chart left, the things you act on right, the way Neon ranks them. */
+.dash { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+.dash-side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+.panel-foot { margin: 12px 0 0; color: var(--ink-3); font-size: 12px; line-height: 1.5; }
+
+.chart { width: 100%; }
+.chart-axis { fill: var(--ink-3); font-size: 10px; font-variant-numeric: tabular-nums; }
+.chart-legend { display: flex; gap: 16px; margin-top: 4px; }
+.legend-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-3);
+}
+.legend-hatch {
+  width: 14px; height: 9px; border: 1px solid var(--line-strong); border-radius: var(--radius-bar);
+  background: repeating-linear-gradient(45deg, var(--line-strong) 0 1.5px, transparent 1.5px 5px);
+}
+.legend-line { width: 14px; height: 2px; background: var(--accent); border-radius: var(--radius-bar); }
+
+.db-list { display: flex; flex-direction: column; }
+.db-row { padding: 11px 0; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+.db-row:first-child { padding-top: 0; }
+.db-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.db-row-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.db-name {
+  font-size: 13.5px; font-weight: 600; color: var(--ink); text-decoration: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.db-name:hover { color: var(--accent); }
+.db-row-main > .state { margin-left: auto; flex: none; }
+.db-row-meta {
+  display: flex; align-items: center; gap: 12px;
+  color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums;
+}
+
+/* A settings list, not a table: two columns, the value carrying the weight. */
+.kv { display: flex; align-items: baseline; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.kv-label { color: var(--ink-2); flex: none; }
+.kv-value {
+  margin-left: auto; color: var(--ink); text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+
+.panel-danger { display: flex; align-items: center; gap: 12px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.danger-title { font-size: 12.5px; font-weight: 600; }
+.danger-note { margin: 3px 0 0; color: var(--ink-3); font-size: 12px; line-height: 1.45; }
+.panel-danger > :last-child { margin-left: auto; flex: none; }
+
+.select-sm { width: auto; padding: 3px 7px; font-size: 12px; }
+.field-hint { margin: 0; color: var(--ink-3); font-size: 12px; line-height: 1.45; }
+.modal-body .field + .field { margin-top: 14px; }
+
+@media (max-width: 1040px) {
+  .dash { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 720px) {
+  .stat-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 
 /* ---------- capacity panel: the honest local answer to a plan quota ---------- */
 
