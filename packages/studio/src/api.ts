@@ -111,6 +111,22 @@ export function session(): Promise<{ authenticated: boolean }> {
   return request('/studio/session')
 }
 
+// --- Host ---
+
+export interface Preflight {
+  runtimeAvailable: boolean
+  filesystem: { path: string; reflinkSupported: boolean; freeBytes: number }
+  ports: { proxy: { port: number; bound: boolean }; studio: { port: number; bound: boolean } }
+}
+
+// Read only, and the daemon guarantees it mutates nothing, so Studio can poll
+// it for the capacity panel. It is the closest thing to a plan quota that is
+// actually true on a machine you own. Note it carries no memory figure: the
+// panel shows disk and awake count rather than estimating RAM.
+export function preflight(): Promise<Preflight> {
+  return request('/v1/preflight')
+}
+
 // --- Projects ---
 
 export function listProjects(): Promise<{ projects: Project[] }> {

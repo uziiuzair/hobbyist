@@ -27,13 +27,16 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   }
 
   return (
-    <div className="login-shell">
-      <form className="card login-card" onSubmit={(event) => void handleSubmit(event)}>
-        <div className="login-brand">Hobbyist Studio</div>
-        <div className="login-tagline">Your Postgres. Your box.</div>
+    <div className="login-wrap">
+      <form className="login-card" onSubmit={(event) => void handleSubmit(event)}>
+        <div className="login-brand">
+          <span className="rail-mark" aria-hidden="true"><i /></span>
+          hobbyist studio
+        </div>
+        <div className="card" style={{ padding: 18 }}>
         <div className="stack">
           <div className="field">
-            <label htmlFor="password">Operator password</label>
+            <label htmlFor="password">operator password</label>
             <input
               id="password"
               className="input"
@@ -49,6 +52,11 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
             {busy ? 'Signing in...' : 'Sign in'}
           </button>
         </div>
+        </div>
+        <p className="dim" style={{ fontSize: 12, marginTop: 14, lineHeight: 1.5 }}>
+          set on the box with <code className="mono">hobby studio passwd</code>. there is no
+          reset link and no recovery, on purpose.
+        </p>
       </form>
     </div>
   )

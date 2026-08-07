@@ -1,16 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { Project as ProjectModel, Resource } from '@hobby.sh/core'
 import * as api from '../api.js'
-import { ResourceBadge, formatBytes } from '../components/ResourceBadge.js'
-import { WakingBanner } from '../components/WakingBanner.js'
-import { useWakeAwareRun } from '../lib/useWaking.js'
+import { navigate } from '../lib/router.js'
+import { formatBytes, formatSince, readStats } from '../lib/format.js'
+import { State } from '../components/State.js'
 
-interface ResourceStats {
-  sizeBytes?: number
-  connectionCount?: number
-}
-
-export function Project({ projectName }: { projectName: string }) {
+export function Project({ projectName, onChanged }: { projectName: string; onChanged: () => void }) {
   const [project, setProject] = useState<ProjectModel | null>(null)
   const [resources, setResources] = useState<Resource[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -23,42 +18,76 @@ export function Project({ projectName }: { projectName: string }) {
         setResources(detail.resources)
         setError(null)
       })
-      .catch((err: unknown) => {
-        setError(err instanceof api.ApiError ? err.message : 'could not reach the daemon')
-      })
+      .catch((err: unknown) =>
+        setError(err instanceof api.ApiError ? err.message : 'could not reach the daemon'),
+      )
   }, [projectName])
 
-  useEffect(() => {
+  useEffect(load, [load])
+
+  const refresh = useCallback(() => {
     load()
-  }, [load])
+    onChanged()
+  }, [load, onChanged])
 
   if (error !== null) {
-    return <div className="error-banner">{error}</div>
+    return (
+      <div className="page">
+        <div className="notice notice-danger">{error}</div>
+      </div>
+    )
   }
 
-  if (project === null || resources === null) {
-    return <div className="hint-text">Loading {projectName}...</div>
+  if (resources === null || project === null) {
+    return (
+      <div className="page">
+        <span className="dim">loading</span>
+      </div>
+    )
   }
+
+  const idleMinutes = project.sleepAfterSeconds === null ? null : Math.round(project.sleepAfterSeconds / 60)
 
   return (
-    <div className="stack">
-      <div className="row" style={{ justifyContent: 'space-between' }}>
-        <h2 style={{ margin: 0 }}>{project.name}</h2>
-        <span className="hint-text">
-          sleeps after {project.sleepAfterSeconds !== null ? `${project.sleepAfterSeconds}s idle` : 'never (manual only)'}
-        </span>
+    <div className="page">
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">{project.name}</h1>
+          <p className="page-sub">
+            {idleMinutes === null
+              ? 'pinned awake, never sleeps on its own'
+              : `sleeps after ${idleMinutes} minute${idleMinutes === 1 ? '' : 's'} with nothing connected`}
+          </p>
+        </div>
+        <div className="page-actions">
+          <DestroyProject name={project.name} onDone={onChanged} />
+        </div>
       </div>
 
+      <h2 className="section-title">databases</h2>
+
       {resources.length === 0 ? (
-        <div className="empty-state">No resources in this project yet.</div>
+        <div className="empty">
+          <h3>no databases in this project</h3>
+          <p>a project with no database has nothing to connect to yet.</p>
+        </div>
       ) : (
-        resources.map((resource) => <ResourceCard key={resource.id} projectName={projectName} resource={resource} onChanged={load} />)
+        <div className="stack">
+          {resources.map((resource) => (
+            <DatabaseRow
+              key={resource.id}
+              projectName={project.name}
+              resource={resource}
+              onChanged={refresh}
+            />
+          ))}
+        </div>
       )}
     </div>
   )
 }
 
-function ResourceCard({
+function DatabaseRow({
   projectName,
   resource,
   onChanged,
@@ -67,138 +96,149 @@ function ResourceCard({
   resource: Resource
   onChanged: () => void
 }) {
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState<'wake' | 'sleep' | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
-  const [connString, setConnString] = useState<string | null>(null)
-  const [logsText, setLogsText] = useState<string | null>(null)
-  const [logsOpen, setLogsOpen] = useState(false)
-  const { snapshot, run } = useWakeAwareRun()
+  const [conn, setConn] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
 
-  const stats = resource as unknown as ResourceStats
+  const stats = readStats(resource)
+  const base = `#/projects/${encodeURIComponent(projectName)}/resources/${encodeURIComponent(resource.name)}`
 
-  async function handleWake(): Promise<void> {
-    setBusy(true)
+  async function act(kind: 'wake' | 'sleep'): Promise<void> {
+    setBusy(kind)
     setActionError(null)
     try {
-      await run(resource.id, resource.state, () => api.wakeResource(resource.id))
+      if (kind === 'wake') await api.wakeResource(resource.id)
+      else await api.sleepResource(resource.id)
       onChanged()
     } catch (err) {
-      setActionError(err instanceof api.ApiError ? err.message : 'failed to wake')
+      setActionError(err instanceof api.ApiError ? err.message : `failed to ${kind}`)
     } finally {
-      setBusy(false)
+      setBusy(null)
     }
   }
 
-  async function handleSleep(): Promise<void> {
-    setBusy(true)
-    setActionError(null)
+  async function copy(): Promise<void> {
     try {
-      await api.sleepResource(resource.id)
-      onChanged()
+      const value = conn ?? (await api.connectionString(resource.id)).connectionString
+      setConn(value)
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1600)
     } catch (err) {
-      setActionError(err instanceof api.ApiError ? err.message : 'failed to sleep')
-    } finally {
-      setBusy(false)
+      setActionError(err instanceof api.ApiError ? err.message : 'could not read the connection string')
     }
   }
-
-  async function handleShowConnection(): Promise<void> {
-    try {
-      const { connectionString } = await api.connectionString(resource.id)
-      setConnString(connectionString)
-    } catch (err) {
-      setActionError(err instanceof api.ApiError ? err.message : 'failed to load connection string')
-    }
-  }
-
-  async function handleCopyConnection(): Promise<void> {
-    const value = connString ?? (await api.connectionString(resource.id)).connectionString
-    setConnString(value)
-    await navigator.clipboard.writeText(value).catch(() => undefined)
-  }
-
-  async function handleToggleLogs(): Promise<void> {
-    if (logsOpen) {
-      setLogsOpen(false)
-      return
-    }
-    setLogsOpen(true)
-    try {
-      const { logs } = await api.logs(resource.id, 200)
-      setLogsText(logs)
-    } catch (err) {
-      setActionError(err instanceof api.ApiError ? err.message : 'failed to load logs')
-    }
-  }
-
-  const base = `/projects/${encodeURIComponent(projectName)}/resources/${encodeURIComponent(resource.name)}`
 
   return (
-    <div className="card stack">
-      <div className="row" style={{ justifyContent: 'space-between' }}>
-        <div className="row">
-          <strong>{resource.name}</strong>
-          <ResourceBadge state={resource.state} />
-        </div>
-        <div className="row">
-          <button type="button" className="btn btn-small" disabled={busy || resource.state === 'running' || resource.state === 'starting'} onClick={() => void handleWake()}>
-            Wake
-          </button>
-          <button
-            type="button"
-            className="btn btn-small"
-            disabled={busy || resource.state === 'sleeping' || resource.state === 'stopping'}
-            onClick={() => void handleSleep()}
-          >
-            Sleep
-          </button>
-        </div>
-      </div>
-
-      <WakingBanner resourceName={resource.name} snapshot={snapshot} />
-
-      <div className="project-card-meta">
-        <span>{stats.sizeBytes !== undefined ? formatBytes(stats.sizeBytes) : 'size unknown'}</span>
-        <span>{stats.connectionCount !== undefined ? `${stats.connectionCount} connections` : 'connections unknown'}</span>
-      </div>
-
-      {actionError !== null && <div className="error-text">{actionError}</div>}
-
-      <div className="stack">
-        {connString === null ? (
-          <button type="button" className="btn btn-small" onClick={() => void handleShowConnection()}>
-            Show connection string
-          </button>
-        ) : (
-          <div className="conn-string">
-            <code>{connString}</code>
-            <button type="button" className="btn btn-small" onClick={() => void handleCopyConnection()}>
-              Copy
-            </button>
+    <div className="card">
+      <div className="db-head">
+        <div style={{ minWidth: 0 }}>
+          <div className="card-title">{resource.name}</div>
+          <div className="card-meta">
+            postgres · {formatBytes(stats.sizeBytes)} · {stats.connectionCount ?? 0} connection
+            {(stats.connectionCount ?? 0) === 1 ? '' : 's'} · active {formatSince(stats.lastActiveAt)}
           </div>
-        )}
+        </div>
+        <State state={resource.state} />
+        <div className="row" style={{ gap: 6 }}>
+          {resource.state === 'running' ? (
+            <button type="button" className="btn btn-sm" onClick={() => act('sleep')} disabled={busy !== null}>
+              {busy === 'sleep' && <span className="spinner" />}
+              sleep
+            </button>
+          ) : (
+            <button type="button" className="btn btn-sm" onClick={() => act('wake')} disabled={busy !== null}>
+              {busy === 'wake' && <span className="spinner" />}
+              wake
+            </button>
+          )}
+        </div>
       </div>
 
-      <div className="row">
-        <a className="btn btn-small" href={`#${base}/tables`}>
-          Tables
+      <div className="db-conn">
+        <div className="connstring">
+          <code>{conn ?? `postgres://...@127.0.0.1:5432/${projectName}`}</code>
+          <button type="button" className="btn btn-sm btn-ghost" onClick={copy}>
+            {copied ? 'copied' : 'copy'}
+          </button>
+        </div>
+      </div>
+
+      {actionError !== null && (
+        <div style={{ padding: '0 15px 12px' }}>
+          <div className="notice notice-danger">{actionError}</div>
+        </div>
+      )}
+
+      <div className="card-foot">
+        <a className="btn btn-sm btn-ghost" href={`${base}/tables`}>
+          tables
         </a>
-        <a className="btn btn-small" href={`#${base}/sql`}>
-          SQL
+        <a className="btn btn-sm btn-ghost" href={`${base}/sql`}>
+          sql
         </a>
-        <a className="btn btn-small" href={`#${base}/schema`}>
-          Schema
+        <a className="btn btn-sm btn-ghost" href={`${base}/schema`}>
+          schema
         </a>
-        <button type="button" className="btn btn-small" onClick={() => void handleToggleLogs()}>
-          {logsOpen ? 'Hide logs' : 'Show logs'}
+      </div>
+    </div>
+  )
+}
+
+function DestroyProject({ name, onDone }: { name: string; onDone: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [typed, setTyped] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  if (!open) {
+    return (
+      <button type="button" className="btn btn-danger" onClick={() => setOpen(true)}>
+        delete project
+      </button>
+    )
+  }
+
+  return (
+    <div className="panel" style={{ minWidth: 300 }}>
+      <p style={{ margin: '0 0 10px', fontSize: 13 }}>
+        this destroys the database and its data directory. type <strong>{name}</strong> to confirm.
+      </p>
+      <input
+        className="input"
+        value={typed}
+        autoFocus
+        onChange={(e) => setTyped(e.target.value)}
+        aria-label={`type ${name} to confirm`}
+      />
+      {error !== null && <div className="notice notice-danger" style={{ marginTop: 10 }}>{error}</div>}
+      <div className="row" style={{ marginTop: 10 }}>
+        <button
+          type="button"
+          className="btn btn-danger"
+          disabled={typed !== name || busy}
+          onClick={() => {
+            setBusy(true)
+            api
+              .deleteProject(name, { force: true })
+              .then(() => {
+                onDone()
+                navigate('/')
+              })
+              .catch((err: unknown) =>
+                setError(err instanceof api.ApiError ? err.message : 'could not delete'),
+              )
+              .finally(() => setBusy(false))
+          }}
+        >
+          {busy && <span className="spinner" />}
+          delete
+        </button>
+        <button type="button" className="btn btn-ghost" onClick={() => setOpen(false)} disabled={busy}>
+          cancel
         </button>
       </div>
-
-      {logsOpen && (
-        <pre className="mono" style={{ maxHeight: 240, overflow: 'auto', background: 'var(--bg-sunken)', padding: 10, borderRadius: 6, margin: 0 }}>
-          {logsText ?? 'Loading logs...'}
-        </pre>
-      )}
     </div>
   )
 }
