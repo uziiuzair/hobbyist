@@ -549,6 +549,59 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
 
 .pager { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 13px; color: var(--ink-2); }
 
+/* ---------- waking: the interaction the whole product rests on ----------
+   A query against a sleeping database takes about a second. The failure mode
+   is not the wait, it is an unexplained wait: a bare spinner says something is
+   broken, so this names the database, says plainly what is happening, and runs
+   a clock that only counts up. Amber rather than green, because this is a
+   transition and not a resting state. */
+
+.waking-banner {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 13px;
+  border: 1px solid var(--waking);
+  background: var(--waking-dim);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.waking-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--waking);
+  box-shadow: 0 0 0 3px var(--waking-dim);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+
+.waking-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.waking-text strong { font-weight: 600; }
+.waking-detail { color: var(--ink-2); font-size: 12.5px; }
+
+/* Tabular figures so the clock does not jitter as it counts. */
+.waking-elapsed {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--waking);
+  flex: none;
+}
+
+/* Already running and merely slow: quieter, and it says something different,
+   because claiming a wake that is not happening would be a lie. */
+.waking-banner-subtle {
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+}
+.waking-banner-subtle .waking-dot { background: var(--ink-3); box-shadow: none; }
+.waking-banner-subtle .waking-elapsed { color: var(--ink-2); }
+
+@media (prefers-reduced-motion: reduce) {
+  .waking-dot { animation: none; }
+}
+
 /* ---------- modals: every form lives in one ---------- */
 
 .modal-scrim {
