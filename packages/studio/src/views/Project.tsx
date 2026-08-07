@@ -138,7 +138,7 @@ function DatabaseRow({
           <div className="card-title">{resource.name}</div>
           <div className="card-meta">
             Postgres · {formatBytes(stats.sizeBytes)} · {stats.connectionCount ?? 0} connection
-            {(stats.connectionCount ?? 0) === 1 ? '' : 's'} · Active {formatSince(stats.lastActiveAt)}
+            {(stats.connectionCount ?? 0) === 1 ? '' : 's'} · Last active {formatSince(stats.lastActiveAt)}
           </div>
         </div>
         <State state={resource.state} />
@@ -159,7 +159,7 @@ function DatabaseRow({
 
       <div className="db-conn">
         <div className="connstring">
-          <code>{conn ?? `postgres://...@127.0.0.1:5432/${projectName}`}</code>
+          <code>{conn ?? 'Connection string hidden until you copy it'}</code>
           <button type="button" className="btn btn-sm btn-ghost" onClick={copy}>
             {copied ? 'Copied' : 'Copy'}
           </button>

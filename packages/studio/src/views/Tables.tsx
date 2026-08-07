@@ -72,10 +72,18 @@ export function Tables({
   }, [active, resource?.id])
 
   if (resourceError !== null) {
-    return <div className="error-banner">{resourceError}</div>
+    return (
+      <div className="page measure">
+        <div className="error-banner">{resourceError}</div>
+      </div>
+    )
   }
   if (resource === null) {
-    return <div className="hint-text">Loading {resourceName}...</div>
+    return (
+      <div className="page measure">
+        <span className="hint-text">Loading {resourceName}</span>
+      </div>
+    )
   }
 
   const currentTable = tables?.find((t) => t.name === active)
@@ -184,7 +192,7 @@ export function Tables({
               )}
 
               {rows === null ? (
-                <div className="hint-text">Loading rows...</div>
+                <div className="hint-text">Loading rows</div>
               ) : rows.length === 0 ? (
                 <div className="empty-state">No rows.</div>
               ) : (

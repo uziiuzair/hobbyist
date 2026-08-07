@@ -15,9 +15,9 @@ export function formatBytes(bytes: number | undefined | null): string {
 // read it as live truth; the daemon's own idle threshold is 300 seconds, so
 // anything finer than a minute is noise the operator cannot act on.
 export function formatSince(iso: string | null | undefined): string {
-  if (iso === undefined || iso === null) return 'never'
+  if (iso === undefined || iso === null) return 'not yet'
   const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return 'never'
+  if (Number.isNaN(then)) return 'not yet'
   const seconds = Math.max(0, Math.round((Date.now() - then) / 1000))
   if (seconds < 60) return 'just now'
   const minutes = Math.round(seconds / 60)

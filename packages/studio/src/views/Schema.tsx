@@ -26,10 +26,18 @@ export function Schema({ projectName, resourceName }: { projectName: string; res
   }, [resource?.id])
 
   if (resourceError !== null) {
-    return <div className="error-banner">{resourceError}</div>
+    return (
+      <div className="page measure">
+        <div className="error-banner">{resourceError}</div>
+      </div>
+    )
   }
   if (resource === null) {
-    return <div className="hint-text">Loading {resourceName}...</div>
+    return (
+      <div className="page measure">
+        <span className="hint-text">Loading {resourceName}</span>
+      </div>
+    )
   }
 
   return (
@@ -39,7 +47,7 @@ export function Schema({ projectName, resourceName }: { projectName: string; res
       {error !== null && <div className="error-banner">{error}</div>}
 
       {tables === null ? (
-        <div className="hint-text">Loading schema...</div>
+        <div className="hint-text">Loading schema</div>
       ) : tables.length === 0 ? (
         <div className="empty-state">No tables in the public schema.</div>
       ) : (
@@ -50,10 +58,10 @@ export function Schema({ projectName, resourceName }: { projectName: string; res
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>column</th>
-                    <th>type</th>
-                    <th>nullable</th>
-                    <th>default</th>
+                    <th>Column</th>
+                    <th>Type</th>
+                    <th>Nullable</th>
+                    <th>Default</th>
                   </tr>
                 </thead>
                 <tbody>
