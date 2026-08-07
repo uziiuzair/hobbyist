@@ -75,7 +75,7 @@
   --on-accent-line: color-mix(in srgb, var(--accent-ink) 26%, transparent);
   --on-accent-fill: color-mix(in srgb, var(--accent-ink) 13%, transparent);
   --rail: 248px;
-  --topbar: 52px;
+  --topbar: 40px;
 
   --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.02) inset, 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.4);
@@ -304,6 +304,8 @@ body {
   padding-inline: 24px;
   min-width: 0;
 }
+
+.crumbs { font-size: 12.5px; }
 
 .topbar .measure { display: flex; align-items: center; gap: 12px; }
 
@@ -597,10 +599,12 @@ kbd {
    so the tabs still line up with the breadcrumb above them. */
 
 .workbench {
-  flex: 1;
+  flex: none;
+  height: calc(100vh - var(--topbar));
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
 .workbench-tabs { padding-top: 14px; flex: none; }
 .workbench-tabs .tabs { margin-bottom: 0; }
