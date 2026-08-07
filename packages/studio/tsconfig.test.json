@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": false,
+    "outDir": "dist-test",
+    "rootDir": "."
+  },
+  "include": ["src/api.ts", "src/lib/sqlStorage.ts", "src/lib/identifiers.ts", "src/lib/schema.ts", "test"]
+}
