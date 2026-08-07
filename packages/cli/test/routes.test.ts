@@ -640,7 +640,13 @@ test('POST /v1/projects/:name/eject renders a compose file grounded in the real 
     const res = await call(baseUrl, 'POST', '/v1/projects/blog/eject')
     assert.equal(res.status, 200)
     const body = res.body as { compose: string; dataDirs: string[] }
-    assert.match(body.compose, /container_name: hobby-blog-primary/)
+    // No container_name, deliberately. This test previously asserted its
+    // presence, which pinned a real defect: the emitted file reused the name
+    // Hobbyist's own container holds, so `docker compose up` failed with a
+    // name conflict while Hobbyist was still managing the project, which is
+    // the state eject leaves you in. Verified against real Docker before and
+    // after. An ejected stack that cannot start is not an escape hatch.
+    assert.doesNotMatch(body.compose, /container_name:/)
     // Loopback-bound, exactly as the daemon itself publishes the container
     // (packages/core/src/docker.ts): a compose file that published the
     // database on every interface would hand the departing user a strictly
