@@ -139,7 +139,7 @@ body {
 
 /* ---------- shell ---------- */
 
-.shell { display: grid; grid-template-columns: var(--rail) 1fr; min-height: 100%; }
+.shell { display: grid; grid-template-columns: var(--rail) 1fr; min-height: 100vh; }
 
 .rail {
   position: sticky;
@@ -270,6 +270,7 @@ body {
    its content's intrinsic width, a long connection string or a wide table
    pushes the whole document sideways, and the rail scrolls out of frame. */
 .main { min-width: 0; display: flex; flex-direction: column; overflow-x: clip; }
+.main > * { min-height: 0; }
 
 .topbar {
   height: var(--topbar);
@@ -512,6 +513,84 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
    one system without touching working query and paging logic. */
 
 .btn-small { padding: 4px 8px; font-size: 12.5px; }
+
+/* ---------- the workbench ----------
+   A row browser is not a document, so it does not sit in the reading measure
+   with air around it. It takes the whole viewport below the topbar: the table
+   index owns a fixed column, the grid owns the rest and scrolls inside itself,
+   and the header row stays put. Only the tab strip keeps the shared measure,
+   so the tabs still line up with the breadcrumb above them. */
+
+.workbench {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.workbench-tabs { padding-top: 14px; flex: none; }
+.workbench-tabs .tabs { margin-bottom: 0; }
+
+.workbench-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 252px minmax(0, 1fr);
+  min-height: 0;
+  border-top: 1px solid var(--line);
+}
+
+.wb-side {
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.wb-side-head {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 14px 14px 10px;
+}
+.wb-side-title { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.wb-side-count { margin-left: auto; color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.wb-side-search { padding: 0 12px 10px; }
+.wb-side-list { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
+
+.wb-table {
+  width: 100%;
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px;
+  border: 0; background: none; cursor: pointer;
+  color: var(--ink-2);
+  font-family: var(--font-mono); font-size: 12.5px;
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+.wb-table:hover { background: var(--surface-2); color: var(--ink); }
+.wb-table.active { background: var(--accent-dim); color: var(--ink); }
+.wb-table.active svg { color: var(--accent); }
+.wb-table svg { flex: none; opacity: 0.7; }
+.wb-table.active svg { opacity: 1; }
+.wb-table-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-table-note { margin-left: auto; font-size: 10.5px; color: var(--ink-3); flex: none; }
+
+.wb-main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  padding: 12px 14px 0;
+  gap: 10px;
+}
+
+/* The grid takes whatever height is left and scrolls inside itself, so the
+   filter bar and the row range stay put while the rows move. */
+.wb-main .table-scroll { flex: 1; max-height: none; min-height: 0; border-radius: var(--radius); }
+.wb-main .grid-table thead th { position: sticky; top: 0; z-index: 2; }
+.wb-main .grid-bar { flex: none; padding-bottom: 12px; }
+
+@media (max-width: 860px) {
+  .workbench-body { grid-template-columns: minmax(0, 1fr); }
+  .wb-side { border-right: 0; border-bottom: 1px solid var(--line); max-height: 34vh; }
+}
 
 /* ---------- the data grid ----------
    A row browser is not a content table: it is a grid, and it earns vertical

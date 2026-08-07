@@ -32,6 +32,7 @@ export function Tables({
 
   const [rows, setRows] = useState<Array<Record<string, unknown>> | null>(null)
   const [queryMs, setQueryMs] = useState<number | null>(null)
+  const [tableQuery, setTableQuery] = useState('')
   const [page, setPage] = useState(0)
   const [filter, setFilter] = useState('')
   const [appliedFilter, setAppliedFilter] = useState('')
@@ -150,34 +151,65 @@ export function Tables({
     }
   }
 
-  return (
-    <div className="page measure stack">
-      <ResourceTabs projectName={projectName} resourceName={resourceName} active="tables" />
-      <WakingBanner resourceName={resourceName} snapshot={snapshot} />
-      {schemaError !== null && <div className="error-banner">{schemaError}</div>}
+  const visibleTables = (tables ?? []).filter((t) =>
+    tableQuery.trim().length === 0 ? true : t.name.toLowerCase().includes(tableQuery.trim().toLowerCase()),
+  )
 
-      <div className="sql-editor-shell">
-        <div className="side-index">
-          <div className="side-list">
-            <div className="side-list-title">Tables</div>
+  return (
+    <div className="workbench">
+      <div className="workbench-tabs measure">
+        <ResourceTabs projectName={projectName} resourceName={resourceName} active="tables" />
+      </div>
+
+      <div className="workbench-body">
+        <aside className="wb-side" aria-label="Tables">
+          <div className="wb-side-head">
+            <span className="wb-side-title">Tables</span>
+            <span className="wb-side-count">{tables?.length ?? 0}</span>
+          </div>
+          <div className="wb-side-search">
+            <div className="search">
+              <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
+                <circle cx="5.6" cy="5.6" r="3.9" stroke="currentColor" strokeWidth="1.3" />
+                <path d="M8.6 8.6 11.3 11.3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+              </svg>
+              <input
+                className="input"
+                placeholder="Search tables"
+                aria-label="Search tables"
+                value={tableQuery}
+                onChange={(event) => setTableQuery(event.target.value)}
+              />
+            </div>
+          </div>
+          <div className="wb-side-list">
             {tables === null && <div className="side-list-empty">Loading</div>}
             {tables?.length === 0 && <div className="side-list-empty">No tables in the public schema</div>}
-            {tables?.map((t) => (
+            {tables !== null && tables.length > 0 && visibleTables.length === 0 && (
+              <div className="side-list-empty">No table matches</div>
+            )}
+            {visibleTables.map((t) => (
               <button
                 type="button"
                 key={t.name}
-                className={`side-list-item mono${t.name === active ? ' active' : ''}`}
+                className={`wb-table${t.name === active ? ' active' : ''}`}
                 aria-current={t.name === active ? 'page' : undefined}
                 onClick={() => handleSelectTable(t.name)}
               >
-                <span>{t.name}</span>
-                {t.primaryKey.length === 0 && <span className="hint-text">no pk</span>}
+                <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <rect x="1.5" y="2" width="11" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+                  <path d="M1.5 5.5h11M5.5 5.5V12" stroke="currentColor" strokeWidth="1.2" />
+                </svg>
+                <span className="wb-table-name">{t.name}</span>
+                {t.primaryKey.length === 0 && <span className="wb-table-note">no pk</span>}
               </button>
             ))}
           </div>
-        </div>
+        </aside>
 
-        <div className="stack">
+        <section className="wb-main">
+          <WakingBanner resourceName={resourceName} snapshot={snapshot} />
+          {schemaError !== null && <div className="error-banner">{schemaError}</div>}
           {active === undefined ? (
             <div className="empty"><h3>Pick a table</h3><p>Choose a table on the left to browse its rows.</p></div>
           ) : (
@@ -301,7 +333,7 @@ export function Tables({
               </div>
             </>
           )}
-        </div>
+        </section>
       </div>
     </div>
   )
