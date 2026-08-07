@@ -4,7 +4,7 @@ import { navigate } from '../lib/router.js'
 import { useResource } from '../lib/useResource.js'
 import { useWakeAwareRun } from '../lib/useWaking.js'
 import { WakingBanner } from '../components/WakingBanner.js'
-import { ResourceTabs } from '../components/ResourceTabs.js'
+import { Workbench } from '../components/Workbench.js'
 import { quoteIdentifier } from '../lib/identifiers.js'
 import { loadSchema, type TableInfo } from '../lib/schema.js'
 
@@ -37,7 +37,7 @@ export function Tables({
   const [filter, setFilter] = useState('')
   const [appliedFilter, setAppliedFilter] = useState('')
   const [rowsError, setRowsError] = useState<string | null>(null)
-  const [editing, setEditing] = useState<{ rowIndex: number; column: string } | null>(null)
+  const [editing, setEditing] = useState<{ rowIndex: number; column: string; popout: boolean } | null>(null)
   const [editValue, setEditValue] = useState('')
   const [saveError, setSaveError] = useState<string | null>(null)
 
@@ -118,9 +118,12 @@ export function Tables({
     loadRows(next, appliedFilter)
   }
 
+  const POPOUT_AT = 48
+
   function startEdit(rowIndex: number, column: string, currentValue: unknown): void {
     if (currentTable === undefined || currentTable.primaryKey.length === 0) return
-    setEditing({ rowIndex, column })
+    const text = currentValue === null ? '' : String(currentValue)
+    setEditing({ rowIndex, column, popout: text.length > POPOUT_AT || text.includes('\n') })
     setEditValue(currentValue === null || currentValue === undefined ? '' : String(currentValue))
     setSaveError(null)
   }
@@ -156,13 +159,12 @@ export function Tables({
   )
 
   return (
-    <div className="workbench">
-      <div className="workbench-tabs measure">
-        <ResourceTabs projectName={projectName} resourceName={resourceName} active="tables" />
-      </div>
-
-      <div className="workbench-body">
-        <aside className="wb-side" aria-label="Tables">
+    <Workbench
+      projectName={projectName}
+      resourceName={resourceName}
+      section="tables"
+      sidebar={
+        <>
           <div className="wb-side-head">
             <span className="wb-side-title">Tables</span>
             <span className="wb-side-count">{tables?.length ?? 0}</span>
@@ -205,11 +207,11 @@ export function Tables({
               </button>
             ))}
           </div>
-        </aside>
-
-        <section className="wb-main">
-          <WakingBanner resourceName={resourceName} snapshot={snapshot} />
-          {schemaError !== null && <div className="error-banner">{schemaError}</div>}
+        </>
+      }
+    >
+      <WakingBanner resourceName={resourceName} snapshot={snapshot} />
+      {schemaError !== null && <div className="error-banner">{schemaError}</div>}
           {active === undefined ? (
             <div className="empty"><h3>Pick a table</h3><p>Choose a table on the left to browse its rows.</p></div>
           ) : (
@@ -269,9 +271,9 @@ export function Tables({
                                 className={editable ? 'editable' : ''}
                                 onClick={() => !isEditing && startEdit(rowIndex, col, value)}
                               >
-                                {isEditing ? (
+                                {isEditing && editing?.popout === false ? (
                                   <input
-                                    className="input"
+                                    className="cell-input"
                                     autoFocus
                                     value={editValue}
                                     onChange={(event) => setEditValue(event.target.value)}
@@ -279,6 +281,18 @@ export function Tables({
                                     onKeyDown={(event) => {
                                       if (event.key === 'Enter') void commitEdit()
                                       if (event.key === 'Escape') setEditing(null)
+                                    }}
+                                  />
+                                ) : isEditing ? (
+                                  <CellPopout
+                                    column={col}
+                                    value={editValue}
+                                    onChange={setEditValue}
+                                    onCancel={() => setEditing(null)}
+                                    onSave={() => void commitEdit()}
+                                    onNull={() => {
+                                      setEditValue('')
+                                      void commitEdit()
                                     }}
                                   />
                                 ) : value === null ? (
@@ -303,37 +317,62 @@ export function Tables({
                 </div>
               )}
 
-              <div className="grid-bar">
-                <span className="grid-range">
-                  {rows === null || rows.length === 0
-                    ? 'No rows'
-                    : `${page * PAGE_SIZE + 1} to ${page * PAGE_SIZE + rows.length}`}
-                </span>
-                {queryMs !== null && <span className="grid-timing">{queryMs}ms</span>}
-                <div className="grid-nav">
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    aria-label="Previous page"
-                    disabled={page === 0}
-                    onClick={() => handlePage(-1)}
-                  >
-                    Previous
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    aria-label="Next page"
-                    disabled={rows === null || rows.length < PAGE_SIZE}
-                    onClick={() => handlePage(1)}
-                  >
-                    Next
-                  </button>
-                </div>
-              </div>
             </>
           )}
-        </section>
+    </Workbench>
+  )
+}
+
+// Anything long or multiline gets room rather than a one line box the width of
+// a column. Anchored over the cell it belongs to, so you never lose which
+// value you are changing, with the keys it responds to written on the buttons.
+function CellPopout({
+  column,
+  value,
+  onChange,
+  onCancel,
+  onSave,
+  onNull,
+}: {
+  column: string
+  value: string
+  onChange: (next: string) => void
+  onCancel: () => void
+  onSave: () => void
+  onNull: () => void
+}) {
+  return (
+    <div className="cell-popout" role="dialog" aria-label={`Edit ${column}`}>
+      <textarea
+        className="cell-popout-area"
+        autoFocus
+        value={value}
+        spellCheck={false}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            onCancel()
+          }
+          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault()
+            onSave()
+          }
+        }}
+      />
+      <div className="cell-popout-foot">
+        <button type="button" className="btn btn-sm" onClick={onNull}>
+          Set NULL
+        </button>
+        <div className="row" style={{ marginLeft: 'auto', gap: 6 }}>
+          <button type="button" className="btn btn-sm" onClick={onCancel}>
+            Cancel <kbd>Esc</kbd>
+          </button>
+          <button type="button" className="btn btn-sm btn-primary" onClick={onSave}>
+            Save <kbd>{navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}</kbd>
+            <kbd>{'\u21B5'}</kbd>
+          </button>
+        </div>
       </div>
     </div>
   )
