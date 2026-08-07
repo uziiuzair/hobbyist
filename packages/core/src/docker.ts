@@ -46,8 +46,19 @@ function errorOf(err: unknown): ExecError {
 // Docker's message for a missing container, image, network or volume is
 // "Error: No such object: <name>", or for older subcommands "No such
 // container: <name>" / "No such network: <name>".
+// Docker does not use one wording for this. `docker inspect` on a missing
+// container says "No such object" or "No such container", while
+// `docker network inspect` on a missing network says "network <name> not
+// found". Matching only the first form made ensureNetwork unable to create the
+// very first network, because the inspect failure it was meant to swallow was
+// rethrown instead. Found by running hobby new against real Docker, not by any
+// test, because the tests drive an injectable exec whose error text we wrote.
 function isNotFound(stderr: string | undefined): boolean {
-  return stderr !== undefined && /No such (object|container|network)/i.test(stderr)
+  if (stderr === undefined) return false
+  return (
+    /No such (object|container|network|image|volume)/i.test(stderr) ||
+    /\bnot found\b/i.test(stderr)
+  )
 }
 
 // Docker's message for removing a network with attached containers, e.g.
