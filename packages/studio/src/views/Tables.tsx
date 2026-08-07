@@ -160,9 +160,6 @@ export function Tables({
 
   return (
     <Workbench
-      projectName={projectName}
-      resourceName={resourceName}
-      section="tables"
       sidebar={
         <>
           <div className="wb-side-head">
@@ -216,20 +213,49 @@ export function Tables({
             <div className="empty"><h3>Pick a table</h3><p>Choose a table on the left to browse its rows.</p></div>
           ) : (
             <>
-              <div className="row">
+              <div className="grid-toolbar">
                 <input
-                  className="input"
-                  style={{ flex: 1 }}
-                  placeholder="Filter rows: a SQL boolean expression, such as status = 'active'"
+                  className="input grid-filter"
+                  placeholder="Filter rows: status = 'active'"
+                  aria-label="Filter rows with a SQL boolean expression"
                   value={filter}
                   onChange={(event) => setFilter(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter') handleApplyFilter()
                   }}
                 />
-                <button type="button" className="btn btn-small" onClick={handleApplyFilter}>
+                <button type="button" className="btn btn-sm" onClick={handleApplyFilter}>
                   Apply
                 </button>
+
+                <div className="grid-toolbar-right">
+                  {queryMs !== null && <span className="grid-timing">{queryMs}ms</span>}
+                  <span className="grid-range">
+                    {rows === null || rows.length === 0
+                      ? 'No rows'
+                      : `${page * PAGE_SIZE + 1} to ${page * PAGE_SIZE + rows.length}`}
+                  </span>
+                  <div className="grid-nav">
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      aria-label="Previous page"
+                      disabled={page === 0}
+                      onClick={() => handlePage(-1)}
+                    >
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      aria-label="Next page"
+                      disabled={rows === null || rows.length < PAGE_SIZE}
+                      onClick={() => handlePage(1)}
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
               </div>
 
               {rowsError !== null && <div className="error-banner">{rowsError}</div>}

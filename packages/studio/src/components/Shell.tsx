@@ -123,10 +123,20 @@ function ProjectSwitcher({ projects, current }: { projects: RailProject[]; curre
   )
 }
 
+export type RailSection = 'tables' | 'sql' | 'schema'
+
+const DB_VIEWS: Array<{ id: RailSection; label: string }> = [
+  { id: 'tables', label: 'Tables' },
+  { id: 'sql', label: 'SQL' },
+  { id: 'schema', label: 'Schema' },
+]
+
 export function Shell({
   projects,
   currentProject,
   currentSection,
+  currentResource,
+  currentView,
   crumbs,
   onLogout,
   children,
@@ -134,6 +144,8 @@ export function Shell({
   projects: RailProject[]
   currentProject?: string
   currentSection?: 'databases'
+  currentResource?: string
+  currentView?: RailSection
   crumbs: ReactNode
   onLogout: () => void
   children: ReactNode
@@ -169,12 +181,32 @@ export function Shell({
             <a
               className="rail-link"
               href={`#/projects/${encodeURIComponent(currentProject)}`}
-              aria-current={currentSection === 'databases' ? 'page' : undefined}
+              aria-current={currentSection === 'databases' && currentResource === undefined ? 'page' : undefined}
             >
               <DatabaseIcon />
               Databases
               <span className="count">{databases.length}</span>
             </a>
+
+            {/* The database's own views nest under it, the way Neon nests
+                Tables and SQL Editor under a Postgres database, rather than
+                sitting as a tab strip above the content. They only appear
+                once you are inside a database, because outside one they lead
+                nowhere. */}
+            {currentResource !== undefined && (
+              <div className="rail-sub">
+                {DB_VIEWS.map((view) => (
+                  <a
+                    key={view.id}
+                    className="rail-link rail-link-sub"
+                    href={`#/projects/${encodeURIComponent(currentProject)}/resources/${encodeURIComponent(currentResource)}/${view.id}`}
+                    aria-current={currentView === view.id ? 'page' : undefined}
+                  >
+                    {view.label}
+                  </a>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
