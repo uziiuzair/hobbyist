@@ -1536,6 +1536,18 @@ git commit -m "spike(m0): scenario matrix, runner and markdown report"
 - Consumes: `spike/m0/src/run.ts`
 - Produces: the answered gate
 
+**Two warnings from the harness review, to read before trusting any number it prints:**
+
+1. **A failed stop silently produces a warm sample.** `resetInstance` swallows failures from
+   `stopClean` and `killHard`. If a stop fails and the container is still running when the
+   next iteration connects, the proxy sees it already up, skips the start entirely, and that
+   iteration reports a near-zero wake segment. It lands in the same percentile pool with no
+   flag on it, biasing results optimistic, which is the dangerous direction. Before trusting
+   a run, check that the minimum `container_up` in each cell is not implausibly small.
+2. **The report header's page-cache line is global, but only one scenario drops caches**, and
+   that attempt fails silently without passwordless sudo. Do not let the header be read as
+   applying to the whole table. State per scenario what actually happened.
+
 - [ ] **Step 1: Run the matrix on the Mac Mini, on Bun**
 
 ```bash

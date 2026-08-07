@@ -2,10 +2,15 @@
 
 What is true right now. Overwrite freely, this file is not history.
 
-## State: pre-code, scope reopened and settled
+## State: Phase 1 built, unverified against real hardware
 
-The repository contains documentation and no implementation. Nothing has been
-built and no dependency has been added.
+**Branch `phase-1` holds the whole of Phase 1, built in one unattended session
+on 2026-08-07.** Six packages, 221 tests passing plus 23 in Studio's own suite,
+root typecheck clean. It has never run against real Docker or a real Postgres.
+
+**Read `claude_docs/HANDOFF-2026-08-07.md` before touching it.** Three things
+matter first: do not expose Studio yet, `hobby eject` is deliberately not built,
+and Studio cannot be logged into because three finished units were never wired.
 
 The scope was deliberately widened on 2026-08-07, one day after it was written.
 Hobbyist is now a single-box platform rather than a Postgres-only tool. That is
