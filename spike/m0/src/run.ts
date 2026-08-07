@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { writeFileSync, rmSync } from 'node:fs'
 import { prepareFixture } from './fixture.ts'
 import { removeIfExists } from './runtime.ts'
@@ -42,14 +43,20 @@ const results: CellResult[] = []
 for (const scenario of SCENARIOS) {
   process.stderr.write(`running ${scenario.label}\n`)
   await removeIfExists(NAME)
-  // Each scenario gets a fresh data directory, so an earlier scenario's
-  // bloat or WAL state cannot leak into a later one's numbers.
-  rmSync(DATA_DIR, { recursive: true, force: true })
+  // Each scenario gets its own directory rather than one shared path that is
+  // deleted and recreated between scenarios. Deleting the source of a bind
+  // mount and recreating it at the same path leaves the previous mount
+  // pointing at a dead inode, and the next container then sees a directory it
+  // cannot write into. Observed on macOS with OrbStack: scenario one passed,
+  // scenario two died with "mkdir: can't create directory
+  // '/var/lib/postgresql/18/': No such file or directory".
+  const scenarioDir = join(DATA_DIR, scenario.label)
+  rmSync(scenarioDir, { recursive: true, force: true })
   const fixture = await prepareFixture({
     name: NAME,
     image: scenario.image,
     hostPort: HOST_PORT,
-    dataDir: DATA_DIR,
+    dataDir: scenarioDir,
   })
   results.push(
     await runCell({
