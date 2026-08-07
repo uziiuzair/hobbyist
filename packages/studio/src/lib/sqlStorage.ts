@@ -52,11 +52,17 @@ export function loadHistory(storage: StorageLike, resourceId?: string): HistoryE
 
 // Newest first, capped at MAX_HISTORY total entries across all resources so
 // the key cannot grow without bound over a long-lived install.
+//
+// Returns only the entries for the resource just written to, which is the
+// same shape loadHistory(storage, id) returns. It used to return everything
+// it had stored, and the SQL editor set that straight into state: the sidebar
+// listed one database's history until you ran a query, and every database's
+// history from then on.
 export function pushHistory(storage: StorageLike, entry: HistoryEntry): HistoryEntry[] {
   const all = readArray<HistoryEntry>(storage, HISTORY_KEY)
   const next = [entry, ...all].slice(0, MAX_HISTORY)
   writeArray(storage, HISTORY_KEY, next)
-  return next
+  return next.filter((row) => row.resourceId === entry.resourceId)
 }
 
 export function clearHistory(storage: StorageLike, resourceId?: string): void {
