@@ -92,7 +92,7 @@ export function Sql({ projectName, resourceName }: { projectName: string; resour
   }
 
   return (
-    <div className="stack">
+    <div className="page measure stack">
       <ResourceTabs projectName={projectName} resourceName={resourceName} active="sql" />
       <WakingBanner resourceName={resourceName} snapshot={snapshot} />
 

@@ -62,7 +62,7 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
   }
 
   return (
-    <div className="page">
+    <div className="page measure">
       <div className="page-head">
         <div>
           <h1 className="page-title">projects</h1>

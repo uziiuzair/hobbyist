@@ -130,7 +130,7 @@ export function Tables({
   }
 
   return (
-    <div className="stack">
+    <div className="page measure stack">
       <ResourceTabs projectName={projectName} resourceName={resourceName} active="tables" />
       <WakingBanner resourceName={resourceName} snapshot={snapshot} />
       {schemaError !== null && <div className="error-banner">{schemaError}</div>}

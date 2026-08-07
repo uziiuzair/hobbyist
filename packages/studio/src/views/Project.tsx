@@ -32,7 +32,7 @@ export function Project({ projectName, onChanged }: { projectName: string; onCha
 
   if (error !== null) {
     return (
-      <div className="page">
+      <div className="page measure">
         <div className="notice notice-danger">{error}</div>
       </div>
     )
@@ -40,7 +40,7 @@ export function Project({ projectName, onChanged }: { projectName: string; onCha
 
   if (resources === null || project === null) {
     return (
-      <div className="page">
+      <div className="page measure">
         <span className="dim">loading</span>
       </div>
     )
@@ -49,7 +49,7 @@ export function Project({ projectName, onChanged }: { projectName: string; onCha
   const idleMinutes = project.sleepAfterSeconds === null ? null : Math.round(project.sleepAfterSeconds / 60)
 
   return (
-    <div className="page">
+    <div className="page measure">
       <div className="page-head">
         <div>
           <h1 className="page-title">{project.name}</h1>

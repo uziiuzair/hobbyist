@@ -33,7 +33,7 @@ export function Schema({ projectName, resourceName }: { projectName: string; res
   }
 
   return (
-    <div className="stack">
+    <div className="page measure stack">
       <ResourceTabs projectName={projectName} resourceName={resourceName} active="schema" />
       <WakingBanner resourceName={resourceName} snapshot={snapshot} />
       {error !== null && <div className="error-banner">{error}</div>}

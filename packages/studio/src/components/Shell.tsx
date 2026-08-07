@@ -187,10 +187,12 @@ export function Shell({
 
       <div className="main">
         <header className="topbar">
-          <nav className="crumbs" aria-label="breadcrumb">
-            {crumbs}
-          </nav>
-          <div className="topbar-right" />
+          <div className="measure">
+            <nav className="crumbs" aria-label="breadcrumb">
+              {crumbs}
+            </nav>
+            <div className="topbar-right" />
+          </div>
         </header>
         {children}
       </div>

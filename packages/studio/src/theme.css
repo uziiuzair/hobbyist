@@ -241,7 +241,10 @@ body {
 
 /* ---------- main ---------- */
 
-.main { min-width: 0; display: flex; flex-direction: column; }
+/* min-width: 0 is load-bearing on a grid child: without it the column takes
+   its content's intrinsic width, a long connection string or a wide table
+   pushes the whole document sideways, and the rail scrolls out of frame. */
+.main { min-width: 0; display: flex; flex-direction: column; overflow-x: clip; }
 
 .topbar {
   height: var(--topbar);
@@ -249,14 +252,25 @@ body {
   border-bottom: 1px solid var(--line);
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 20px;
   background: color-mix(in srgb, var(--ground) 88%, transparent);
   backdrop-filter: blur(8px);
   position: sticky;
   top: 0;
   z-index: 30;
 }
+
+/* One measure shared by the bar and the page beneath it, so the breadcrumb
+   sits exactly above the page title at every width and the content column
+   stays centred instead of hugging the rail on a wide display. */
+.measure {
+  width: 100%;
+  max-width: 1180px;
+  margin-inline: auto;
+  padding-inline: 24px;
+  min-width: 0;
+}
+
+.topbar .measure { display: flex; align-items: center; gap: 12px; }
 
 .crumbs { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink-3); min-width: 0; }
 .crumbs a { color: var(--ink-2); text-decoration: none; }
@@ -265,7 +279,7 @@ body {
 
 .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 
-.page { padding: 26px 20px 64px; max-width: 1360px; width: 100%; }
+.page { padding-block: 26px 64px; }
 .page-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
 .page-title { margin: 0; font-size: 21px; font-weight: 600; letter-spacing: -0.015em; }
 .page-sub { margin: 4px 0 0; color: var(--ink-2); font-size: 13.5px; }
