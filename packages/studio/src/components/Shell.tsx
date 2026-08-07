@@ -137,6 +137,7 @@ export function Shell({
   currentSection,
   currentResource,
   currentView,
+  wide,
   crumbs,
   onLogout,
   children,
@@ -146,6 +147,7 @@ export function Shell({
   currentSection?: 'databases'
   currentResource?: string
   currentView?: RailSection
+  wide?: boolean
   crumbs: ReactNode
   onLogout: () => void
   children: ReactNode
@@ -219,7 +221,10 @@ export function Shell({
 
       <div className="main">
         <header className="topbar">
-          <div className="measure">
+          {/* The bar has to agree with the page beneath it. A full bleed
+              workbench under a breadcrumb centred in the reading measure
+              leaves the crumb floating over nothing. */}
+          <div className={wide === true ? 'bleed' : 'measure'}>
             <nav className="crumbs" aria-label="breadcrumb">
               {crumbs}
             </nav>
