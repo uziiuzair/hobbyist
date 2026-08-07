@@ -7,6 +7,7 @@ import { mkdir, rm } from 'node:fs/promises'
 import {
   HobbyError,
   validateName,
+  type ActivitySink,
   type ComputeRuntime,
   type ContainerSpec,
   type HobbyConfig,
@@ -23,6 +24,16 @@ export interface PgDeps {
   runtime: ComputeRuntime
   paths: Paths
   config: HobbyConfig
+  // Where "this resource just became usable / stopped being usable" is
+  // reported. Optional so a caller building a PgDeps from just
+  // { store, runtime, paths, config } still satisfies this interface; the
+  // daemon always supplies one, because DaemonContext's own `activity`
+  // field (the proxy's ActivityTracker) structurally is an ActivitySink.
+  // These two calls are what make hibernation honest for a resource woken
+  // by `hobby wake` or Studio rather than by a proxy connection: without
+  // them the tracker never hears about it, idleSeconds stays null, and the
+  // hibernator skips it forever. See core's ActivitySink.
+  activity?: ActivitySink
   // Optional seam for tests. Defaults to pgProbe, which opens a real `pg`
   // connection against the allocated host port. There is no other way to
   // exercise createPostgres/startPostgres against createFakeRuntime, which
@@ -200,6 +211,11 @@ export async function startPostgres(deps: PgDeps, resource: Resource): Promise<v
 
   deps.store.setResourceState(resource.id, 'running')
   deps.store.touchResource(resource.id, new Date())
+  // The resource is usable as of right now, whoever asked for it: a proxy
+  // connection, `hobby wake`, or Studio. The idle clock has to start here,
+  // not only when a proxy connection later closes, or a resource woken from
+  // the CLI or Studio would have no idle clock at all and would never sleep.
+  deps.activity?.touch(resource.id)
 }
 
 export async function stopPostgres(deps: PgDeps, resource: Resource): Promise<void> {
@@ -211,6 +227,11 @@ export async function stopPostgres(deps: PgDeps, resource: Resource): Promise<vo
     throw err
   }
   deps.store.setResourceState(resource.id, 'sleeping')
+  // The connection count and idle clock described a container that is now
+  // stopped. Carrying them forward is what made a resource woken a moment
+  // later get slept again on the very next tick, on an idle time measured
+  // against the previous run.
+  deps.activity?.reset(resource.id)
 }
 
 function errorMessage(err: unknown): string {
@@ -266,6 +287,10 @@ export async function destroyPostgres(deps: PgDeps, resource: Resource): Promise
   }
 
   deps.store.deleteResource(resource.id)
+  // Same reasoning as stopPostgres, one step further: there is not even a
+  // resource left for this activity to describe, and without this the
+  // tracker would keep an entry for every resource ever destroyed.
+  deps.activity?.reset(resource.id)
 
   if (failures.length > 0) {
     throw new HobbyError(

@@ -3,6 +3,9 @@
 // node:sqlite) so tests do not share state or touch the filesystem.
 
 import assert from 'node:assert/strict'
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { openStore, type PostgresConfig } from '../src/index.js'
 
@@ -111,5 +114,33 @@ test('allocatePort skips a taken port', () => {
     assert.equal(store.allocatePort(15432, 15440), 15433)
   } finally {
     store.close()
+  }
+})
+
+// The one test here that touches the filesystem, because the property under
+// test IS a filesystem property. Every resource row's `config` column holds
+// that database's superuser password as plaintext JSON, and sqlite creates
+// its files 0644 by default, which makes every password on the box readable
+// by every local user.
+test('openStore restricts the state file, and its WAL sidecars, to the owner', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-store-mode-'))
+  const path = join(dir, 'state.db')
+  const store = openStore(path)
+  try {
+    const project = store.createProject({ name: 'blog', sleepAfterSeconds: null })
+    store.createResource({
+      projectId: project.id,
+      kind: 'postgres',
+      name: 'primary',
+      config: samplePostgresConfig(15432),
+    })
+
+    for (const file of [path, `${path}-wal`, `${path}-shm`]) {
+      if (!existsSync(file)) continue
+      assert.equal(statSync(file).mode & 0o777, 0o600, `${file} must not be readable by other users`)
+    }
+  } finally {
+    store.close()
+    rmSync(dir, { recursive: true, force: true })
   }
 })

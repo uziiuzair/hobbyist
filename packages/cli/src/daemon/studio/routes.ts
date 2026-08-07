@@ -166,20 +166,39 @@ function stateFor(ctx: DaemonContext): StudioState {
 
 // Behind Caddy (the only intended caller of the loopback TCP listener, see
 // ADR 0008), req.socket.remoteAddress is always Caddy's own loopback
-// connection, which would collapse every real client into one throttle key.
-// Caddy's reverse_proxy sets X-Forwarded-For by default, so that header is
-// preferred when present. This trusts a client-controlled header, which is
-// only sound because the listener is loopback-only and Caddy is assumed to
-// be the sole caller; a local process on the same box could still forge it
-// and blur throttle keys together. That is a real, accepted limitation of
-// this exact trust model, not an oversight, flagged again in the task
-// report as a review item for anyone exposing this to a real network.
-function remoteKey(req: IncomingMessage): string {
-  const forwarded = req.headers['x-forwarded-for']
-  if (typeof forwarded === 'string' && forwarded.length > 0) {
-    return (forwarded.split(',')[0] ?? '').trim() || 'unknown'
+// connection, which would collapse every real client into one throttle key
+// and let any one attacker's failures lock the operator out. Caddy's
+// reverse_proxy sets X-Forwarded-For, so that header is preferred when
+// present, but it is read from the RIGHT, not the left.
+//
+// That detail is the whole fix, and the naive reading looks correct, so:
+// X-Forwarded-For is a chain, and each proxy APPENDS the address of the
+// peer it received the request from. A request arriving at Caddy with a
+// client-supplied `X-Forwarded-For: 1.2.3.4` leaves Caddy as
+// `1.2.3.4, <real client address>`. The first element is therefore a value
+// the remote client chose; taking it (as this did) let an attacker pick a
+// fresh throttle key on every single request, so the exponential backoff
+// never engaged at all, remotely, for anyone. The last element is the one
+// written by the hop we actually trust. With no header at all, nothing is
+// in front of us and the socket's own remote address is the only honest
+// answer.
+export function throttleKey(forwardedFor: string | string[] | undefined, socketAddress: string | undefined): string {
+  // node collapses repeated headers into one comma-joined string for most
+  // headers, but the typings allow an array; joining first means one code
+  // path handles both, and the last element is still the last hop.
+  const chain = Array.isArray(forwardedFor) ? forwardedFor.join(',') : forwardedFor
+  if (typeof chain === 'string' && chain.length > 0) {
+    const hops = chain.split(',')
+    const last = (hops[hops.length - 1] ?? '').trim()
+    if (last.length > 0) {
+      return last
+    }
   }
-  return req.socket.remoteAddress ?? 'unknown'
+  return socketAddress ?? 'unknown'
+}
+
+function remoteKey(req: IncomingMessage): string {
+  return throttleKey(req.headers['x-forwarded-for'], req.socket.remoteAddress)
 }
 
 async function loginHandler(ctx: DaemonContext, req: IncomingMessage, res: ServerResponse): Promise<RouteResult> {
@@ -250,12 +269,15 @@ export function mountStudioRoutes(app: Router, ctx: DaemonContext): void {
 }
 
 // Every path an unauthenticated request may reach on the studio-fronted TCP
-// listener. Login must be reachable to log in at all. Health is harmless to
-// leave open (Caddy or an operator polling liveness) and reveals nothing.
-// Session is deliberately open too: it is how the client finds out whether
-// it is currently authenticated, and if calling it required already being
-// authenticated it could never usefully answer "no."
-const UNAUTHENTICATED_PATHS = new Set(['/studio/login', '/studio/logout', '/studio/session', '/v1/health'])
+// listener, written as the normalized segments pathKey() below produces,
+// never as a raw pathname string. Login must be reachable to log in at all.
+// Health is harmless to leave open (Caddy or an operator polling liveness)
+// and reveals nothing. Session is deliberately open too: it is how the
+// client finds out whether it is currently authenticated, and if calling it
+// required already being authenticated it could never usefully answer "no."
+// Everything else, without exception, needs a session: this list is the
+// entire exception surface, and the gate is default-deny around it.
+const UNAUTHENTICATED_PATHS = new Set(['studio/login', 'studio/logout', 'studio/session', 'v1/health'])
 
 export function isAuthenticated(ctx: DaemonContext, req: IncomingMessage): boolean {
   const token = readSessionCookie(req)
@@ -265,16 +287,52 @@ export function isAuthenticated(ctx: DaemonContext, req: IncomingMessage): boole
   return stateFor(ctx).sessions.verify(token)
 }
 
-function requiresAuth(pathname: string): boolean {
-  return pathname.startsWith('/v1/') && !UNAUTHENTICATED_PATHS.has(pathname)
+// Reduces a request to exactly the identity ../routes.ts's `dispatch` routes
+// on: URL pathname, split on '/', empty segments dropped, joined back with
+// single slashes and no leading one.
+//
+// This is the fix for a real bypass, so it is worth stating precisely. The
+// gate used to ask `url.pathname.startsWith('/v1/')`, while dispatch routes
+// on `url.pathname.split('/').filter(s => s.length > 0)`. Those two
+// disagree: `GET /.//v1/projects` has a pathname of `//v1/projects`, which
+// fails startsWith and so was waved through unauthenticated, and then
+// dispatch dropped the empty segment and served /v1/projects anyway. That
+// reached project deletion, arbitrary SQL as superuser via
+// POST /v1/resources/:id/query, and the routes that hand back cleartext
+// superuser passwords. Any gate that parses a path differently from the
+// thing that routes it is a bypass waiting to be found, so this parses it
+// once, the same way, and decides from segments rather than from a prefix.
+//
+// Two properties this must keep: it must not depend on Caddy normalizing
+// the path first (the daemon's TCP listener has to be correct on its own,
+// and the unix socket has no Caddy in front of it at all), and it must be
+// default-deny, so a path shape nobody anticipated needs a session rather
+// than skipping the check.
+function pathKey(req: IncomingMessage): string {
+  let pathname: string
+  try {
+    pathname = new URL(req.url ?? '/', 'http://localhost').pathname
+  } catch {
+    // An unparseable target cannot be matched against the allowlist, so it
+    // is denied, same as anything else not on it.
+    return ''
+  }
+  return pathname
+    .split('/')
+    .filter((segment) => segment.length > 0)
+    .join('/')
+}
+
+function requiresAuth(key: string): boolean {
+  return !UNAUTHENTICATED_PATHS.has(key)
 }
 
 // The handler actually bound to the loopback TCP listener (see server.ts):
-// tries Studio's own three routes first, then, for anything else under
-// /v1/, requires a valid session before ever calling `next` (the daemon's
-// existing control-plane app, unmodified). The unix socket listener keeps
-// using `next` directly and never sees this wrapper at all, per this file's
-// header comment.
+// tries Studio's own three routes first, then requires a valid session for
+// everything that is not on UNAUTHENTICATED_PATHS before ever calling
+// `next` (the daemon's existing control-plane app, unmodified). The unix
+// socket listener keeps using `next` directly and never sees this wrapper
+// at all, per this file's header comment.
 export function createStudioApp(
   ctx: DaemonContext,
   next: (req: IncomingMessage, res: ServerResponse) => void
@@ -311,8 +369,7 @@ async function handle(
     return
   }
 
-  const url = new URL(req.url ?? '/', 'http://localhost')
-  if (!requiresAuth(url.pathname)) {
+  if (!requiresAuth(pathKey(req))) {
     next(req, res)
     return
   }
