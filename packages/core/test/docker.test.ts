@@ -212,6 +212,29 @@ test('ensureNetwork creates the network only when absent', async () => {
   ])
 })
 
+// The wording below is copied verbatim from real Docker 29.4.0, not invented.
+// The test above asserts against "No such network", which real Docker does not
+// say for this subcommand, so it passed while `hobby new` failed on a clean
+// host: the inspect failure was rethrown instead of triggering the create.
+test('ensureNetwork creates the network given real Docker not-found wording', async () => {
+  const calls: RecordedCall[] = []
+  const exec: ExecFn = async (cmd, args) => {
+    calls.push({ cmd, args })
+    if (args[0] === 'network' && args[1] === 'inspect') {
+      throw notFoundError('Error response from daemon: network hobby-blog not found')
+    }
+    return { stdout: '', stderr: '' }
+  }
+
+  const runtime = createDockerRuntime(exec)
+  await runtime.ensureNetwork('hobby-blog')
+
+  assert.deepEqual(calls, [
+    { cmd: 'docker', args: ['network', 'inspect', 'hobby-blog'] },
+    { cmd: 'docker', args: ['network', 'create', 'hobby-blog'] },
+  ])
+})
+
 test('ensureNetwork is a no-op when the network already exists', async () => {
   const calls: RecordedCall[] = []
   const exec: ExecFn = async (cmd, args) => {
