@@ -4,9 +4,10 @@
    you rent. It refuses the hosted-dashboard arrangement where capacity is an
    abstract quota and a stopped database is an apology.
    OWN-WORLD: near-black layered ground, hairline rules, system faces, dense
-   rows. The interface is entirely neutral and state is the only saturated
-   colour in it: awake carries chroma, sleeping is a calm dim neutral, primary
-   actions are high-contrast rather than branded.
+   rows. One green carries both action and state, kept apart by form rather
+   than hue: action is a large filled surface or an edge, state is a small
+   glowing dot or a meter fill. Sleeping keeps no chroma at all, so the eye
+   still lands on what is actually running.
    STORY: the operator sees which of their databases are awake, what the box
    has left, and opens one to work in it.
    FIRST VIEWPORT: fixed left rail with project switcher and scoped services,
@@ -37,18 +38,28 @@
   --ink-2: #a2a8ad;
   --ink-3: #6e757b;
 
-  /* The only chroma in the interface. Awake is a live filament; sleeping
-     deliberately has no colour at all, because sleeping is correct. */
-  --awake: #7ee0a8;
-  --awake-dim: rgba(126, 224, 168, 0.14);
-  --awake-ring: rgba(126, 224, 168, 0.32);
+  /* Green does two jobs and the separation between them is deliberate.
+     --accent is action: it only ever appears on things you can press or
+     follow. --awake is state: it only ever appears as a small glowing dot or
+     a meter fill. A large filled surface reads as a control, a 7px dot with a
+     halo reads as a status, so the same hue stays unambiguous. Sleeping still
+     has no chroma at all, because sleeping is the product working. */
+  --accent: #3ecf8e;
+  --accent-hover: #4fdb9c;
+  --accent-ink: #05231a;
+  --accent-dim: rgba(62, 207, 142, 0.13);
+  --accent-line: rgba(62, 207, 142, 0.34);
+
+  --awake: #6ee7a8;
+  --awake-dim: rgba(110, 231, 168, 0.16);
+  --awake-ring: rgba(110, 231, 168, 0.34);
   --waking: #f0c674;
   --waking-dim: rgba(240, 198, 116, 0.14);
 
   --danger: #f0857a;
   --danger-dim: rgba(240, 133, 122, 0.12);
 
-  --focus: #6ea8fe;
+  --focus: var(--accent);
 
   --radius: 8px;
   --radius-sm: 5px;
@@ -74,16 +85,22 @@
     --ink-2: #5c6166;
     --ink-3: #8a8f94;
 
-    --awake: #1a7f4b;
-    --awake-dim: rgba(26, 127, 75, 0.1);
-    --awake-ring: rgba(26, 127, 75, 0.28);
+    --accent: #10794f;
+    --accent-hover: #0c6342;
+    --accent-ink: #ffffff;
+    --accent-dim: rgba(16, 121, 79, 0.09);
+    --accent-line: rgba(16, 121, 79, 0.3);
+
+    --awake: #128a56;
+    --awake-dim: rgba(18, 138, 86, 0.12);
+    --awake-ring: rgba(18, 138, 86, 0.28);
     --waking: #8a5a12;
     --waking-dim: rgba(138, 90, 18, 0.1);
 
     --danger: #b3392c;
     --danger-dim: rgba(179, 57, 44, 0.08);
 
-    --focus: #2563eb;
+    --focus: var(--accent);
 
     --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.05);
     --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.08);
@@ -111,7 +128,7 @@ body {
   border-radius: 3px;
 }
 
-::selection { background: var(--awake-ring); color: var(--ink); }
+::selection { background: var(--accent-line); color: var(--ink); }
 
 /* ---------- shell ---------- */
 
@@ -185,10 +202,11 @@ body {
 }
 .rail-link:hover { background: var(--surface-2); color: var(--ink); }
 .rail-link[aria-current="page"] {
-  background: var(--surface-3);
+  background: var(--accent-dim);
   color: var(--ink);
-  border-color: var(--line);
+  border-color: var(--accent-line);
 }
+.rail-link[aria-current="page"] svg { color: var(--accent); opacity: 1; }
 .rail-link svg { flex: none; opacity: 0.75; }
 .rail-link .count { margin-left: auto; color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
 
@@ -274,7 +292,7 @@ body {
 
 .crumbs { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink-3); min-width: 0; }
 .crumbs a { color: var(--ink-2); text-decoration: none; }
-.crumbs a:hover { color: var(--ink); }
+.crumbs a:hover { color: var(--accent); }
 .crumbs .here { color: var(--ink); }
 
 .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
@@ -301,9 +319,11 @@ body {
 .btn:hover { background: var(--surface-3); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* Primary is contrast, not brand colour: chroma is reserved for state. */
-.btn-primary { background: var(--ink); color: var(--ground); border-color: var(--ink); }
-.btn-primary:hover { background: var(--ink); opacity: 0.9; }
+/* The primary action is the one place a large filled green surface appears,
+   which is what keeps it readable against the small green status dots. */
+.btn-primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn-primary:disabled { background: var(--accent); border-color: var(--accent); }
 .btn-danger { color: var(--danger); border-color: var(--line-strong); }
 .btn-danger:hover { background: var(--danger-dim); }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--ink-2); }
@@ -320,7 +340,7 @@ body {
   font: inherit; font-size: 13.5px;
 }
 .input::placeholder { color: var(--ink-3); }
-.input:focus, .select:focus, .textarea:focus { border-color: var(--line-strong); }
+.input:focus, .select:focus, .textarea:focus { border-color: var(--accent-line); }
 
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field label { font-size: 12.5px; color: var(--ink-2); }
@@ -368,7 +388,7 @@ body {
 }
 
 a.card { text-decoration: none; color: inherit; }
-a.card:hover { border-color: var(--line-strong); background: var(--surface-2); }
+a.card:hover { border-color: var(--accent-line); background: var(--surface-2); }
 
 .card-body { padding: 14px 15px; display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
 .card-title { font-size: 14.5px; font-weight: 600; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -422,7 +442,7 @@ a.card:hover { border-color: var(--line-strong); background: var(--surface-2); }
 }
 .segment:last-child { border-right: 0; }
 .segment:hover { color: var(--ink); }
-.segment[aria-pressed="true"] { background: var(--surface-3); color: var(--ink); }
+.segment[aria-pressed="true"] { background: var(--accent-dim); color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
 
 /* ---------- tables ---------- */
 
@@ -470,7 +490,7 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
   border-bottom: 2px solid transparent; margin-bottom: -1px;
 }
 .tab:hover { color: var(--ink); }
-.tab[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); }
+.tab[aria-current="page"] { color: var(--ink); border-bottom-color: var(--accent); }
 
 .row { display: flex; align-items: center; gap: 10px; }
 .stack { display: flex; flex-direction: column; gap: 10px; }
@@ -512,7 +532,7 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
   color: var(--ink); font-family: var(--font-mono); font-size: 13px; line-height: 1.6; padding: 12px;
   tab-size: 2;
 }
-.sql-editor:focus { border-color: var(--line-strong); }
+.sql-editor:focus { border-color: var(--accent-line); }
 
 .side-list { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); overflow: hidden; }
 .side-list-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-3); padding: 9px 12px; border-bottom: 1px solid var(--line); font-weight: 600; }
@@ -522,7 +542,7 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
 }
 .side-list-item:last-child { border-bottom: 0; }
 .side-list-item:hover { background: var(--surface-2); color: var(--ink); }
-.side-list-item[aria-current="page"] { background: var(--surface-3); color: var(--ink); }
+.side-list-item[aria-current="page"] { background: var(--accent-dim); color: var(--ink); box-shadow: inset 2px 0 0 var(--accent); }
 
 .schema-table { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); margin-bottom: 14px; overflow: hidden; }
 .schema-table-name { font-weight: 600; font-size: 13.5px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
