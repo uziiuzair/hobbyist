@@ -16,9 +16,10 @@ import {
   type Project,
   type Resource,
 } from '@hobby.sh/core'
-import { connectionString, createPostgres, destroyPostgres, startPostgres, stopPostgres } from '@hobby.sh/pg'
-import type { DaemonContext } from './context.js'
+import { connectionString, createPostgres, destroyPostgres, runQuery, startPostgres, stopPostgres } from '@hobby.sh/pg'
+import { getOrCreateWake, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
+import { toWireResource, toWireResources } from './wire.js'
 
 interface RouteResult {
   status: number
@@ -104,10 +105,10 @@ async function createProjectRoute(ctx: DaemonContext, req: IncomingMessage): Pro
   return ctx.store.createProject({ name, sleepAfterSeconds: ctx.config.sleepAfterSeconds })
 }
 
-function getProjectRoute(ctx: DaemonContext, name: string): RouteResult {
+async function getProjectRoute(ctx: DaemonContext, name: string): Promise<RouteResult> {
   const project = getProjectByNameOrThrow(ctx, name)
   const resources = ctx.store.listResources(project.id)
-  return { status: 200, body: { project, resources } }
+  return { status: 200, body: { project, resources: await toWireResources(ctx, resources) } }
 }
 
 // Best-effort teardown, same shape as destroyPostgres's own contract: every
@@ -179,13 +180,13 @@ async function destroyResourceRoute(ctx: DaemonContext, id: string): Promise<Rou
 async function startResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
   await startPostgres(ctx, resource)
-  return { status: 200, body: { resource: getResourceOrThrow(ctx, id) } }
+  return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
 
 async function stopResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
   await stopPostgres(ctx, resource)
-  return { status: 200, body: { resource: getResourceOrThrow(ctx, id) } }
+  return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
 
 // Always rendered as though the client will reach it through the proxy
@@ -235,6 +236,13 @@ function renderCompose(resources: Resource[]): string {
     lines.push('    restart: unless-stopped')
     lines.push('    environment:')
     lines.push(`      POSTGRES_USER: ${cfg.superuser}`)
+    // The second, deliberate place the real password crosses the wire (see
+    // wire.ts's own file comment): a docker-compose.yml with no working
+    // password in it cannot start Postgres, which would make `hobby eject`
+    // (CLAUDE.md's "you can always leave" promise, priority one of three)
+    // hand back a file that lies about being able to stand alone. This is
+    // not the resource-payload leak Item 1 closes, it is eject's entire
+    // reason to exist.
     lines.push(`      POSTGRES_PASSWORD: ${cfg.password}`)
     lines.push(`      POSTGRES_DB: ${cfg.database}`)
     lines.push('    ports:')
@@ -243,6 +251,59 @@ function renderCompose(resources: Resource[]): string {
     lines.push(`      - "${cfg.dataDir}:/var/lib/postgresql/data"`)
   }
   return `${lines.join('\n')}\n`
+}
+
+function isUnknownArray(value: unknown): value is unknown[] {
+  return Array.isArray(value)
+}
+
+// Studio's Tables, Sql and Schema views (packages/studio/src/api.ts's
+// runQuery) all rest on this one route. Waking happens through
+// getOrCreateWake(ctx), the exact same idempotent, single-flight function
+// the wake-on-connect proxy itself uses (see context.ts's own comment):
+// a sleeping resource is woken and this call waits for real readiness
+// (startPostgres never resolves early, see packages/pg/src/postgres.ts)
+// before the query is ever attempted, which is what makes Studio's waking
+// banner honest rather than theatrical. A resource already `running` skips
+// the wake entirely, the same guard the proxy's own handleStartup uses.
+//
+// params is always passed straight through to runQuery, which hands it to
+// the driver's own parameterized query path; this function never touches
+// the SQL string itself.
+async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
+  const resource = getResourceOrThrow(ctx, id)
+  const body = await readJsonBody(req)
+  const sql = isRecord(body) ? body['sql'] : undefined
+  const rawParams = isRecord(body) ? body['params'] : undefined
+
+  if (typeof sql !== 'string' || sql.length === 0) {
+    throw new HobbyError(
+      'usage',
+      'sql is required',
+      'POST /v1/resources/:id/query expects { "sql": string, "params"?: unknown[] }'
+    )
+  }
+  if (rawParams !== undefined && !isUnknownArray(rawParams)) {
+    throw new HobbyError(
+      'usage',
+      'params must be an array',
+      'POST /v1/resources/:id/query expects { "sql": string, "params"?: unknown[] }'
+    )
+  }
+  const params = rawParams ?? []
+
+  if (resource.state !== 'running') {
+    await getOrCreateWake(ctx)(resource.id)
+  }
+
+  // The resource may have been replaced or re-configured by the wake above
+  // (it was not, in practice, startPostgres never touches config, but
+  // re-reading is what the proxy's own handleStartup does after a wake and
+  // matching that is cheap insurance against relying on a config snapshot
+  // that raced a concurrent change).
+  const ready = getResourceOrThrow(ctx, id)
+  const result = await runQuery(ready.config, sql, params)
+  return { status: 200, body: result }
 }
 
 function ejectRoute(ctx: DaemonContext, name: string): RouteResult {
@@ -282,13 +343,14 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
 
     if (segments.length === 3) {
       const name = decodeURIComponent(segments[2] as string)
-      if (method === 'GET') return getProjectRoute(ctx, name)
+      if (method === 'GET') return await getProjectRoute(ctx, name)
       if (method === 'DELETE') return deleteProjectRoute(ctx, name)
     }
 
     if (segments.length === 4 && method === 'POST' && segments[3] === 'resources') {
       const name = decodeURIComponent(segments[2] as string)
-      return { status: 201, body: { resource: await createResourceRoute(ctx, req, name) } }
+      const resource = await createResourceRoute(ctx, req, name)
+      return { status: 201, body: { resource: await toWireResource(ctx, resource) } }
     }
 
     if (segments.length === 4 && method === 'POST' && segments[3] === 'eject') {
@@ -300,7 +362,9 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
   if (segments[1] === 'resources') {
     if (segments.length === 3) {
       const id = decodeURIComponent(segments[2] as string)
-      if (method === 'GET') return { status: 200, body: { resource: getResourceOrThrow(ctx, id) } }
+      if (method === 'GET') {
+        return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
+      }
       if (method === 'DELETE') return destroyResourceRoute(ctx, id)
     }
 
@@ -311,6 +375,7 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       if (method === 'POST' && action === 'stop') return stopResourceRoute(ctx, id)
       if (method === 'GET' && action === 'connection') return connectionRoute(ctx, id)
       if (method === 'GET' && action === 'logs') return logsRoute(ctx, id, url)
+      if (method === 'POST' && action === 'query') return queryRoute(ctx, req, id)
     }
   }
 

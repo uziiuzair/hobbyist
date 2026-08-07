@@ -7,15 +7,20 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import type { Api, ConnectionResponse, DeletedResponse, LogsResponse, ProjectDetailResponse, ProjectsResponse, ResourceResponse } from '@hobby.sh/cli'
-import type { Project, Resource } from '@hobby.sh/core'
+import type { Api, ConnectionResponse, DeletedResponse, LogsResponse, ProjectDetailResponse, ProjectsResponse, ResourceResponse, WireResource } from '@hobby.sh/cli'
+import type { Project } from '@hobby.sh/core'
 import { connectionStringTool, listTool, logsTool, newTool, rmTool, sleepTool, wakeTool, type ToolResult } from '../src/tools.js'
 
 function project(name: string, id = `${name}-id`): Project {
   return { id, name, networkName: `hobby-${name}`, sleepAfterSeconds: 300, createdAt: new Date('2026-01-01') }
 }
 
-function resource(name: string, projectId: string, id = `${name}-id`): Resource {
+// The daemon's wire shape (WireResource, packages/cli/src/daemon/wire.ts):
+// no config.password (see routes.ts's toWireResource), sizeBytes and
+// connectionCount present instead. This fixture never carries a password at
+// all, which is the point: it stands in for what the real daemon actually
+// sends now, not the richer internal record it used to leak.
+function resource(name: string, projectId: string, id = `${name}-id`): WireResource {
   return {
     id,
     projectId,
@@ -28,9 +33,10 @@ function resource(name: string, projectId: string, id = `${name}-id`): Resource 
       dataDir: '/x/pgdata',
       hostPort: 15432,
       superuser: 'postgres',
-      password: 'super-secret',
       database: projectId,
     },
+    sizeBytes: null,
+    connectionCount: 0,
     lastActiveAt: null,
     createdAt: new Date('2026-01-01'),
   }
@@ -77,7 +83,7 @@ function resultText(result: ToolResult): unknown {
   return JSON.parse(first.text)
 }
 
-test('hobby_list: GET /v1/projects then GET /v1/projects/:name per project, resources redacted', async () => {
+test('hobby_list: GET /v1/projects then GET /v1/projects/:name per project, no password in any resource', async () => {
   const p = project('blog')
   const { api, calls } = fakeApi({
     listProjects: async (): Promise<ProjectsResponse> => ({ projects: [p] }),
@@ -91,8 +97,10 @@ test('hobby_list: GET /v1/projects then GET /v1/projects/:name per project, reso
   assert.equal(result.isError, undefined)
   assert.deepEqual(calls, ['listProjects()', 'getProject("blog")'])
 
-  const body = resultText(result) as { projects: Array<{ resources: Resource[] }> }
-  assert.equal(body.projects[0]?.resources[0]?.config.password, '[redacted, call hobby_connection_string for the real value]')
+  const body = resultText(result) as { projects: Array<{ resources: WireResource[] }> }
+  const config = body.projects[0]?.resources[0]?.config as Record<string, unknown> | undefined
+  assert.equal(config?.password, undefined)
+  assert.ok(config !== undefined && !('password' in config), 'the wire config must not carry a password key at all')
 })
 
 test('hobby_new: POST /v1/projects then POST /v1/projects/:name/resources with name "primary", no connection call', async () => {
@@ -113,8 +121,9 @@ test('hobby_new: POST /v1/projects then POST /v1/projects/:name/resources with n
   assert.equal(result.isError, undefined)
   assert.deepEqual(calls, ['createProject("blog")', 'createResource("blog", {"kind":"postgres","name":"primary"})'])
 
-  const body = resultText(result) as { resource: Resource }
-  assert.equal(body.resource.config.password, '[redacted, call hobby_connection_string for the real value]')
+  const body = resultText(result) as { resource: WireResource }
+  const config = body.resource.config as unknown as Record<string, unknown>
+  assert.equal(config.password, undefined)
 })
 
 test('hobby_connection_string: resolves the target then GET /v1/resources/:id/connection, password included', async () => {
@@ -147,9 +156,10 @@ test('hobby_sleep: resolves the target then POST /v1/resources/:id/stop', async 
 
   const result = await sleepTool(api, { target: 'blog' })
   assert.deepEqual(calls, ['getProject("blog")', `stopResource("${r.id}")`])
-  const body = resultText(result) as { resource: Resource }
+  const body = resultText(result) as { resource: WireResource }
   assert.equal(body.resource.state, 'sleeping')
-  assert.equal(body.resource.config.password, '[redacted, call hobby_connection_string for the real value]')
+  const config = body.resource.config as unknown as Record<string, unknown>
+  assert.equal(config.password, undefined)
 })
 
 test('hobby_wake: resolves the target then POST /v1/resources/:id/start', async () => {
@@ -165,7 +175,7 @@ test('hobby_wake: resolves the target then POST /v1/resources/:id/start', async 
 
   const result = await wakeTool(api, { target: 'blog/primary' })
   assert.deepEqual(calls, ['getProject("blog")', `startResource("${r.id}")`])
-  const body = resultText(result) as { resource: Resource }
+  const body = resultText(result) as { resource: WireResource }
   assert.equal(body.resource.state, 'running')
 })
 

@@ -9,11 +9,12 @@
 
 import { spawnSync } from 'node:child_process'
 import { mkdir } from 'node:fs/promises'
-import { HobbyError, parseTarget, type HobbyConfig, type Paths, type Project, type Resource } from '@hobby.sh/core'
+import { HobbyError, parseTarget, type HobbyConfig, type Paths, type Project } from '@hobby.sh/core'
 import { createDaemonContext } from '../daemon/context.js'
 import { runPreflight } from '../daemon/preflight.js'
 import { reconcile } from '../daemon/reconcile.js'
 import { startDaemon } from '../daemon/server.js'
+import type { WireResource } from '../daemon/wire.js'
 import type { Api } from './client.js'
 import { exitCodeForError } from './exit.js'
 import { reflinkWarning, renderPreflight, renderResourceLine } from './output.js'
@@ -46,7 +47,7 @@ function flagString(flags: Flags, name: string): string | undefined {
 // `ambiguous_target`, the same ErrorCode the daemon uses for this exact
 // situation, so it maps through exit.ts identically regardless of which
 // side of the socket noticed it.
-export async function resolveTarget(api: Api, target: string): Promise<{ project: Project; resource: Resource }> {
+export async function resolveTarget(api: Api, target: string): Promise<{ project: Project; resource: WireResource }> {
   const { project: projectName, resource: resourceName } = parseTarget(target)
   const detail = await api.getProject(projectName)
 
@@ -68,7 +69,7 @@ export async function resolveTarget(api: Api, target: string): Promise<{ project
     throw new HobbyError('resource_not_found', `project ${projectName} has no resources`)
   }
   if (detail.resources.length === 1) {
-    return { project: detail.project, resource: detail.resources[0] as Resource }
+    return { project: detail.project, resource: detail.resources[0] as WireResource }
   }
   throw new HobbyError(
     'ambiguous_target',

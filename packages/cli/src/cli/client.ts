@@ -11,7 +11,8 @@
 // file ever touches raw HTTP.
 
 import http from 'node:http'
-import { HobbyError, type ErrorCode, type Project, type Resource } from '@hobby.sh/core'
+import { HobbyError, type ErrorCode, type Project } from '@hobby.sh/core'
+import type { WireResource } from '../daemon/wire.js'
 
 // Thrown when the socket does not exist, or exists but nothing answers on
 // it (a stale file, or the daemon crashed). Deliberately not a HobbyError:
@@ -118,13 +119,20 @@ async function call<T>(client: DaemonClient, method: string, path: string, body?
 }
 
 // Response envelopes, verbatim from the table in task-4-report.md and
-// cross-checked against packages/cli/src/daemon/routes.ts. `Project` and
-// `Resource` are reused directly from @hobby.sh/core for the shape of a
-// single project/resource; note that createdAt/lastActiveAt are typed as
-// Date there but actually arrive as ISO strings once they have crossed the
-// wire and been through JSON.parse. Nothing in this package calls a Date
-// method on a value that came back from the client, specifically to avoid
-// that mismatch ever mattering; see output.ts.
+// cross-checked against packages/cli/src/daemon/routes.ts. `Project` is
+// reused directly from @hobby.sh/core for the shape of a single project;
+// note that createdAt/lastActiveAt are typed as Date there but actually
+// arrive as ISO strings once they have crossed the wire and been through
+// JSON.parse. Nothing in this package calls a Date method on a value that
+// came back from the client, specifically to avoid that mismatch ever
+// mattering; see output.ts.
+//
+// A resource, unlike a project, is never core's own `Resource`: every route
+// that hands one back sends the daemon's wire shape (see
+// packages/cli/src/daemon/wire.ts), which strips config.password and adds
+// sizeBytes/connectionCount. WireResource is that shape, typed here to
+// match reality rather than the richer internal record the daemon actually
+// holds.
 export interface HealthResponse {
   status: string
 }
@@ -136,10 +144,10 @@ export interface ProjectResponse {
 }
 export interface ProjectDetailResponse {
   project: Project
-  resources: Resource[]
+  resources: WireResource[]
 }
 export interface ResourceResponse {
-  resource: Resource
+  resource: WireResource
 }
 export interface DeletedResponse {
   deleted: true
