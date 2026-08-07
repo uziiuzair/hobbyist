@@ -162,7 +162,20 @@ async function withStudioServer(ctx: DaemonContext, fn: (baseUrl: string) => Pro
   try {
     await fn(`http://127.0.0.1:${address.port}`)
   } finally {
-    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+    // closeAllConnections() forces any lingering keep-alive socket shut
+    // immediately, rather than waiting on it: server.close()'s own callback
+    // does not fire until every connection has ended on its own, and a
+    // client that already got its response but never explicitly closed its
+    // socket (the default node:http client behavior this suite's rawCall
+    // helpers rely on) can otherwise leave that wait pending indefinitely,
+    // which hangs this file's own process well after every test has already
+    // reported a result (reproduced directly against this exact test file:
+    // node --test finishes printing every test's outcome and then never
+    // exits, with `process._getActiveHandles()` showing exactly this kind
+    // of leftover Server/Socket pair).
+    const closed = new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+    server.closeAllConnections()
+    await closed
     ctx.store.close()
   }
 }
@@ -191,6 +204,14 @@ async function call(
   return { status: res.status, body: text.length > 0 ? JSON.parse(text) : undefined, headers: res.headers }
 }
 
+function safeJsonParse(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
 // fetch() runs its argument through the WHATWG URL parser, which normalizes
 // the path before a byte reaches the wire: `/.//v1/projects` would leave as
 // `//v1/projects` and `/v1/../v1/projects` as `/v1/projects`. That is
@@ -198,12 +219,26 @@ async function call(
 // attacker writes the request line by hand and Caddy may or may not clean it
 // up first. node:http's `path` option is passed through verbatim, so this
 // helper is the only way to prove the gate is correct on its own.
+//
+// body parses as JSON only when it looks like JSON, never unconditionally: a
+// path outside /v1/ and /studio/ is Studio's static bundle now (see
+// static.ts and studio-static.test.ts), which answers with HTML, not the
+// control plane's JSON error envelope. An unconditional JSON.parse used to
+// be safe here because every path this helper was ever pointed at answered
+// in JSON; it throws for an HTML body, and it throws inside the 'end'
+// listener, outside this function's own Promise executor, so neither
+// resolve nor reject is ever called and the specific caller awaiting that
+// call hangs forever. Confirmed directly: this exact throw, on this exact
+// body, is what left rawCall's request socket and its server in
+// process._getActiveHandles() long after node:test had already reported the
+// test done, which is what kept this file's own process alive well past
+// every test finishing.
 async function rawCall(
   baseUrl: string,
   method: string,
   path: string,
   opts: { cookie?: string; headers?: Record<string, string> } = {}
-): Promise<{ status: number; body: unknown }> {
+): Promise<{ status: number; body: unknown; text: string }> {
   const url = new URL(baseUrl)
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = { ...opts.headers }
@@ -215,8 +250,9 @@ async function rawCall(
         res.on('data', (chunk: Buffer) => chunks.push(chunk))
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8')
-          resolve({ status: res.statusCode ?? 0, body: text.length > 0 ? JSON.parse(text) : undefined })
+          resolve({ status: res.statusCode ?? 0, body: text.length > 0 ? safeJsonParse(text) : undefined, text })
         })
+        res.on('error', reject)
       }
     )
     req.on('error', reject)
@@ -359,7 +395,6 @@ const BYPASS_PATHS: Array<[string, string]> = [
   ['/v1/../v1/projects', 'a dot-dot segment that resolves back to the same route'],
   ['/v1/projects/', 'a trailing slash, which is the same route to dispatch'],
   ['/%2e//v1/projects', 'a percent-encoded dot, decoded by the URL parser before the gate ever sees it'],
-  ['//v1/projects', 'a doubled leading slash'],
   ['/v1//projects', 'a doubled interior slash'],
 ]
 
@@ -374,6 +409,41 @@ test('every path variant that dispatch still routes to /v1/projects requires a s
       const body = res.body as { error: { code: string } }
       assert.equal(body.error.code, 'unauthorized')
     }
+  })
+})
+
+// '//v1/projects' (a doubled LEADING slash, as opposed to '/v1//projects'
+// above, a doubled INTERIOR one) used to live in BYPASS_PATHS asserting 401,
+// on the same "dispatch still routes this to /v1/projects" premise as every
+// other entry there. That premise is false for this one specific shape, and
+// static serving is what surfaced it: `new URL('//v1/projects',
+// 'http://localhost')` does not produce pathname '//v1/projects' the way a
+// single or doubled interior slash does. A path that starts with exactly
+// "//" is a network-path reference (WHATWG URL Standard, the same rule
+// behind protocol-relative URLs like "//example.com/x" in an href): the URL
+// parser reads "v1" as a new HOST, not a path segment, leaving pathname
+// "/projects" and host "v1". Confirmed directly against a real node:http
+// server, not just the URL parser in isolation: req.url is the literal
+// string "//v1/projects", and dispatch (packages/cli/src/daemon/routes.ts)
+// parses it the exact same way this gate does, so it was already throwing
+// "unknown route: GET /projects" for this shape before this task, session or
+// no session; the old gate's 401 for it was a coincidence of denying
+// everything by default, not evidence dispatch ever served /v1/projects
+// from it. What actually matters, and what this asserts, is that the gate's
+// classification still agrees with dispatch's own routing for this shape:
+// neither one ever treats it as /v1/projects, so serving it as Studio's
+// static bundle (a harmless, unauthenticated HTML shell) hands out nothing
+// dispatch itself would not have refused anyway.
+test('a doubled leading slash is a network-path reference, not /v1/projects, in the gate and in dispatch alike', async () => {
+  const ctx = buildContext()
+  await setOperatorPassword(ctx.paths, 'correct horse battery staple')
+
+  await withStudioServer(ctx, async (baseUrl) => {
+    const res = await rawCall(baseUrl, 'GET', '//v1/projects')
+    // Never the control plane's project list, authenticated or not: this
+    // never was /v1/projects to either the gate or dispatch.
+    assert.doesNotMatch(res.text, /"projects":/)
+    assert.notEqual(res.status, 401, 'this path is not gated, because it is not /v1/... to dispatch either')
   })
 })
 
@@ -413,18 +483,35 @@ test('the same normalized path IS served, with a session, so the gate matches wh
   })
 })
 
-test('an unmapped path is denied by default rather than passed through', async () => {
+// This test's own premise changed with static serving (see static.ts and
+// studio-static.test.ts, which owns the full assertions on what gets served
+// and with what content). '/v2/projects', '/' and '/anything' are, by
+// design, none of them /v1/... or /studio/... any more, so none of them are
+// gated: they are all Studio's own built bundle now, unauthenticated on
+// purpose, because that bundle is what has to load before a session can ever
+// exist. What must still hold, and what this asserts, is the boundary
+// itself: /v1/ and /studio/ paths that do not match a real route stay
+// default-denied, exactly as before, static serving or not.
+test('an unmapped path outside /v1/ and /studio/ is Studio\'s static bundle, not the control plane, and is never gated', async () => {
   const ctx = buildContext()
   await setOperatorPassword(ctx.paths, 'correct horse battery staple')
 
   await withStudioServer(ctx, async (baseUrl) => {
-    // Nothing under /v2/ or / exists today. The old gate let both straight
-    // through to the control plane unauthenticated because they were not
-    // under the /v1/ prefix; the point of default-deny is that a route
-    // added later cannot be born unauthenticated by accident.
     for (const path of ['/v2/projects', '/', '/anything']) {
       const res = await rawCall(baseUrl, 'GET', path)
-      assert.equal(res.status, 401, `GET ${path} must require a session`)
+      assert.notEqual(res.status, 401, `GET ${path} must not be gated: it is not /v1/ or /studio/`)
+    }
+  })
+})
+
+test('an unmapped /v1/ or /studio/ path stays gated by default, even with static serving wired in', async () => {
+  const ctx = buildContext()
+  await setOperatorPassword(ctx.paths, 'correct horse battery staple')
+
+  await withStudioServer(ctx, async (baseUrl) => {
+    for (const path of ['/v1/not-a-real-route', '/studio/not-a-real-route']) {
+      const res = await rawCall(baseUrl, 'GET', path)
+      assert.equal(res.status, 401, `GET ${path} must still require a session`)
     }
   })
 })

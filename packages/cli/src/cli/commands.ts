@@ -7,7 +7,7 @@
 // main.ts's handleError, so a command never has to decide its own exit code
 // for a failure path.
 
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { chmod, mkdir } from 'node:fs/promises'
 import {
   HobbyError,
@@ -21,6 +21,7 @@ import { createDaemonContext } from '../daemon/context.js'
 import { runPreflight } from '../daemon/preflight.js'
 import { reconcile } from '../daemon/reconcile.js'
 import { startDaemon } from '../daemon/server.js'
+import { hasOperatorCredential, setOperatorPassword } from '../daemon/studio/auth.js'
 import type { WireResource } from '../daemon/wire.js'
 import type { Api } from './client.js'
 import { exitCodeForError } from './exit.js'
@@ -451,5 +452,109 @@ export async function cmdEject(c: Ctx, positionals: string[], flags: Flags): Pro
     'this is a snapshot of current state; hobby is still managing this project. moving the data out and ' +
       'stopping management here is not yet automated, see docs/portability.'
   )
+  return 0
+}
+
+// `hobby studio passwd`: the only way the operator credential (ADR 0008,
+// packages/cli/src/daemon/studio/auth.ts) is ever set or changed. Deliberate
+// design, not a shortcut:
+//
+// - Never a daemon route, and never called through c.api: existing shell
+//   access on the box is the whole root of trust (ADR 0008 again), so this
+//   calls setOperatorPassword directly against paths.home, the same local
+//   state cmdInit and cmdDaemon already touch. It works with the daemon
+//   stopped, running, or never started at all, because nothing here opens
+//   the unix socket.
+// - Never a command-line argument: only io.readLine() ever supplies the
+//   password, twice, and neither prompt is echoed to the terminal (see
+//   ReadLineOptions.silent in main.ts). A password living in argv is
+//   readable by every other user on the box via `ps`, exactly the leak
+//   cmdConnect's own comment describes closing for the connection string;
+//   this command has no flag or positional that could carry one in the
+//   first place, so there is no argv path to close, only one to never open.
+export async function cmdStudioPasswd(io: Io, paths: Paths): Promise<number> {
+  await ensurePrivateDir(paths.home)
+
+  io.out('set the studio operator password. it is stored only on this box, in')
+  io.out(`${paths.home}, and is never sent anywhere else.`)
+  io.out('password:')
+  const first = await io.readLine({ silent: true })
+  io.out('confirm password:')
+  const second = await io.readLine({ silent: true })
+
+  if (first !== second) {
+    io.err('passwords did not match, nothing was changed')
+    return 1
+  }
+
+  // setOperatorPassword itself throws HobbyError('usage', ...) for an empty
+  // password, which main.ts's handleError renders the same way any other
+  // usage error is rendered; there is no separate empty-password check to
+  // keep in sync with that one.
+  await setOperatorPassword(paths, first)
+  io.out('studio operator password set.')
+  return 0
+}
+
+export type BrowserOpener = (url: string) => void
+
+function browserOpenCommand(platform: NodeJS.Platform): { cmd: string; args: string[] } | null {
+  if (platform === 'darwin') return { cmd: 'open', args: [] }
+  if (platform === 'linux') return { cmd: 'xdg-open', args: [] }
+  if (platform === 'win32') return { cmd: 'cmd', args: ['/c', 'start', ''] }
+  // Every other platform (a headless VPS with no desktop at all, which is
+  // squarely this project's audience per the root CLAUDE.md) has nothing
+  // sensible to exec; cmdStudio below still prints the URL either way.
+  return null
+}
+
+// Best-effort and asynchronous on purpose: `open`/`xdg-open` launch the
+// browser and return immediately, but spawnSync would still block `hobby
+// studio` until that child process itself exits, which on some platforms is
+// only when the browser itself closes. detached + unref lets the CLI exit
+// right after printing the URL regardless of what the browser process does.
+// A missing launcher (no desktop environment, a bare VPS) is not an error:
+// the URL was already printed, which is the fallback the brief asks for.
+function defaultOpenBrowser(url: string): void {
+  const command = browserOpenCommand(process.platform)
+  if (command === null) {
+    return
+  }
+  try {
+    const child = spawn(command.cmd, [...command.args, url], { stdio: 'ignore', detached: true })
+    child.on('error', () => {
+      // No GUI to open a browser in, or the launcher is not on PATH: the URL
+      // is already on stdout, so this is not fatal.
+    })
+    child.unref()
+  } catch {
+    // Same reasoning: spawn itself throwing is still not fatal here.
+  }
+}
+
+// `hobby studio`: prints the URL to open and opens it when it can. Points
+// straight at the daemon's own loopback listener (config.apiPort), not at a
+// Caddy front door: Caddy is out of scope for this task (see the task
+// report), and the daemon serves both the API and Studio's built bundle on
+// that same port now (packages/cli/src/daemon/studio/routes.ts's
+// createStudioApp). If Caddy is fronting this with TLS later, that changes
+// the URL and is Caddy's task to update, not this one's.
+export function cmdStudio(io: Io, paths: Paths, config: HobbyConfig, openBrowser: BrowserOpener = defaultOpenBrowser): number {
+  const url = `http://127.0.0.1:${config.apiPort}`
+
+  if (!hasOperatorCredential(paths)) {
+    // Deliberately not the login page: a login attempt against a fresh
+    // install can never succeed (routes.ts's loginHandler always throws
+    // unauthorized when no credential is set, by design, so a failed login
+    // never reveals whether one exists), so opening it here would just be a
+    // confusing dead end. Naming the fix directly is what the brief asks
+    // for instead of a page nobody can get past.
+    io.err('no studio password has been set yet, so signing in could never succeed.')
+    io.err('hint: run `hobby studio passwd`, then `hobby studio` again.')
+    return 1
+  }
+
+  io.out(url)
+  openBrowser(url)
   return 0
 }

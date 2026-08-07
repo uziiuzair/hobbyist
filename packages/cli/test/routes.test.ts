@@ -73,7 +73,15 @@ async function withServer(ctx: DaemonContext, fn: (baseUrl: string) => Promise<v
   try {
     await fn(`http://127.0.0.1:${address.port}`)
   } finally {
-    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+    // Forces any lingering keep-alive socket closed immediately rather than
+    // waiting on it: server.close()'s own callback does not fire until
+    // every connection has ended on its own, and a client that already got
+    // its response but never explicitly closed its socket can otherwise
+    // leave that wait pending indefinitely, which hangs this file's own
+    // test process well after every test has already reported a result.
+    const closed = new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+    server.closeAllConnections()
+    await closed
     ctx.store.close()
   }
 }
