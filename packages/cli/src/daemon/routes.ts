@@ -21,7 +21,6 @@ import {
   connectionString,
   createPostgres,
   destroyPostgres,
-  releasePostgres,
   runQuery,
   startPostgres,
   stopPostgres,
@@ -361,23 +360,30 @@ async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string):
   }
 }
 
-// Two calls in one route, and the order is the whole design.
+// Two calls in one route, and what `release` does NOT do is the design.
 //
-// Without `release` this is what it has always been: a pure read that renders
-// a compose file from real state, writes nothing, stops nothing, and leaves
-// the project managed. That stays the default, because the common use is
-// looking at the file.
+// Without `release` this is a pure read: a compose file rendered from real
+// state, nothing written, nothing stopped, the project still managed. That
+// stays the default, because the common use is looking at the file.
 //
-// With `release` it also performs the handover CLAUDE.md's first promise
-// actually requires: containers stopped and removed, the project's network
-// removed, the project forgotten. The data directories are not touched, and
-// they are the reason the compose file above is worth anything.
+// With `release`, hobby stops acting on the project and keeps every record of
+// it. Containers are stopped, the rows stay, the config stays, the credentials
+// stay, the data directory is untouched, the network stays. The project is
+// marked released and from then on hobby will not wake it, hibernate it, or
+// reconcile it, because whatever the user started from that compose file now
+// owns the data directory and two Postgres processes on one PGDATA is
+// corruption. `hobby adopt` clears the mark and takes it back.
 //
-// The compose file is rendered before any of that runs. It is rendered from
-// the store rows, credentials included, and once the project is forgotten
-// there is nothing left to render it from. Releasing first would hand back an
-// empty services list at exactly the moment the file is the only thing the
-// user has left.
+// An earlier version deleted the project instead. That was wrong for a reason
+// worth writing down: --release is a flag someone types once, out of
+// curiosity, on a project they care about, and if their export turns out to be
+// botched there was no way back. Handing something over and destroying the
+// only record of it are different operations, and only one of them is what
+// this verb means. Deleting is what `hobby rm` is for, and it asks first.
+//
+// The compose file is still rendered before anything else runs, because it is
+// rendered from the store rows, credentials included, and it is the artifact
+// the whole call exists to produce.
 async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): Promise<RouteResult> {
   const project = getProjectByNameOrThrow(ctx, name)
   const resources = ctx.store.listResources(project.id)
@@ -391,35 +397,45 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
     return { status: 200, body }
   }
 
+  // Stopped, not removed. A stopped container holds no port and no data
+  // directory, so the compose file can start cleanly beside it, and leaving it
+  // in place is what makes `hobby adopt` a state change rather than a rebuild.
   const failures: string[] = []
   for (const resource of resources) {
+    if (resource.state !== 'running') continue
     try {
-      await releasePostgres(ctx, resource)
+      await stopPostgres(ctx, resource)
     } catch (err) {
       failures.push(`${resource.name}: ${errorMessage(err)}`)
     }
   }
 
-  // The network is Hobbyist's, not the departing project's: compose creates
-  // its own. Leaving it behind is how a box accumulates one dead network per
-  // project ever created.
-  try {
-    await ctx.runtime.removeNetwork(project.networkName)
-  } catch (err) {
-    failures.push(`remove network ${project.networkName}: ${errorMessage(err)}`)
-  }
-
-  ctx.store.deleteProject(project.id)
+  ctx.store.setProjectReleased(project.id, new Date())
 
   if (failures.length > 0) {
     throw new HobbyError(
       'internal',
-      `project ${name} is no longer managed, but ${failures.length} handover step(s) failed: ${failures.join('; ')}`,
-      'the data directories are untouched; a container or network may still exist and may need to be removed by hand before the compose file can start'
+      `project ${name} is released, but ${failures.length} of its databases did not stop cleanly: ${failures.join('; ')}`,
+      'nothing was deleted. Stop the container by hand before starting the compose file, so two postgres processes cannot open the same data directory'
     )
   }
 
   return { status: 200, body }
+}
+
+// The other direction. Nothing to rebuild and nothing to restore: the rows
+// never went anywhere, so taking a project back is one column changing.
+function adoptRoute(ctx: DaemonContext, name: string): RouteResult {
+  const project = getProjectByNameOrThrow(ctx, name)
+  if (project.releasedAt == null) {
+    throw new HobbyError(
+      'conflict',
+      `project ${name} was not released`,
+      'hobby is already managing it'
+    )
+  }
+  ctx.store.setProjectReleased(project.id, null)
+  return { status: 200, body: { project: ctx.store.getProject(project.id) } }
 }
 
 async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<RouteResult> {
@@ -462,6 +478,11 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       // Opt-in by an explicit query parameter: the destructive reading of a
       // verb is never the one a bare request gets.
       return await ejectRoute(ctx, name, url.searchParams.get('release') === 'true')
+    }
+
+    if (segments.length === 4 && method === 'POST' && segments[3] === 'adopt') {
+      const name = decodeURIComponent(segments[2] as string)
+      return adoptRoute(ctx, name)
     }
   }
 

@@ -12,7 +12,7 @@ import type { Project } from '@hobby.sh/core'
 import { connectionStringTool, listTool, logsTool, newTool, rmTool, sleepTool, wakeTool, type ToolResult } from '../src/tools.js'
 
 function project(name: string, id = `${name}-id`): Project {
-  return { id, name, networkName: `hobby-${name}`, sleepAfterSeconds: 300, createdAt: new Date('2026-01-01') }
+  return { id, name, networkName: `hobby-${name}`, sleepAfterSeconds: 300, createdAt: new Date('2026-01-01'), releasedAt: null }
 }
 
 // The daemon's wire shape (WireResource, packages/cli/src/daemon/wire.ts):
@@ -66,6 +66,7 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     getConnection: notWired('getConnection'),
     getLogs: notWired('getLogs'),
     eject: notWired('eject'),
+    adopt: notWired('adopt'),
   }
   const api = { ...base } as unknown as Record<string, unknown>
   for (const [key, fn] of Object.entries(overrides)) {

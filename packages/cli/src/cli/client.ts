@@ -180,6 +180,7 @@ export interface Api {
   getConnection(id: string): Promise<ConnectionResponse>
   getLogs(id: string, tail?: number): Promise<LogsResponse>
   eject(project: string, opts?: { release?: boolean }): Promise<EjectResponse>
+  adopt(project: string): Promise<{ project: Project }>
 }
 
 export function createApi(socketPath: string): Api {
@@ -202,5 +203,6 @@ export function createApi(socketPath: string): Api {
       call(client, 'GET', `/v1/resources/${p(id)}/logs${tail === undefined ? '' : `?tail=${tail}`}`),
     eject: (project, opts) =>
       call(client, 'POST', `/v1/projects/${p(project)}/eject${opts?.release === true ? '?release=true' : ''}`),
+    adopt: (project) => call(client, 'POST', `/v1/projects/${p(project)}/adopt`),
   }
 }
