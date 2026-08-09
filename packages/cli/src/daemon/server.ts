@@ -129,6 +129,12 @@ export interface StartDaemonOptions {
   // need the unix socket), but tests that only care about the unix socket
   // path can skip binding a second port.
   apiPort: number | null
+  // Run once, last, after every listener is closed and every running resource
+  // has been stopped cleanly. The daemon lock is released here rather than by
+  // the caller because the caller's own await never returns: `hobby daemon`
+  // blocks forever and this process exits from inside the signal handler
+  // below, so a release after startDaemon() would never run.
+  onShutdown?: () => void
 }
 
 export async function startDaemon(
@@ -235,6 +241,15 @@ export async function startDaemon(
         await rm(opts.socketPath, { force: true })
       } catch (err) {
         console.error(`daemon shutdown: failed to remove socket file: ${errorMessage(err)}`)
+      }
+
+      // Last, and never allowed to throw: releasing the lock is what lets the
+      // next daemon start, so a failure here must not become the reason the
+      // rest of a clean shutdown is reported as unclean.
+      try {
+        opts.onShutdown?.()
+      } catch (err) {
+        console.error(`daemon shutdown: failed to release the daemon lock: ${errorMessage(err)}`)
       }
     })()
     return shutdownPromise
