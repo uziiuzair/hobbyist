@@ -20,6 +20,7 @@ import {
 import { createDaemonContext } from '../daemon/context.js'
 import { runPreflight } from '../daemon/preflight.js'
 import { reconcile } from '../daemon/reconcile.js'
+import { acquireDaemonLock } from '../daemon/single-instance.js'
 import { startDaemon } from '../daemon/server.js'
 import { hasOperatorCredential, setOperatorPassword } from '../daemon/studio/auth.js'
 import type { WireResource } from '../daemon/wire.js'
@@ -172,9 +173,19 @@ export async function cmdDaemon(io: Io, paths: Paths, config: HobbyConfig): Prom
   await ensurePrivateDir(paths.home)
   await ensurePrivateDir(paths.projectsDir)
 
+  // Before reconcile, not after. Reconcile inspects and starts containers, so
+  // a second daemon that gets that far has already touched the first one's
+  // resources before finding out it should not exist.
+  const lock = acquireDaemonLock(paths.home)
+
   const ctx = createDaemonContext({ paths, config })
-  await reconcile(ctx)
-  await startDaemon(ctx, { socketPath: paths.socketPath, apiPort: config.apiPort })
+  try {
+    await reconcile(ctx)
+    await startDaemon(ctx, { socketPath: paths.socketPath, apiPort: config.apiPort, onShutdown: () => lock.release() })
+  } catch (err) {
+    lock.release()
+    throw err
+  }
   io.out(`hobby daemon listening on ${paths.socketPath}`)
   await new Promise<void>(() => {
     // Deliberately never resolves; see the file comment above.
