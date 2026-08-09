@@ -11,7 +11,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync } from 'node:fs'
-import { openDatabase } from './sqlite.js'
+import { openDatabase, type SqliteDatabase } from './sqlite.js'
 import { HobbyError } from './errors.js'
 import type {
   PostgresConfig,
@@ -29,6 +29,7 @@ export interface Store {
   getProjectByName(name: string): Project | null
   listProjects(): Project[]
   deleteProject(id: ProjectId): void
+  setProjectReleased(id: ProjectId, at: Date | null): void
   createResource(input: {
     projectId: ProjectId
     kind: ResourceKind
@@ -52,6 +53,7 @@ interface ProjectRow {
   network_name: string
   sleep_after_seconds: number | null
   created_at: string
+  released_at: string | null
 }
 
 interface ResourceRow {
@@ -75,7 +77,8 @@ CREATE TABLE IF NOT EXISTS projects (
   name TEXT NOT NULL UNIQUE,
   network_name TEXT NOT NULL,
   sleep_after_seconds INTEGER,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  released_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS resources (
@@ -98,6 +101,7 @@ function rowToProject(row: ProjectRow): Project {
     networkName: row.network_name,
     sleepAfterSeconds: row.sleep_after_seconds,
     createdAt: new Date(row.created_at),
+    releasedAt: row.released_at === null || row.released_at === undefined ? null : new Date(row.released_at),
   }
 }
 
@@ -137,10 +141,27 @@ function restrictStateFiles(path: string): void {
   }
 }
 
+// CREATE TABLE IF NOT EXISTS creates a new database correctly and does nothing
+// at all to one that already exists, so every column added after the first
+// release needs a statement of its own. There is no migration framework here
+// on purpose: this is one process opening one file, and the entire history is
+// a handful of ALTERs that each have to be idempotent.
+//
+// Idempotent by asking sqlite what the table looks like rather than by
+// catching the duplicate-column error, so a genuine failure is not swallowed
+// along with the expected one.
+function migrate(db: SqliteDatabase): void {
+  const columns = db.prepare('PRAGMA table_info(projects)').all() as Array<{ name: string }>
+  if (!columns.some((column) => column.name === 'released_at')) {
+    db.exec('ALTER TABLE projects ADD COLUMN released_at TEXT')
+  }
+}
+
 export function openStore(path: string): Store {
   const db = openDatabase(path)
   db.exec('PRAGMA journal_mode = WAL;')
   db.exec(SCHEMA)
+  migrate(db)
   restrictStateFiles(path)
 
   function getProject(id: ProjectId): Project | null {
@@ -193,7 +214,16 @@ export function openStore(path: string): Store {
         networkName,
         sleepAfterSeconds: input.sleepAfterSeconds,
         createdAt,
+        releasedAt: null,
       }
+    },
+
+    // Both directions: a Date hands the project over, null takes it back
+    // (`hobby adopt`). Nothing else about the project changes either way,
+    // which is the point: the rows, the config, the credentials and the data
+    // directory are all still here, and only whether hobby acts on them moves.
+    setProjectReleased(id: ProjectId, at: Date | null): void {
+      db.prepare('UPDATE projects SET released_at = ? WHERE id = ?').run(at === null ? null : at.toISOString(), id)
     },
 
     getProject,

@@ -275,7 +275,16 @@ export async function cmdLs(c: Ctx, flags: Flags): Promise<number> {
   }
 
   for (const { project, resources } of details) {
-    c.io.out(project.name)
+    // A released project is still listed, because it is still here. Saying so
+    // on the project line is the difference between "hobby forgot this" and
+    // "hobby is deliberately not touching this", and only one of those is
+    // true.
+    // `!= null`, not `=== null`. This runs against whatever daemon is on the
+    // socket, and a daemon built before releasedAt existed sends a project
+    // with no such field at all: strict inequality against null read that
+    // `undefined` as released and labelled every project on the box as handed
+    // over. Loose null here is the one place it is the correct operator.
+    c.io.out(project.releasedAt != null ? `${project.name}  (released, not managed)` : project.name)
     if (resources.length === 0) {
       c.io.out('  (no resources)')
       continue
@@ -499,15 +508,40 @@ export async function cmdEject(c: Ctx, positionals: string[], flags: Flags): Pro
   }
   if (release) {
     c.io.err(
-      `hobby is no longer managing ${project}: its containers and network are gone and its rows are ` +
-        'deleted. the data directories above are untouched, and the compose file on stdout starts them.'
+      `hobby has stopped acting on ${project} and deleted nothing. its databases are stopped, its records ` +
+        'are still here, and the data directories above are untouched: the compose file on stdout starts ' +
+        `the same data. run \`hobby adopt ${project}\` to take it back, after stopping that stack.`
     )
   } else {
     c.io.err(
       'this is a snapshot of current state; hobby is still managing this project. pass --release to hand ' +
-        'it over: containers and network removed, rows deleted, data left exactly where it is.'
+        'it over: databases stopped and hobby out of the way, with every record and every byte kept.'
     )
   }
+  return 0
+}
+
+// The other half of --release, and the reason --release is safe to type out of
+// curiosity: nothing was deleted, so taking a project back is a state change
+// rather than a restore.
+export async function cmdAdopt(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const project = positionals[0]
+  if (project === undefined) {
+    throw new UsageError('usage: hobby adopt <project>')
+  }
+
+  const result = await c.api.adopt(project)
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+    return 0
+  }
+
+  c.io.out(`hobby is managing ${project} again`)
+  c.io.err(
+    'its databases are still stopped. anything that connects will wake one, or run `hobby wake ' +
+      `${project}\` now.`
+  )
   return 0
 }
 

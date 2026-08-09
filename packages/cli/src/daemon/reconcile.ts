@@ -220,6 +220,15 @@ export async function reconcile(ctx: DaemonContext, opts: ReconcileOptions = {})
       continue
     }
 
+    // Released projects are skipped whole. Reconcile's job is to make the
+    // world match the store, and for a released project the world is
+    // deliberately not hobby's any more: the container it would find running
+    // is the user's own compose stack on the same data directory, and
+    // "correcting" that would stop somebody's database.
+    if (ctx.store.getProject(resource.projectId)?.releasedAt != null) {
+      continue
+    }
+
     const status = await ctx.runtime.inspect(resource.config.containerName)
     let bucket: ObservedBucket
     if (!status.exists) {
