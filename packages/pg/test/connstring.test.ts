@@ -12,6 +12,7 @@ function sampleProject(): Project {
     networkName: 'hobby-blog',
     sleepAfterSeconds: 300,
     createdAt: new Date('2026-01-01T00:00:00Z'),
+    releasedAt: null,
   }
 }
 

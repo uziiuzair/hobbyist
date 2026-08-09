@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import {
   createFakeRuntime,
+  HobbyError,
   openStore,
   resolvePaths,
   type ComputeRuntime,
@@ -22,7 +23,7 @@ import {
   type Store,
 } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
-import { createApp, reconcile, type DaemonContext } from '../src/index.js'
+import { createApp, createProxyDeps, reconcile, type DaemonContext } from '../src/index.js'
 
 function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
   return {
@@ -897,29 +898,70 @@ test('POST /v1/projects/:name/eject without release changes nothing', async () =
   })
 })
 
-test('POST /v1/projects/:name/eject?release=true hands the project over and keeps the data', async () => {
+test('POST /v1/projects/:name/eject?release=true hands the project over and deletes nothing', async () => {
   const runtime = createFakeRuntime()
   const ctx = buildContext(runtime)
   const { projectId, config } = await seedProject(ctx)
   const networkName = ctx.store.getProject(projectId)?.networkName as string
-  assert.equal(runtime._networks.has(networkName), true)
 
   await withServer(ctx, async (baseUrl) => {
     const res = await call(baseUrl, 'POST', '/v1/projects/blog/eject?release=true')
     assert.equal(res.status, 200)
     const body = res.body as { compose: string; dataDirs: string[]; released: boolean }
     assert.equal(body.released, true)
-    // Rendered before the release, from rows that no longer exist by the time
-    // this assertion runs. A compose file with no services is the failure
-    // this ordering exists to prevent.
+    // Rendered before anything else runs, from the rows and the real
+    // credentials. A compose file with no services is the failure this
+    // ordering exists to prevent.
     assert.match(body.compose, /services:\n {2}primary:/)
     assert.match(body.compose, /POSTGRES_PASSWORD: secret/)
     assert.deepEqual(body.dataDirs, [config.dataDir])
 
-    assert.equal(ctx.store.getProject(projectId), null, 'the project is forgotten')
+    // The whole point of the change: --release is a flag someone types once
+    // out of curiosity, so it must not be the thing that loses their project.
+    const project = ctx.store.getProject(projectId)
+    assert.notEqual(project, null, 'the project row survives')
+    assert.notEqual(project?.releasedAt, null, 'and is marked released')
+    assert.equal(ctx.store.listResources(projectId).length, 1, 'the resource row survives')
+
     const status = await runtime.inspect(config.containerName)
-    assert.equal(status.exists, false, 'the container is removed, not merely stopped')
-    assert.equal(runtime._networks.has(networkName), false, 'the network is removed rather than leaked')
+    assert.equal(status.exists, true, 'the container is stopped, not removed')
+    assert.equal(status.running, false)
+    assert.equal(runtime._networks.has(networkName), true, 'the network survives, ready for adopt')
+  })
+})
+
+test('a released project is refused by the wake path rather than woken', async () => {
+  const ctx = buildContext()
+  const { projectId } = await seedProject(ctx)
+  ctx.store.setProjectReleased(projectId, new Date())
+
+  // Two postgres processes on one PGDATA is corruption, not a conflict the
+  // user gets an error about, so this refuses before anything starts.
+  const deps = createProxyDeps(ctx)
+  await assert.rejects(deps.resolve('blog'), (err: unknown) => {
+    assert.ok(err instanceof HobbyError)
+    assert.equal(err.code, 'conflict')
+    assert.match(err.hint ?? '', /hobby adopt blog/)
+    return true
+  })
+  ctx.store.close()
+})
+
+test('POST /v1/projects/:name/adopt takes a released project back', async () => {
+  const ctx = buildContext()
+  const { projectId } = await seedProject(ctx)
+  ctx.store.setProjectReleased(projectId, new Date())
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', '/v1/projects/blog/adopt')
+    assert.equal(res.status, 200)
+    assert.equal(ctx.store.getProject(projectId)?.releasedAt, null)
+
+    // Nothing was rebuilt: adopting is one column changing, because nothing
+    // was ever taken apart.
+    const again = await call(baseUrl, 'POST', '/v1/projects/blog/adopt')
+    assert.equal(again.status, 409)
+    assert.equal((again.body as { error: { code: string } }).error.code, 'conflict')
   })
 })
 
@@ -936,4 +978,23 @@ test('DELETE /v1/projects/:name removes the project network rather than leaking 
     assert.equal(ctx.store.getProject(projectId), null)
     assert.equal(runtime._networks.has(networkName), false, 'nothing else ever removed a project network')
   })
+})
+
+// A daemon built before releasedAt existed answers with a project that has no
+// such field. The CLI reads that response, and the first version of the ls
+// display asked `releasedAt === null`, so every project served by an older
+// daemon was labelled as handed over. Found by running the new CLI against the
+// daemon that was already up.
+test('a project payload with no releasedAt field is not treated as released', async () => {
+  const ctx = buildContext()
+  const { projectId } = await seedProject(ctx)
+
+  const stored = ctx.store.getProject(projectId)
+  assert.equal(stored?.releasedAt, null, 'a project that was never released reads as null, not undefined')
+
+  // The shape an older daemon sends: the key is simply absent.
+  const legacy = JSON.parse(JSON.stringify({ ...stored, releasedAt: undefined })) as { releasedAt?: string }
+  assert.equal('releasedAt' in legacy, false)
+  assert.equal(legacy.releasedAt != null, false, 'the loose check the CLI uses reads it as not released')
+  ctx.store.close()
 })

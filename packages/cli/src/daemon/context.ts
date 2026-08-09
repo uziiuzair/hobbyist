@@ -138,6 +138,22 @@ export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
       return null
     }
 
+    // A released project is one hobby handed over: its data directory now
+    // belongs to whatever the user started from the emitted compose file.
+    // Waking it here would open a second postgres on that same PGDATA, which
+    // is not a conflict the user gets an error about, it is corruption. The
+    // rows are all still here, which is why this is a refusal with a reason
+    // rather than a "no such project".
+    if (project.releasedAt != null) {
+      throw new HobbyError(
+        'conflict',
+        `project ${projectName} was released and is no longer managed by hobby`,
+        'it is running from the compose file hobby eject --release gave you. Run `hobby adopt ' +
+          projectName +
+          '` to take it back, after stopping that stack.'
+      )
+    }
+
     const resources = ctx.store.listResources(project.id)
     if (resources.length === 0) {
       return null

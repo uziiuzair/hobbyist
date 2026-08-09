@@ -100,6 +100,14 @@ async function tick(
     }
 
     const project = ctx.store.getProject(resource.projectId)
+
+    // A released project is not hobby's to put to sleep. Its container is
+    // stopped and its data directory belongs to the user's own compose stack
+    // now; acting on it would mean stopping something hobby did not start.
+    if (project?.releasedAt != null) {
+      continue
+    }
+
     const sleepAfterSeconds = project?.sleepAfterSeconds ?? null
     // Pinned. Checked first, before anything else, including the cheap
     // in-memory activity lookups below: there is nothing left to decide.
