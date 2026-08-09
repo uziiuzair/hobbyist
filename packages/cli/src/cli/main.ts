@@ -11,6 +11,7 @@ import { createApi, DaemonUnreachableError } from './client.js'
 import {
   cmdConnect,
   cmdDaemon,
+  cmdAdopt,
   cmdEject,
   cmdInit,
   cmdLogs,
@@ -129,6 +130,7 @@ function printHelp(io: Io): void {
   io.out('  hobby rm <target> [--yes]              destroy, with confirmation')
   io.out('  hobby eject <project>                 emit docker-compose.yml plus data')
   io.out('  hobby eject <project> --release       the same, and stop managing it')
+  io.out('  hobby adopt <project>                 manage a released project again')
   io.out('  hobby studio passwd                   set the studio operator password')
   io.out('  hobby studio                          print the studio URL and open it')
   io.out('')
@@ -237,6 +239,10 @@ export async function run(argv: string[], io: Io): Promise<number> {
       case 'rm': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json', 'yes'] })
         return await cmdRm(ctx, positionals, flags)
+      }
+      case 'adopt': {
+        const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+        return await cmdAdopt(ctx, positionals, flags)
       }
       case 'eject': {
         // --release is its own gate and there is no confirmation prompt, a

@@ -22,6 +22,14 @@ export interface Project {
   networkName: string
   sleepAfterSeconds: number | null
   createdAt: Date
+  // Set when `hobby eject --release` handed this project over. Hobbyist keeps
+  // every row and every byte, and stops acting: it will not wake these
+  // resources, hibernate them, or reconcile them, because the data directory
+  // now belongs to whatever the user started from the emitted compose file.
+  // Two Postgres processes on one PGDATA is the failure this prevents, and it
+  // is why handing a project over records a state rather than deleting one.
+  // `hobby adopt` clears it and takes the project back.
+  releasedAt: Date | null
 }
 
 export interface Resource {
