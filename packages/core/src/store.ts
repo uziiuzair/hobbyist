@@ -1,13 +1,17 @@
 // The state store: one sqlite file per daemon, holding projects and
-// resources. Uses node:sqlite (built into Node, no native build step) rather
-// than better-sqlite3. It is synchronous on purpose: the daemon is a single
-// process and sqlite writes are fast, so there is nothing an async wrapper
-// would buy here. Importing node:sqlite emits an ExperimentalWarning; that is
-// expected and not suppressed.
+// resources. It is synchronous on purpose: the daemon is a single process and
+// sqlite writes are fast, so there is nothing an async wrapper would buy here.
+//
+// Which sqlite is behind openDatabase depends on the runtime, and this file
+// deliberately does not know: see sqlite.ts, which is also where the one
+// behavioural difference between the two (what a row miss returns) is
+// normalised away. Under Node that is node:sqlite, built in, no native build
+// step, and its import emits an ExperimentalWarning that is expected and not
+// suppressed.
 
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync } from 'node:fs'
-import { DatabaseSync } from 'node:sqlite'
+import { openDatabase } from './sqlite.js'
 import { HobbyError } from './errors.js'
 import type {
   PostgresConfig,
@@ -134,7 +138,7 @@ function restrictStateFiles(path: string): void {
 }
 
 export function openStore(path: string): Store {
-  const db = new DatabaseSync(path)
+  const db = openDatabase(path)
   db.exec('PRAGMA journal_mode = WAL;')
   db.exec(SCHEMA)
   restrictStateFiles(path)
