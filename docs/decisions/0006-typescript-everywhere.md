@@ -61,3 +61,48 @@ throughput this project will never need, neither trade is worth it.
 M0 showing that neither Bun nor Node can hold the cold start budget or proxy
 connections reliably. That would move the proxy, and only the proxy, to Go or
 Rust, with the daemon API as the seam between them.
+
+## Amendment, 2026-08-09: Bun was finally run, and the install path is source
+
+Bun had never been executed against this codebase when this ADR was accepted.
+M0 was measured on Node, its results file says so in its name, and the "M0
+stress-tests both runtimes" line above was never carried out. Running it found
+one hard blocker and settled two open questions.
+
+**`node:sqlite` is not implemented by Bun.** `bun packages/cli/bin/hobby.js`
+died on `No such built-in module: node:sqlite` before printing a line of help.
+This is worth stating precisely, because the Node-compatible API rule above did
+not prevent it and could not have: `node:sqlite` **is** a Node API, and
+`packages/core/src/store.ts` followed the rule exactly. The rule protects
+against reaching for Bun-only APIs. It does not protect against Node built-ins
+Bun has not shipped. Resolved by `packages/core/src/sqlite.ts`, which is now the
+only file that knows there are two implementations, and which also normalises a
+behavioural difference between them: a row miss reads as `undefined` on Node and
+`null` on Bun, and every lookup in `store.ts` asks `row === undefined`.
+
+**argon2 installs and runs under Bun.** The native dependency was the failure
+expected first, and it was not a problem on either runtime.
+
+**The keystone works under Bun.** With the adapter in place, the full daemon
+runs: `hobby init`, `hobby new`, a Postgres provisioned and cleanly stopped, and
+wake-on-connect through the proxy. That is the specific risk this ADR named
+("Bun's socket and TLS stack is younger than Node's, and the proxy is the
+keystone"), now tested rather than assumed.
+
+**The install path is a source install, so a runtime is a prerequisite after
+all.** This ADR says `bun build --compile` makes installation "a download rather
+than a runtime prerequisite". What shipped is
+`curl -fsSL https://hobby.sh/install | bash`, which clones the repository and
+builds it (`scripts/web-install.sh`, then `install.sh`). Bun is therefore
+required on the box, and `install.sh` installs it when it is missing, which its
+own unprivileged one-line installer makes cheap. `bun build --compile` has not
+been attempted and remains the better answer for a bare VPS: it would remove the
+build step, the toolchain and the clone. This amendment records that the
+downloaded-binary claim above is currently an intention, not a description.
+
+**Both runtimes still work, and that is deliberate.** The test suite runs under
+`node --test`, and `bun test` passes the adapter's own cross-runtime
+assertions. The escape hatch this ADR describes ("if Bun disappoints we move to
+Node and lose only the compile step") is real and was exercised in the writing:
+everything shipped tonight was developed and tested on Node and then verified on
+Bun.
