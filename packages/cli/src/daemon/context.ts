@@ -28,7 +28,13 @@ import {
   type Store,
 } from '@hobby.sh/core'
 import { postgresKindHandler } from '@hobby.sh/pg'
-import { ActivityTracker, type ProxyDeps, type ProxyTarget } from '@hobby.sh/proxy'
+import {
+  ActivityTracker,
+  type HttpProxyDeps,
+  type HttpTarget,
+  type ProxyDeps,
+  type ProxyTarget,
+} from '@hobby.sh/proxy'
 
 // Every kind this daemon knows how to run. One list, built here, read by
 // every dispatch site (routes, hibernator, reconcile, the wake path). Adding
@@ -212,4 +218,99 @@ export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
   }
 
   return { resolve, wake: getOrCreateWake(ctx), activity: ctx.activity }
+}
+
+// `<resource>.<project>.<domain>` split back into its two names.
+//
+// Exactly two labels ahead of the domain, never a wildcard match on the
+// leftmost label alone: `a.b.c.blog.localhost` must not resolve to project
+// `blog`, because accepting extra labels would let one deployed app be
+// reached under names that look like other people's subdomains.
+//
+// Exported for its own tests: this is pure string handling with no store, no
+// clock and no I/O, and it is the one place a hostname becomes a routing
+// decision.
+export function parseAppHostname(
+  hostname: string,
+  domain: string
+): { project: string; resource: string } | null {
+  const suffix = `.${domain.toLowerCase()}`
+  const lower = hostname.toLowerCase()
+  if (!lower.endsWith(suffix) || lower.length === suffix.length) {
+    return null
+  }
+  const labels = lower.slice(0, -suffix.length).split('.')
+  if (labels.length !== 2) {
+    return null
+  }
+  const [resource, project] = labels
+  if (resource === undefined || project === undefined || resource === '' || project === '') {
+    return null
+  }
+  return { project, resource }
+}
+
+// The HTTP wake router's view of the world, bound to this DaemonContext.
+// Mirrors createProxyDeps above: resolve reads the store, wake is the same
+// memoized, de-duplicated wake the Postgres proxy and the query route
+// already share, and activity is the same tracker hibernation reads. One
+// wake path for every kind and every protocol is the point.
+export function createHttpProxyDeps(ctx: DaemonContext): HttpProxyDeps {
+  async function resolve(hostname: string): Promise<HttpTarget | null> {
+    const parsed = parseAppHostname(hostname, ctx.config.domain)
+    if (parsed === null) {
+      return null
+    }
+    const project = ctx.store.getProjectByName(parsed.project)
+    if (project === null) {
+      return null
+    }
+
+    // Same refusal as the Postgres proxy's, for the same reason: a released
+    // project's containers belong to the user's own compose stack now, and
+    // waking one here would start a second copy of something already
+    // running. Thrown rather than returned as null so the router can render
+    // 503 with this reason rather than a bare 404, which would read as "you
+    // never deployed this".
+    if (project.releasedAt != null) {
+      throw new HobbyError(
+        'conflict',
+        `project ${parsed.project} was released and is no longer managed by hobby`,
+        `run \`hobby adopt ${parsed.project}\` to take it back`
+      )
+    }
+
+    const resource = ctx.store.getResourceByName(project.id, parsed.resource)
+    if (resource === null) {
+      return null
+    }
+    // Only compute kinds serve HTTP. A postgres resource has a hostname
+    // shaped like this one by accident of the naming scheme, and routing a
+    // browser to port 5432 would hand it a Postgres wire protocol error.
+    if (resource.kind !== 'app' && resource.kind !== 'worker') {
+      return null
+    }
+
+    return {
+      resourceId: resource.id,
+      host: '127.0.0.1',
+      port: resource.config.hostPort,
+      state: resource.state,
+    }
+  }
+
+  // Caddy's on-demand TLS gate. Deliberately the same lookup as resolve, so
+  // there is exactly one definition of "a hostname this box serves", and
+  // deliberately swallowing the released-project refusal: a released project
+  // is a reason not to route a request, not a reason to refuse a
+  // certificate for a name that genuinely belongs to this box.
+  async function allowHostname(hostname: string): Promise<boolean> {
+    try {
+      return (await resolve(hostname)) !== null
+    } catch {
+      return true
+    }
+  }
+
+  return { resolve, allowHostname, wake: getOrCreateWake(ctx), activity: ctx.activity }
 }
