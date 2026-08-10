@@ -1,6 +1,7 @@
 # `docs/proxy/` wake-on-connect wire proxy
 
-**Status:** PROPOSED. Nothing built. **This is the keystone.**
+**Status:** BUILT, in `packages/proxy/`. **This is the keystone.** The open
+questions at the bottom are still open, and TLS termination is still not built.
 
 A Postgres wire-protocol proxy that makes a sleeping database indistinguishable
 from a slow one.
@@ -86,6 +87,9 @@ whether to fork one or start clean.
   `research/2026-08-07-cold-start-budget.md`.
 - **SSL terminates at the proxy.** Not a preference: routing requires reading the
   startup packet, and the startup packet is inside the TLS session.
+- **Cancels route on a key the proxy mints**, swapped into BackendKeyData on its
+  way to the client, because the pair a client presents is the only thing a
+  CancelRequest carries. See `specs/2026-08-10-cancel-routing.md`.
 - **Auth passes through** to Postgres, untouched.
 - **Routing on the database name**, as above.
 
