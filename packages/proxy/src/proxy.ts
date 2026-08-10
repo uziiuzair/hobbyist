@@ -12,7 +12,15 @@
 import net from 'node:net'
 import { HobbyError, parseRoutingKey } from '@hobby.sh/core'
 import type { ActivityTracker } from './activity.js'
-import { buildStartupPacket, errorResponse, parseStartup, type StartupMessage } from './startup.js'
+import { CancelRegistry, type CancelRoute } from './cancel.js'
+import {
+  buildCancelRequest,
+  buildStartupPacket,
+  errorResponse,
+  parseStartup,
+  scanBackendStartup,
+  type StartupMessage,
+} from './startup.js'
 
 export interface ProxyTarget {
   resourceId: string
@@ -265,20 +273,44 @@ function raceTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => Error)
   })
 }
 
-// Attaches the activity tracker and pipes both directions. activity.close
-// fires exactly once per connection: `closed` is the guard. Whichever of
-// client close, upstream close, client error or upstream error happens
-// first calls finish(); every other event after that is a no-op. Tearing
-// down both sockets in finish() (rather than only the one that fired) is
-// what stops the other side from being left half-open forever once its
-// peer is gone.
-function spliceAndTrackActivity(client: net.Socket, upstream: net.Socket, activity: ActivityTracker, resourceId: string): void {
-  const handle = activity.open(resourceId)
+// Attaches the activity tracker, registers the connection for cancellation,
+// and pipes both directions. activity.close fires exactly once per
+// connection: `closed` is the guard. Whichever of client close, upstream
+// close, client error or upstream error happens first calls finish(); every
+// other event after that is a no-op. Tearing down both sockets in finish()
+// (rather than only the one that fired) is what stops the other side from
+// being left half-open forever once its peer is gone.
+//
+// The two directions are not symmetric. Client to backend is a plain pipe
+// and always was: nothing a client sends after the startup packet is the
+// proxy's business. Backend to client is read one message at a time until
+// ReadyForQuery, purely so BackendKeyData can be swapped for a key this
+// proxy can route a cancel on, and then becomes a plain pipe too. The cost
+// is bounded by the startup phase; query traffic is never parsed.
+function spliceAndTrackActivity(
+  client: net.Socket,
+  upstream: net.Socket,
+  activity: ActivityTracker,
+  cancels: CancelRegistry,
+  target: ProxyTarget
+): void {
+  const handle = activity.open(target.resourceId)
+  // Registered before the backend has said anything, because the address is
+  // already known and the key it will send is not. scanBackendStartup fills
+  // in backendKey when BackendKeyData arrives; until then lookup refuses to
+  // resolve this entry.
+  const route: CancelRoute = { host: target.host, port: target.port, backendKey: null }
+  const minted = cancels.add(route)
   let closed = false
 
   const finish = (): void => {
     if (closed) return
     closed = true
+    // Before activity.close, so that the map is bounded by live connections
+    // even if something below throws.
+    if (minted !== null) {
+      cancels.remove(minted)
+    }
     activity.close(handle)
     client.destroy()
     upstream.destroy()
@@ -290,12 +322,100 @@ function spliceAndTrackActivity(client: net.Socket, upstream: net.Socket, activi
   upstream.on('error', finish)
 
   client.pipe(upstream)
-  upstream.pipe(client)
+
+  // No key to hand the client means nothing to look a cancel up by, so
+  // there is nothing to gain by reading the backend's startup messages.
+  // This connection behaves exactly as every connection did before cancel
+  // routing existed.
+  if (minted === null) {
+    upstream.pipe(client)
+    return
+  }
+
+  // Annotated rather than inferred: Buffer.alloc gives Buffer<ArrayBuffer>
+  // and subarray gives the wider Buffer<ArrayBufferLike>, so the inferred
+  // type would reject the reassignment below.
+  let pending: Buffer = Buffer.alloc(0)
+
+  const onBackendData = (chunk: Buffer): void => {
+    pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk])
+
+    const scan = scanBackendStartup(pending, minted)
+    if (scan.backendKey !== null) {
+      route.backendKey = scan.backendKey
+    }
+    if (scan.forward.length > 0) {
+      // The write return value is deliberately ignored. Honouring
+      // backpressure here would mean pausing the backend mid-handshake, and
+      // the total volume being written is one authentication exchange and a
+      // handful of ParameterStatus messages: kilobytes, once, per
+      // connection. The moment that phase ends, pipe() takes over and
+      // backpressure is handled properly for everything that matters.
+      client.write(scan.forward)
+    }
+    pending = pending.subarray(scan.consumed)
+
+    if (!scan.done) {
+      return
+    }
+
+    // Startup is over. Hand the rest of this connection to pipe(), which is
+    // what it was doing before and what it does for the whole session after.
+    // The listener is removed and pipe attached in the same tick, so no
+    // chunk can arrive in between.
+    upstream.off('data', onBackendData)
+    if (pending.length > 0) {
+      client.write(pending)
+      pending = Buffer.alloc(0)
+    }
+    upstream.pipe(client)
+  }
+
+  upstream.on('data', onBackendData)
+}
+
+// A CancelRequest is a second connection carrying nothing but the key pair,
+// so this key is the entire routing decision: no database name to resolve,
+// no user, nothing to wake. An unknown key closes silently, which is both
+// what a real Postgres does with a key it does not recognise and what this
+// proxy did with every cancel before routing existed.
+async function handleCancel(
+  socket: net.Socket,
+  cancels: CancelRegistry,
+  message: Extract<StartupMessage, { type: 'cancel_request' }>
+): Promise<void> {
+  const route = cancels.lookup({ processId: message.processId, secretKey: message.secretKey })
+  if (route === null) {
+    socket.end()
+    return
+  }
+
+  let upstream: net.Socket
+  try {
+    // One attempt, no retry. The dial in handleStartup retries because it
+    // may be racing a container that is still coming up; this one cannot
+    // be, since an entry in the registry means a connection is spliced to
+    // this address right now.
+    upstream = await connectUpstreamOnce(route.host, route.port, DIAL_ATTEMPT_TIMEOUT_MS)
+  } catch {
+    // Nothing useful to tell the client: the protocol has no reply to a
+    // cancel, successful or otherwise.
+    socket.end()
+    return
+  }
+  upstream.on('error', () => {})
+
+  // The backend's own key, not the one the client presented. Postgres reads
+  // the request and closes without replying, so this connection exists only
+  // to carry these 16 bytes.
+  upstream.end(buildCancelRequest(route.backendKey))
+  socket.end()
 }
 
 async function handleStartup(
   socket: net.Socket,
   deps: ProxyDeps,
+  cancels: CancelRegistry,
   wakeTimeoutMs: number,
   message: Extract<StartupMessage, { type: 'startup' }>
 ): Promise<void> {
@@ -398,10 +518,15 @@ async function handleStartup(
   const finalDatabase = routingKey.database ?? target.database
   const packet = buildStartupPacket({ ...message.params, database: finalDatabase }, message.version)
   upstream.write(packet)
-  spliceAndTrackActivity(socket, upstream, deps.activity, target.resourceId)
+  spliceAndTrackActivity(socket, upstream, deps.activity, cancels, target)
 }
 
-async function handleConnectionInner(socket: net.Socket, deps: ProxyDeps, wakeTimeoutMs: number): Promise<void> {
+async function handleConnectionInner(
+  socket: net.Socket,
+  deps: ProxyDeps,
+  cancels: CancelRegistry,
+  wakeTimeoutMs: number
+): Promise<void> {
   // A permanent safety net for the life of this function. readMessage
   // attaches and detaches its own 'error' listener around each read, and
   // there is a real gap between that detach and spliceAndTrackActivity
@@ -449,19 +574,15 @@ async function handleConnectionInner(socket: net.Socket, deps: ProxyDeps, wakeTi
   }
 
   if (read.type === 'cancel_request') {
-    // CancelRequest is routed, never treated as a wake. Real routing needs
-    // a processId/secretKey to upstream-address registry built from the
-    // BackendKeyData handed out on each connection's original startup,
-    // which does not exist yet (out of scope for this task, see the task
-    // report). Without it there is nothing to route a cancel to, and a
-    // cancel against a sleeping resource has nothing to cancel regardless,
-    // so the only safe move is to close without resolving or waking
-    // anything.
-    socket.end()
+    // Routed, never treated as a wake: handleCancel neither resolves a
+    // routing key nor calls deps.wake. The registry it reads only holds
+    // connections that are spliced right now, so a cancel can never be the
+    // thing that starts a container.
+    await handleCancel(socket, cancels, read)
     return
   }
 
-  await handleStartup(socket, deps, wakeTimeoutMs, read)
+  await handleStartup(socket, deps, cancels, wakeTimeoutMs, read)
 }
 
 export function startPgProxy(opts: { port: number; host?: string; deps: ProxyDeps; wakeTimeoutMs: number }): Promise<{
@@ -469,8 +590,14 @@ export function startPgProxy(opts: { port: number; host?: string; deps: ProxyDep
   port: number
 }> {
   return new Promise((resolve, reject) => {
+    // One registry per server, holding one entry per spliced connection. It
+    // is deliberately not part of ProxyDeps: the daemon supplies the world
+    // this proxy cannot see for itself, and this is the opposite, state that
+    // only exists because connections pass through here.
+    const cancels = new CancelRegistry()
+
     const server = net.createServer((socket) => {
-      handleConnectionInner(socket, opts.deps, opts.wakeTimeoutMs).catch((err) => {
+      handleConnectionInner(socket, opts.deps, cancels, opts.wakeTimeoutMs).catch((err) => {
         // Belt and suspenders: everything above already converts failures
         // into a real ErrorResponse. If something still throws past that
         // (a bug, not an expected failure mode), the socket must still not

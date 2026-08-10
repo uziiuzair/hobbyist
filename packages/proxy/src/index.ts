@@ -3,4 +3,5 @@
 
 export * from './startup.js'
 export * from './activity.js'
+export * from './cancel.js'
 export * from './proxy.js'

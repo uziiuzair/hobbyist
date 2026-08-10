@@ -14,11 +14,49 @@
 // The four share a length-prefixed frame, which is why parseStartup reads
 // the length first and dispatches on it rather than parsing four formats
 // independently.
+//
+// The backend to client half of the same phase is a different frame: every
+// message carries a type byte first, then a length that counts itself but
+// not the type byte.
+//
+//   BackendKeyData:  Byte1('K') Int32(12) Int32(processId) Int32(secretKey)
+//   ReadyForQuery:   Byte1('Z') Int32(5)  Byte1(status)
+//   ErrorResponse:   Byte1('E') Int32(length) { Byte1(field) CString }* Byte1(0)
+//
+// Only two of those are read here. BackendKeyData is the pair a client must
+// present to cancel, and ReadyForQuery is the marker that the startup phase
+// is over and there is nothing left to look at.
 
 export const PROTOCOL_3_0 = 196608
 export const SSL_REQUEST_CODE = 80877103
 export const GSS_ENC_REQUEST_CODE = 80877104
 export const CANCEL_REQUEST_CODE = 80877102
+
+// Backend message type bytes, as ASCII codes.
+const BACKEND_KEY_DATA = 0x4b // 'K'
+const READY_FOR_QUERY = 0x5a // 'Z'
+
+// BackendKeyData's length field, which is fixed: 4 for the length itself
+// plus two Int32s. Checked rather than assumed, so a message that merely
+// happens to start with 'K' is not read as one.
+const BACKEND_KEY_DATA_LENGTH = 12
+
+// Nothing the backend sends between the startup packet and ReadyForQuery is
+// large: authentication challenges, ParameterStatus pairs, BackendKeyData.
+// A length above this means the scan has lost sync with the message
+// boundaries, and the right response is to stop scanning rather than to
+// buffer toward a length that may never arrive. See scanBackendStartup.
+const MAX_BACKEND_STARTUP_MESSAGE = 65536
+
+// The pair Postgres hands a client in BackendKeyData, and the pair a client
+// sends back in a CancelRequest. It identifies a connection well enough to
+// cancel its running query, and it is unauthenticated, which is why the
+// proxy mints its own rather than passing the backend's through: see
+// cancel.ts.
+export interface CancelKey {
+  processId: number
+  secretKey: number
+}
 
 // An implausible length is any length that could not be a real startup
 // packet on this project: no client sends 10000 bytes of startup
@@ -158,6 +196,106 @@ export function buildStartupPacket(params: Record<string, string>, version: numb
   header.writeInt32BE(version, 4)
 
   return Buffer.concat([header, paramsBuf, Buffer.from([0])])
+}
+
+// The inverse of the 'cancel_request' branch of parseStartup. The proxy
+// builds one of these to forward a client's cancel to the backend that is
+// actually running the query, carrying the backend's own key rather than
+// the one the client presented. See cancel.ts for why those differ.
+export function buildCancelRequest(key: CancelKey): Buffer {
+  const buf = Buffer.alloc(16)
+  buf.writeInt32BE(16, 0)
+  buf.writeInt32BE(CANCEL_REQUEST_CODE, 4)
+  buf.writeInt32BE(key.processId, 8)
+  buf.writeInt32BE(key.secretKey, 12)
+  return buf
+}
+
+export interface BackendStartupScan {
+  // The bytes to forward to the client: the first `consumed` bytes of the
+  // input, with BackendKeyData's payload replaced if it appeared among them.
+  forward: Buffer
+  // How much of the input was whole messages. Anything past this is a
+  // partial message and belongs at the front of the next call's input.
+  consumed: number
+  // The backend's own key, if BackendKeyData was among the messages read.
+  backendKey: CancelKey | null
+  // Stop scanning. Either ReadyForQuery arrived, meaning the startup phase
+  // is over and everything after it is query traffic that must be spliced
+  // untouched, or the framing stopped making sense and continuing to read
+  // it would be guessing.
+  done: boolean
+}
+
+// Reads the backend's side of the startup phase, message by message, and
+// swaps the key it hands the client for one of ours.
+//
+// Why swap it at all: a client cancels by opening a second, separate,
+// unauthenticated connection carrying only the (processId, secretKey) pair
+// it was given. If that pair is the backend's own, the proxy receives a
+// cancel bearing a key it has no map for and can only drop it, which is
+// exactly the gap this exists to close. Minting our own makes the key
+// something the proxy can look up. Minting rather than merely recording the
+// backend's also removes a collision: two containers can each hand out
+// process id 42, and a cancel is then ambiguous between them.
+//
+// `buf` is whatever has arrived so far, starting at a message boundary.
+// Incomplete trailing bytes are left for the caller to re-present with more
+// data appended; nothing is buffered here, which is what keeps this pure.
+//
+// A message that does not parse sets `done` without throwing. The bytes
+// still forward untouched: losing the ability to route this connection's
+// cancels is a small loss, and killing a working database connection over
+// a message this function did not expect is a large one.
+export function scanBackendStartup(buf: Buffer, replacement: CancelKey): BackendStartupScan {
+  let offset = 0
+  let backendKey: CancelKey | null = null
+  let done = false
+  // Copied only if there is something to rewrite, which is at most once per
+  // connection. Every other byte forwards as a view on the caller's buffer.
+  let rewritten: Buffer | null = null
+
+  // 5 is the smallest readable header: the type byte plus its Int32 length.
+  while (offset + 5 <= buf.length) {
+    const type = buf[offset]
+    const length = buf.readInt32BE(offset + 1)
+
+    if (length < 4 || length > MAX_BACKEND_STARTUP_MESSAGE) {
+      done = true
+      break
+    }
+
+    const total = 1 + length
+    if (offset + total > buf.length) {
+      break
+    }
+
+    if (type === BACKEND_KEY_DATA && length === BACKEND_KEY_DATA_LENGTH) {
+      backendKey = {
+        processId: buf.readInt32BE(offset + 5),
+        secretKey: buf.readInt32BE(offset + 9),
+      }
+      rewritten ??= Buffer.from(buf)
+      rewritten.writeInt32BE(replacement.processId, offset + 5)
+      rewritten.writeInt32BE(replacement.secretKey, offset + 9)
+    }
+
+    offset += total
+
+    // Forwarded first, then scanning stops: ReadyForQuery is itself part of
+    // the startup phase and the client is waiting for it.
+    if (type === READY_FOR_QUERY) {
+      done = true
+      break
+    }
+  }
+
+  return {
+    forward: (rewritten ?? buf).subarray(0, offset),
+    consumed: offset,
+    backendKey,
+    done,
+  }
 }
 
 // Builds a wire-format ErrorResponse ('E'): Byte1('E'), then Int32(length)
