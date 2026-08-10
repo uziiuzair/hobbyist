@@ -193,6 +193,12 @@ export interface Api {
           env?: Record<string, string>
           databaseResourceId?: string
         }
+      | {
+          kind: 'worker'
+          name: string
+          source: { path: string }
+          databaseResourceId?: string
+        }
   ): Promise<ResourceResponse>
   deployResource(
     id: string,

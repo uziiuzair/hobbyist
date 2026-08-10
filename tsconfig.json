@@ -11,6 +11,9 @@
       "path": "packages/app"
     },
     {
+      "path": "packages/worker"
+    },
+    {
       "path": "packages/proxy"
     },
     {

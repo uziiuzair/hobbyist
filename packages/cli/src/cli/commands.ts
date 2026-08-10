@@ -253,12 +253,6 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
       wrangler: existsSync(joinPath(path, 'wrangler.toml')) || existsSync(joinPath(path, 'wrangler.jsonc')),
     })
 
-  if (kind === 'worker') {
-    throw new UsageError(
-      'the worker kind is not built yet (M9 of docs/compute/specs/2026-08-10-phase-2-compute-design.md). Deploy a Dockerfile for now.'
-    )
-  }
-
   const projectName = typeof flags['project'] === 'string' ? flags['project'] : basename(path)
   const name = typeof flags['name'] === 'string' ? flags['name'] : 'web'
   const portFlag = typeof flags['port'] === 'string' ? Number(flags['port']) : undefined
@@ -294,12 +288,17 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     return 0
   }
 
-  const { resource } = await c.api.createResource(projectName, {
-    kind: 'app',
-    name,
-    source: { path },
-    ...(portFlag === undefined ? {} : { port: portFlag }),
-  })
+  const { resource } = await c.api.createResource(
+    projectName,
+    kind === 'worker'
+      ? { kind: 'worker', name, source: { path } }
+      : {
+          kind: 'app',
+          name,
+          source: { path },
+          ...(portFlag === undefined ? {} : { port: portFlag }),
+        }
+  )
 
   if (flags.json) {
     c.io.out(JSON.stringify({ resource }, null, 2))
