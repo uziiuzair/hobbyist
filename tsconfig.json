@@ -8,6 +8,9 @@
       "path": "packages/pg"
     },
     {
+      "path": "packages/do"
+    },
+    {
       "path": "packages/app"
     },
     {
