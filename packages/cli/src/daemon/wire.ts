@@ -31,7 +31,16 @@
 //     activity.ts's ActivityTracker (packages/proxy) for connectionCount,
 //     which is simply ctx.activity.count(resource.id), already free.
 
-import type { AppConfig, PostgresConfig, Resource, ResourceConfig, WorkerConfig } from '@hobby.sh/core'
+import type {
+  AppConfig,
+  AppResource,
+  PostgresConfig,
+  PostgresResource,
+  Resource,
+  ResourceConfig,
+  WorkerConfig,
+  WorkerResource,
+} from '@hobby.sh/core'
 import type { DaemonContext } from './context.js'
 import { resourceSize } from './size.js'
 
@@ -40,11 +49,23 @@ export type WireAppConfig = AppConfig
 export type WireWorkerConfig = WorkerConfig
 export type WireResourceConfig = WirePostgresConfig | WireAppConfig | WireWorkerConfig
 
-export interface WireResource extends Omit<Resource, 'config'> {
-  config: WireResourceConfig
+interface WireExtras {
   sizeBytes: number | null
   connectionCount: number
 }
+
+// Discriminated on `kind`, exactly like Resource itself, rather than a single
+// interface with a union-typed config. The difference matters at every
+// consumer: `resource.kind === 'app' && resource.config.hostname` only
+// narrows if the two travel together, and the flattened version silently
+// forced a cast at each print site in the CLI.
+//
+// App and worker configs keep their own types because redaction rewrites
+// values in place and does not change the shape; only postgres loses a field.
+export type WireResource =
+  | (Omit<PostgresResource, 'config'> & { config: WirePostgresConfig } & WireExtras)
+  | (AppResource & WireExtras)
+  | (WorkerResource & WireExtras)
 
 // What a redacted value reads as. A visible placeholder rather than a
 // removed key, so a caller can still see that a variable is set without
@@ -82,7 +103,10 @@ export async function toWireResource(ctx: DaemonContext, resource: Resource): Pr
   const config = redactConfig(resource.kind, resource.config)
   const sizeBytes = await resourceSize(ctx, resource)
   const connectionCount = ctx.activity.count(resource.id)
-  return { ...resource, config, sizeBytes, connectionCount }
+  // The one assertion, for the same reason store.ts's rowToResource has one:
+  // redactConfig returns the union, and TypeScript cannot see that its result
+  // corresponds to this resource's own kind.
+  return { ...resource, config, sizeBytes, connectionCount } as WireResource
 }
 
 export function toWireResources(ctx: DaemonContext, resources: Resource[]): Promise<WireResource[]> {

@@ -14,10 +14,12 @@ import {
   DEFAULT_PORT_BIND,
   HobbyError,
   validateName,
+  type AppResource,
   type PostgresResource,
   type Project,
   type Resource,
 } from '@hobby.sh/core'
+import { createAppResource, deployApp, type AppSource } from '@hobby.sh/app'
 import { connectionString, createPostgres, runQuery } from '@hobby.sh/pg'
 import { getOrCreateWake, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
@@ -179,28 +181,102 @@ async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<Rou
   return { status: 200, body: { deleted: true } }
 }
 
+// The default port an app's process is asked to listen on. Handed to the
+// container as $PORT, so an image that reads it needs no configuration at
+// all, and an image that hardcodes something else declares it here.
+const DEFAULT_APP_PORT = 3000
+
+function readAppSource(body: Record<string, unknown>): AppSource | null {
+  const source = body['source']
+  if (!isRecord(source)) {
+    return null
+  }
+  const path = source['path']
+  if (typeof path !== 'string' || path.length === 0) {
+    return null
+  }
+  const dockerfile = source['dockerfile']
+  return { path, dockerfile: typeof dockerfile === 'string' && dockerfile.length > 0 ? dockerfile : 'Dockerfile' }
+}
+
+function readStringMap(value: unknown): Record<string, string> {
+  if (!isRecord(value)) {
+    return {}
+  }
+  const out: Record<string, string> = {}
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === 'string') {
+      out[key] = entry
+    }
+  }
+  return out
+}
+
 async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, projectName: string): Promise<Resource> {
   const project = getProjectByNameOrThrow(ctx, projectName)
   const body = await readJsonBody(req)
-  const kind = isRecord(body) ? body['kind'] : undefined
-  const name = isRecord(body) ? body['name'] : undefined
+  const fields = isRecord(body) ? body : {}
+  const kind = fields['kind']
+  const name = fields['name']
 
-  if (kind !== 'postgres') {
-    throw new HobbyError(
-      'usage',
-      `unsupported resource kind: ${String(kind)}`,
-      'only "postgres" is supported in this milestone'
-    )
-  }
   if (typeof name !== 'string' || name.length === 0) {
     throw new HobbyError(
       'usage',
       'name is required',
-      'POST /v1/projects/:name/resources expects { "kind": "postgres", "name": string }'
+      'POST /v1/projects/:name/resources expects { "kind": "postgres" | "app", "name": string }'
     )
   }
 
-  return createPostgres(ctx, { project, name })
+  if (kind === 'postgres') {
+    return createPostgres(ctx, { project, name })
+  }
+
+  if (kind === 'app') {
+    const source = readAppSource(fields)
+    const image = typeof fields['image'] === 'string' && fields['image'].length > 0 ? fields['image'] : null
+    const rawPort = fields['port']
+    const containerPort = typeof rawPort === 'number' && Number.isInteger(rawPort) ? rawPort : DEFAULT_APP_PORT
+    const databaseResourceId =
+      typeof fields['databaseResourceId'] === 'string' ? fields['databaseResourceId'] : null
+
+    return createAppResource(ctx, {
+      project,
+      name,
+      source,
+      image,
+      containerPort,
+      env: readStringMap(fields['env']),
+      databaseResourceId,
+    })
+  }
+
+  throw new HobbyError(
+    'usage',
+    `unsupported resource kind: ${String(kind)}`,
+    `registered kinds: ${ctx.kinds.kinds().join(', ')}`
+  )
+}
+
+// Rebuild an app from its source and prove the result serves before calling
+// it deployed. Postgres has no equivalent and answers `usage` rather than
+// pretending: there is nothing to build.
+async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
+  const resource = getResourceOrThrow(ctx, id)
+  if (resource.kind !== 'app') {
+    throw new HobbyError('usage', `resource ${resource.name} is a ${resource.kind}, and only an app can be deployed`)
+  }
+  const body = await readJsonBody(req)
+  const source = isRecord(body) ? readAppSource(body) : null
+
+  const result = await deployApp(ctx, resource, source === null ? {} : { source })
+  return {
+    status: 200,
+    body: {
+      resource: await toWireResource(ctx, result.resource),
+      image: result.image,
+      logs: result.logs,
+    },
+  }
 }
 
 // The three lifecycle routes are kind-agnostic and were the last places in
@@ -269,7 +345,10 @@ async function logsRoute(ctx: DaemonContext, id: string, url: URL): Promise<Rout
 // no side effects, nothing stopped, nothing deleted, no files written to
 // disk. Real `hobby eject` (moving the daemon out of the way entirely) is
 // portability/'s job and is not built here, see the task report.
-function renderCompose(resources: PostgresResource[]): string {
+function renderCompose(resources: PostgresResource[], apps: AppResource[] = []): string {
+  // Every postgres resource in this project, by id, so an app's
+  // databaseResourceId can be rewritten to the compose service name below.
+  const byId = new Map(resources.map((resource) => [resource.id, resource]))
   const lines: string[] = ['services:']
   for (const resource of resources) {
     const cfg = resource.config
@@ -312,7 +391,69 @@ function renderCompose(resources: PostgresResource[]): string {
     // would break eject's whole reason to exist.
     lines.push(`      - "${cfg.dataDir}:/var/lib/postgresql"`)
   }
+
+  for (const app of apps) {
+    const cfg = app.config
+    lines.push(`  ${app.name}:`)
+    lines.push(`    image: ${cfg.image}`)
+    // Emitted alongside `image:` rather than instead of it when we built it
+    // from source. compose accepts both and treats the image as the tag for
+    // what it builds, so the file starts immediately from the image already
+    // on disk AND can be rebuilt from the same Dockerfile later. An ejected
+    // stack that can only ever run one frozen image is not the "you can
+    // always leave" promise, it is a snapshot.
+    if (cfg.source !== null) {
+      lines.push('    build:')
+      lines.push(`      context: ${cfg.source.path}`)
+      lines.push(`      dockerfile: ${cfg.source.dockerfile}`)
+    }
+    lines.push('    restart: unless-stopped')
+    lines.push('    environment:')
+    lines.push(`      PORT: "${cfg.containerPort}"`)
+    const database = cfg.databaseResourceId === null ? undefined : byId.get(cfg.databaseResourceId)
+    if (database !== undefined) {
+      // Rewritten to the COMPOSE service name, not the hobby container name.
+      // Inside the emitted stack the database answers to `primary`, not to
+      // `hobby-blog-primary`, so carrying the hobby name through would hand
+      // the user an app that starts and then cannot reach its database, which
+      // is a worse failure than not emitting it at all because it looks like
+      // it worked.
+      const db = database.config
+      const user = encodeURIComponent(db.superuser)
+      const password = encodeURIComponent(db.password)
+      lines.push(`      DATABASE_URL: postgres://${user}:${password}@${database.name}:5432/${db.database}`)
+    }
+    for (const [key, value] of Object.entries(cfg.env)) {
+      lines.push(`      ${key}: ${JSON.stringify(value)}`)
+    }
+    lines.push('    ports:')
+    lines.push(`      - "${DEFAULT_PORT_BIND}:${cfg.hostPort}:${cfg.containerPort}"`)
+  }
+
   return `${lines.join('\n')}\n`
+}
+
+// The Caddy half of eject. ADR 0009 is explicit that emitting the compose
+// file alone leaks the promise: "an ejected app that no longer serves is not
+// an ejected app." A Caddyfile is emitted rather than the JSON we push to the
+// admin API, because the departing user is going to hand-edit this, and
+// nobody hand-edits Caddy JSON.
+//
+// Deliberately points at the published host ports rather than at container
+// names: this Caddy is not necessarily inside the compose network, and the
+// ports are published on loopback either way.
+function renderCaddyfile(apps: AppResource[]): string {
+  if (apps.length === 0) {
+    return ''
+  }
+  const lines: string[] = []
+  for (const app of apps) {
+    lines.push(`${app.config.hostname} {`)
+    lines.push(`\treverse_proxy ${DEFAULT_PORT_BIND}:${app.config.hostPort}`)
+    lines.push('}')
+    lines.push('')
+  }
+  return lines.join('\n')
 }
 
 function isUnknownArray(value: unknown): value is unknown[] {
@@ -417,9 +558,16 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
   // project; the count of skipped resources is reported so nobody reads an
   // incomplete compose file as a complete one.
   const postgresResources = resources.filter((r) => r.kind === 'postgres')
-  const notEjectable = resources.filter((r) => r.kind !== 'postgres').map((r) => `${r.name} (${r.kind})`)
+  const appResources = resources.filter((r) => r.kind === 'app')
+  const notEjectable = resources
+    .filter((r) => r.kind !== 'postgres' && r.kind !== 'app')
+    .map((r) => `${r.name} (${r.kind})`)
   const body = {
-    compose: renderCompose(postgresResources),
+    compose: renderCompose(postgresResources, appResources),
+    // ADR 0009: without this, an ejected app comes up on a loopback port with
+    // nothing routing a hostname to it, which is a running container rather
+    // than a working site.
+    caddyfile: renderCaddyfile(appResources),
     dataDirs: postgresResources.map((resource) => resource.config.dataDir),
     released: release,
     notEjectable,
@@ -535,6 +683,7 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       if (method === 'GET' && action === 'connection') return connectionRoute(ctx, id)
       if (method === 'GET' && action === 'logs') return logsRoute(ctx, id, url)
       if (method === 'POST' && action === 'query') return queryRoute(ctx, req, id)
+      if (method === 'POST' && action === 'deploy') return deployResourceRoute(ctx, req, id)
     }
   }
 
