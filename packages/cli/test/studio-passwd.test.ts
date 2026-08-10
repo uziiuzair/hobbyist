@@ -30,6 +30,8 @@ function testConfig(): HobbyConfig {
     proxyPort: 5432,
     studioPort: 8443,
     apiPort: 7432,
+    httpPort: 7433,
+    domain: 'localhost',
     sleepAfterSeconds: 300,
     wakeTimeoutMs: 150,
     readinessPollMs: 20,

@@ -231,7 +231,7 @@ export async function startDaemon(
       const running = ctx.store.listResources().filter((resource) => resource.state === 'running')
       for (const resource of running) {
         try {
-          await stopPostgres(ctx, resource)
+          await ctx.kinds.get(resource.kind).stop(ctx, resource)
         } catch (err) {
           console.error(`daemon shutdown: failed to stop resource ${resource.id} cleanly: ${errorMessage(err)}`)
         }

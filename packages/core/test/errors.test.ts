@@ -17,6 +17,8 @@ const EXPECTED_STATUS: Record<ErrorCode, number> = {
   conflict: 409,
   usage: 400,
   unauthorized: 401,
+  unknown_kind: 500,
+  build_failed: 422,
   internal: 500,
 }
 

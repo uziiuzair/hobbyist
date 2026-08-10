@@ -23,6 +23,7 @@ import {
   type Store,
 } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
+import { createDefaultKindRegistry } from '../src/daemon/context.js'
 import { createApp, createProxyDeps, reconcile, type DaemonContext } from '../src/index.js'
 
 function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
@@ -31,6 +32,8 @@ function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
     proxyPort: 5432,
     studioPort: 8443,
     apiPort: 7432,
+    httpPort: 7433,
+    domain: 'localhost',
     sleepAfterSeconds: 300,
     // Short on purpose: every route test below runs against a fake runtime
     // with nothing real listening on any allocated port, so any code path
@@ -46,7 +49,7 @@ function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
 function buildContext(runtime: ComputeRuntime = createFakeRuntime()): DaemonContext {
   const store: Store = openStore(':memory:')
   const paths = resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-cli-test-${randomUUID()}`) })
-  return { store, runtime, paths, config: testConfig(), activity: new ActivityTracker() }
+  return { store, runtime, paths, config: testConfig(), activity: new ActivityTracker(), kinds: createDefaultKindRegistry() }
 }
 
 function samplePostgresConfig(overrides: Partial<PostgresConfig> = {}): PostgresConfig {

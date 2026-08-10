@@ -10,11 +10,16 @@
 // config is the actual value that governs what the proxy and psql both see,
 // and there should be exactly one source of truth for it.
 
-import type { Project, Resource } from '@hobby.sh/core'
+import type { PostgresResource, Project } from '@hobby.sh/core'
 
+// Takes a PostgresResource, not a Resource. Since the model was widened for
+// Phase 2 (packages/core/src/types.ts), `Resource` is a union and an app or
+// a worker has no superuser, no password and no database to render. The
+// narrower parameter is what makes every caller prove it has a postgres in
+// hand before asking for a Postgres connection string.
 export function connectionString(
   project: Project,
-  resource: Resource,
+  resource: PostgresResource,
   opts: { host: string; proxyPort: number; viaProxy: boolean }
 ): string {
   // project is accepted for symmetry with the resource-kind functions above

@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { createFakeRuntime, openStore, resolvePaths, type HobbyConfig, type Store } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
+import { createDefaultKindRegistry } from '../src/daemon/context.js'
 import {
   createApp,
   createStudioApp,
@@ -34,6 +35,8 @@ function testConfig(): HobbyConfig {
     proxyPort: 5432,
     studioPort: 8443,
     apiPort: 7432,
+    httpPort: 7433,
+    domain: 'localhost',
     sleepAfterSeconds: 300,
     wakeTimeoutMs: 150,
     readinessPollMs: 20,
@@ -45,7 +48,7 @@ function buildContext(): DaemonContext {
   const home = join(tmpdir(), `hobby-studio-test-${randomUUID()}`)
   mkdirSync(home, { recursive: true })
   const paths = resolvePaths({ HOBBY_HOME: home })
-  return { store, runtime: createFakeRuntime(), paths, config: testConfig(), activity: new ActivityTracker() }
+  return { store, runtime: createFakeRuntime(), paths, config: testConfig(), activity: new ActivityTracker(), kinds: createDefaultKindRegistry() }
 }
 
 // --- hashPassword / verifyPassword -----------------------------------------
