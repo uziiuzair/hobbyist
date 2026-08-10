@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@hobby.sh/core": "*",
-    "smol-toml": "^1.7.1"
+    "smol-toml": "^1.7.1",
+    "@hobby.sh/do": "*"
   }
 }

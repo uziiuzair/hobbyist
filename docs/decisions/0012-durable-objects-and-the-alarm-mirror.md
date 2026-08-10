@@ -131,9 +131,13 @@ keeps both testable against a fake with no Docker in the loop.
   table as a loud error rather than an empty result. An alarm mirror that
   silently reports nothing pending is indistinguishable from a working one until
   an alarm is missed.
-- **Scope went up again, five days after ADR 0007 said that was the main risk.**
-  Nothing here repeals the 30-day daily-use gate in ADR 0007 guard 2. This
-  capability is Phase 2 work and inherits that gate.
+- **Scope went up again, and nothing now paces it.** ADR 0007 named abandonment
+  at 40 percent as the failure mode and named the 30-day daily-use gate as the
+  mechanism against it. ADR 0010, filed the same day as this one, removed that
+  gate. So this capability is not held back by anything except judgment, which
+  is exactly the situation ADR 0007 guard 2 existed to prevent. That is a worse
+  position to add scope from than the one ADR 0007 described, and it is recorded
+  here rather than left to be discovered.
 - **`hobby eject` has a third obligation.** ADR 0007 already noted eject gets
   harder with every kind. A namespace directory is self-contained and its files
   are plain SQLite, so the obligation is met by handing over the directory and the

@@ -1,11 +1,12 @@
 # `docs/durable-objects/` the durable half
 
-**Status:** Spec written, `@hobby.sh/do` built and tested. **Phase 2.**
+**Status:** Built, tested, and wired into the daemon. **Phase 2.**
 See `docs/decisions/0012` for why this capability exists at all.
 
-**Inherits the Phase 2 gate.** ADR 0007 guard 2 says Phase 2 does not begin until
-Phase 1 has been in the author's daily use for 30 consecutive days. Nothing here
-repeals it.
+**The Phase 2 gate is gone.** ADR 0007 guard 2 held Phase 2 until Phase 1 had
+been in daily use for 30 consecutive days. `docs/decisions/0010` removed it on
+2026-08-10. Nothing paces this capability, which is worth knowing before adding
+to it.
 
 Registers the `durable_object` resource kind: **one resource is one Durable
 Object class**, which is one namespace, which is one directory of SQLite files.

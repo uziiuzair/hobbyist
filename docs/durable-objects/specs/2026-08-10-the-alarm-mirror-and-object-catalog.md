@@ -223,18 +223,38 @@ against a counter in a temp directory.
 
 ## Wiring
 
-`DRAFT pending @hobby.sh/compute`. The following depends on the widened
-`ResourceKind` and the `resourcePath(project, resource, part)` helper that
-session is adding to `packages/core/src/config.ts`, and must not be written
-before that merges:
+Done, against `phase-2-compute`. Amended 2026-08-10, after that branch landed
+`ResourceKind`, `ResourceKindHandler` and `resourcePath(project, resource, part)`:
 
-- registering `durable_object` as a kind and reconciling namespaces from the
-  manifest on deploy, per ADR 0012 part 2
-- calling `startAlarmMirror` from the daemon with `namespaces()` reading the
-  store and `wake` calling the compute runtime's wake
-- having `hibernator.ts` consult `shouldSleepNamespace` for `durable_object`
-  resources
-- `hobby do ls`, `hobby do inspect`, `hobby do rm`, and the Studio view
+- **`guard.ts`** provides `durableObjectAlarmGuard`, which
+  `packages/worker/src/kind.ts` returns from `ResourceKindHandler.guard`. Core
+  calls it exactly once immediately before an irreversible stop. It answers
+  `'active'` on a due or imminent alarm, `'idle'` otherwise, and
+  `'unreachable'` when the schedule cannot be read, because core's own contract
+  says a guard that could not answer must never be read as permission to stop.
+- **`packages/cli/src/daemon/alarms.ts`** joins the mirror to the store, and
+  `server.ts` starts `startAlarmMirror` beside the hibernator and drains it in
+  the same shutdown step.
+
+**The guard's question is not the predicate's question**, and this is the one
+place the two diverge. `shouldSleepNamespace` reasons about a namespace the
+daemon is considering stopping and lets an *overdue* alarm through, because the
+mirror handles those. The guard runs against a **running** container, where an
+overdue row means workerd is firing that alarm right now (the row is deleted
+when it fires, so its presence means the handler has not finished). Stopping
+there kills an alarm mid-flight, which is what
+`packages/pg/src/activity-guard.ts` prevents for a transaction. Hence
+`isAlarmWithin` for the guard and `isAlarmImminent` for the predicate.
+
+Still not built:
+
+- registering `durable_object` as its own `ResourceKind` and reconciling
+  namespaces from the manifest on deploy, per ADR 0012 parts 1 and 2. Today a
+  namespace is storage belonging to a `worker` resource, and the catalog reads
+  it from disk; the store holds no row per namespace, so per-namespace branch
+  and backup are described but not reachable.
+- `hobby do ls`, `hobby do inspect`, `hobby do rm`, and the Studio view. The
+  functions behind all four exist and are tested; nothing calls them.
 
 ## Tests
 

@@ -134,6 +134,22 @@ export function describeNamespace(doRoot: string, uniqueKey: string): NamespaceS
   }
 }
 
+// Just the namespace directories, without describing what is in them.
+//
+// The guard runs on every hibernation tick, once per worker, and only needs to
+// know which schedules to read. describeNamespace stats every object file,
+// which at ten thousand objects is ten thousand syscalls to answer a question
+// that one query per namespace answers.
+export function namespaceDirs(doRoot: string): string[] {
+  if (!existsSync(doRoot)) {
+    return []
+  }
+  return readdirSync(doRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(doRoot, entry.name))
+    .sort()
+}
+
 // Every namespace under a worker's do/ directory. A missing directory means
 // no Durable Object has ever been addressed, which is an empty list rather
 // than a failure: a worker that declares a class but has never been called

@@ -71,6 +71,29 @@ export function isAlarmImminent(
   return nextAlarmAtMs - nowMs <= wakeGraceSeconds * 1000
 }
 
+// Due OR imminent. This is what the pre-sleep guard asks, and it is
+// deliberately not the same question shouldSleepNamespace asks, because the
+// two are asked about different states of the world.
+//
+// shouldSleepNamespace reasons about a namespace the daemon is considering
+// stopping, and lets an overdue alarm through because the mirror is what
+// handles those. The guard runs once immediately before an irreversible stop
+// of a RUNNING container, and on a running container an overdue row means
+// workerd's own scheduler is firing that alarm right now: the row is deleted
+// when it fires, so its continued presence means the handler has not finished.
+// Stopping there kills an alarm mid-flight, which is the same failure
+// packages/pg/src/activity-guard.ts exists to prevent for a transaction.
+export function isAlarmWithin(
+  nextAlarmAtMs: number | null,
+  nowMs: number,
+  graceSeconds: number
+): boolean {
+  if (nextAlarmAtMs === null) {
+    return false
+  }
+  return nextAlarmAtMs <= nowMs + graceSeconds * 1000
+}
+
 // A namespace is due when its earliest alarm has arrived. Deliberately `<=`
 // and deliberately not "within the next tick": the mirror polls, so an alarm
 // set for a moment between two ticks is picked up by the later one, one
