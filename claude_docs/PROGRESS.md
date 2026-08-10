@@ -56,6 +56,75 @@ the phase gate that existed to prevent exactly that is gone.
 
 ---
 
+## 2026-08-10: Durable Objects, and proving an alarm can survive sleep
+
+ADR 0012, a new `docs/durable-objects/` capability folder, and `@hobby.sh/do`
+built and tested: 50 tests, whole suite 350 passing, typecheck clean.
+
+**What was actually at stake.** Durable Objects were not in ADR 0007's phase
+table, so this is reopened scope and it went through an ADR rather than around
+one. The reason it earned the reopening is that the runtime is not ours to
+build: `@hobby.sh/compute` had independently chosen workerd (via Miniflare, ADR
+0011) the same afternoon, and workerd implements Durable Objects natively. What
+it cannot do, by construction, is honour an alarm while stopped, because a
+stopped process has no timer. That gap is the capability.
+
+**The finding the design rests on.** workerd persists its alarm schedule to
+disk, per namespace, in an ordinary SQLite table
+(`server.c++:404-408`, `alarm-scheduler.c++:55`), so the daemon can read every
+pending deadline out of a stopped runtime with one query. And workerd reloads
+and reschedules every row on startup, so we never fire an alarm: being awake at
+the deadline is the entire contribution. That is the proxy's seam one clock
+further out, and it kept the package to five small files.
+
+**What testing changed that reading did not.** Three things, all of which would
+have shipped as bugs:
+
+- A pending alarm exists in **two** places, `_cf_METADATA` key 1 in the object's
+  own file and `_cf_ALARM` in the namespace's `metadata.sqlite`, and they carry
+  the same value. The mirror reads `_cf_ALARM` because that is the copy
+  `AlarmScheduler`'s constructor reloads, because it is one file per namespace
+  rather than one per object, and because it is the only place an object's
+  human name is written down.
+
+  This entry originally claimed `_cf_METADATA` did not exist at all. It was a
+  sampling error: the table is created lazily on first write, the probe gave
+  alarms to two of three objects, and the file spot-checked was the third. The
+  compute session, running the same question against real Docker, reported the
+  opposite and forced the recheck. Worth recording because the failure mode of
+  a wrong answer here is silent: a mirror that reports nothing pending looks
+  exactly like a working one until an alarm is missed.
+- Nanosecond epoch values **cannot be read into a JavaScript number**.
+  `node:sqlite` throws `ERR_OUT_OF_RANGE` rather than rounding, since 1.79e18 is
+  far past `Number.MAX_SAFE_INTEGER`. The conversion now happens in SQL and
+  nanoseconds never reach JavaScript. The first test fixture then hit the same
+  wall from the other side, binding milliseconds and multiplying, which goes
+  through a double and lands one millisecond low.
+- Running the finished package against a real Miniflare tree found that one
+  unparseable directory aborted the entire namespace listing.
+
+**The cost of not assuming.** Two throwaway probes against a real Miniflare,
+maybe fifteen minutes, which is what turned "the compute session warns the
+layout may be wrapped, do not hard-code it" into a verified layout plus three
+corrections. `docs/durable-objects/research/2026-08-10-alarms-are-readable-from-outside.md`
+carries the method and the output.
+
+**What is deliberately not built.** The runtime, the manifest, the generated
+config and HTTP wake, all of which belong to `@hobby.sh/compute`; and the wiring
+into the daemon, which is marked `DRAFT pending` in the spec because it needs
+the widened `ResourceKind` that session is landing. Two sessions agreed the seam
+in writing before either wrote code, which is why there is one workerd substrate
+in this repo and not two.
+
+**The honest risk.** `localDisk` is marked `** EXPERIMENTAL; SUBJECT TO
+BACKWARDS-INCOMPATIBLE CHANGE **` upstream and the scheduler behind it describes
+itself as sufficient "for the usecase of local development". The mitigation is
+a schema assertion that turns a format change into a loud failure instead of an
+empty result, and ADR 0012 states the condition under which this capability
+should be deleted rather than maintained.
+
+---
+
 ## 2026-08-07: scope reopened, Hobbyist becomes a platform
 
 Still no code. Four new ADRs, four new capability folders, a rewritten root

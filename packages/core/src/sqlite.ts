@@ -73,3 +73,30 @@ export function openDatabase(path: string): SqliteDatabase {
   const { DatabaseSync } = requireModule('node:sqlite') as { DatabaseSync: new (path: string) => RawDatabase }
   return normalise(new DatabaseSync(path))
 }
+
+// The second divergence this file exists to hide: node:sqlite spells the
+// read-only flag `readOnly`, bun:sqlite spells it `readonly`. A caller that
+// guessed wrong would not fail loudly, it would silently get a writable
+// handle, which is the one thing a read-only open is for.
+//
+// @hobby.sh/do is the caller. It reads a Durable Object namespace's
+// metadata.sqlite to find pending alarms while the runtime is stopped, and it
+// must not perturb what it observes: a read-write open of a WAL database can
+// create sidecar files and checkpoint the log, so the act of looking would
+// change the thing being looked at. See
+// docs/durable-objects/specs/2026-08-10-the-alarm-mirror-and-object-catalog.md.
+//
+// Verified against a real Miniflare-written WAL database with live -wal and
+// -shm sidecars present: a read-only open succeeds and reads current rows.
+export function openDatabaseReadOnly(path: string): SqliteDatabase {
+  if (isBun()) {
+    const { Database } = requireModule('bun:sqlite') as {
+      Database: new (path: string, options: { readonly: boolean }) => RawDatabase
+    }
+    return normalise(new Database(path, { readonly: true }))
+  }
+  const { DatabaseSync } = requireModule('node:sqlite') as {
+    DatabaseSync: new (path: string, options: { readOnly: boolean }) => RawDatabase
+  }
+  return normalise(new DatabaseSync(path, { readOnly: true }))
+}
