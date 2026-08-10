@@ -24,6 +24,7 @@ import { HobbyError, type ComputeRuntime } from '@hobby.sh/core'
 const CADDY_CONTAINER_NAME = 'hobby-caddy'
 const CADDY_IMAGE = 'caddy:2-alpine'
 const CADDY_SERVER_NAME = 'hobby'
+const FALLBACK_ROUTE_ID = 'hobby-fallback'
 const STOP_TIMEOUT_SEC = 10
 
 export interface CaddyRoute {
@@ -40,6 +41,25 @@ export interface CaddyRoute {
   upstream: string
 }
 
+// The catch-all. One route, appended after every host-matched route, with no
+// matcher at all, pointing at the daemon's HTTP wake router.
+//
+// This is what keeps Caddy static as apps come and go. The alternative,
+// pushing a Caddy route per deployed app, would mean an admin API call on
+// every deploy and destroy, and a Caddy config that drifts from the store
+// whenever one of those calls fails. Our router already has to resolve the
+// Host header in order to know what to wake, so having Caddy resolve it too
+// is duplicated state for no gain.
+export interface CaddyFallback {
+  // e.g. "127.0.0.1:7433"
+  upstream: string
+  // Where Caddy asks "is this hostname real?" before issuing a certificate
+  // for a name nobody configured ahead of time. Absent means on-demand TLS
+  // is off and only the operator's own configured hostname gets a
+  // certificate.
+  askUrl?: string
+}
+
 export interface CaddyManager {
   // Idempotent: safe to call on every daemon start. Creates the container
   // if absent (never recreates one that already exists, matching every
@@ -51,6 +71,10 @@ export interface CaddyManager {
   // route is pushed.
   addRoute(route: CaddyRoute): Promise<void>
   removeRoute(id: string): Promise<void>
+  // Installs (or clears, with null) the catch-all route. Idempotent and
+  // pushed immediately, like addRoute. Called once at daemon start; nothing
+  // calls it again per deploy, which is the entire point.
+  setFallback(fallback: CaddyFallback | null): Promise<void>
   stop(): Promise<void>
 }
 
@@ -66,34 +90,69 @@ export interface CreateCaddyManagerOptions {
   fetchFn?: FetchFn
 }
 
-function buildConfig(routes: Map<string, CaddyRoute>): unknown {
-  return {
+function buildConfig(routes: Map<string, CaddyRoute>, fallback: CaddyFallback | null): unknown {
+  const matched = [...routes.values()].map((route) => ({
+    '@id': route.id,
+    match: [{ host: [route.host] }],
+    handle: [
+      {
+        handler: 'reverse_proxy',
+        upstreams: [{ dial: route.upstream }],
+      },
+    ],
+  }))
+
+  // Order is the whole contract here. Caddy evaluates routes in order and a
+  // route with no `match` matches everything, so the catch-all has to be
+  // last or it would swallow Studio's own hostname.
+  const all =
+    fallback === null
+      ? matched
+      : [
+          ...matched,
+          {
+            '@id': FALLBACK_ROUTE_ID,
+            handle: [{ handler: 'reverse_proxy', upstreams: [{ dial: fallback.upstream }] }],
+          },
+        ]
+
+  const config: Record<string, unknown> = {
     apps: {
       http: {
         servers: {
           [CADDY_SERVER_NAME]: {
             listen: [':80', ':443'],
-            routes: [...routes.values()].map((route) => ({
-              '@id': route.id,
-              match: [{ host: [route.host] }],
-              handle: [
-                {
-                  handler: 'reverse_proxy',
-                  upstreams: [{ dial: route.upstream }],
-                },
-              ],
-            })),
+            routes: all,
           },
         },
       },
     },
   }
+
+  // On-demand TLS, and the ask endpoint that makes it safe. Without `ask`,
+  // Caddy would attempt to issue a certificate for any hostname anyone
+  // pointed at this box, which is both a way to get rate-limited by Let's
+  // Encrypt and a way for a stranger to make our box do work on demand. The
+  // ask endpoint answers only yes or no, and never enumerates.
+  if (fallback?.askUrl !== undefined) {
+    ;(config['apps'] as Record<string, unknown>)['tls'] = {
+      automation: {
+        policies: [{ on_demand: true }],
+      },
+      // Sibling of `automation`, not inside a policy: this is the global
+      // permission check every on-demand issuance passes through.
+      on_demand: { permission: { module: 'http', endpoint: fallback.askUrl } },
+    }
+  }
+
+  return config
 }
 
 export function createCaddyManager(runtime: ComputeRuntime, opts: CreateCaddyManagerOptions): CaddyManager {
   const adminBase = `http://${opts.adminHost ?? '127.0.0.1'}:${opts.adminPort}`
   const fetchFn = opts.fetchFn ?? fetch
   const routes = new Map<string, CaddyRoute>()
+  let fallback: CaddyFallback | null = null
   let warned = false
 
   // Decision 1 from the task brief: printed once, the first time a route
@@ -120,7 +179,7 @@ export function createCaddyManager(runtime: ComputeRuntime, opts: CreateCaddyMan
       res = await fetchFn(`${adminBase}/load`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(buildConfig(routes)),
+        body: JSON.stringify(buildConfig(routes, fallback)),
       })
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err)
@@ -153,6 +212,14 @@ export function createCaddyManager(runtime: ComputeRuntime, opts: CreateCaddyMan
 
     async removeRoute(id: string): Promise<void> {
       routes.delete(id)
+      await push()
+    },
+
+    async setFallback(next: CaddyFallback | null): Promise<void> {
+      if (next !== null) {
+        warnOnFirstExposure()
+      }
+      fallback = next
       await push()
     },
 
