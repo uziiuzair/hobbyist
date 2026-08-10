@@ -40,11 +40,13 @@ The routing rule is in `docs/CLAUDE.md`. The project context is in the root
 | `sdk/` | Client libraries, React first | Phase 3 |
 | `decisions/` | Architecture decision records, numbered and immutable | n/a |
 
-## The nine decisions that define the project
+## The eleven decisions that define the project
 
 Read these before proposing anything structural. **Start with 0007**, which is
 what makes this a platform rather than a database tool, and which supersedes the
-scope section of the original root `CLAUDE.md`.
+scope section of the original root `CLAUDE.md`. Then read 0010, which removes
+0007's phase gate, because 0007 on its own now describes a guard that is no
+longer in force.
 
 | ADR | Decision |
 |---|---|
@@ -57,13 +59,17 @@ scope section of the original root `CLAUDE.md`.
 | `docs/decisions/0007` | Hobbyist is a platform, not a Postgres tool |
 | `docs/decisions/0008` | Studio is network exposed, with an operator credential |
 | `docs/decisions/0009` | Caddy as the HTTP front door, run as a managed container |
+| `docs/decisions/0010` | Phase 2 begins without the 30-day gate |
+| `docs/decisions/0011` | workerd, via Miniflare, as the `worker` runtime |
 
 ## The one number
 
 **Cold start: under 1 second target, 3 seconds hard ceiling.** Everything sleeps,
-so this is what the project is judged on. It is unmeasured as of this writing,
-and M0 exists to measure it before anything is built on top.
+so this is what the project is judged on. Postgres wake was measured on
+2026-08-07 (`spike/m0/`, and `docs/proxy/research/2026-08-07-cold-start-measurements.md`).
+HTTP wake, for Phase 2's `app` and `worker` kinds, holds the same budget and is
+still unmeasured; M10 in the Phase 2 spec exists to close it.
 
 ---
 
-Last Updated: 2026-08-07
+Last Updated: 2026-08-10

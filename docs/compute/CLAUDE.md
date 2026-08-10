@@ -1,11 +1,13 @@
 # `docs/compute/` workers and apps
 
-**Status:** PROPOSED. Nothing built. **Phase 2.**
+**Status:** IN PROGRESS. **Phase 2.** The design is ratified and filed at
+`specs/2026-08-10-phase-2-compute-design.md`, which is the actionable document;
+this file remains the scope guard.
 
-**Blocked by a hard gate:** Phase 2 does not begin until Phase 1 has been in the
-author's daily use for 30 consecutive days. Not "is finished." Is in use. See
-`docs/decisions/0007`, where that gate is the main protection against the failure
-mode this project is most likely to hit.
+**The gate is gone.** Phase 2 used to be blocked until Phase 1 had been in the
+author's daily use for 30 consecutive days. `docs/decisions/0010` removed that on
+2026-08-10, two days after Phase 1 merged, and records plainly that the gate was
+correct and was removed anyway.
 
 Registers two resource kinds, `app` and `worker`, against the same
 `ComputeRuntime` interface Postgres already uses.
@@ -19,13 +21,19 @@ runtime, a build pipeline and HTTP wake would make the hardest phase harder.
 
 ## What "many runtimes work" means
 
-It means containers, and only containers. A Next.js app, a Python worker and a
-Go binary are the same thing to us: an image that listens on a port, or a process
-that runs to completion. We do not ship per-language buildpacks in Phase 2.
-Bring a `Dockerfile`, or bring an image.
+**For `app`, it means containers, and only containers.** A Next.js app, a Python
+service and a Go binary are the same thing to us: an image that listens on a
+port. We do not ship per-language buildpacks. Bring a `Dockerfile`, or bring an
+image.
 
 That is a smaller promise than "Python and JS and many others just work," and it
 is the honest version of it.
+
+**For `worker`, it means workerd.** Amended 2026-08-10: a `worker` is not a
+container of your choosing running a background process. It is a Cloudflare
+Worker, running on Cloudflare's own open-source runtime, configured from your own
+`wrangler.toml`. See `docs/decisions/0011`. The container is ours, not yours, and
+what you bring is a Worker.
 
 ## Wake on request
 
@@ -57,10 +65,23 @@ which stays in `@hobby.sh/proxy`. See `docs/decisions/0009`.
 
 ## Open questions
 
-- What is the HTTP cold start budget? An app is not a database, and a browser
-  waiting several seconds for a page is a worse experience than an ORM waiting
-  for a connection.
-- Where do builds happen, and what stops a build from starving the box that is
-  also serving a database?
-- Does `hobby eject` on an app emit its `Dockerfile` and Caddy config, and does
-  the result actually serve? If not, the ADR 0003 promise has leaked.
+The three questions this file has carried since 2026-08-07 are answered in
+`specs/2026-08-10-phase-2-compute-design.md` and repeated here in one line each,
+because the answers are scope-shaped and belong in the scope guard:
+
+- **HTTP cold start budget:** 1 second target, 3 second hard ceiling, both kinds,
+  with a 300ms stretch target for `worker`. Unmeasured until M10, and therefore
+  still an assertion.
+- **Builds:** on the box, one at a time globally, capped at `--memory=2g` and
+  `--cpu-shares=512` so a build always loses to a database serving a query.
+- **Eject:** yes, and verified by running it, not by asserting it. A kind that
+  cannot be ejected does not ship.
+
+Still open, and both real:
+
+- **Does Miniflare lay Durable Object storage out the way workerd documents it?**
+  The Durable Objects work depends on scanning that directory to recover alarm
+  deadlines from stopped objects. Unverified.
+- **A Durable Object alarm cannot fire inside a stopped container.** Until the
+  Durable Objects work lands an external schedule holder, a worker that sets an
+  alarm misses it. Written down rather than discovered later.
