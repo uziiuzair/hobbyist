@@ -458,7 +458,11 @@ test('a startup packet split across two writes is reassembled before routing', a
   }
 })
 
-test('a CancelRequest is never treated as a wake and simply closes the connection', async () => {
+// A cancel carries no database name, so there is nothing to resolve and
+// nothing that could be woken by one. A key the proxy never issued (or one
+// whose connection has since closed) has nothing to route to, and closing
+// silently is what a real Postgres does with a key it does not recognise.
+test('a CancelRequest for a key this proxy never issued closes without resolving or waking', async () => {
   let resolveCalls = 0
   let wakeCalls = 0
   const deps: ProxyDeps = {
@@ -586,4 +590,222 @@ test('ActivityTracker: a connection that outlives a reset cannot zero the count 
   tracker.close(live)
   assert.equal(tracker.count('r1'), 0)
   assert.equal(tracker.idleSeconds('r1'), 0)
+})
+
+// Reads exactly `count` bytes, across as many 'data' events as it takes.
+// The proxy may forward BackendKeyData and ReadyForQuery in one write or
+// two, and a test that assumed one would be asserting the scheduler.
+function readBytes(socket: net.Socket, count: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    let buffer = Buffer.alloc(0)
+    const onData = (chunk: Buffer): void => {
+      buffer = Buffer.concat([buffer, chunk])
+      if (buffer.length < count) return
+      socket.off('data', onData)
+      socket.off('error', onError)
+      resolve(buffer.subarray(0, count))
+    }
+    const onError = (err: Error): void => {
+      socket.off('data', onData)
+      reject(err)
+    }
+    socket.on('data', onData)
+    socket.once('error', onError)
+  })
+}
+
+function backendKeyDataBytes(processId: number, secretKey: number): Buffer {
+  const buf = Buffer.alloc(13)
+  buf.write('K', 0, 'ascii')
+  buf.writeInt32BE(12, 1)
+  buf.writeInt32BE(processId, 5)
+  buf.writeInt32BE(secretKey, 9)
+  return buf
+}
+
+function readyForQueryBytes(): Buffer {
+  const buf = Buffer.alloc(6)
+  buf.write('Z', 0, 'ascii')
+  buf.writeInt32BE(5, 1)
+  buf.write('I', 5, 'ascii')
+  return buf
+}
+
+// A fake upstream that says just enough to be cancellable: it answers the
+// first connection's startup packet with BackendKeyData and ReadyForQuery,
+// the way a real backend does once authentication succeeds, and records
+// what any later connection sends, which is where a routed CancelRequest
+// arrives.
+function startCancellableUpstream(backendKey: { processId: number; secretKey: number }): Promise<{
+  port: number
+  cancelBytes: () => Promise<Buffer>
+  connectionCount: () => number
+  // Writes on the first accepted socket, so a test can send bytes after the
+  // startup phase has ended and assert on what reaches the client.
+  sendOnFirst: (buf: Buffer) => void
+  close: () => Promise<void>
+}> {
+  return new Promise((resolve, reject) => {
+    let cancelResolve: ((buf: Buffer) => void) | null = null
+    const cancel = new Promise<Buffer>((res) => {
+      cancelResolve = res
+    })
+    let connections = 0
+    let first: net.Socket | null = null
+
+    const server = net.createServer((socket) => {
+      connections += 1
+      const isFirst = connections === 1
+      if (isFirst) {
+        first = socket
+      }
+      socket.on('error', () => {})
+      socket.once('data', (chunk: Buffer) => {
+        if (isFirst) {
+          socket.write(backendKeyDataBytes(backendKey.processId, backendKey.secretKey))
+          socket.write(readyForQueryBytes())
+          return
+        }
+        cancelResolve?.(chunk)
+        socket.end()
+      })
+    })
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      const port = typeof address === 'object' && address !== null ? address.port : 0
+      resolve({
+        port,
+        cancelBytes: () => cancel,
+        connectionCount: () => connections,
+        sendOnFirst: (buf: Buffer) => first?.write(buf),
+        close: () => new Promise((res, rej) => server.close((err) => (err ? rej(err) : res()))),
+      })
+    })
+  })
+}
+
+function runningDeps(port: number): ProxyDeps {
+  return {
+    resolve: async (): Promise<ProxyTarget> => ({
+      resourceId: 'resource-1',
+      host: '127.0.0.1',
+      port,
+      state: 'running',
+      database: 'proj1',
+    }),
+    wake: async () => {
+      throw new Error('wake must not be called for a running target')
+    },
+    activity: new ActivityTracker(),
+  }
+}
+
+// The whole point of the feature, end to end. The client is handed a key
+// the proxy minted, presents it on a second connection, and the backend
+// receives a cancel carrying its own key instead.
+test('a CancelRequest is routed to the connection it belongs to, carrying the backend own key', async () => {
+  const backendKey = { processId: 4242, secretKey: 24242 }
+  const upstream = await startCancellableUpstream(backendKey)
+  const proxy = await startPgProxy({ port: 0, deps: runningDeps(upstream.port), wakeTimeoutMs: 1000 })
+
+  try {
+    const client = await connectClient(proxy.port)
+    client.write(buildStartupPacket({ user: 'bob', database: 'proj1' }))
+
+    const handed = await readBytes(client, 13 + 6)
+    assert.equal(handed[0], 0x4b, 'BackendKeyData reached the client')
+    const issued = { processId: handed.readInt32BE(5), secretKey: handed.readInt32BE(9) }
+    assert.notDeepEqual(issued, backendKey, 'the key the client holds is minted, not the backend own')
+    assert.deepEqual(
+      handed.subarray(13),
+      readyForQueryBytes(),
+      'everything either side of BackendKeyData passes through untouched'
+    )
+
+    // The cancel arrives the way psql sends one: a second connection that
+    // carries nothing but the pair.
+    const canceller = await connectClient(proxy.port)
+    canceller.write(cancelRequestBytes(issued.processId, issued.secretKey))
+
+    const received = await upstream.cancelBytes()
+    assert.equal(received.length, 16)
+    assert.equal(received.readInt32BE(0), 16)
+    assert.equal(received.readInt32BE(4), CANCEL_REQUEST_CODE)
+    assert.equal(received.readInt32BE(8), backendKey.processId)
+    assert.equal(received.readInt32BE(12), backendKey.secretKey)
+
+    client.destroy()
+    canceller.destroy()
+  } finally {
+    await proxy.close()
+    await upstream.close()
+  }
+})
+
+// The registry is bounded by live connections, and this is the visible
+// consequence: once the connection is gone, its key is a key the proxy
+// never issued, and nothing is dialed.
+test('a CancelRequest for a connection that has already closed dials nothing', async () => {
+  const backendKey = { processId: 4242, secretKey: 24242 }
+  const upstream = await startCancellableUpstream(backendKey)
+  const proxy = await startPgProxy({ port: 0, deps: runningDeps(upstream.port), wakeTimeoutMs: 1000 })
+
+  try {
+    const client = await connectClient(proxy.port)
+    client.write(buildStartupPacket({ user: 'bob', database: 'proj1' }))
+
+    const handed = await readBytes(client, 13 + 6)
+    const issued = { processId: handed.readInt32BE(5), secretKey: handed.readInt32BE(9) }
+    assert.equal(upstream.connectionCount(), 1)
+
+    client.destroy()
+    await sleep(20)
+
+    const canceller = await connectClient(proxy.port)
+    canceller.write(cancelRequestBytes(issued.processId, issued.secretKey))
+    const response = await readAll(canceller)
+
+    assert.equal(response.length, 0, 'closed with no payload, same as any unroutable cancel')
+    assert.equal(upstream.connectionCount(), 1, 'no second connection was made to the backend')
+  } finally {
+    await proxy.close()
+    await upstream.close()
+  }
+})
+
+// Query traffic must not be parsed or rewritten. Once ReadyForQuery has
+// gone past, the connection is a plain pipe again, and bytes that happen to
+// be shaped exactly like BackendKeyData are just bytes: a rewrite here
+// would corrupt a result set.
+test('bytes after ReadyForQuery are spliced untouched, including ones shaped like BackendKeyData', async () => {
+  const backendKey = { processId: 4242, secretKey: 24242 }
+  const upstream = await startCancellableUpstream(backendKey)
+  const proxy = await startPgProxy({ port: 0, deps: runningDeps(upstream.port), wakeTimeoutMs: 1000 })
+
+  try {
+    const client = await connectClient(proxy.port)
+    client.write(buildStartupPacket({ user: 'bob', database: 'proj1' }))
+
+    const handed = await readBytes(client, 13 + 6)
+    const issued = { processId: handed.readInt32BE(5), secretKey: handed.readInt32BE(9) }
+
+    // The same bytes the proxy rewrote a moment ago, sent again after the
+    // startup phase has ended.
+    const lookalike = backendKeyDataBytes(backendKey.processId, backendKey.secretKey)
+    const arrived = readBytes(client, lookalike.length)
+    upstream.sendOnFirst(lookalike)
+
+    assert.deepEqual(await arrived, lookalike, 'forwarded verbatim, not rewritten a second time')
+    assert.notEqual(
+      (await arrived).readInt32BE(5),
+      issued.processId,
+      'the minted key was not substituted into post-startup traffic'
+    )
+
+    client.destroy()
+  } finally {
+    await proxy.close()
+    await upstream.close()
+  }
 })
