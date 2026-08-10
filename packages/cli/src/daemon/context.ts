@@ -16,17 +16,28 @@
 
 import {
   createDockerRuntime,
+  createKindRegistry,
   HobbyError,
   openStore,
   type ComputeRuntime,
   type HobbyConfig,
+  type KindRegistry,
   type Paths,
   type PostgresConfig,
-  type Resource,
+  type PostgresResource,
   type Store,
 } from '@hobby.sh/core'
-import { startPostgres } from '@hobby.sh/pg'
+import { postgresKindHandler } from '@hobby.sh/pg'
 import { ActivityTracker, type ProxyDeps, type ProxyTarget } from '@hobby.sh/proxy'
+
+// Every kind this daemon knows how to run. One list, built here, read by
+// every dispatch site (routes, hibernator, reconcile, the wake path). Adding
+// a kind is adding a line here plus its package; nothing else in the daemon
+// learns a new name. That is what ADR 0007's "later kinds are registered by
+// implementing an interface, and earlier phases do not change" buys.
+export function createDefaultKindRegistry(): KindRegistry {
+  return createKindRegistry([postgresKindHandler])
+}
 
 export interface DaemonContext {
   store: Store
@@ -34,6 +45,7 @@ export interface DaemonContext {
   paths: Paths
   config: HobbyConfig
   activity: ActivityTracker
+  kinds: KindRegistry
   // Optional test seam, identical in shape and reasoning to
   // PgDeps.probeFactory (packages/pg/src/postgres.ts) and read by exactly
   // that code, since a DaemonContext structurally IS a PgDeps. Declaring it
@@ -61,6 +73,7 @@ export function createDaemonContext(opts: {
     paths: opts.paths,
     config: opts.config,
     activity: new ActivityTracker(),
+    kinds: createDefaultKindRegistry(),
   }
 }
 
@@ -88,7 +101,11 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
       if (resource === null) {
         throw new HobbyError('resource_not_found', `no resource with id ${resourceId}`)
       }
-      await startPostgres(ctx, resource)
+      // Dispatched by kind rather than calling startPostgres directly, which
+      // is what makes this one wake path serve every kind: an app waking on
+      // an HTTP request and a database waking on a connection are the same
+      // call here, differing only in which handler answers it.
+      await ctx.kinds.get(resource.kind).start(ctx, resource)
     })().finally(() => {
       inFlightWakes.delete(resourceId)
     })
@@ -154,7 +171,15 @@ export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
       )
     }
 
-    const resources = ctx.store.listResources(project.id)
+    // Only postgres resources are candidates. Port 5432 speaks one protocol
+    // and a startup packet cannot name an app or a worker, so a project
+    // holding a database and two apps must still route cleanly to the
+    // database rather than reading as ambiguous. Filtering by kind here,
+    // before the count checks below, is what keeps that true: without it,
+    // deploying an app to a project would have broken psql against its
+    // database, which is exactly the kind of cross-phase breakage ADR 0007
+    // guard 1 exists to prevent.
+    const resources = ctx.store.listResources(project.id).filter((r) => r.kind === 'postgres')
     if (resources.length === 0) {
       return null
     }
@@ -171,12 +196,12 @@ export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
       // wire rather than crashing the connection handler.
       throw new HobbyError(
         'ambiguous_target',
-        `project ${projectName} has more than one resource: ${resources.map((r) => r.name).join(', ')}`,
-        'the wake-on-connect proxy cannot disambiguate resources by database name alone; connect to a project with exactly one resource'
+        `project ${projectName} has more than one postgres resource: ${resources.map((r) => r.name).join(', ')}`,
+        'the wake-on-connect proxy cannot disambiguate resources by database name alone; connect to a project with exactly one postgres resource'
       )
     }
 
-    const resource = resources[0] as Resource
+    const resource = resources[0] as PostgresResource
     return {
       resourceId: resource.id,
       host: '127.0.0.1',

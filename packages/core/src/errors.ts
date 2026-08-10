@@ -15,6 +15,14 @@ export type ErrorCode =
   | 'conflict'
   | 'usage'
   | 'unauthorized'
+  // A resource row names a kind no handler was registered for, which means
+  // the daemon was built without a package it has rows for. Not a user
+  // error and not a 404: the resource exists, and nothing on this box knows
+  // how to run it. See kinds.ts's KindRegistry.
+  | 'unknown_kind'
+  // The user's Dockerfile or wrangler manifest failed to build. Distinct
+  // from wake_failed, which is about a built thing refusing to serve.
+  | 'build_failed'
   | 'internal'
 
 const HTTP_STATUS_BY_CODE: Record<ErrorCode, number> = {
@@ -30,6 +38,8 @@ const HTTP_STATUS_BY_CODE: Record<ErrorCode, number> = {
   conflict: 409,
   usage: 400,
   unauthorized: 401,
+  unknown_kind: 500,
+  build_failed: 422,
   internal: 500,
 }
 

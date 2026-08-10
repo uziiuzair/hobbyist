@@ -5,8 +5,7 @@
 // one pg_stat_activity guard, calling stopPostgres, lives in startHibernator,
 // the only place in this file that touches real time or a real resource.
 
-import type { Resource, ResourceState } from '@hobby.sh/core'
-import { checkActiveQuery, stopPostgres, type ActivityGuardResult } from '@hobby.sh/pg'
+import { guardFor, type ActivityGuardResult, type Resource, type ResourceState } from '@hobby.sh/core'
 import type { DaemonContext } from './context.js'
 
 export interface ShouldSleepInput {
@@ -64,9 +63,12 @@ export interface StartHibernatorOptions {
   now?: () => number
   sleepFor?: (ms: number) => Promise<void>
   // Test seam for the one real Postgres touch this file makes. Defaults to
-  // @hobby.sh/pg's checkActiveQuery against the resource's own config.
-  // Additive and optional, same reasoning as PgDeps.probeFactory: production
-  // never sets this.
+  // asking the resource's own kind handler for its pre-sleep guard (core's
+  // guardFor), which for `postgres` is a real pg_stat_activity query and for
+  // a kind that declares no guard is a plain 'idle'. Named checkActiveQuery
+  // for continuity with the callers that already set it; it is no longer
+  // Postgres-specific. Additive and optional, same reasoning as
+  // PgDeps.probeFactory: production never sets this.
   checkActiveQuery?: (resource: Resource) => Promise<ActivityGuardResult>
 }
 
@@ -172,7 +174,11 @@ async function tick(
     }
 
     try {
-      await stopPostgres(ctx, freshResource)
+      // Dispatched by kind. Before the registry, this named stopPostgres
+      // directly, which meant hibernation could only ever sleep a database:
+      // the wedge says everything sleeps, and this line is where that stops
+      // being true if a kind is added without a handler.
+      await ctx.kinds.get(freshResource.kind).stop(ctx, freshResource)
     } catch (err) {
       console.error(`hibernator: failed to sleep resource ${resource.id}: ${errorMessage(err)}`)
     }
@@ -182,7 +188,9 @@ async function tick(
 export function startHibernator(ctx: DaemonContext, opts: StartHibernatorOptions): { stop(): Promise<void> } {
   const now = opts.now ?? Date.now
   const sleepFor = opts.sleepFor ?? defaultSleepFor
-  const guard = opts.checkActiveQuery ?? ((resource: Resource): Promise<ActivityGuardResult> => checkActiveQuery(resource.config))
+  const guard =
+    opts.checkActiveQuery ??
+    ((resource: Resource): Promise<ActivityGuardResult> => guardFor(ctx.kinds, ctx, resource))
 
   let stopped = false
   let resolveStopSignal: () => void = () => {}

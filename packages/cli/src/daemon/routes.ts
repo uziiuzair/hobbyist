@@ -14,17 +14,11 @@ import {
   DEFAULT_PORT_BIND,
   HobbyError,
   validateName,
+  type PostgresResource,
   type Project,
   type Resource,
 } from '@hobby.sh/core'
-import {
-  connectionString,
-  createPostgres,
-  destroyPostgres,
-  runQuery,
-  startPostgres,
-  stopPostgres,
-} from '@hobby.sh/pg'
+import { connectionString, createPostgres, runQuery } from '@hobby.sh/pg'
 import { getOrCreateWake, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
 import { toWireResource, toWireResources } from './wire.js'
@@ -103,6 +97,24 @@ function getResourceOrThrow(ctx: DaemonContext, id: string): Resource {
   return resource
 }
 
+// The narrowing gate for the handful of routes that are genuinely
+// Postgres-only: a connection string and an ad-hoc SQL query mean nothing
+// for an app or a worker. Everything else in this file dispatches through
+// the kind registry instead and never needs to know.
+//
+// `usage`, not `internal`: asking Studio for a connection string against an
+// app is a reasonable mistake for a caller to make, and the message names
+// the actual kind so the caller can see why.
+function expectPostgres(resource: Resource, what: string): PostgresResource {
+  if (resource.kind !== 'postgres') {
+    throw new HobbyError(
+      'usage',
+      `resource ${resource.name} is a ${resource.kind}, and ${what} is only meaningful for a postgres resource`
+    )
+  }
+  return resource
+}
+
 async function createProjectRoute(ctx: DaemonContext, req: IncomingMessage): Promise<Project> {
   const body = await readJsonBody(req)
   const name = isRecord(body) ? body['name'] : undefined
@@ -135,7 +147,7 @@ async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<Rou
   for (const resource of resources) {
     ctx.store.setResourceState(resource.id, 'destroying')
     try {
-      await destroyPostgres(ctx, resource)
+      await ctx.kinds.get(resource.kind).destroy(ctx, resource)
     } catch (err) {
       failures.push(`${resource.name}: ${errorMessage(err)}`)
     }
@@ -191,22 +203,27 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
   return createPostgres(ctx, { project, name })
 }
 
+// The three lifecycle routes are kind-agnostic and were the last places in
+// the daemon that named Postgres. `hobby rm`, `hobby sleep` and `hobby wake`
+// now mean the same thing for a database, an app and a worker, which is what
+// makes the wedge ("everything sleeps, everything wakes on demand") one
+// mechanism rather than three.
 async function destroyResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
   ctx.store.setResourceState(resource.id, 'destroying')
-  await destroyPostgres(ctx, resource)
+  await ctx.kinds.get(resource.kind).destroy(ctx, resource)
   return { status: 200, body: { deleted: true } }
 }
 
 async function startResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
-  await startPostgres(ctx, resource)
+  await ctx.kinds.get(resource.kind).start(ctx, resource)
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
 
 async function stopResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
-  await stopPostgres(ctx, resource)
+  await ctx.kinds.get(resource.kind).stop(ctx, resource)
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
 
@@ -218,7 +235,12 @@ async function stopResourceRoute(ctx: DaemonContext, id: string): Promise<RouteR
 // HobbyConfig has no field yet for an externally reachable host, and adding
 // one is out of scope here.
 function connectionRoute(ctx: DaemonContext, id: string): RouteResult {
-  const resource = getResourceOrThrow(ctx, id)
+  // Genuinely postgres-only, unlike the lifecycle routes above: there is no
+  // such thing as a connection string for an app or a worker, and an app's
+  // reachable address is its hostname, served over HTTP. Answered with
+  // `usage` rather than `internal` because asking for one is a reasonable
+  // mistake for a caller to make, not a bug in the daemon.
+  const resource = expectPostgres(getResourceOrThrow(ctx, id), 'a connection string')
   const project = ctx.store.getProject(resource.projectId)
   if (project === null) {
     throw new HobbyError('internal', `resource ${id} has no owning project (project ${resource.projectId} is gone)`)
@@ -247,7 +269,7 @@ async function logsRoute(ctx: DaemonContext, id: string, url: URL): Promise<Rout
 // no side effects, nothing stopped, nothing deleted, no files written to
 // disk. Real `hobby eject` (moving the daemon out of the way entirely) is
 // portability/'s job and is not built here, see the task report.
-function renderCompose(resources: Resource[]): string {
+function renderCompose(resources: PostgresResource[]): string {
   const lines: string[] = ['services:']
   for (const resource of resources) {
     const cfg = resource.config
@@ -311,7 +333,7 @@ function isUnknownArray(value: unknown): value is unknown[] {
 // the driver's own parameterized query path; this function never touches
 // the SQL string itself.
 async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
-  const resource = getResourceOrThrow(ctx, id)
+  const resource = expectPostgres(getResourceOrThrow(ctx, id), 'running SQL')
   const body = await readJsonBody(req)
   const sql = isRecord(body) ? body['sql'] : undefined
   const rawParams = isRecord(body) ? body['params'] : undefined
@@ -341,7 +363,7 @@ async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string):
   // re-reading is what the proxy's own handleStartup does after a wake and
   // matching that is cheap insurance against relying on a config snapshot
   // that raced a concurrent change).
-  const ready = getResourceOrThrow(ctx, id)
+  const ready = expectPostgres(getResourceOrThrow(ctx, id), 'running SQL')
   // A query is activity, exactly as much as a proxy connection is, and the
   // hibernator has to hear about it from here because nothing else will:
   // Studio's Tables, Sql and Schema views never open a proxy connection.
@@ -387,10 +409,20 @@ async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string):
 async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): Promise<RouteResult> {
   const project = getProjectByNameOrThrow(ctx, name)
   const resources = ctx.store.listResources(project.id)
+  // Only postgres resources are rendered today. Emitting compose services for
+  // `app` and `worker` is M8 and M9 respectively (see
+  // docs/compute/specs/2026-08-10-phase-2-compute-design.md), and ADR 0007 is
+  // explicit that a kind which cannot be ejected does not ship. Filtering
+  // rather than throwing keeps eject working for the database half of a mixed
+  // project; the count of skipped resources is reported so nobody reads an
+  // incomplete compose file as a complete one.
+  const postgresResources = resources.filter((r) => r.kind === 'postgres')
+  const notEjectable = resources.filter((r) => r.kind !== 'postgres').map((r) => `${r.name} (${r.kind})`)
   const body = {
-    compose: renderCompose(resources),
-    dataDirs: resources.map((resource) => resource.config.dataDir),
+    compose: renderCompose(postgresResources),
+    dataDirs: postgresResources.map((resource) => resource.config.dataDir),
     released: release,
+    notEjectable,
   }
 
   if (!release) {
@@ -404,7 +436,7 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
   for (const resource of resources) {
     if (resource.state !== 'running') continue
     try {
-      await stopPostgres(ctx, resource)
+      await ctx.kinds.get(resource.kind).stop(ctx, resource)
     } catch (err) {
       failures.push(`${resource.name}: ${errorMessage(err)}`)
     }

@@ -9,8 +9,9 @@ import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { createFakeRuntime, openStore, resolvePaths, type HobbyConfig, type PostgresConfig, type Resource, type Store } from '@hobby.sh/core'
+import { expectKind, createFakeRuntime, openStore, resolvePaths, type HobbyConfig, type PostgresConfig, type PostgresResource, type Resource, type Store } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
+import { createDefaultKindRegistry } from '../src/daemon/context.js'
 import { resourceSize } from '../src/daemon/size.js'
 import type { DaemonContext } from '../src/index.js'
 
@@ -20,6 +21,8 @@ function testConfig(): HobbyConfig {
     proxyPort: 5432,
     studioPort: 8443,
     apiPort: 7432,
+    httpPort: 7433,
+    domain: 'localhost',
     sleepAfterSeconds: 300,
     wakeTimeoutMs: 150,
     readinessPollMs: 20,
@@ -29,7 +32,7 @@ function testConfig(): HobbyConfig {
 function buildContext(): DaemonContext {
   const store: Store = openStore(':memory:')
   const paths = resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-size-test-${randomUUID()}`) })
-  return { store, runtime: createFakeRuntime(), paths, config: testConfig(), activity: new ActivityTracker() }
+  return { store, runtime: createFakeRuntime(), paths, config: testConfig(), activity: new ActivityTracker(), kinds: createDefaultKindRegistry() }
 }
 
 function samplePostgresConfig(overrides: Partial<PostgresConfig> = {}): PostgresConfig {
@@ -48,10 +51,10 @@ function samplePostgresConfig(overrides: Partial<PostgresConfig> = {}): Postgres
 // Fetches the current row and asserts it exists, rather than a bare `!`:
 // every resource in this file was just created a line or two above, so a
 // null here means a real bug in the test setup, not a case worth silencing.
-function mustGetResource(ctx: DaemonContext, id: string): Resource {
+function mustGetResource(ctx: DaemonContext, id: string): PostgresResource {
   const resource = ctx.store.getResource(id)
   assert.ok(resource !== null, `expected resource ${id} to exist`)
-  return resource
+  return expectKind(resource, 'postgres')
 }
 
 test('resourceSize: a sleeping resource with no prior size never calls getSize and returns null', async () => {

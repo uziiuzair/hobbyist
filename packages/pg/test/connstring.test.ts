@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import type { PostgresConfig, Project, Resource } from '@hobby.sh/core'
+import type { PostgresConfig, PostgresResource, Project } from '@hobby.sh/core'
 import { connectionString } from '../src/index.js'
 
 function sampleProject(): Project {
@@ -28,7 +28,7 @@ function sampleConfig(): PostgresConfig {
   }
 }
 
-function sampleResource(): Resource {
+function sampleResource(): PostgresResource {
   return {
     id: 'resource-1',
     projectId: 'project-1',

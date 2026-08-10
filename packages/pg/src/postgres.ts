@@ -8,6 +8,7 @@ import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { basename, dirname } from 'node:path'
 import {
+  expectKind,
   HobbyError,
   validateName,
   type ActivitySink,
@@ -16,6 +17,7 @@ import {
   type HobbyConfig,
   type Paths,
   type PostgresConfig,
+  type PostgresResource,
   type Project,
   type Resource,
   type Store,
@@ -108,13 +110,13 @@ function containerSpec(config: PostgresConfig, network: string): ContainerSpec {
 export async function createPostgres(
   deps: PgDeps,
   opts: { project: Project; name: string }
-): Promise<Resource> {
+): Promise<PostgresResource> {
   validateName(opts.name)
 
   const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
   const password = randomBytes(PASSWORD_BYTES).toString('hex')
   const containerName = `hobby-${opts.project.name}-${opts.name}`
-  const dataDir = deps.paths.resourceDataDir(opts.project.name, opts.name)
+  const dataDir = deps.paths.resourcePath(opts.project.name, opts.name, 'pgdata')
 
   const config: PostgresConfig = {
     image: deps.config.image,
@@ -200,10 +202,14 @@ export async function createPostgres(
   if (final === null) {
     throw new HobbyError('internal', `resource ${resource.id} vanished immediately after creation`)
   }
-  return final
+  // The store can only ever promise `Resource`, the union. This row was
+  // written three statements ago with kind 'postgres', so the narrowing is a
+  // formality, but expectKind is the one place that formality is checked
+  // rather than asserted.
+  return expectKind(final, 'postgres')
 }
 
-export async function startPostgres(deps: PgDeps, resource: Resource): Promise<void> {
+export async function startPostgres(deps: PgDeps, resource: PostgresResource): Promise<void> {
   deps.store.setResourceState(resource.id, 'starting')
 
   // A `starting` (or, in stopPostgres below, `stopping`) state that outlives
@@ -243,7 +249,7 @@ export async function startPostgres(deps: PgDeps, resource: Resource): Promise<v
   deps.activity?.touch(resource.id)
 }
 
-export async function stopPostgres(deps: PgDeps, resource: Resource): Promise<void> {
+export async function stopPostgres(deps: PgDeps, resource: PostgresResource): Promise<void> {
   deps.store.setResourceState(resource.id, 'stopping')
   try {
     await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
@@ -347,7 +353,7 @@ function createDefaultRemoveDataDir(
 // that names every step that did and says plainly that something may
 // remain on disk. Deleting the row first and throwing second is
 // deliberate, in that order.
-export async function destroyPostgres(deps: PgDeps, resource: Resource): Promise<void> {
+export async function destroyPostgres(deps: PgDeps, resource: PostgresResource): Promise<void> {
   const failures: string[] = []
 
   try {
