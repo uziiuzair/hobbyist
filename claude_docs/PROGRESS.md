@@ -130,12 +130,28 @@ still reads `_cf_ALARM`, now for stated reasons rather than a false premise, and
 a test pins that the two agree so a divergence fails a build instead of losing a
 wake.
 
-**What still has not happened, and is the thing that would actually prove any of
-this:** the end-to-end run. Set an alarm, let the worker sleep, watch it wake
-and fire. Everything above is tested against real SQLite files with no Docker
-and no clock, which is the right way to test a policy and is not evidence that
-the feature works. That is precisely the lesson the compute session recorded on
-the same day, one kind earlier.
+**Then it was run for real, and it works.** 2026-08-11: an alarm armed 60
+seconds out, the container stopped, nothing touching it over HTTP, and
+`alarm()` ran 60,967ms after the stop. The deadline on disk matched the
+worker's own `getAlarm()` to 0ms, `actor_name` came back as `the-one` from a
+stopped runtime, and workerd deleted the row itself once it fired. Filed with
+the method and the hardware at
+`docs/durable-objects/research/2026-08-11-end-to-end-alarm-across-sleep.md`.
+
+**And the run found a defect that no unit test could have.** `bun build` could
+not resolve `cloudflare:workers`, so **no Durable Object written the documented
+way could be deployed at all**. The module is provided by workerd at runtime and
+must be external, not bundled; the fix is one flag. The failure mode was worse
+than the bug: it failed at build time telling the user to run `bun install`, so
+it read like the user's imports were wrong rather than like a platform that
+could not run the syntax its own upstream docs are written in.
+
+That is now three findings in two days with the same shape, across two
+sessions: miniflare not working under Bun, workerd needing glibc, and this. All
+three were invisible to every unit test and obvious on first contact with
+Docker. The compute session drew this lesson on 2026-08-10 for the `app` and
+`worker` kinds; it repeated one kind later, in a different session, on work
+that had 66 passing tests at the time.
 
 **The honest risk.** `localDisk` is marked `** EXPERIMENTAL; SUBJECT TO
 BACKWARDS-INCOMPATIBLE CHANGE **` upstream and the scheduler behind it describes
