@@ -1,8 +1,9 @@
 # Phase 2 compute: `app` and `worker`
 
-Status: RATIFIED. Approved by the author on 2026-08-10, after the design was
-presented in full. Nothing in it is built yet, and every section below describes
-intent rather than behaviour until the milestone that ships it says otherwise.
+Status: RATIFIED, and M6 through M9 are BUILT. Approved by the author on
+2026-08-10 and implemented the same day on branch `phase-2-compute`. See the
+milestone table in section 8 for exactly what is real and what is not; M10 is
+half done and the five dollar VPS measurement is outstanding.
 Date:   2026-08-10
 
 Supersedes nothing. Fills in `docs/compute/CLAUDE.md`, which has stood at
@@ -435,6 +436,14 @@ imported by `@hobby.sh/proxy`, which continues to know nothing about kinds.
 | M9 | `worker` kind | A real `wrangler.toml` deploys, binds to a sibling Postgres, sleeps, wakes, and ejects |
 | M10 | Cold start measured | Numbers published with hardware stated, for both kinds |
 
+**Status as of 2026-08-10:** M6 through M9 are built and merged on
+`phase-2-compute`. M10 is half done: the Mac numbers are filed at
+`../research/2026-08-10-http-cold-start-measurements.md` (app p95 133ms,
+worker p95 321ms, both inside the ceiling), and the five dollar VPS half is
+not run. `hobby eject` renders postgres, app and worker services plus a
+Caddyfile covering every hostname, so every registered kind can leave, which is
+what ADR 0007 requires before a kind ships.
+
 ## 9. Risks accepted
 
 - **Miniflare is a dev and test tool being used as a server.** ADR 0011, with a
@@ -455,14 +464,15 @@ imported by `@hobby.sh/proxy`, which continues to know nothing about kinds.
 
 ## 10. Open questions
 
-- **Does Miniflare lay Durable Object storage out as workerd's bare
-  `<uniqueKey>/<id>.sqlite`, or does it wrap it?** The Durable Objects work
-  depends on scanning that directory. Unverified. M9 confirms it against a
-  running Miniflare before anyone writes a scanner.
-- **Does `wrangler.toml` parsing need TOML dependencies?** Bun has no built-in
-  TOML reader for arbitrary files at the time of writing. Either a small
-  dependency, or restrict to `wrangler.jsonc`, and the choice should be made
-  against real user files rather than in the abstract.
+- ~~**Does Miniflare lay Durable Object storage out as workerd's bare
+  `<uniqueKey>/<id>.sqlite`?**~~ ANSWERED 2026-08-10, by running it. Yes, when
+  `durableObjectsPersist` is set explicitly. With `defaultPersistRoot` instead,
+  Miniflare inserts a plugin segment of its own. One trap remains for the
+  scanner: each namespace directory also holds Miniflare's own
+  `metadata.sqlite`, which is not an object and has no `_cf_METADATA` table.
+- ~~**Does `wrangler.toml` parsing need TOML dependencies?**~~ ANSWERED. Yes,
+  `smol-toml`. Writing our own reader for a format we do not own, to save one
+  small dependency, would have been the worse trade.
 - **What is the right sleep threshold for an app?** 300 seconds is the Postgres
   default (`packages/core/src/config.ts`). Cloudflare ships 600 for containers
   that cost their owner money

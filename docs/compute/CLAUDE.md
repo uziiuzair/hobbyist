@@ -77,11 +77,18 @@ because the answers are scope-shaped and belong in the scope guard:
 - **Eject:** yes, and verified by running it, not by asserting it. A kind that
   cannot be ejected does not ship.
 
-Still open, and both real:
+Answered on 2026-08-10 by running it, not by reading:
 
-- **Does Miniflare lay Durable Object storage out the way workerd documents it?**
-  The Durable Objects work depends on scanning that directory to recover alarm
-  deadlines from stopped objects. Unverified.
+- **Miniflare's Durable Object layout** is workerd's own,
+  `<uniqueKey>/<objectId>.sqlite`, provided `durableObjectsPersist` is set
+  explicitly rather than through `defaultPersistRoot`. See
+  `research/2026-08-10-http-cold-start-measurements.md` for the run that
+  settled it and `docs/durable-objects/` for what depends on it.
+
+Still open, and all real:
+
 - **A Durable Object alarm cannot fire inside a stopped container.** Until the
   Durable Objects work lands an external schedule holder, a worker that sets an
   alarm misses it. Written down rather than discovered later.
+- **Cold start on a five dollar VPS is unmeasured.** The Mac numbers pass
+  comfortably and are the easy end of the matrix.

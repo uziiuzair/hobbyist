@@ -35,7 +35,7 @@ The routing rule is in `docs/CLAUDE.md`. The project context is in the root
 | `mcp/` | The MCP server | M5 |
 | `branching/` | Copy-on-write branches | Phase 1.5 |
 | `backups/` | Backup, restore, PITR | Phase 1.5 |
-| `compute/` | Stateless workers and apps | Phase 2 |
+| `compute/` | Stateless workers and apps. `app` and `worker` kinds, built 2026-08-10 | Phase 2 |
 | `storage/` | S3-compatible buckets, volumes | Phase 3 |
 | `sdk/` | Client libraries, React first | Phase 3 |
 | `decisions/` | Architecture decision records, numbered and immutable | n/a |
@@ -65,10 +65,16 @@ longer in force.
 ## The one number
 
 **Cold start: under 1 second target, 3 seconds hard ceiling.** Everything sleeps,
-so this is what the project is judged on. Postgres wake was measured on
-2026-08-07 (`spike/m0/`, and `docs/proxy/research/2026-08-07-cold-start-measurements.md`).
-HTTP wake, for Phase 2's `app` and `worker` kinds, holds the same budget and is
-still unmeasured; M10 in the Phase 2 spec exists to close it.
+so this is what the project is judged on.
+
+| Path | p50 | p95 | Measured |
+|---|---|---|---|
+| Postgres wake | 170ms | 186ms | 2026-08-07, `docs/proxy/research/` |
+| `app` HTTP wake | 121ms | 133ms | 2026-08-10, `docs/compute/research/` |
+| `worker` HTTP wake | 299ms | 321ms | 2026-08-10, `docs/compute/research/` |
+
+Every one of those is from a Mac. **The five dollar VPS half of the matrix has
+never been run**, and it is the machine the project is actually aimed at.
 
 ---
 
