@@ -1,6 +1,9 @@
 # `docs/durable-objects/` the durable half
 
-**Status:** Built, tested, and wired into the daemon. **Phase 2.**
+**Status:** Built, wired into the daemon, and **verified end to end against real
+Docker** on 2026-08-11: an alarm set before sleep fired after it, with no
+request in between. See
+`research/2026-08-11-end-to-end-alarm-across-sleep.md`. **Phase 2.**
 See `docs/decisions/0012` for why this capability exists at all.
 
 **The Phase 2 gate is gone.** ADR 0007 guard 2 held Phase 2 until Phase 1 had
@@ -68,10 +71,12 @@ it. It does not call the hibernator.
 
 ## Open questions
 
-- **How long is the wake grace window?** The predicate refuses to sleep a
-  namespace whose next alarm is imminent, because sleeping at 02:59:58 to wake at
-  03:00:00 is worse than not sleeping. The right number is unmeasured and
-  currently a parameter, not a constant.
+- **How long is the wake grace window, and how late may an alarm be?** The guard
+  refuses to sleep a namespace whose next alarm is within
+  `DEFAULT_WAKE_GRACE_SECONDS` (30). Separately, because the mirror polls,
+  an alarm can fire up to one tick late, currently 10 seconds, plus a cold
+  start. Fine for a cron-shaped task and unexamined for anything finer. Neither
+  number is measured against a need; both are guesses with a knob.
 - **What does the catalog show for an object that has never set an alarm?** Its
   hex id, and nothing else. `actor_name` lives only in `_cf_ALARM`, and
   `idFromName` is an HMAC that does not reverse. Whether forward derivation
