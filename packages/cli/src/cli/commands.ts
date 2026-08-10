@@ -8,7 +8,9 @@
 // for a failure path.
 
 import { spawn, spawnSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { chmod, mkdir } from 'node:fs/promises'
+import { basename, join as joinPath, resolve as resolvePath } from 'node:path'
 import {
   HobbyError,
   parseTarget,
@@ -199,6 +201,118 @@ export async function cmdDaemon(io: Io, paths: Paths, config: HobbyConfig): Prom
 // all three; createResource's own createPostgres already blocks until
 // Postgres is ready before returning (packages/pg/src/postgres.ts), which is
 // what satisfies "waits for readiness" here without an extra start call.
+// `hobby deploy [path]`: the one verb for putting code on the box.
+//
+// The kind is detected from what is in the directory rather than asked for,
+// because the user already told us by what they wrote: a wrangler manifest
+// means a Worker, a Dockerfile means a container. Both present is an error
+// that asks which, rather than a guess, since guessing wrong means building
+// the wrong thing and only finding out when it does not serve.
+//
+// Deliberately not a `git push` flow. That needs a receiving repository, a
+// hook, and a build triggered by someone else's commit, none of which is one
+// box's worth of complexity, and `hobby deploy` from the directory you are
+// already standing in is the same number of keystrokes.
+export type DeployKind = 'app' | 'worker'
+
+// Only an app or a worker has a hostname; a postgres resource is reached on
+// 5432 through the proxy and has none. Narrowed here rather than at each
+// print site.
+function hostnameOf(resource: WireResource): string {
+  return resource.kind === 'app' || resource.kind === 'worker' ? resource.config.hostname : ''
+}
+
+export function detectDeployKind(files: { dockerfile: boolean; wrangler: boolean }): DeployKind {
+  if (files.dockerfile && files.wrangler) {
+    throw new UsageError(
+      'this directory has both a Dockerfile and a wrangler manifest, so it is ambiguous. Pass --kind app or --kind worker.'
+    )
+  }
+  if (files.wrangler) {
+    return 'worker'
+  }
+  if (files.dockerfile) {
+    return 'app'
+  }
+  throw new UsageError(
+    'nothing to deploy here: expected a Dockerfile (for an app) or wrangler.toml / wrangler.jsonc (for a worker)'
+  )
+}
+
+export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const path = resolvePath(positionals[0] ?? '.')
+  const kindFlag = typeof flags['kind'] === 'string' ? flags['kind'] : undefined
+  if (kindFlag !== undefined && kindFlag !== 'app' && kindFlag !== 'worker') {
+    throw new UsageError(`unknown --kind: ${kindFlag}. Expected app or worker.`)
+  }
+
+  const kind =
+    kindFlag ??
+    detectDeployKind({
+      dockerfile: existsSync(joinPath(path, 'Dockerfile')),
+      wrangler: existsSync(joinPath(path, 'wrangler.toml')) || existsSync(joinPath(path, 'wrangler.jsonc')),
+    })
+
+  if (kind === 'worker') {
+    throw new UsageError(
+      'the worker kind is not built yet (M9 of docs/compute/specs/2026-08-10-phase-2-compute-design.md). Deploy a Dockerfile for now.'
+    )
+  }
+
+  const projectName = typeof flags['project'] === 'string' ? flags['project'] : basename(path)
+  const name = typeof flags['name'] === 'string' ? flags['name'] : 'web'
+  const portFlag = typeof flags['port'] === 'string' ? Number(flags['port']) : undefined
+  if (portFlag !== undefined && !Number.isInteger(portFlag)) {
+    throw new UsageError(`--port must be a whole number, got ${String(flags['port'])}`)
+  }
+
+  // A project is created on first deploy rather than required up front. The
+  // alternative, making the user run `hobby new` first, means two commands
+  // for the thing CLAUDE.md promises takes one.
+  let existing: WireResource | undefined
+  try {
+    const detail = await c.api.getProject(projectName)
+    existing = detail.resources.find((r) => r.name === name)
+  } catch (err) {
+    if (!(err instanceof HobbyError) || err.code !== 'project_not_found') {
+      throw err
+    }
+    await c.api.createProject(projectName)
+  }
+
+  if (existing !== undefined) {
+    const result = await c.api.deployResource(existing.id, { source: { path } })
+    if (flags.json) {
+      c.io.out(JSON.stringify({ resource: result.resource, image: result.image }, null, 2))
+      return 0
+    }
+    c.io.out(`deployed ${projectName}/${name}`)
+    c.io.out(`  image     ${result.image}`)
+    c.io.out(`  url       https://${hostnameOf(result.resource)}`)
+    c.io.out('')
+    c.io.out('It is asleep. The first request wakes it.')
+    return 0
+  }
+
+  const { resource } = await c.api.createResource(projectName, {
+    kind: 'app',
+    name,
+    source: { path },
+    ...(portFlag === undefined ? {} : { port: portFlag }),
+  })
+
+  if (flags.json) {
+    c.io.out(JSON.stringify({ resource }, null, 2))
+    return 0
+  }
+  c.io.out(`deployed ${projectName}/${name}`)
+  c.io.out(`  image     ${resource.config.image}`)
+  c.io.out(`  url       https://${hostnameOf(resource)}`)
+  c.io.out('')
+  c.io.out('It is asleep. The first request wakes it.')
+  return 0
+}
+
 export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const name = positionals[0]
   if (name === undefined) {

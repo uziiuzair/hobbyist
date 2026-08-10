@@ -1,13 +1,10 @@
 {
-  "name": "@hobby.sh/cli",
+  "name": "@hobby.sh/app",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
-  "bin": {
-    "hobby": "./bin/hobby.js"
-  },
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
@@ -15,10 +12,6 @@
     }
   },
   "dependencies": {
-    "@hobby.sh/app": "*",
-    "@hobby.sh/core": "*",
-    "@hobby.sh/pg": "*",
-    "@hobby.sh/proxy": "*",
-    "argon2": "^0.45.1"
+    "@hobby.sh/core": "*"
   }
 }

@@ -164,6 +164,14 @@ export interface EjectResponse {
   // True when this call also performed the handover: containers removed, the
   // network removed, the project forgotten, data left alone.
   released: boolean
+  // A Caddyfile routing each ejected app's hostname to its published port.
+  // Empty when the project has no apps. ADR 0009: an ejected app that no
+  // longer serves is not an ejected app.
+  caddyfile?: string
+  // Resources this eject could not render, as "name (kind)". Reported rather
+  // than silently dropped, so an incomplete compose file is never mistaken
+  // for a complete one.
+  notEjectable?: string[]
 }
 
 export interface Api {
@@ -172,7 +180,24 @@ export interface Api {
   createProject(name: string): Promise<ProjectResponse>
   getProject(name: string): Promise<ProjectDetailResponse>
   deleteProject(name: string): Promise<DeletedResponse>
-  createResource(project: string, input: { kind: 'postgres'; name: string }): Promise<ResourceResponse>
+  createResource(
+    project: string,
+    input:
+      | { kind: 'postgres'; name: string }
+      | {
+          kind: 'app'
+          name: string
+          source?: { path: string; dockerfile?: string }
+          image?: string
+          port?: number
+          env?: Record<string, string>
+          databaseResourceId?: string
+        }
+  ): Promise<ResourceResponse>
+  deployResource(
+    id: string,
+    input?: { source?: { path: string; dockerfile?: string } }
+  ): Promise<ResourceResponse & { image: string; logs: string }>
   getResource(id: string): Promise<ResourceResponse>
   deleteResource(id: string): Promise<DeletedResponse>
   startResource(id: string): Promise<ResourceResponse>
@@ -194,6 +219,7 @@ export function createApi(socketPath: string): Api {
     getProject: (name) => call(client, 'GET', `/v1/projects/${p(name)}`),
     deleteProject: (name) => call(client, 'DELETE', `/v1/projects/${p(name)}`),
     createResource: (project, input) => call(client, 'POST', `/v1/projects/${p(project)}/resources`, input),
+    deployResource: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/deploy`, input ?? {}),
     getResource: (id) => call(client, 'GET', `/v1/resources/${p(id)}`),
     deleteResource: (id) => call(client, 'DELETE', `/v1/resources/${p(id)}`),
     startResource: (id) => call(client, 'POST', `/v1/resources/${p(id)}/start`),

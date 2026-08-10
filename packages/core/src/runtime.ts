@@ -40,6 +40,24 @@ export interface ContainerStatus {
   exitCode: number | null
 }
 
+// What `docker build` needs, and nothing more. Separate from ContainerSpec
+// because building and running are different operations with different
+// failure modes: a build failure is the user's Dockerfile, a run failure is
+// ours or their process's.
+export interface BuildSpec {
+  // The build context directory, as the user gave it.
+  contextPath: string
+  // Path to the Dockerfile, absolute or relative to contextPath.
+  dockerfile: string
+  // What the resulting image is tagged, e.g. hobby/blog-web:1754870400.
+  tag: string
+  // Resource caps. A build that is slow is a nuisance; a build that makes a
+  // sleeping database miss its wake budget is a broken promise, so a build
+  // always loses to anything else contending for the box.
+  memory?: string
+  cpuShares?: number
+}
+
 export interface ComputeRuntime {
   available(): Promise<boolean>
   ensureCreated(spec: ContainerSpec): Promise<ContainerId>
@@ -50,6 +68,15 @@ export interface ComputeRuntime {
   logs(name: string, opts: { tail: number }): Promise<string>
   ensureNetwork(name: string): Promise<void>
   removeNetwork(name: string): Promise<void>
+
+  // Optional on purpose, and this is ADR 0002's escape hatch staying honest.
+  // Only the `app` kind needs to build an image, and a future microVM
+  // runtime would not build one this way at all. Making these required would
+  // force every implementation, including createFakeRuntime, to grow a
+  // Docker-shaped build it has no use for. A kind that needs them checks and
+  // fails with a real error rather than the interface pretending.
+  build?(spec: BuildSpec): Promise<string>
+  removeImage?(tag: string): Promise<void>
 }
 
 const NOT_FOUND_STATUS: ContainerStatus = { exists: false, running: false, exitCode: null }
@@ -58,14 +85,34 @@ export function createFakeRuntime(): ComputeRuntime & {
   _state: Map<string, ContainerStatus>
   _specs: Map<string, ContainerSpec>
   _networks: Set<string>
+  _builds: BuildSpec[]
+  _images: Set<string>
 } {
   const state = new Map<string, ContainerStatus>()
   const specs = new Map<string, ContainerSpec>()
   const networks = new Set<string>()
+  const builds: BuildSpec[] = []
+  const images = new Set<string>()
 
   return {
     _state: state,
     _specs: specs,
+    // Exposed for the same reason _specs is: a test asserting that a deploy
+    // built the image it said it did has nothing else to read, and a build
+    // that silently did not happen would otherwise look identical to one
+    // that did.
+    _builds: builds,
+    _images: images,
+
+    async build(spec: BuildSpec): Promise<string> {
+      builds.push(spec)
+      images.add(spec.tag)
+      return `fake build of ${spec.tag}\n`
+    },
+
+    async removeImage(tag: string): Promise<void> {
+      images.delete(tag)
+    },
     // Exposed for the same reason _specs is: a network that is created and
     // never removed is invisible to every assertion unless a test can see the
     // set. That leak is exactly what eject --release had to stop doing.

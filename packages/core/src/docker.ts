@@ -7,7 +7,7 @@
 import { execFile } from 'node:child_process'
 import { HobbyError } from './errors.js'
 import { DEFAULT_PORT_BIND } from './runtime.js'
-import type { ComputeRuntime, ContainerId, ContainerSpec, ContainerStatus } from './runtime.js'
+import type { BuildSpec, ComputeRuntime, ContainerId, ContainerSpec, ContainerStatus } from './runtime.js'
 
 export type ExecFn = (cmd: string, args: string[]) => Promise<{ stdout: string; stderr: string }>
 
@@ -190,6 +190,57 @@ export function createDockerRuntime(exec: ExecFn = defaultExec): ComputeRuntime 
     async logs(name: string, opts: { tail: number }): Promise<string> {
       const { stdout } = await run(['logs', '--tail', String(opts.tail), name])
       return stdout
+    },
+
+    // `docker build`, with the caps that keep a build from starving the box
+    // it shares with running databases. Never a shell string: contextPath and
+    // dockerfile come from user input and reach argv directly, same reasoning
+    // as buildCreateArgs above.
+    //
+    // A non-zero exit is the user's Dockerfile far more often than it is
+    // ours, so it becomes `build_failed` (422) rather than
+    // `runtime_unavailable` (503), and the whole build output is carried as
+    // the hint because the last line of a docker build is rarely the line
+    // that explains it.
+    async build(spec: BuildSpec): Promise<string> {
+      const args = ['build', '-f', spec.dockerfile, '-t', spec.tag]
+      if (spec.memory !== undefined) {
+        args.push('--memory', spec.memory)
+      }
+      if (spec.cpuShares !== undefined) {
+        args.push('--cpu-shares', String(spec.cpuShares))
+      }
+      args.push(spec.contextPath)
+
+      try {
+        const { stdout, stderr } = await exec('docker', args)
+        // docker build writes its progress to stderr and only the final
+        // image id to stdout, so a caller shown stdout alone sees nothing
+        // useful.
+        return `${stderr}${stdout}`
+      } catch (err) {
+        const e = errorOf(err)
+        throw new HobbyError(
+          'build_failed',
+          `docker build failed for ${spec.tag}`,
+          `${e.stderr ?? ''}${e.stdout ?? ''}` || e.message || String(err)
+        )
+      }
+    },
+
+    // Best effort, and a missing image is success. Called when an app is
+    // destroyed, so that destroying a resource does not silently leave its
+    // built layers on the disk forever.
+    async removeImage(tag: string): Promise<void> {
+      try {
+        await exec('docker', ['image', 'rm', tag])
+      } catch (err) {
+        const e = errorOf(err)
+        if (isNotFound(e.stderr)) {
+          return
+        }
+        throw toRuntimeUnavailable('docker image rm', err)
+      }
     },
 
     // Idempotent: the daemon calls this on every project start, so
