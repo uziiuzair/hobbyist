@@ -110,11 +110,32 @@ corrections. `docs/durable-objects/research/2026-08-10-alarms-are-readable-from-
 carries the method and the output.
 
 **What is deliberately not built.** The runtime, the manifest, the generated
-config and HTTP wake, all of which belong to `@hobby.sh/compute`; and the wiring
-into the daemon, which is marked `DRAFT pending` in the spec because it needs
-the widened `ResourceKind` that session is landing. Two sessions agreed the seam
-in writing before either wrote code, which is why there is one workerd substrate
-in this repo and not two.
+config and HTTP wake, all of which belong to `@hobby.sh/compute`. Two sessions
+agreed the seam in writing before either wrote code, which is why there is one
+workerd substrate in this repo and not two.
+
+**Then `phase-2-compute` landed, and this rebased onto it.** The seam held: the
+`worker` handler's `guard` hole, which that session's own comment had reserved
+for exactly this, now returns `durableObjectAlarmGuard`, and the daemon starts
+the alarm mirror beside the hibernator on the same tick and drains it in the
+same shutdown step. 452 tests pass on the branch.
+
+The rebase also settled the one disagreement between the two sessions, in their
+favour. Their real-Docker run reported `_cf_METADATA` present in object files
+where this session's note said it was absent. Rechecking every file rather than
+one showed the table exists on exactly the objects that have alarms, created
+lazily on first write, and that the probe had sampled the one object
+deliberately given no alarm. Both copies of an alarm exist and agree. The mirror
+still reads `_cf_ALARM`, now for stated reasons rather than a false premise, and
+a test pins that the two agree so a divergence fails a build instead of losing a
+wake.
+
+**What still has not happened, and is the thing that would actually prove any of
+this:** the end-to-end run. Set an alarm, let the worker sleep, watch it wake
+and fire. Everything above is tested against real SQLite files with no Docker
+and no clock, which is the right way to test a policy and is not evidence that
+the feature works. That is precisely the lesson the compute session recorded on
+the same day, one kind earlier.
 
 **The honest risk.** `localDisk` is marked `** EXPERIMENTAL; SUBJECT TO
 BACKWARDS-INCOMPATIBLE CHANGE **` upstream and the scheduler behind it describes
