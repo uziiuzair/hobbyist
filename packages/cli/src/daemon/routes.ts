@@ -21,6 +21,7 @@ import {
 } from '@hobby.sh/core'
 import { createAppResource, deployApp, type AppSource } from '@hobby.sh/app'
 import { connectionString, createPostgres, runQuery } from '@hobby.sh/pg'
+import { createWorkerResource, deployWorker, describeIgnored } from '@hobby.sh/worker'
 import { getOrCreateWake, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
 import { toWireResource, toWireResources } from './wire.js'
@@ -250,6 +251,34 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
     })
   }
 
+  if (kind === 'worker') {
+    const source = readAppSource(fields)
+    if (source === null) {
+      throw new HobbyError(
+        'usage',
+        'a worker needs a source directory holding its wrangler manifest',
+        'POST /v1/projects/:name/resources expects { "kind": "worker", "name": string, "source": { "path": string } }'
+      )
+    }
+    const databaseResourceId =
+      typeof fields['databaseResourceId'] === 'string' ? fields['databaseResourceId'] : null
+
+    const result = await createWorkerResource(ctx, {
+      project,
+      name,
+      sourcePath: source.path,
+      databaseResourceId,
+    })
+    // Every wrangler key we read and did not act on, reported at the moment
+    // the user is watching. Silence here is how a platform earns a
+    // reputation for lying about a config file the user believes is
+    // authoritative.
+    for (const line of describeIgnored(result.ignored)) {
+      console.error(`worker ${name}: ignoring ${line}`)
+    }
+    return result.resource
+  }
+
   throw new HobbyError(
     'usage',
     `unsupported resource kind: ${String(kind)}`,
@@ -262,21 +291,41 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
 // pretending: there is nothing to build.
 async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
-  if (resource.kind !== 'app') {
-    throw new HobbyError('usage', `resource ${resource.name} is a ${resource.kind}, and only an app can be deployed`)
-  }
   const body = await readJsonBody(req)
   const source = isRecord(body) ? readAppSource(body) : null
 
-  const result = await deployApp(ctx, resource, source === null ? {} : { source })
-  return {
-    status: 200,
-    body: {
-      resource: await toWireResource(ctx, result.resource),
-      image: result.image,
-      logs: result.logs,
-    },
+  if (resource.kind === 'app') {
+    const result = await deployApp(ctx, resource, source === null ? {} : { source })
+    return {
+      status: 200,
+      body: {
+        resource: await toWireResource(ctx, result.resource),
+        image: result.image,
+        logs: result.logs,
+      },
+    }
   }
+
+  if (resource.kind === 'worker') {
+    const result = await deployWorker(ctx, resource, source === null ? {} : { sourcePath: source.path })
+    for (const line of describeIgnored(result.ignored)) {
+      console.error(`worker ${resource.name}: ignoring ${line}`)
+    }
+    return {
+      status: 200,
+      body: {
+        resource: await toWireResource(ctx, result.resource),
+        image: result.image,
+        ignored: result.ignored,
+        logs: result.logs,
+      },
+    }
+  }
+
+  throw new HobbyError(
+    'usage',
+    `resource ${resource.name} is a ${resource.kind}, and only an app or a worker can be deployed`
+  )
 }
 
 // The three lifecycle routes are kind-agnostic and were the last places in

@@ -29,6 +29,7 @@ import {
 } from '@hobby.sh/core'
 import { appKindHandler } from '@hobby.sh/app'
 import { postgresKindHandler } from '@hobby.sh/pg'
+import { workerKindHandler } from '@hobby.sh/worker'
 import {
   ActivityTracker,
   type HttpProxyDeps,
@@ -43,7 +44,7 @@ import {
 // learns a new name. That is what ADR 0007's "later kinds are registered by
 // implementing an interface, and earlier phases do not change" buys.
 export function createDefaultKindRegistry(): KindRegistry {
-  return createKindRegistry([postgresKindHandler, appKindHandler])
+  return createKindRegistry([postgresKindHandler, appKindHandler, workerKindHandler])
 }
 
 export interface DaemonContext {
