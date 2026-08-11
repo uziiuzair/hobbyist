@@ -12,6 +12,7 @@ import {
   cmdConnect,
   cmdDaemon,
   cmdAdopt,
+  cmdDeploy,
   cmdEject,
   cmdInit,
   cmdLogs,
@@ -122,6 +123,7 @@ function printHelp(io: Io): void {
   io.out('  hobby daemon                         run the daemon in the foreground')
   io.out('  hobby new <name>                     project + postgres + connection string')
   io.out('  hobby ls                             everything, with sleep state')
+  io.out('  hobby deploy [path]                  build a Dockerfile here and serve it')
   io.out('  hobby pg create --project <p> <name> the explicit form, for a second database')
   io.out('  hobby connect <target>                open psql against it')
   io.out('  hobby sleep <target>                  put it to sleep')
@@ -239,6 +241,13 @@ export async function run(argv: string[], io: Io): Promise<number> {
       case 'rm': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json', 'yes'] })
         return await cmdRm(ctx, positionals, flags)
+      }
+      case 'deploy': {
+        const { positionals, flags } = parseArgs(rest, {
+          bool: ['json'],
+          value: ['project', 'name', 'port', 'kind'],
+        })
+        return await cmdDeploy(ctx, positionals, flags)
       }
       case 'adopt': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json'] })

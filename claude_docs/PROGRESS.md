@@ -5,6 +5,55 @@ delete one, even when it turns out to have been wrong. Especially then.
 
 Each entry: what changed, what it cost, and what was learned.
 
+## 2026-08-10: Phase 2 compute, built in one session
+
+Two resource kinds, `app` and `worker`, plus the model fix and the HTTP wake
+router they needed. Branch `phase-2-compute`. 380 tests pass, up from 302.
+
+**The gate went first, and it went honestly.** ADR 0007's 30-day daily-use
+requirement was the guard that made the wider scope defensible, and ADR 0010
+removes it two days after Phase 1 merged. The ADR says plainly that the gate
+was correct and was removed because it was inconvenient, because a record that
+argues its own case is worth less than one that states what happened. The
+project's main risk is now unmitigated by its main mitigation.
+
+**The `worker` kind is not what `docs/compute/CLAUDE.md` described.** That file
+said "containers, and only containers"; a worker is now specifically a
+Cloudflare Worker on Cloudflare's own open-source runtime, driven by the
+`miniflare` npm package, with `wrangler.toml` as its manifest (ADR 0011).
+Miniflare's own README says it is not intended for production use, and the ADR
+overrides that explicitly with a named fallback rather than quietly.
+
+**M6 was the whole architectural cost, and it was Phase 1's bill.**
+`ResourceKind` was the single literal `'postgres'`, `Resource.config` was typed
+`PostgresConfig`, `store.ts` parsed every config as one, and `config.ts`
+appended `pgdata` to every resource of every kind. Making `Resource` a union
+discriminated on the `kind` column it already had cost no migration, and the
+compiler then found every place Phase 1 assumed Postgres. None of them was
+found by hand.
+
+**Three bugs came from running it, not from testing it.** Miniflare does not
+work under Bun (it asserts on a control pipe fd Bun's child_process does not
+provide). workerd ships no musl binary, so an Alpine runtime stage fails with
+an ENOENT that reads like a missing file and is a missing platform. And the
+readiness probe was lying: a TCP connect to a published container port succeeds
+the instant the container is created, because Docker's port proxy binds the
+host port whether or not anything inside is listening, so a worker whose
+process had already exited was recorded `running`. That last one is the same
+bug `reconcile.ts` documents at length for Postgres, reintroduced for two new
+kinds. The lesson did not transfer automatically, which is the part worth
+keeping.
+
+**The numbers.** End to end through the real wake router, on an Apple M5 Pro:
+`app` p95 133ms, `worker` p95 321ms, against a 1 second target and a 3 second
+ceiling. Both pass comfortably and both are from the easy end of the matrix;
+the five dollar VPS is not measured and the budget stays provisional until it
+is. Filed with hardware stated at
+`docs/compute/research/2026-08-10-http-cold-start-measurements.md`.
+
+**Cost:** one session. The scope taken was larger than any previous one, and
+the phase gate that existed to prevent exactly that is gone.
+
 ---
 
 ## 2026-08-07: scope reopened, Hobbyist becomes a platform

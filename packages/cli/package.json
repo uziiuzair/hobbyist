@@ -15,9 +15,11 @@
     }
   },
   "dependencies": {
+    "@hobby.sh/app": "*",
     "@hobby.sh/core": "*",
     "@hobby.sh/pg": "*",
     "@hobby.sh/proxy": "*",
+    "@hobby.sh/worker": "*",
     "argon2": "^0.45.1"
   }
 }

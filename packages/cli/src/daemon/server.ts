@@ -16,9 +16,8 @@ import { existsSync } from 'node:fs'
 import { chmod, rm } from 'node:fs/promises'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import net from 'node:net'
-import { stopPostgres } from '@hobby.sh/pg'
-import { startPgProxy } from '@hobby.sh/proxy'
-import { createProxyDeps, type DaemonContext } from './context.js'
+import { startHttpRouter, startPgProxy } from '@hobby.sh/proxy'
+import { createHttpProxyDeps, createProxyDeps, type DaemonContext } from './context.js'
 import { startHibernator } from './hibernator.js'
 import { handleRequest } from './routes.js'
 import { createStudioApp } from './studio/routes.js'
@@ -182,6 +181,19 @@ export async function startDaemon(
     wakeTimeoutMs: ctx.config.wakeTimeoutMs,
   })
 
+  // The HTTP half of the same router (M7, docs/compute/specs/2026-08-10-
+  // phase-2-compute-design.md). Caddy holds :80 and :443 and forwards
+  // everything it does not recognise here, because Caddy cannot trigger a
+  // wake (ADR 0009). Loopback only: Caddy runs on the same box and is the
+  // only intended caller, and a public bind would let anyone who can route
+  // to the machine reach every app by sending a Host header, with TLS
+  // termination skipped.
+  const httpRouter = await startHttpRouter(createHttpProxyDeps(ctx), {
+    port: ctx.config.httpPort,
+    host: '127.0.0.1',
+    wakeTimeoutMs: ctx.config.wakeTimeoutMs,
+  })
+
   // The sleep half of the pair the proxy completes. Reads activity off the
   // same ActivityTracker instance the proxy just started using (ctx.activity
   // is one source of truth for both), never polls Postgres on a schedule.
@@ -222,6 +234,15 @@ export async function startDaemon(
         console.error(`daemon shutdown: failed to close the wake-on-connect proxy cleanly: ${errorMessage(err)}`)
       }
 
+      // Same ordering constraint, same reason: an HTTP router still
+      // accepting requests would wake an app back up the instant the loop
+      // below stopped it.
+      try {
+        await httpRouter.close()
+      } catch (err) {
+        console.error(`daemon shutdown: failed to close the http wake router cleanly: ${errorMessage(err)}`)
+      }
+
       // Only after both control-plane listeners and the proxy are fully
       // closed: stopping a `running` resource is a clean stop (see
       // stopPostgres / docker.ts), which is what keeps the next wake out of
@@ -231,7 +252,7 @@ export async function startDaemon(
       const running = ctx.store.listResources().filter((resource) => resource.state === 'running')
       for (const resource of running) {
         try {
-          await stopPostgres(ctx, resource)
+          await ctx.kinds.get(resource.kind).stop(ctx, resource)
         } catch (err) {
           console.error(`daemon shutdown: failed to stop resource ${resource.id} cleanly: ${errorMessage(err)}`)
         }

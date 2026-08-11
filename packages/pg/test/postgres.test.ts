@@ -12,6 +12,7 @@ import {
   type ComputeRuntime,
   type HobbyConfig,
   type PostgresConfig,
+  expectKind,
 } from '@hobby.sh/core'
 import { createPostgres, destroyPostgres, startPostgres } from '../src/index.js'
 import { waitReady } from '../src/readiness.js'
@@ -44,6 +45,8 @@ function testHobbyConfig(): HobbyConfig {
     proxyPort: 5432,
     studioPort: 8443,
     apiPort: 7432,
+    httpPort: 7433,
+    domain: 'localhost',
     sleepAfterSeconds: 300,
     wakeTimeoutMs: 30000,
     readinessPollMs: 25,
@@ -240,7 +243,7 @@ test('destroyPostgres deletes the row even when the container was never created'
     const runtime = createFakeRuntime()
     const paths = resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-pg-test-${randomUUID()}`) })
 
-    await destroyPostgres({ store, runtime, paths, config: testHobbyConfig() }, resource)
+    await destroyPostgres({ store, runtime, paths, config: testHobbyConfig() }, expectKind(resource, 'postgres'))
 
     assert.equal(store.getResource(created.id), null)
   } finally {
@@ -285,7 +288,7 @@ test('destroyPostgres deletes the row and throws when removing the data director
               throw new Error('device or resource busy')
             },
           },
-          created
+          expectKind(created, 'postgres')
         ),
       (err: unknown) => {
         assert.ok(err instanceof Error)
@@ -334,7 +337,7 @@ test('startPostgres marks the resource failed, not starting, when runtime.start 
     const paths = resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-pg-test-${randomUUID()}`) })
 
     await assert.rejects(() =>
-      startPostgres({ store, runtime: failingRuntime, paths, config: testHobbyConfig() }, resource)
+      startPostgres({ store, runtime: failingRuntime, paths, config: testHobbyConfig() }, expectKind(resource, 'postgres'))
     )
 
     const stored = store.getResource(resource.id)

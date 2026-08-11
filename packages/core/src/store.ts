@@ -14,10 +14,10 @@ import { chmodSync, existsSync } from 'node:fs'
 import { openDatabase, type SqliteDatabase } from './sqlite.js'
 import { HobbyError } from './errors.js'
 import type {
-  PostgresConfig,
   Project,
   ProjectId,
   Resource,
+  ResourceConfig,
   ResourceId,
   ResourceKind,
   ResourceState,
@@ -34,14 +34,14 @@ export interface Store {
     projectId: ProjectId
     kind: ResourceKind
     name: string
-    config: PostgresConfig
+    config: ResourceConfig
   }): Resource
   getResource(id: ResourceId): Resource | null
   getResourceByName(projectId: ProjectId, name: string): Resource | null
   listResources(projectId?: ProjectId): Resource[]
   setResourceState(id: ResourceId, state: ResourceState): void
   touchResource(id: ResourceId, at: Date): void
-  updateResourceConfig(id: ResourceId, config: PostgresConfig): void
+  updateResourceConfig(id: ResourceId, config: ResourceConfig): void
   deleteResource(id: ResourceId): void
   allocatePort(from: number, to: number): number
   close(): void
@@ -105,6 +105,13 @@ function rowToProject(row: ProjectRow): Project {
   }
 }
 
+// The one place a stored row becomes a typed Resource, and therefore the one
+// place the discriminated union in types.ts is asserted rather than proven.
+// sqlite hands back a `kind` string and a `config` JSON blob; nothing at this
+// boundary can check that a row tagged 'worker' really holds a WorkerConfig.
+// The invariant is upheld on the way in (createResource takes a
+// ResourceConfig and the kind that goes with it) and asserted here on the way
+// out, which is the same shape of trust every row-to-object mapper makes.
 function rowToResource(row: ResourceRow): Resource {
   return {
     id: row.id,
@@ -112,10 +119,10 @@ function rowToResource(row: ResourceRow): Resource {
     kind: row.kind as ResourceKind,
     name: row.name,
     state: row.state as ResourceState,
-    config: JSON.parse(row.config) as PostgresConfig,
+    config: JSON.parse(row.config) as ResourceConfig,
     lastActiveAt: row.last_active_at === null ? null : new Date(row.last_active_at),
     createdAt: new Date(row.created_at),
-  }
+  } as Resource
 }
 
 // Owner-only. Every resource row's `config` column is plaintext JSON
@@ -245,7 +252,7 @@ export function openStore(path: string): Store {
       projectId: ProjectId
       kind: ResourceKind
       name: string
-      config: PostgresConfig
+      config: ResourceConfig
     }): Resource {
       // Same check-then-insert reasoning as createProject above: deliberate application-level
       // backstop for the UNIQUE(project_id, name) constraint, not a substitute for a
@@ -268,6 +275,9 @@ export function openStore(path: string): Store {
         null,
         createdAt.toISOString()
       )
+      // Same assertion as rowToResource, for the same reason: the caller
+      // supplies a (kind, config) pair and TypeScript cannot check that they
+      // agree from inside a function that accepts every kind.
       return {
         id,
         projectId: input.projectId,
@@ -277,7 +287,7 @@ export function openStore(path: string): Store {
         config: input.config,
         lastActiveAt: null,
         createdAt,
-      }
+      } as Resource
     },
 
     getResource,
@@ -300,7 +310,7 @@ export function openStore(path: string): Store {
       db.prepare('UPDATE resources SET last_active_at = ? WHERE id = ?').run(at.toISOString(), id)
     },
 
-    updateResourceConfig(id: ResourceId, config: PostgresConfig): void {
+    updateResourceConfig(id: ResourceId, config: ResourceConfig): void {
       db.prepare('UPDATE resources SET config = ? WHERE id = ?').run(JSON.stringify(config), id)
     },
 
@@ -308,12 +318,21 @@ export function openStore(path: string): Store {
       db.prepare('DELETE FROM resources WHERE id = ?').run(id)
     },
 
+    // Every kind allocates a host port today (they all extend
+    // ResourceConfigBase), so the guard below is defensive rather than
+    // load-bearing. It is here because the previous version read
+    // `config.hostPort` off every row unconditionally, which was correct
+    // while one kind existed and would have silently added `undefined` to
+    // the taken set the first time a kind without a port appeared, handing
+    // two resources the same port with no error anywhere.
     allocatePort(from: number, to: number): number {
       const rows = db.prepare('SELECT config FROM resources').all() as unknown as ConfigRow[]
       const taken = new Set<number>()
       for (const row of rows) {
-        const config = JSON.parse(row.config) as PostgresConfig
-        taken.add(config.hostPort)
+        const config = JSON.parse(row.config) as Partial<ResourceConfig>
+        if (typeof config.hostPort === 'number') {
+          taken.add(config.hostPort)
+        }
       }
       for (let port = from; port <= to; port++) {
         if (!taken.has(port)) return port

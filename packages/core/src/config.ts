@@ -6,13 +6,33 @@ import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
+// Which subdirectory of a resource's own directory a caller wants. Phase 1
+// had exactly one and hard-coded it; each kind now owns its own parts and
+// nothing else writes into them.
+//
+//   pgdata  the postgres data directory. ADR 0003's plain PGDATA, unchanged,
+//           so no existing resource's data moves.
+//   bundle  a worker's built script and the manifest generated from its
+//           wrangler file.
+//   state   a worker's Miniflare persistence root: KV, R2, D1, cache.
+//   do      a worker's Durable Object storage. Read (never written) by the
+//           daemon's alarm mirror, which recovers pending alarm deadlines
+//           from stopped objects' sqlite files, since a stopped container
+//           cannot fire its own timer.
+//
+// An `app` has no part at all: ADR 0007 makes Phase 2 compute stateless and
+// volumes wait for Phase 3.
+export type ResourcePart = 'pgdata' | 'bundle' | 'state' | 'do'
+
 export interface Paths {
   home: string
   statePath: string
   socketPath: string
   projectsDir: string
   configPath: string
-  resourceDataDir(project: string, resource: string): string
+  // The resource's own directory, holding whichever parts its kind uses.
+  resourceDir(project: string, resource: string): string
+  resourcePath(project: string, resource: string, part: ResourcePart): string
 }
 
 export function resolvePaths(env: NodeJS.ProcessEnv = process.env): Paths {
@@ -24,8 +44,11 @@ export function resolvePaths(env: NodeJS.ProcessEnv = process.env): Paths {
     socketPath: join(home, 'hobby.sock'),
     projectsDir,
     configPath: join(home, 'hobby.json'),
-    resourceDataDir(project: string, resource: string): string {
-      return join(projectsDir, project, resource, 'pgdata')
+    resourceDir(project: string, resource: string): string {
+      return join(projectsDir, project, resource)
+    },
+    resourcePath(project: string, resource: string, part: ResourcePart): string {
+      return join(projectsDir, project, resource, part)
     },
   }
 }
@@ -50,6 +73,17 @@ export interface HobbyConfig {
   proxyPort: number
   studioPort: number
   apiPort: number
+  // Where the HTTP wake router listens, on loopback. Caddy's catch-all route
+  // points here and every request to an app or a worker passes through it,
+  // because Caddy itself cannot trigger a wake (ADR 0009). This is to port
+  // 443 what proxyPort is to 5432.
+  httpPort: number
+  // The suffix every app and worker hostname is built under:
+  // <resource>.<project>.<domain>. Defaults to `localhost` because
+  // *.localhost already resolves to loopback in browsers and in curl, so a
+  // laptop install works with no DNS and no /etc/hosts edit. Set it to a
+  // real domain to serve a real one.
+  domain: string
   sleepAfterSeconds: number | null
   wakeTimeoutMs: number
   readinessPollMs: number
@@ -60,6 +94,8 @@ const DEFAULT_CONFIG: HobbyConfig = {
   proxyPort: 5432,
   studioPort: 8443,
   apiPort: 7432,
+  httpPort: 7433,
+  domain: 'localhost',
   sleepAfterSeconds: 300,
   wakeTimeoutMs: 30000,
   readinessPollMs: 25,
@@ -88,6 +124,8 @@ function readEnvConfig(env: NodeJS.ProcessEnv): Partial<HobbyConfig> {
   if (env.HOBBY_PROXY_PORT !== undefined) config.proxyPort = Number(env.HOBBY_PROXY_PORT)
   if (env.HOBBY_STUDIO_PORT !== undefined) config.studioPort = Number(env.HOBBY_STUDIO_PORT)
   if (env.HOBBY_API_PORT !== undefined) config.apiPort = Number(env.HOBBY_API_PORT)
+  if (env.HOBBY_HTTP_PORT !== undefined) config.httpPort = Number(env.HOBBY_HTTP_PORT)
+  if (env.HOBBY_DOMAIN !== undefined) config.domain = env.HOBBY_DOMAIN
   if (env.HOBBY_SLEEP_AFTER_SECONDS !== undefined) {
     config.sleepAfterSeconds =
       env.HOBBY_SLEEP_AFTER_SECONDS === 'null' ? null : Number(env.HOBBY_SLEEP_AFTER_SECONDS)

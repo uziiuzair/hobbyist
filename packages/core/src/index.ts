@@ -2,6 +2,7 @@
 // here, never from the individual files directly.
 
 export * from './types.js'
+export * from './kinds.js'
 export * from './errors.js'
 export * from './names.js'
 export * from './config.js'

@@ -235,7 +235,12 @@ export function Project({ projectName, onChanged }: { projectName: string; onCha
 
             <Row label="Sleeps after" value={idleMinutes === null ? 'Never' : `${idleMinutes} min idle`} />
             {selected !== undefined && <Row label="Postgres" value={selected.config.image} mono />}
-            {selected !== undefined && <Row label="Data directory" value={selected.config.dataDir} mono />}
+            {/* Data directory is a postgres-only fact: an app or a worker has
+                no PGDATA, and since the resource model was widened for Phase 2
+                the config is a union that only carries dataDir on one member. */}
+            {selected !== undefined && selected.kind === 'postgres' && (
+              <Row label="Data directory" value={selected.config.dataDir} mono />
+            )}
             <Row label="Network" value={project.networkName} mono />
             <Row
               label="Instant branching"
