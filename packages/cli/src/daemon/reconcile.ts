@@ -117,7 +117,6 @@
 // `destroying` is not in the table above because it is not a relabeling
 // problem at all. See the comment on the function below.
 
-import { destroyPostgres, pgProbe } from '@hobby.sh/pg'
 import type { Resource, ResourceState } from '@hobby.sh/core'
 import type { DaemonContext } from './context.js'
 
@@ -173,7 +172,7 @@ export interface ReconcileOptions {
 // one stuck resource must not stop the daemon from starting.
 async function resumeDestroy(ctx: DaemonContext, resource: Resource): Promise<void> {
   try {
-    await destroyPostgres(ctx, resource)
+    await ctx.kinds.get(resource.kind).destroy(ctx, resource)
   } catch (err) {
     console.error(
       `reconcile: resuming destroy of resource ${resource.id} (${resource.name}) did not finish cleanly: ${errorMessage(err)}`
@@ -193,7 +192,7 @@ export async function reconcile(ctx: DaemonContext, opts: ReconcileOptions = {})
   // (see packages/pg/src/readiness.ts), with its own connect timeout, so a
   // single call here is already bounded; the budget above bounds the sum of
   // them.
-  async function isPostgresReady(resource: Resource): Promise<boolean> {
+  async function isReady(resource: Resource): Promise<boolean> {
     if (now() >= probeDeadline) {
       if (!budgetExhaustedReported) {
         budgetExhaustedReported = true
@@ -203,11 +202,15 @@ export async function reconcile(ctx: DaemonContext, opts: ReconcileOptions = {})
       }
       return false
     }
-    const probe = (ctx.probeFactory ?? pgProbe)(resource.config)
     try {
-      return await probe()
+      // Asked of the kind's own handler rather than of Postgres directly.
+      // Each kind answers the same question its own way (a real connection
+      // for postgres, a TCP connect to the published port for an app or a
+      // worker), and reconcile does not need to know which.
+      return await ctx.kinds.get(resource.kind).probe(ctx, resource)
     } catch (err) {
-      // pgProbe never throws, but ctx.probeFactory is a seam and a throw
+      // A kind's probe is documented to resolve false rather than throw
+      // (pgProbe never throws), but ctx.probeFactory is a seam and a throw
       // from it must read as "not ready," never abort the whole reconcile.
       console.error(`reconcile: readiness probe for resource ${resource.id} threw: ${errorMessage(err)}`)
       return false
@@ -236,7 +239,7 @@ export async function reconcile(ctx: DaemonContext, opts: ReconcileOptions = {})
     } else if (!status.running) {
       bucket = 'stopped'
     } else {
-      bucket = (await isPostgresReady(resource)) ? 'ready' : 'booting'
+      bucket = (await isReady(resource)) ? 'ready' : 'booting'
     }
 
     const corrected = correctedState(resource.state, bucket)

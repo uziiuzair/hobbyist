@@ -4,6 +4,25 @@
     "rootDir": ".",
     "outDir": "dist"
   },
-  "include": ["src", "test"],
-  "references": [{ "path": "../core" }, { "path": "../pg" }, { "path": "../proxy" }]
+  "include": [
+    "src",
+    "test"
+  ],
+  "references": [
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../pg"
+    },
+    {
+      "path": "../proxy"
+    },
+    {
+      "path": "../app"
+    },
+    {
+      "path": "../worker"
+    }
+  ]
 }

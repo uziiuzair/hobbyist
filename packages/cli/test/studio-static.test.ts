@@ -18,6 +18,7 @@ import { Writable } from 'node:stream'
 import { test } from 'node:test'
 import { createFakeRuntime, openStore, resolvePaths, type HobbyConfig, type Store } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
+import { createDefaultKindRegistry } from '../src/daemon/context.js'
 import { createApp, createStudioApp, serveStudioStatic, setOperatorPassword, type DaemonContext } from '../src/index.js'
 
 function testConfig(): HobbyConfig {
@@ -26,6 +27,8 @@ function testConfig(): HobbyConfig {
     proxyPort: 5432,
     studioPort: 8443,
     apiPort: 7432,
+    httpPort: 7433,
+    domain: 'localhost',
     sleepAfterSeconds: 300,
     wakeTimeoutMs: 150,
     readinessPollMs: 20,
@@ -37,7 +40,7 @@ function buildContext(): DaemonContext {
   const home = join(tmpdir(), `hobby-studio-static-test-${randomUUID()}`)
   mkdirSync(home, { recursive: true })
   const paths = resolvePaths({ HOBBY_HOME: home })
-  return { store, runtime: createFakeRuntime(), paths, config: testConfig(), activity: new ActivityTracker() }
+  return { store, runtime: createFakeRuntime(), paths, config: testConfig(), activity: new ActivityTracker(), kinds: createDefaultKindRegistry() }
 }
 
 // A small stand-in for `npm run build -w @hobby.sh/studio`'s real output

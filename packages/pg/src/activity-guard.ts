@@ -64,7 +64,13 @@ function deadline(ms: number): Promise<void> {
 // sleep a database it could not even confirm was idle, which is the worst
 // possible reading of that signal; callers must treat it the same as
 // 'active'.
-export type ActivityGuardResult = 'active' | 'idle' | 'unreachable'
+// Declared in @hobby.sh/core (kinds.ts) since the resource kind registry
+// arrived, because a kind handler's optional `guard` returns it and core
+// cannot depend on this package. Re-exported here so every existing importer
+// keeps working and so the reasoning above stays next to the one
+// implementation that produces all three values.
+import type { ActivityGuardResult } from '@hobby.sh/core'
+export type { ActivityGuardResult }
 
 const ACTIVE_QUERY_SQL = `
   SELECT count(*)::int AS active

@@ -31,23 +31,82 @@
 //     activity.ts's ActivityTracker (packages/proxy) for connectionCount,
 //     which is simply ctx.activity.count(resource.id), already free.
 
-import type { PostgresConfig, Resource } from '@hobby.sh/core'
+import type {
+  AppConfig,
+  AppResource,
+  PostgresConfig,
+  PostgresResource,
+  Resource,
+  ResourceConfig,
+  WorkerConfig,
+  WorkerResource,
+} from '@hobby.sh/core'
 import type { DaemonContext } from './context.js'
 import { resourceSize } from './size.js'
 
 export type WirePostgresConfig = Omit<PostgresConfig, 'password'>
+export type WireAppConfig = AppConfig
+export type WireWorkerConfig = WorkerConfig
+export type WireResourceConfig = WirePostgresConfig | WireAppConfig | WireWorkerConfig
 
-export interface WireResource extends Omit<Resource, 'config'> {
-  config: WirePostgresConfig
+interface WireExtras {
   sizeBytes: number | null
   connectionCount: number
 }
 
+// Discriminated on `kind`, exactly like Resource itself, rather than a single
+// interface with a union-typed config. The difference matters at every
+// consumer: `resource.kind === 'app' && resource.config.hostname` only
+// narrows if the two travel together, and the flattened version silently
+// forced a cast at each print site in the CLI.
+//
+// App and worker configs keep their own types because redaction rewrites
+// values in place and does not change the shape; only postgres loses a field.
+export type WireResource =
+  | (Omit<PostgresResource, 'config'> & { config: WirePostgresConfig } & WireExtras)
+  | (AppResource & WireExtras)
+  | (WorkerResource & WireExtras)
+
+// What a redacted value reads as. A visible placeholder rather than a
+// removed key, so a caller can still see that a variable is set without
+// being handed its value.
+const REDACTED = '<redacted>'
+
+function redactValues(values: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.keys(values).map((key) => [key, REDACTED]))
+}
+
+// One place where a stored config becomes something safe to hand out. Phase 1
+// had exactly one secret to strip, the generated superuser password. Phase 2
+// adds two more, and they are worse in one specific way: an app's `env` and a
+// worker's `vars` hold whatever the user put there, which in practice means
+// third-party API keys.
+//
+// The threat is not Studio, whose caller already authenticated. It is
+// everywhere a payload from this boundary ends up: `--json` output redirected
+// to a file, shell history, CI logs, and agent transcripts. That is the same
+// reasoning that put the password redaction here in the first place.
+function redactConfig(kind: Resource['kind'], config: ResourceConfig): WireResourceConfig {
+  if (kind === 'postgres') {
+    const { password: _password, ...rest } = config as PostgresConfig
+    return rest
+  }
+  if (kind === 'app') {
+    const app = config as AppConfig
+    return { ...app, env: redactValues(app.env) }
+  }
+  const worker = config as WorkerConfig
+  return { ...worker, vars: redactValues(worker.vars) }
+}
+
 export async function toWireResource(ctx: DaemonContext, resource: Resource): Promise<WireResource> {
-  const { password: _password, ...config } = resource.config
+  const config = redactConfig(resource.kind, resource.config)
   const sizeBytes = await resourceSize(ctx, resource)
   const connectionCount = ctx.activity.count(resource.id)
-  return { ...resource, config, sizeBytes, connectionCount }
+  // The one assertion, for the same reason store.ts's rowToResource has one:
+  // redactConfig returns the union, and TypeScript cannot see that its result
+  // corresponds to this resource's own kind.
+  return { ...resource, config, sizeBytes, connectionCount } as WireResource
 }
 
 export function toWireResources(ctx: DaemonContext, resources: Resource[]): Promise<WireResource[]> {

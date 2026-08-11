@@ -39,6 +39,15 @@ export async function resourceSize(
 ): Promise<number | null> {
   const known = cacheFor(ctx)
 
+  // Size means "how big is the database", which only a database has. An app
+  // or a worker has no equivalent number worth reporting here: their disk
+  // footprint is an image, shared between resources and not attributable to
+  // one. Answered null rather than 0, which is what every consumer already
+  // renders as a dash for a resource whose size is unknown.
+  if (resource.kind !== 'postgres') {
+    return null
+  }
+
   if (resource.state !== 'running') {
     return known.get(resource.id) ?? null
   }

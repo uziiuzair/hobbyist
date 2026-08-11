@@ -57,7 +57,13 @@ that matters, because it is the difference between a decision and a dogma.
 | [0007](0007-hobbyist-is-a-platform.md) | Hobbyist is a platform, not a Postgres tool |
 | [0008](0008-studio-is-network-exposed.md) | Studio is network exposed, with an operator credential |
 | [0009](0009-caddy-as-http-front-door.md) | Caddy as the HTTP front door, run as a managed container |
+| [0010](0010-phase-2-begins-without-the-30-day-gate.md) | Phase 2 begins without the 30-day gate |
+| [0011](0011-workerd-via-miniflare-as-the-worker-runtime.md) | workerd, via Miniflare, as the `worker` runtime |
 
 0007 supersedes the scope section of the original root `CLAUDE.md` and is the one
 to read first if you are wondering why this is bigger than a database tool. 0001
 through 0005 survive it unchanged.
+
+0010 removes 0007's 30-day daily-use gate, which was the guard this folder's
+own text above calls the one that matters. Read it before concluding the gate
+still protects anything. 0007's other three guards are unaffected.

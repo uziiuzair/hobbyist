@@ -30,10 +30,12 @@ import {
   type Resource,
   type ResourceState,
   type Store,
+  expectKind,
 } from '@hobby.sh/core'
 import { startPostgres, stopPostgres, type ActivityGuardResult } from '@hobby.sh/pg'
 import { ActivityTracker, type ConnectionHandle } from '@hobby.sh/proxy'
 import { createApp, createProxyDeps, shouldSleep, startHibernator, type DaemonContext } from '../src/index.js'
+import { createDefaultKindRegistry } from '../src/daemon/context.js'
 
 function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
   return {
@@ -41,6 +43,8 @@ function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
     proxyPort: 5432,
     studioPort: 8443,
     apiPort: 7432,
+    httpPort: 7433,
+    domain: 'localhost',
     sleepAfterSeconds: 300,
     // Short on purpose: real startPostgres readiness waits below run against
     // a fake runtime with nothing actually listening on the allocated port,
@@ -55,7 +59,7 @@ function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
 function buildContext(runtime: ComputeRuntime = createFakeRuntime(), activity: ActivityTracker = new ActivityTracker()): DaemonContext {
   const store: Store = openStore(':memory:')
   const paths = resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-hibernator-test-${randomUUID()}`) })
-  return { store, runtime, paths, config: testConfig(), activity }
+  return { store, runtime, paths, config: testConfig(), activity, kinds: createDefaultKindRegistry() }
 }
 
 function samplePostgresConfig(overrides: Partial<PostgresConfig> = {}): PostgresConfig {
@@ -563,7 +567,7 @@ test('a wake that came from the CLI or Studio, with no proxy connection at all, 
   // getOrCreateWake, which POST /v1/resources/:id/start reaches through
   // startPostgres). No proxy connection is ever opened here, which is the
   // whole point: this is the case that used to run forever.
-  await startPostgres(ctx, resource)
+  await startPostgres(ctx, expectKind(resource, 'postgres'))
   assert.equal(ctx.store.getResource(resource.id)?.state, 'running')
   assert.equal(activity.idleSeconds(resource.id), 0, 'a wake must start the idle clock at the moment of the wake')
 
@@ -605,13 +609,13 @@ test('stopping a resource clears its idle clock, so the next wake is not slept o
   activity.close(activity.open(resource.id))
   clock.nowMs += 10_000_000 // absurdly long ago
 
-  await stopPostgres(ctx, resource)
+  await stopPostgres(ctx, expectKind(resource, 'postgres'))
   assert.equal(activity.idleSeconds(resource.id), null, 'a stopped resource has no idle clock to reason from')
 
   // Now something wakes it again (Studio's query route, `hobby wake`).
   const woken = ctx.store.getResource(resource.id)
   assert.ok(woken !== null)
-  await startPostgres(ctx, woken)
+  await startPostgres(ctx, expectKind(woken, 'postgres'))
   assert.equal(ctx.store.getResource(resource.id)?.state, 'running')
 
   const guard = async (): Promise<ActivityGuardResult> => 'idle'

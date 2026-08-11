@@ -2,20 +2,21 @@
 
 What is true right now. Overwrite freely, this file is not history.
 
-## State: Phase 1 built, unverified against real hardware
+## State: Phase 1 on `main`, Phase 2 compute on `phase-2-compute`
 
-**Branch `phase-1` holds the whole of Phase 1, built in one unattended session
-on 2026-08-07.** Six packages, 221 tests passing plus 23 in Studio's own suite,
-root typecheck clean. It has never run against real Docker or a real Postgres.
+Phase 1 is merged and has been exercised against real Docker: eject end to end
+on 2026-08-08, cancel routing against a live Postgres on 2026-08-10.
 
-**Read `claude_docs/HANDOFF-2026-08-07.md` before touching it.** Three things
-matter first: do not expose Studio yet, `hobby eject` is deliberately not built,
-and Studio cannot be logged into because three finished units were never wired.
+**Phase 2 compute is built on branch `phase-2-compute`, not merged.** Two new
+resource kinds, `app` and `worker`, the model fix they needed, and the HTTP
+wake router. 380 tests pass. The design is at
+`docs/compute/specs/2026-08-10-phase-2-compute-design.md` and is the thing to
+read before touching any of it.
 
-The scope was deliberately widened on 2026-08-07, one day after it was written.
-Hobbyist is now a single-box platform rather than a Postgres-only tool. That is
-recorded in `docs/decisions/0007`, which supersedes the original scope section
-and is the first thing to read.
+**The phase gate is gone.** ADR 0007 required 30 consecutive days of Phase 1
+daily use before Phase 2 began. `docs/decisions/0010` removes it, two days
+after Phase 1 merged, and says plainly that the gate was correct and was
+removed anyway. Nothing now paces this project except the author.
 
 ## What is settled
 
@@ -25,60 +26,62 @@ and is the first thing to read.
 | Scope | Platform, four phases, Projects holding typed resources | ADR 0007 |
 | Studio access | Network exposed, TLS, one operator credential | ADR 0008 |
 | HTTP front door | Caddy, as a managed container, via its admin API | ADR 0009 |
-| One box | Still one box. ADRs 0001 through 0005 all survive | ADR 0007 |
+| Phase 2 pacing | No gate. Removed deliberately | ADR 0010 |
+| `worker` runtime | workerd, via the miniflare npm package, pinned to 4.20260730.0 | ADR 0011 |
+| How a kind is added | Implement `ResourceKindHandler`, add one line to `createDefaultKindRegistry` | `packages/core/src/kinds.ts` |
 | The wedge | Everything sleeps, everything wakes on demand | root `CLAUDE.md` |
-| Cold start | Under 1s target, 3s hard ceiling | `docs/proxy/` |
-| Routing | Database name is the project | `docs/proxy/` |
-| Activity sensor | The proxy, not `pg_stat_activity` polling | `docs/hibernation/` |
-| Control surface | One daemon HTTP API. CLI and MCP over a unix socket, Studio over loopback behind Caddy | `docs/cli/` |
+| Cold start, Postgres | 170 to 186ms p50/p95, measured 2026-08-07 | `docs/proxy/research/` |
+| Cold start, HTTP | app p95 133ms, worker p95 321ms, measured 2026-08-10 on a Mac | `docs/compute/research/` |
 
 ## Build order
 
 | Milestone | Ships | State |
 |---|---|---|
-| **M0** | Throwaway spike: container start, readiness, TCP splice, benchmarked on a five dollar VPS and a Mac Mini | **next** |
-| **M1** | `core`, `pg`, `cli`, daemon, the ADR 0003 invariant tests | not started |
-| **M2** | `proxy`. Wake on connect. **The keystone** | not started |
-| **M3** | Hibernation | not started |
-| **M4** | `studio`, and Caddy arrives with it | not started |
-| **M5** | `mcp` | not started |
+| M0 to M5 | Phase 1 | merged to `main` |
+| **M6** | Resource kind registry, model widened | **built** |
+| **M7** | HTTP wake router, static Caddy catch-all | **built** |
+| **M8** | `app` kind: build, deploy, wake, logs, eject | **built** |
+| **M9** | `worker` kind: wrangler.toml, Miniflare, hyperdrive | **built, verified against real Docker** |
+| **M10** | HTTP cold start measured | **half done**: Mac yes, five dollar VPS no |
 
-Each of M1 through M5 gets its own spec in the relevant capability's `specs/`
-folder, then its own plan. There is deliberately no single Phase 1 spec.
+## The immediate next steps
 
-## The immediate next step
-
-**M0, and it is not building anything.** Prove the cold start budget before
-committing to a design that assumes it. Container start, plus Postgres readiness,
-plus a spliced socket, measured honestly on real hardware, on both Bun and Node.
-
-If it cannot beat 3 seconds, the project changes shape, and finding that out in
-week one is the entire point of putting it first.
+1. **Run the cold start matrix on a five dollar VPS.** The Mac numbers pass
+   comfortably and are the easy end. Until the VPS is measured, the budget is
+   an assertion with one favourable data point.
+2. **Wire Caddy.** `createCaddyManager` still has no caller, which is a Phase 1
+   loose end (see `HANDOFF-2026-08-07.md`), and Phase 2 makes it load-bearing.
+   `network: 'host'` does not exist on Docker Desktop for macOS, so this fails
+   on the author's own machine first.
+3. **Merge `phase-2-compute` to `main`,** or decide not to.
 
 ## Open risks
 
-- **Cold start is still unmeasured.** It is the number the project is judged on
-  and M0 exists to close this.
-- **Scope is now the dominant risk**, not a background one. The mitigation is the
-  30-day daily-use gate before Phase 2 in ADR 0007, and it will feel unreasonable
-  at exactly the moment it matters.
-- **The ext4 problem.** Instant branching needs reflinks. ext4 is the default on
-  many cheap VPS images and has no reflink support. Detect at `hobby init`, warn
-  loudly, proceed.
-- **Client connect timeouts.** Some ORMs and pool managers default to timeouts
-  shorter than a container start. Still the most likely source of "it does not
-  work" reports, and the M2 client matrix is the gate for it.
-- **Studio is the largest security surface in the project** now that it is
-  exposed. It gets reviewed as security code, not as UI.
-- **A JavaScript wire proxy is unusual.** M0 measures it on both runtimes rather
-  than assuming.
+- **Scope, and nothing now checks it.** ADR 0007 named abandonment at 40
+  percent as the failure mode and named the phase gate as the mechanism against
+  it. The gate is gone. The remaining guards are real but none of them paces
+  anything.
+- **Miniflare is a documented dev tool running as a server.** ADR 0011, with a
+  named fallback: drop it from the runtime path and generate workerd capnp
+  directly, at the cost of the storage APIs.
+- **A Durable Object alarm cannot fire inside a stopped container.** A worker
+  that sets an alarm misses it until the durable-objects work lands an external
+  schedule holder. The seam is marked in `packages/worker/src/kind.ts`.
+- **Caddy on macOS.** Above.
+- **The ext4 problem.** Unchanged: instant branching needs reflinks, ext4 has
+  none, detect at `hobby init` and warn.
+- **Studio has not been read by a person.** Unchanged from Phase 1 and still
+  the largest security surface in the project.
 
-## Prior art not yet read
+## The lesson from this session worth keeping
 
-Still none of it. Xata's open-source core is the closest existing work on the
-database half and Coolify and Dokploy are now genuinely adjacent on the compute
-half. Read Xata before writing the proxy.
+Three real bugs came from running the thing, none from testing it, and one of
+them was a bug the codebase had already documented at length for a different
+kind. `reconcile.ts` explains exactly why a TCP-level check cannot answer "is
+it serving"; both new kinds shipped with that check anyway until real Docker
+proved it wrong. A lesson recorded in one kind's comments does not transfer to
+the next kind by itself.
 
 ---
 
-Last Updated: 2026-08-07
+Last Updated: 2026-08-10

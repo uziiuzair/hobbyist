@@ -88,8 +88,10 @@ idea unworkable, so it gets tested early rather than late. `portability/` is in
 M1 because ADR 0003's invariants are executable tests that have to exist before
 there is anything to break them.
 
-**Phase 2 is gated.** It does not begin until Phase 1 has been in daily use for
-30 consecutive days. See `docs/decisions/0007`.
+**Phase 2 is no longer gated.** ADR 0007 required 30 consecutive days of daily
+use before it began; `docs/decisions/0010` removed that gate on 2026-08-10 and
+records honestly why. Phase 2's design is filed at
+`docs/compute/specs/2026-08-10-phase-2-compute-design.md`.
 
 `research/` accepts incomplete and even wrong, as long as it is dated. `specs/`
 must be actionable by an engineer who did not read the conversation. When a

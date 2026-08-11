@@ -14,17 +14,15 @@ import {
   DEFAULT_PORT_BIND,
   HobbyError,
   validateName,
+  type AppResource,
+  type PostgresResource,
+  type WorkerResource,
   type Project,
   type Resource,
 } from '@hobby.sh/core'
-import {
-  connectionString,
-  createPostgres,
-  destroyPostgres,
-  runQuery,
-  startPostgres,
-  stopPostgres,
-} from '@hobby.sh/pg'
+import { createAppResource, deployApp, type AppSource } from '@hobby.sh/app'
+import { connectionString, createPostgres, runQuery } from '@hobby.sh/pg'
+import { buildRunnerManifest, createWorkerResource, deployWorker, describeIgnored } from '@hobby.sh/worker'
 import { getOrCreateWake, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
 import { toWireResource, toWireResources } from './wire.js'
@@ -103,6 +101,24 @@ function getResourceOrThrow(ctx: DaemonContext, id: string): Resource {
   return resource
 }
 
+// The narrowing gate for the handful of routes that are genuinely
+// Postgres-only: a connection string and an ad-hoc SQL query mean nothing
+// for an app or a worker. Everything else in this file dispatches through
+// the kind registry instead and never needs to know.
+//
+// `usage`, not `internal`: asking Studio for a connection string against an
+// app is a reasonable mistake for a caller to make, and the message names
+// the actual kind so the caller can see why.
+function expectPostgres(resource: Resource, what: string): PostgresResource {
+  if (resource.kind !== 'postgres') {
+    throw new HobbyError(
+      'usage',
+      `resource ${resource.name} is a ${resource.kind}, and ${what} is only meaningful for a postgres resource`
+    )
+  }
+  return resource
+}
+
 async function createProjectRoute(ctx: DaemonContext, req: IncomingMessage): Promise<Project> {
   const body = await readJsonBody(req)
   const name = isRecord(body) ? body['name'] : undefined
@@ -135,7 +151,7 @@ async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<Rou
   for (const resource of resources) {
     ctx.store.setResourceState(resource.id, 'destroying')
     try {
-      await destroyPostgres(ctx, resource)
+      await ctx.kinds.get(resource.kind).destroy(ctx, resource)
     } catch (err) {
       failures.push(`${resource.name}: ${errorMessage(err)}`)
     }
@@ -167,46 +183,173 @@ async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<Rou
   return { status: 200, body: { deleted: true } }
 }
 
+// The default port an app's process is asked to listen on. Handed to the
+// container as $PORT, so an image that reads it needs no configuration at
+// all, and an image that hardcodes something else declares it here.
+const DEFAULT_APP_PORT = 3000
+
+function readAppSource(body: Record<string, unknown>): AppSource | null {
+  const source = body['source']
+  if (!isRecord(source)) {
+    return null
+  }
+  const path = source['path']
+  if (typeof path !== 'string' || path.length === 0) {
+    return null
+  }
+  const dockerfile = source['dockerfile']
+  return { path, dockerfile: typeof dockerfile === 'string' && dockerfile.length > 0 ? dockerfile : 'Dockerfile' }
+}
+
+function readStringMap(value: unknown): Record<string, string> {
+  if (!isRecord(value)) {
+    return {}
+  }
+  const out: Record<string, string> = {}
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === 'string') {
+      out[key] = entry
+    }
+  }
+  return out
+}
+
 async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, projectName: string): Promise<Resource> {
   const project = getProjectByNameOrThrow(ctx, projectName)
   const body = await readJsonBody(req)
-  const kind = isRecord(body) ? body['kind'] : undefined
-  const name = isRecord(body) ? body['name'] : undefined
+  const fields = isRecord(body) ? body : {}
+  const kind = fields['kind']
+  const name = fields['name']
 
-  if (kind !== 'postgres') {
-    throw new HobbyError(
-      'usage',
-      `unsupported resource kind: ${String(kind)}`,
-      'only "postgres" is supported in this milestone'
-    )
-  }
   if (typeof name !== 'string' || name.length === 0) {
     throw new HobbyError(
       'usage',
       'name is required',
-      'POST /v1/projects/:name/resources expects { "kind": "postgres", "name": string }'
+      'POST /v1/projects/:name/resources expects { "kind": "postgres" | "app", "name": string }'
     )
   }
 
-  return createPostgres(ctx, { project, name })
+  if (kind === 'postgres') {
+    return createPostgres(ctx, { project, name })
+  }
+
+  if (kind === 'app') {
+    const source = readAppSource(fields)
+    const image = typeof fields['image'] === 'string' && fields['image'].length > 0 ? fields['image'] : null
+    const rawPort = fields['port']
+    const containerPort = typeof rawPort === 'number' && Number.isInteger(rawPort) ? rawPort : DEFAULT_APP_PORT
+    const databaseResourceId =
+      typeof fields['databaseResourceId'] === 'string' ? fields['databaseResourceId'] : null
+
+    return createAppResource(ctx, {
+      project,
+      name,
+      source,
+      image,
+      containerPort,
+      env: readStringMap(fields['env']),
+      databaseResourceId,
+    })
+  }
+
+  if (kind === 'worker') {
+    const source = readAppSource(fields)
+    if (source === null) {
+      throw new HobbyError(
+        'usage',
+        'a worker needs a source directory holding its wrangler manifest',
+        'POST /v1/projects/:name/resources expects { "kind": "worker", "name": string, "source": { "path": string } }'
+      )
+    }
+    const databaseResourceId =
+      typeof fields['databaseResourceId'] === 'string' ? fields['databaseResourceId'] : null
+
+    const result = await createWorkerResource(ctx, {
+      project,
+      name,
+      sourcePath: source.path,
+      databaseResourceId,
+    })
+    // Every wrangler key we read and did not act on, reported at the moment
+    // the user is watching. Silence here is how a platform earns a
+    // reputation for lying about a config file the user believes is
+    // authoritative.
+    for (const line of describeIgnored(result.ignored)) {
+      console.error(`worker ${name}: ignoring ${line}`)
+    }
+    return result.resource
+  }
+
+  throw new HobbyError(
+    'usage',
+    `unsupported resource kind: ${String(kind)}`,
+    `registered kinds: ${ctx.kinds.kinds().join(', ')}`
+  )
 }
 
+// Rebuild an app from its source and prove the result serves before calling
+// it deployed. Postgres has no equivalent and answers `usage` rather than
+// pretending: there is nothing to build.
+async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
+  const resource = getResourceOrThrow(ctx, id)
+  const body = await readJsonBody(req)
+  const source = isRecord(body) ? readAppSource(body) : null
+
+  if (resource.kind === 'app') {
+    const result = await deployApp(ctx, resource, source === null ? {} : { source })
+    return {
+      status: 200,
+      body: {
+        resource: await toWireResource(ctx, result.resource),
+        image: result.image,
+        logs: result.logs,
+      },
+    }
+  }
+
+  if (resource.kind === 'worker') {
+    const result = await deployWorker(ctx, resource, source === null ? {} : { sourcePath: source.path })
+    for (const line of describeIgnored(result.ignored)) {
+      console.error(`worker ${resource.name}: ignoring ${line}`)
+    }
+    return {
+      status: 200,
+      body: {
+        resource: await toWireResource(ctx, result.resource),
+        image: result.image,
+        ignored: result.ignored,
+        logs: result.logs,
+      },
+    }
+  }
+
+  throw new HobbyError(
+    'usage',
+    `resource ${resource.name} is a ${resource.kind}, and only an app or a worker can be deployed`
+  )
+}
+
+// The three lifecycle routes are kind-agnostic and were the last places in
+// the daemon that named Postgres. `hobby rm`, `hobby sleep` and `hobby wake`
+// now mean the same thing for a database, an app and a worker, which is what
+// makes the wedge ("everything sleeps, everything wakes on demand") one
+// mechanism rather than three.
 async function destroyResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
   ctx.store.setResourceState(resource.id, 'destroying')
-  await destroyPostgres(ctx, resource)
+  await ctx.kinds.get(resource.kind).destroy(ctx, resource)
   return { status: 200, body: { deleted: true } }
 }
 
 async function startResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
-  await startPostgres(ctx, resource)
+  await ctx.kinds.get(resource.kind).start(ctx, resource)
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
 
 async function stopResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
-  await stopPostgres(ctx, resource)
+  await ctx.kinds.get(resource.kind).stop(ctx, resource)
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
 
@@ -218,7 +361,12 @@ async function stopResourceRoute(ctx: DaemonContext, id: string): Promise<RouteR
 // HobbyConfig has no field yet for an externally reachable host, and adding
 // one is out of scope here.
 function connectionRoute(ctx: DaemonContext, id: string): RouteResult {
-  const resource = getResourceOrThrow(ctx, id)
+  // Genuinely postgres-only, unlike the lifecycle routes above: there is no
+  // such thing as a connection string for an app or a worker, and an app's
+  // reachable address is its hostname, served over HTTP. Answered with
+  // `usage` rather than `internal` because asking for one is a reasonable
+  // mistake for a caller to make, not a bug in the daemon.
+  const resource = expectPostgres(getResourceOrThrow(ctx, id), 'a connection string')
   const project = ctx.store.getProject(resource.projectId)
   if (project === null) {
     throw new HobbyError('internal', `resource ${id} has no owning project (project ${resource.projectId} is gone)`)
@@ -247,7 +395,16 @@ async function logsRoute(ctx: DaemonContext, id: string, url: URL): Promise<Rout
 // no side effects, nothing stopped, nothing deleted, no files written to
 // disk. Real `hobby eject` (moving the daemon out of the way entirely) is
 // portability/'s job and is not built here, see the task report.
-function renderCompose(resources: Resource[]): string {
+function renderCompose(
+  ctx: DaemonContext,
+  projectName: string,
+  resources: PostgresResource[],
+  apps: AppResource[] = [],
+  workers: WorkerResource[] = []
+): string {
+  // Every postgres resource in this project, by id, so an app's
+  // databaseResourceId can be rewritten to the compose service name below.
+  const byId = new Map(resources.map((resource) => [resource.id, resource]))
   const lines: string[] = ['services:']
   for (const resource of resources) {
     const cfg = resource.config
@@ -290,7 +447,106 @@ function renderCompose(resources: Resource[]): string {
     // would break eject's whole reason to exist.
     lines.push(`      - "${cfg.dataDir}:/var/lib/postgresql"`)
   }
+
+  for (const app of apps) {
+    const cfg = app.config
+    lines.push(`  ${app.name}:`)
+    lines.push(`    image: ${cfg.image}`)
+    // Emitted alongside `image:` rather than instead of it when we built it
+    // from source. compose accepts both and treats the image as the tag for
+    // what it builds, so the file starts immediately from the image already
+    // on disk AND can be rebuilt from the same Dockerfile later. An ejected
+    // stack that can only ever run one frozen image is not the "you can
+    // always leave" promise, it is a snapshot.
+    if (cfg.source !== null) {
+      lines.push('    build:')
+      lines.push(`      context: ${cfg.source.path}`)
+      lines.push(`      dockerfile: ${cfg.source.dockerfile}`)
+    }
+    lines.push('    restart: unless-stopped')
+    lines.push('    environment:')
+    lines.push(`      PORT: "${cfg.containerPort}"`)
+    const database = cfg.databaseResourceId === null ? undefined : byId.get(cfg.databaseResourceId)
+    if (database !== undefined) {
+      // Rewritten to the COMPOSE service name, not the hobby container name.
+      // Inside the emitted stack the database answers to `primary`, not to
+      // `hobby-blog-primary`, so carrying the hobby name through would hand
+      // the user an app that starts and then cannot reach its database, which
+      // is a worse failure than not emitting it at all because it looks like
+      // it worked.
+      const db = database.config
+      const user = encodeURIComponent(db.superuser)
+      const password = encodeURIComponent(db.password)
+      lines.push(`      DATABASE_URL: postgres://${user}:${password}@${database.name}:5432/${db.database}`)
+    }
+    for (const [key, value] of Object.entries(cfg.env)) {
+      lines.push(`      ${key}: ${JSON.stringify(value)}`)
+    }
+    lines.push('    ports:')
+    lines.push(`      - "${DEFAULT_PORT_BIND}:${cfg.hostPort}:${cfg.containerPort}"`)
+  }
+
+  for (const worker of workers) {
+    const cfg = worker.config
+    lines.push(`  ${worker.name}:`)
+    lines.push(`    image: ${cfg.image}`)
+    // No `build:` counterpart to the app kind's, deliberately. A worker's
+    // Dockerfile is generated by hobby and lives under hobby's own home
+    // directory, so pointing an ejected stack at it would make the file
+    // depend on hobby still being installed, which is the opposite of what
+    // ejecting means. The image is self-contained; rebuilding it is
+    // `wrangler`'s job once you have left.
+    lines.push('    restart: unless-stopped')
+    lines.push('    environment:')
+    const manifest = buildRunnerManifest(ctx, worker)
+    const database = cfg.databaseResourceId === null ? undefined : byId.get(cfg.databaseResourceId)
+    if (database !== undefined && manifest.hyperdrives !== undefined) {
+      // Same rewrite as the app kind's DATABASE_URL, for the same reason:
+      // inside the emitted stack the database answers to its compose service
+      // name, not to `hobby-blog-primary`.
+      const db = database.config
+      const user = encodeURIComponent(db.superuser)
+      const password = encodeURIComponent(db.password)
+      manifest.hyperdrives = {
+        ...manifest.hyperdrives,
+        DB: `postgres://${user}:${password}@${database.name}:5432/${db.database}`,
+      }
+    }
+    lines.push(`      HOBBY_WORKER_MANIFEST: ${JSON.stringify(JSON.stringify(manifest))}`)
+    lines.push('    ports:')
+    lines.push(`      - "${DEFAULT_PORT_BIND}:${cfg.hostPort}:${cfg.containerPort}"`)
+    lines.push('    volumes:')
+    // Both mounts, because a worker that comes up with an empty durable
+    // object directory has lost its data as surely as a postgres pointed at
+    // an empty PGDATA.
+    lines.push(`      - "${ctx.paths.resourcePath(projectName, worker.name, 'state')}:/hobby/state"`)
+    lines.push(`      - "${ctx.paths.resourcePath(projectName, worker.name, 'do')}:/hobby/do"`)
+  }
+
   return `${lines.join('\n')}\n`
+}
+
+// The Caddy half of eject. ADR 0009 is explicit that emitting the compose
+// file alone leaks the promise: "an ejected app that no longer serves is not
+// an ejected app." A Caddyfile is emitted rather than the JSON we push to the
+// admin API, because the departing user is going to hand-edit this, and
+// nobody hand-edits Caddy JSON.
+//
+// Deliberately points at the published host ports rather than at container
+// names: this Caddy is not necessarily inside the compose network, and the
+// ports are published on loopback either way.
+function renderCaddyfile(routed: Array<{ hostname: string; hostPort: number }>): string {
+  if (routed.length === 0) {
+    return ''
+  }
+  const lines: string[] = []
+  for (const entry of routed) {
+    lines.push(`${entry.hostname} {`)
+    lines.push(`\treverse_proxy ${DEFAULT_PORT_BIND}:${entry.hostPort}`)
+    lines.push('}')
+    lines.push('')
+  }
+  return lines.join('\n')
 }
 
 function isUnknownArray(value: unknown): value is unknown[] {
@@ -311,7 +567,7 @@ function isUnknownArray(value: unknown): value is unknown[] {
 // the driver's own parameterized query path; this function never touches
 // the SQL string itself.
 async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
-  const resource = getResourceOrThrow(ctx, id)
+  const resource = expectPostgres(getResourceOrThrow(ctx, id), 'running SQL')
   const body = await readJsonBody(req)
   const sql = isRecord(body) ? body['sql'] : undefined
   const rawParams = isRecord(body) ? body['params'] : undefined
@@ -341,7 +597,7 @@ async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string):
   // re-reading is what the proxy's own handleStartup does after a wake and
   // matching that is cheap insurance against relying on a config snapshot
   // that raced a concurrent change).
-  const ready = getResourceOrThrow(ctx, id)
+  const ready = expectPostgres(getResourceOrThrow(ctx, id), 'running SQL')
   // A query is activity, exactly as much as a proxy connection is, and the
   // hibernator has to hear about it from here because nothing else will:
   // Studio's Tables, Sql and Schema views never open a proxy connection.
@@ -387,10 +643,35 @@ async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string):
 async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): Promise<RouteResult> {
   const project = getProjectByNameOrThrow(ctx, name)
   const resources = ctx.store.listResources(project.id)
+  // Only postgres resources are rendered today. Emitting compose services for
+  // `app` and `worker` is M8 and M9 respectively (see
+  // docs/compute/specs/2026-08-10-phase-2-compute-design.md), and ADR 0007 is
+  // explicit that a kind which cannot be ejected does not ship. Filtering
+  // rather than throwing keeps eject working for the database half of a mixed
+  // project; the count of skipped resources is reported so nobody reads an
+  // incomplete compose file as a complete one.
+  const postgresResources = resources.filter((r) => r.kind === 'postgres')
+  const appResources = resources.filter((r) => r.kind === 'app')
+  const workerResources = resources.filter((r) => r.kind === 'worker')
+  // Every kind registered today can be ejected, which is what ADR 0007
+  // requires before a kind ships. Kept as a computed list rather than deleted
+  // so the next kind cannot quietly ship without one.
+  const EJECTABLE: ReadonlySet<string> = new Set(['postgres', 'app', 'worker'])
+  const notEjectable = resources
+    .filter((r) => !EJECTABLE.has(r.kind))
+    .map((r) => `${r.name} (${r.kind})`)
   const body = {
-    compose: renderCompose(resources),
-    dataDirs: resources.map((resource) => resource.config.dataDir),
+    compose: renderCompose(ctx, project.name, postgresResources, appResources, workerResources),
+    // ADR 0009: without this, an ejected app comes up on a loopback port with
+    // nothing routing a hostname to it, which is a running container rather
+    // than a working site.
+    caddyfile: renderCaddyfile([
+      ...appResources.map((r) => ({ hostname: r.config.hostname, hostPort: r.config.hostPort })),
+      ...workerResources.map((r) => ({ hostname: r.config.hostname, hostPort: r.config.hostPort })),
+    ]),
+    dataDirs: postgresResources.map((resource) => resource.config.dataDir),
     released: release,
+    notEjectable,
   }
 
   if (!release) {
@@ -404,7 +685,7 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
   for (const resource of resources) {
     if (resource.state !== 'running') continue
     try {
-      await stopPostgres(ctx, resource)
+      await ctx.kinds.get(resource.kind).stop(ctx, resource)
     } catch (err) {
       failures.push(`${resource.name}: ${errorMessage(err)}`)
     }
@@ -503,6 +784,7 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       if (method === 'GET' && action === 'connection') return connectionRoute(ctx, id)
       if (method === 'GET' && action === 'logs') return logsRoute(ctx, id, url)
       if (method === 'POST' && action === 'query') return queryRoute(ctx, req, id)
+      if (method === 'POST' && action === 'deploy') return deployResourceRoute(ctx, req, id)
     }
   }
 

@@ -40,6 +40,12 @@ const EXIT_CODE_BY_ERROR: Record<ErrorCode, number> = {
   ambiguous_target: EXIT_USAGE,
   usage: EXIT_USAGE,
 
+  // The user's own Dockerfile or wrangler manifest did not build. That is
+  // something they can fix by typing something different, in a file rather
+  // than on the command line, so it belongs with the other exit 2 codes
+  // rather than with "the daemon tried and failed".
+  build_failed: EXIT_USAGE,
+
   // Everything below is "the daemon tried and the operation did not
   // succeed," which is exit 1's whole job. None of these are "you typed it
   // wrong" (that's 2), "it doesn't exist" (3), "it's already there" (4), or
@@ -55,6 +61,10 @@ const EXIT_CODE_BY_ERROR: Record<ErrorCode, number> = {
   // "operation failed" is the closest honest bucket until Studio's operator
   // credential (M4) gives this code a real meaning worth a code of its own.
   unauthorized: EXIT_OPERATION_FAILED,
+  // A resource row naming a kind this daemon has no handler for. The user
+  // did nothing wrong and the thing exists, so neither 2 nor 3 fits: the
+  // daemon simply cannot act on it.
+  unknown_kind: EXIT_OPERATION_FAILED,
   internal: EXIT_OPERATION_FAILED,
 }
 

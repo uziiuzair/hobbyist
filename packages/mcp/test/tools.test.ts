@@ -59,6 +59,7 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     getProject: notWired('getProject'),
     deleteProject: notWired('deleteProject'),
     createResource: notWired('createResource'),
+    deployResource: notWired('deployResource'),
     getResource: notWired('getResource'),
     deleteResource: notWired('deleteResource'),
     startResource: notWired('startResource'),
