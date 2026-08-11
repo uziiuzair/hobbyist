@@ -376,6 +376,17 @@ test('the runtime stage is glibc, because workerd ships no musl binary', () => {
   )
 })
 
+// The third thing a real Docker run found, and the one with the worst failure
+// mode: a build error that blames the user's imports for a platform gap.
+test('cloudflare: modules are external, because workerd provides them at runtime', () => {
+  const dockerfile = renderWorkerDockerfile({ main: 'src/index.ts' })
+  assert.match(dockerfile, /--external "cloudflare:\*"/)
+  // Without this, `import { DurableObject } from 'cloudflare:workers'`, the
+  // documented way to write a Durable Object, fails with
+  // `Could not resolve: "cloudflare:workers". Maybe you need to "bun install"?`
+  // and no Durable Object written the modern way can be deployed at all.
+})
+
 test('a worker entry path with a space or a quote cannot break out of the build command', () => {
   const dockerfile = renderWorkerDockerfile({ main: 'src/my worker".ts' })
   assert.match(dockerfile, /"src\/my worker\\"\.ts"/)

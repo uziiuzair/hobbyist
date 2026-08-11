@@ -16,8 +16,10 @@ import { existsSync } from 'node:fs'
 import { chmod, rm } from 'node:fs/promises'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import net from 'node:net'
+import { startAlarmMirror } from '@hobby.sh/do'
 import { startHttpRouter, startPgProxy } from '@hobby.sh/proxy'
-import { createHttpProxyDeps, createProxyDeps, type DaemonContext } from './context.js'
+import { durableObjectNamespaces } from './alarms.js'
+import { createHttpProxyDeps, createProxyDeps, getOrCreateWake, type DaemonContext } from './context.js'
 import { startHibernator } from './hibernator.js'
 import { handleRequest } from './routes.js'
 import { createStudioApp } from './studio/routes.js'
@@ -33,6 +35,20 @@ const SOCKET_MODE = 0o600
 // ActivityTracker reads for every resource that is not already a sleep
 // candidate, and only one real Postgres round trip for the ones that are).
 const HIBERNATION_TICK_MS = 10_000
+
+// How often the alarm mirror re-reads pending Durable Object deadlines.
+//
+// Matched to the hibernation tick on purpose. The mirror's cost is one
+// read-only sqlite query per namespace of a SLEEPING worker, which is cheap,
+// but the number that matters is lateness: an alarm can fire at most one tick
+// after its deadline, so this is the worst-case delay a user sees on a
+// scheduled task. Ten seconds is well inside what a cron-shaped workload
+// tolerates and is the same order as the cold start that follows it anyway.
+//
+// It is deliberately not shorter than the guard's grace window
+// (DEFAULT_WAKE_GRACE_SECONDS in @hobby.sh/do), so a worker is never slept by
+// one loop moments before being woken by the other.
+const ALARM_MIRROR_TICK_MS = 10_000
 
 // How long to wait for a connection attempt against a possibly-stale socket
 // file before assuming nothing is listening. Generous enough that a real,
@@ -199,6 +215,19 @@ export async function startDaemon(
   // is one source of truth for both), never polls Postgres on a schedule.
   const hibernator = startHibernator(ctx, { intervalMs: HIBERNATION_TICK_MS })
 
+  // The other half of the sleep pair, for the one kind whose work can arrive
+  // with no request behind it. A stopped container has no timer, so nothing
+  // inside a sleeping worker can fire an alarm set for 03:00. This reads the
+  // schedule workerd already wrote to disk and asks for a wake when a deadline
+  // comes due; workerd's own scheduler reloads every pending row at startup
+  // and fires it, so being awake at the deadline is the whole contribution.
+  // See docs/durable-objects/.
+  const alarmMirror = startAlarmMirror({
+    namespaces: () => durableObjectNamespaces(ctx),
+    wake: getOrCreateWake(ctx),
+    intervalMs: ALARM_MIRROR_TICK_MS,
+  })
+
   let shutdownPromise: Promise<void> | null = null
 
   // Idempotent and shared between the signal handlers and the returned
@@ -223,6 +252,12 @@ export async function startDaemon(
       // resource and is running stopPostgres, this awaits that tick's
       // drain so it can never run concurrently with the loop below.
       await hibernator.stop()
+
+      // Drained before the proxy closes, for the mirror's own version of the
+      // ordering constraint below: a tick that has already decided to wake a
+      // worker must not still be calling wake while the loop underneath is
+      // stopping resources.
+      await alarmMirror.stop()
 
       // The proxy must close before any resource below is stopped: a proxy
       // still accepting connections would wake a resource right back up the

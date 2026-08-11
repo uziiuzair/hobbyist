@@ -36,11 +36,12 @@ The routing rule is in `docs/CLAUDE.md`. The project context is in the root
 | `branching/` | Copy-on-write branches | Phase 1.5 |
 | `backups/` | Backup, restore, PITR | Phase 1.5 |
 | `compute/` | Stateless workers and apps. `app` and `worker` kinds, built 2026-08-10 | Phase 2 |
+| `durable-objects/` | Durable Objects: alarms across sleep, catalog, storage lifecycle | Phase 2 |
 | `storage/` | S3-compatible buckets, volumes | Phase 3 |
 | `sdk/` | Client libraries, React first | Phase 3 |
 | `decisions/` | Architecture decision records, numbered and immutable | n/a |
 
-## The eleven decisions that define the project
+## The twelve decisions that define the project
 
 Read these before proposing anything structural. **Start with 0007**, which is
 what makes this a platform rather than a database tool, and which supersedes the
@@ -61,6 +62,7 @@ longer in force.
 | `docs/decisions/0009` | Caddy as the HTTP front door, run as a managed container |
 | `docs/decisions/0010` | Phase 2 begins without the 30-day gate |
 | `docs/decisions/0011` | workerd, via Miniflare, as the `worker` runtime |
+| `docs/decisions/0012` | Durable Objects as a resource kind, and the alarm mirror that lets them sleep |
 
 ## The one number
 

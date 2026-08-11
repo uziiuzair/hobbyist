@@ -64,9 +64,13 @@ removed anyway. Nothing now paces this project except the author.
 - **Miniflare is a documented dev tool running as a server.** ADR 0011, with a
   named fallback: drop it from the runtime path and generate workerd capnp
   directly, at the cost of the storage APIs.
-- **A Durable Object alarm cannot fire inside a stopped container.** A worker
-  that sets an alarm misses it until the durable-objects work lands an external
-  schedule holder. The seam is marked in `packages/worker/src/kind.ts`.
+- ~~**A Durable Object alarm cannot fire inside a stopped container.**~~ Closed
+  2026-08-11, and verified against real Docker rather than asserted: an alarm
+  armed 60s out fired 61s after the container was stopped, with no request in
+  between. `@hobby.sh/do` holds the schedule outside the runtime, the `worker`
+  handler's `guard` refuses to sleep with an alarm imminent, and the daemon's
+  mirror wakes one whose deadline arrives. Remaining caveat: an alarm can be up
+  to one mirror tick (10s) late, plus a cold start.
 - **Caddy on macOS.** Above.
 - **The ext4 problem.** Unchanged: instant branching needs reflinks, ext4 has
   none, detect at `hobby init` and warn.
