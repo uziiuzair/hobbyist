@@ -56,6 +56,112 @@ the phase gate that existed to prevent exactly that is gone.
 
 ---
 
+## 2026-08-10: Durable Objects, and proving an alarm can survive sleep
+
+ADR 0012, a new `docs/durable-objects/` capability folder, and `@hobby.sh/do`
+built and tested: 50 tests, whole suite 350 passing, typecheck clean.
+
+**What was actually at stake.** Durable Objects were not in ADR 0007's phase
+table, so this is reopened scope and it went through an ADR rather than around
+one. The reason it earned the reopening is that the runtime is not ours to
+build: `@hobby.sh/compute` had independently chosen workerd (via Miniflare, ADR
+0011) the same afternoon, and workerd implements Durable Objects natively. What
+it cannot do, by construction, is honour an alarm while stopped, because a
+stopped process has no timer. That gap is the capability.
+
+**The finding the design rests on.** workerd persists its alarm schedule to
+disk, per namespace, in an ordinary SQLite table
+(`server.c++:404-408`, `alarm-scheduler.c++:55`), so the daemon can read every
+pending deadline out of a stopped runtime with one query. And workerd reloads
+and reschedules every row on startup, so we never fire an alarm: being awake at
+the deadline is the entire contribution. That is the proxy's seam one clock
+further out, and it kept the package to five small files.
+
+**What testing changed that reading did not.** Three things, all of which would
+have shipped as bugs:
+
+- A pending alarm exists in **two** places, `_cf_METADATA` key 1 in the object's
+  own file and `_cf_ALARM` in the namespace's `metadata.sqlite`, and they carry
+  the same value. The mirror reads `_cf_ALARM` because that is the copy
+  `AlarmScheduler`'s constructor reloads, because it is one file per namespace
+  rather than one per object, and because it is the only place an object's
+  human name is written down.
+
+  This entry originally claimed `_cf_METADATA` did not exist at all. It was a
+  sampling error: the table is created lazily on first write, the probe gave
+  alarms to two of three objects, and the file spot-checked was the third. The
+  compute session, running the same question against real Docker, reported the
+  opposite and forced the recheck. Worth recording because the failure mode of
+  a wrong answer here is silent: a mirror that reports nothing pending looks
+  exactly like a working one until an alarm is missed.
+- Nanosecond epoch values **cannot be read into a JavaScript number**.
+  `node:sqlite` throws `ERR_OUT_OF_RANGE` rather than rounding, since 1.79e18 is
+  far past `Number.MAX_SAFE_INTEGER`. The conversion now happens in SQL and
+  nanoseconds never reach JavaScript. The first test fixture then hit the same
+  wall from the other side, binding milliseconds and multiplying, which goes
+  through a double and lands one millisecond low.
+- Running the finished package against a real Miniflare tree found that one
+  unparseable directory aborted the entire namespace listing.
+
+**The cost of not assuming.** Two throwaway probes against a real Miniflare,
+maybe fifteen minutes, which is what turned "the compute session warns the
+layout may be wrapped, do not hard-code it" into a verified layout plus three
+corrections. `docs/durable-objects/research/2026-08-10-alarms-are-readable-from-outside.md`
+carries the method and the output.
+
+**What is deliberately not built.** The runtime, the manifest, the generated
+config and HTTP wake, all of which belong to `@hobby.sh/compute`. Two sessions
+agreed the seam in writing before either wrote code, which is why there is one
+workerd substrate in this repo and not two.
+
+**Then `phase-2-compute` landed, and this rebased onto it.** The seam held: the
+`worker` handler's `guard` hole, which that session's own comment had reserved
+for exactly this, now returns `durableObjectAlarmGuard`, and the daemon starts
+the alarm mirror beside the hibernator on the same tick and drains it in the
+same shutdown step. 452 tests pass on the branch.
+
+The rebase also settled the one disagreement between the two sessions, in their
+favour. Their real-Docker run reported `_cf_METADATA` present in object files
+where this session's note said it was absent. Rechecking every file rather than
+one showed the table exists on exactly the objects that have alarms, created
+lazily on first write, and that the probe had sampled the one object
+deliberately given no alarm. Both copies of an alarm exist and agree. The mirror
+still reads `_cf_ALARM`, now for stated reasons rather than a false premise, and
+a test pins that the two agree so a divergence fails a build instead of losing a
+wake.
+
+**Then it was run for real, and it works.** 2026-08-11: an alarm armed 60
+seconds out, the container stopped, nothing touching it over HTTP, and
+`alarm()` ran 60,967ms after the stop. The deadline on disk matched the
+worker's own `getAlarm()` to 0ms, `actor_name` came back as `the-one` from a
+stopped runtime, and workerd deleted the row itself once it fired. Filed with
+the method and the hardware at
+`docs/durable-objects/research/2026-08-11-end-to-end-alarm-across-sleep.md`.
+
+**And the run found a defect that no unit test could have.** `bun build` could
+not resolve `cloudflare:workers`, so **no Durable Object written the documented
+way could be deployed at all**. The module is provided by workerd at runtime and
+must be external, not bundled; the fix is one flag. The failure mode was worse
+than the bug: it failed at build time telling the user to run `bun install`, so
+it read like the user's imports were wrong rather than like a platform that
+could not run the syntax its own upstream docs are written in.
+
+That is now three findings in two days with the same shape, across two
+sessions: miniflare not working under Bun, workerd needing glibc, and this. All
+three were invisible to every unit test and obvious on first contact with
+Docker. The compute session drew this lesson on 2026-08-10 for the `app` and
+`worker` kinds; it repeated one kind later, in a different session, on work
+that had 66 passing tests at the time.
+
+**The honest risk.** `localDisk` is marked `** EXPERIMENTAL; SUBJECT TO
+BACKWARDS-INCOMPATIBLE CHANGE **` upstream and the scheduler behind it describes
+itself as sufficient "for the usecase of local development". The mitigation is
+a schema assertion that turns a format change into a loud failure instead of an
+empty result, and ADR 0012 states the condition under which this capability
+should be deleted rather than maintained.
+
+---
+
 ## 2026-08-07: scope reopened, Hobbyist becomes a platform
 
 Still no code. Four new ADRs, four new capability folders, a rewritten root

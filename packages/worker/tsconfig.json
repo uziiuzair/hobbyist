@@ -4,6 +4,16 @@
     "rootDir": ".",
     "outDir": "dist"
   },
-  "include": ["src", "test"],
-  "references": [{ "path": "../core" }]
+  "include": [
+    "src",
+    "test"
+  ],
+  "references": [
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../do"
+    }
+  ]
 }

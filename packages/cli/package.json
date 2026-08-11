@@ -20,6 +20,7 @@
     "@hobby.sh/pg": "*",
     "@hobby.sh/proxy": "*",
     "@hobby.sh/worker": "*",
-    "argon2": "^0.45.1"
+    "argon2": "^0.45.1",
+    "@hobby.sh/do": "*"
   }
 }

@@ -87,8 +87,12 @@ Answered on 2026-08-10 by running it, not by reading:
 
 Still open, and all real:
 
-- **A Durable Object alarm cannot fire inside a stopped container.** Until the
-  Durable Objects work lands an external schedule holder, a worker that sets an
-  alarm misses it. Written down rather than discovered later.
+- ~~**A Durable Object alarm cannot fire inside a stopped container.**~~ Closed
+  2026-08-10. `@hobby.sh/do` holds the schedule outside the runtime: the
+  `worker` handler's `guard` refuses to sleep a worker with an alarm due soon,
+  and the daemon's alarm mirror wakes one whose deadline arrives while it is
+  asleep. workerd reloads and fires the alarm itself once running. See
+  `docs/durable-objects/`. The seam marked in `packages/worker/src/kind.ts` is
+  filled.
 - **Cold start on a five dollar VPS is unmeasured.** The Mac numbers pass
   comfortably and are the easy end of the matrix.
