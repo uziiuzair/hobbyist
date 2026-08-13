@@ -30,8 +30,11 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
     <div className="login-wrap">
       <form className="login-card" onSubmit={(event) => void handleSubmit(event)}>
         <div className="login-brand">
-          <span className="rail-mark" aria-hidden="true"><i /></span>
-          Hobbyist Studio
+          <span className="login-mark" aria-hidden="true"><i /></span>
+          <div>
+            <div className="login-title">Hobbyist Studio</div>
+            <div className="login-sub">The panel on your machine</div>
+          </div>
         </div>
         <div className="card" style={{ padding: 18 }}>
         <div className="stack">

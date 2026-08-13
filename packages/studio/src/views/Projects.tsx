@@ -4,6 +4,7 @@ import * as api from '../api.js'
 import { navigate } from '../lib/router.js'
 import { formatBytes, formatSince, readStats } from '../lib/format.js'
 import { State, summarise } from '../components/State.js'
+import { SpotCrate } from '../components/Spot.js'
 import { Modal } from '../components/Modal.js'
 import type { RailProject } from '../components/Shell.js'
 
@@ -110,6 +111,7 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
 
           {rows.length === 0 ? (
             <div className="empty">
+              <SpotCrate />
               <h3>No projects yet</h3>
               <p>
                 A project holds your databases. Creating one gives you a Postgres and a
@@ -143,8 +145,8 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
                       <div className="card-title">{row.project.name}</div>
                       <div className="card-meta">
                         {row.resources.length === 0
-                          ? 'No databases'
-                          : `${row.resources.length} database${row.resources.length === 1 ? '' : 's'} · ${formatBytes(bytes)}`}
+                          ? 'No services'
+                          : `${row.resources.length} service${row.resources.length === 1 ? '' : 's'} · ${formatBytes(bytes)}`}
                       </div>
                     </div>
                     <div className="card-foot">
