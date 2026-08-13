@@ -89,3 +89,128 @@ export function depth(db: SqliteDatabase): number {
   const row = db.prepare('SELECT count(*) AS n FROM messages').get() as { n: number }
   return row.n
 }
+
+export interface ConsumerOptions {
+  maxBatchSize: number
+  maxBatchTimeoutSeconds: number
+  maxRetries: number
+  retryDelaySeconds: number
+  deadLetterQueue: string | null
+}
+
+// miniflare's DEFAULT_BATCH_SIZE, DEFAULT_BATCH_TIMEOUT and DEFAULT_RETRIES,
+// so a worker behaves here the way it behaves under `wrangler dev`.
+export const DEFAULT_CONSUMER_OPTIONS: ConsumerOptions = {
+  maxBatchSize: 5,
+  maxBatchTimeoutSeconds: 1,
+  maxRetries: 2,
+  retryDelaySeconds: 0,
+  deadLetterQueue: null,
+}
+
+export interface LeasedMessage {
+  id: string
+  body: string
+  contentType: ContentType
+  timestampMs: number
+  attempts: number
+}
+
+export interface LeasedBatch {
+  leaseId: string
+  messages: LeasedMessage[]
+  backlogCount: number
+  backlogBytes: number
+  oldestMessageTimestampMs: number | null
+}
+
+// How long a consumer has to answer before the batch is assumed lost. Longer
+// than any reasonable handler, because the cost of expiring too early is a
+// duplicate delivery of work that may already have happened.
+export const LEASE_MS = 60000
+
+interface ReadyRow {
+  id: string
+  body: string
+  content_type: string
+  timestamp: number
+  attempts: number
+}
+
+function readyRows(db: SqliteDatabase, nowMs: number, limit: number): ReadyRow[] {
+  return db
+    .prepare(
+      `SELECT id, body, content_type, enqueued_at AS timestamp, attempts
+         FROM messages
+        WHERE lease_id IS NULL AND visible_at <= ?
+        ORDER BY id
+        LIMIT ?`
+    )
+    .all(nowMs, limit) as ReadyRow[]
+}
+
+export function isBatchReady(db: SqliteDatabase, opts: ConsumerOptions, nowMs: number): boolean {
+  const row = db
+    .prepare(
+      `SELECT count(*) AS n, min(visible_at) AS oldest
+         FROM messages
+        WHERE lease_id IS NULL AND visible_at <= ?`
+    )
+    .get(nowMs) as { n: number; oldest: number | null }
+  if (row.n === 0) return false
+  if (row.n >= opts.maxBatchSize) return true
+  if (row.oldest === null) return false
+  return nowMs - row.oldest >= opts.maxBatchTimeoutSeconds * 1000
+}
+
+export function leaseBatch(
+  db: SqliteDatabase,
+  opts: ConsumerOptions,
+  nowMs: number,
+  leaseMs: number = LEASE_MS
+): LeasedBatch | null {
+  const rows = readyRows(db, nowMs, opts.maxBatchSize)
+  if (rows.length === 0) return null
+
+  const leaseId = newMessageId(nowMs)
+  const claim = db.prepare(
+    'UPDATE messages SET lease_id = ?, lease_expires_at = ?, attempts = attempts + 1 WHERE id = ?'
+  )
+  for (const row of rows) {
+    claim.run(leaseId, nowMs + leaseMs, row.id)
+  }
+
+  // Read AFTER the claim, so the metrics describe what is still waiting
+  // rather than counting the batch we are about to deliver.
+  const backlog = db
+    .prepare(
+      `SELECT count(*) AS n, coalesce(sum(bytes), 0) AS bytes, min(enqueued_at) AS oldest
+         FROM messages
+        WHERE lease_id IS NULL`
+    )
+    .get() as { n: number; bytes: number; oldest: number | null }
+
+  return {
+    leaseId,
+    messages: rows.map((row) => ({
+      id: row.id,
+      body: row.body,
+      contentType: row.content_type as ContentType,
+      timestampMs: row.timestamp,
+      // Incremented by the claim above, so the value delivered is the number
+      // of attempts INCLUDING this one. Cloudflare documents attempts as
+      // starting at 1 on the first delivery, which is exactly this.
+      attempts: row.attempts + 1,
+    })),
+    backlogCount: backlog.n,
+    backlogBytes: backlog.bytes,
+    oldestMessageTimestampMs: backlog.oldest,
+  }
+}
+
+export function hasOutstandingLease(db: SqliteDatabase, nowMs: number): boolean {
+  const row = db
+    .prepare('SELECT count(*) AS n FROM messages WHERE lease_id IS NOT NULL AND lease_expires_at > ?')
+    .get(nowMs) as { n: number }
+  return row.n > 0
+}
