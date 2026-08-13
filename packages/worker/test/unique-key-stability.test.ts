@@ -101,3 +101,23 @@ test('a worker row that predates the manifest split fails loudly, not silently',
 
   assert.throws(() => assertWorkerConfig(legacy), /predates the manifest split/)
 })
+
+test('a worker created before its code passes the guard, because manifest: null is a shape it knows', () => {
+  // The negative case above proves a legacy row is rejected. This proves the
+  // guard distinguishes "no manifest key at all" (a row that predates the
+  // split) from "manifest deliberately null" (a worker whose code has never
+  // been deployed). Conflating them would reject every record created by
+  // Studio or MCP, which is the whole point of the record-before-code change.
+  const config: WorkerConfig = {
+    image: null,
+    containerName: 'hobby-blog-cron',
+    hostPort: 15501,
+    containerPort: 8787,
+    hostname: 'blog-cron.hobby.local',
+    durableObjectUniqueKeyModifier: 'res-abc-123',
+    manifest: null,
+    databaseResourceId: null,
+  }
+  assert.doesNotThrow(() => assertWorkerConfig(config))
+  assert.equal(assertWorkerConfig(config), config)
+})
