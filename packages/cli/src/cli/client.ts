@@ -202,7 +202,13 @@ export interface Api {
       | {
           kind: 'worker'
           name: string
-          source: { path: string }
+          // Absent for a sourceless create (packages/cli/src/daemon/routes.ts's
+          // createResourceRoute: readAppSource returns null when the field is
+          // missing, and createWorkerResource, packages/worker/src/worker.ts,
+          // accepts sourcePath: null and produces an `undeployed` row). Not
+          // required the way it once was, now that a project can hold a
+          // worker with no code yet.
+          source?: { path: string }
           databaseResourceId?: string
         }
   ): Promise<ResourceResponse>
