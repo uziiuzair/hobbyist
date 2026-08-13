@@ -2,16 +2,35 @@
 
 What is true right now. Overwrite freely, this file is not history.
 
-## State: Phase 1 on `main`, Phase 2 compute on `phase-2-compute`
+## State: Phase 1 and Phase 2 compute both on `main`. Five sub-projects close the gap to Studio and MCP.
 
 Phase 1 is merged and has been exercised against real Docker: eject end to end
 on 2026-08-08, cancel routing against a live Postgres on 2026-08-10.
 
-**Phase 2 compute is built on branch `phase-2-compute`, not merged.** Two new
-resource kinds, `app` and `worker`, the model fix they needed, and the HTTP
-wake router. 380 tests pass. The design is at
-`docs/compute/specs/2026-08-10-phase-2-compute-design.md` and is the thing to
-read before touching any of it.
+**Phase 2 compute merged to `main` at `fe16613` on 2026-08-11**, the morning
+after it was built. This section said "on branch `phase-2-compute`, not
+merged" until this update; that was true on 2026-08-10 and has been false
+since. Two resource kinds, `app` and `worker`, the model fix they needed, and
+the HTTP wake router. The design is at
+`docs/compute/specs/2026-08-10-phase-2-compute-design.md`.
+
+**What shipped after the merge: creation and deploy split into two acts.**
+The daemon originally required a build source before it would commit a
+resource row at all, which meant Studio and MCP could not create an `app` or
+`worker`, having no filesystem path to hand the daemon. `docs/decisions/0014`
+(branch `record-before-code`, not yet merged to `main`) splits `POST
+/v1/projects/:name/resources` from `POST /v1/resources/:id/deploy`: a resource
+can now exist as a row with an id and a hostname, holding no code, in a new
+resting state `undeployed`. `hobby deploy` still resolves-or-creates and
+deploys in one command, so nothing changes for the CLI. Giving Studio and MCP
+the create half is the next sub-project, D1, not this one.
+
+**Main also gained a private ingress lane.** `8fa4846` (2026-08-13) merged
+Tailscale support: the daemon can report a tailnet connection string
+alongside the public Caddy path. Research is filed at
+`docs/compute/research/2026-08-13-tunnels-and-tailscale.md` and
+`docs/proxy/research/2026-08-13-postgres-over-tailnet.md`. An ADR for it is
+expected but not yet filed as of this writing.
 
 **The phase gate is gone.** ADR 0007 required 30 consecutive days of Phase 1
 daily use before Phase 2 began. `docs/decisions/0010` removes it, two days
@@ -32,28 +51,50 @@ removed anyway. Nothing now paces this project except the author.
 | The wedge | Everything sleeps, everything wakes on demand | root `CLAUDE.md` |
 | Cold start, Postgres | 170 to 186ms p50/p95, measured 2026-08-07 | `docs/proxy/research/` |
 | Cold start, HTTP | app p95 133ms, worker p95 321ms, measured 2026-08-10 on a Mac | `docs/compute/research/` |
+| Resource creation vs. deploy | Two acts, not one. `undeployed` is a real resting state | ADR 0014 |
 
 ## Build order
 
 | Milestone | Ships | State |
 |---|---|---|
 | M0 to M5 | Phase 1 | merged to `main` |
-| **M6** | Resource kind registry, model widened | **built** |
-| **M7** | HTTP wake router, static Caddy catch-all | **built** |
-| **M8** | `app` kind: build, deploy, wake, logs, eject | **built** |
-| **M9** | `worker` kind: wrangler.toml, Miniflare, hyperdrive | **built, verified against real Docker** |
+| **M6** | Resource kind registry, model widened | **merged to `main`** |
+| **M7** | HTTP wake router, static Caddy catch-all | **merged to `main`** |
+| **M8** | `app` kind: build, deploy, wake, logs, eject | **merged to `main`** |
+| **M9** | `worker` kind: wrangler.toml, Miniflare, hyperdrive | **merged to `main`, verified against real Docker** |
 | **M10** | HTTP cold start measured | **half done**: Mac yes, five dollar VPS no |
+
+Phase 1 and Phase 2 compute are both on `main` as of `fe16613` (2026-08-11).
+What is left is not a phase, it is closing the gap between what the daemon can
+do and what Studio, MCP and a remote box can reach. Five sub-projects, in the
+order they were scoped:
+
+| Sub-project | Ships | State |
+|---|---|---|
+| **A** record before code | Resource creation split from deploy; `undeployed` state; ADR 0014 | **built, branch `record-before-code`, not yet merged to `main`** |
+| **B** wire Caddy | `createCaddyManager` gets a production caller | not started |
+| **D1** Studio and MCP for all kinds | Drop the hardcoded `kind: 'postgres'` at `packages/studio/src/api.ts:152` and `packages/mcp/src/tools.ts:116`, once A is merged and gives them something else to send | not started |
+| **D2** Studio API tokens | Not yet designed beyond the label; no spec filed as of this writing | not started |
+| **C** remote deploy | Laptop to VPS. Needs its own ADR: the CLI talks to a unix socket (`packages/cli/src/cli/client.ts`), so today it must run on the daemon's own box | not started |
 
 ## The immediate next steps
 
-1. **Run the cold start matrix on a five dollar VPS.** The Mac numbers pass
-   comfortably and are the easy end. Until the VPS is measured, the budget is
-   an assertion with one favourable data point.
-2. **Wire Caddy.** `createCaddyManager` still has no caller, which is a Phase 1
-   loose end (see `HANDOFF-2026-08-07.md`), and Phase 2 makes it load-bearing.
-   `network: 'host'` does not exist on Docker Desktop for macOS, so this fails
-   on the author's own machine first.
-3. **Merge `phase-2-compute` to `main`,** or decide not to.
+1. **Merge `record-before-code` (sub-project A) to `main`.** This is Task 10
+   of that plan, the docs commit, landing now; the code (Tasks 1 through 9b)
+   is already done and reviewed on the branch.
+2. **Wire Caddy (sub-project B).** `createCaddyManager` still has no caller,
+   which is a Phase 1 loose end (see `HANDOFF-2026-08-07.md`), and compute
+   makes it load-bearing: an `undeployed` resource has an allocated hostname
+   with nothing behind it, so Caddy's on-demand TLS ask has to answer for it
+   before there is any code to serve. `network: 'host'` does not exist on
+   Docker Desktop for macOS, so this fails on the author's own machine first.
+3. **D1: give Studio and MCP the ability to create compute**, now that A
+   makes it possible.
+4. **D2: Studio API tokens.**
+5. **C: remote deploy**, laptop to VPS.
+6. **Run the cold start matrix on a five dollar VPS.** Still unmeasured, still
+   the easy end of the matrix having been the only end run so far. Not part
+   of the five-project sequence above, but not forgotten either.
 
 ## Open risks
 
@@ -88,4 +129,4 @@ the next kind by itself.
 
 ---
 
-Last Updated: 2026-08-10
+Last Updated: 2026-08-13

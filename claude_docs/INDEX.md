@@ -35,13 +35,13 @@ The routing rule is in `docs/CLAUDE.md`. The project context is in the root
 | `mcp/` | The MCP server | M5 |
 | `branching/` | Copy-on-write branches | Phase 1.5 |
 | `backups/` | Backup, restore, PITR | Phase 1.5 |
-| `compute/` | Stateless workers and apps. `app` and `worker` kinds, built 2026-08-10 | Phase 2 |
+| `compute/` | Stateless workers and apps. `app` and `worker` kinds, built 2026-08-10. Resource creation split from deploy, 2026-08-13 (ADR 0014) | Phase 2 |
 | `durable-objects/` | Durable Objects: alarms across sleep, catalog, storage lifecycle | Phase 2 |
 | `storage/` | S3-compatible buckets, volumes | Phase 3 |
 | `sdk/` | Client libraries, React first | Phase 3 |
 | `decisions/` | Architecture decision records, numbered and immutable | n/a |
 
-## The twelve decisions that define the project
+## The decisions that define the project
 
 Read these before proposing anything structural. **Start with 0007**, which is
 what makes this a platform rather than a database tool, and which supersedes the
@@ -63,6 +63,14 @@ longer in force.
 | `docs/decisions/0010` | Phase 2 begins without the 30-day gate |
 | `docs/decisions/0011` | workerd, via Miniflare, as the `worker` runtime |
 | `docs/decisions/0012` | Durable Objects as a resource kind, and the alarm mirror that lets them sleep |
+| `docs/decisions/0014` | Resource records exist before code: creating an `app` or `worker` and deploying code into it are two acts, not one |
+
+**0013 is a deliberate gap, not an error.** Three sessions were filing an ADR
+at once against a `main` that topped out at 0012: this one, a parallel branch
+adding a `queue` resource kind, and a third adding a Tailscale ingress lane.
+The three agreed in writing to take 0013, 0014 and 0015 respectively rather
+than collide. Only 0014 exists on this branch; the other two land when their
+own branches merge.
 
 ## The one number
 
@@ -80,4 +88,4 @@ never been run**, and it is the machine the project is actually aimed at.
 
 ---
 
-Last Updated: 2026-08-10
+Last Updated: 2026-08-13
