@@ -291,6 +291,72 @@ test('a redeploy does not change the durable object unique key', async () => {
   assert.notEqual(deployed.image, created.resource.config.image, 'the image should have changed even though the key did not')
 })
 
+// Record-before-code's actual acceptance criterion for the worker kind: a
+// worker created with sourcePath: null (see the sourceless test above) is
+// deployed into, not recreated. This is the sharper of the two mirrored
+// tests (app's equivalent lives in packages/app/test/app.test.ts): a worker
+// carries a durable-object identity from the moment its row exists, and a
+// first deploy must not disturb it.
+test('a first deploy on an undeployed worker succeeds and preserves identity', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: null,
+    databaseResourceId: null,
+  })
+  assert.equal(created.resource.state, 'undeployed')
+
+  const deployed = await deployWorker(deps, created.resource, { sourcePath: workerSource() })
+
+  assert.equal(deployed.resource.state, 'sleeping')
+  assert.notEqual(deployed.resource.config.image, null)
+  assert.notEqual(deployed.resource.config.manifest, null)
+  // The identity allocated at creation survives the deploy. A hostname that
+  // moved on first deploy would invalidate anything the user had already
+  // written down or pointed DNS at.
+  assert.equal(deployed.resource.config.hostname, created.resource.config.hostname)
+  assert.equal(deployed.resource.config.hostPort, created.resource.config.hostPort)
+  // The load-bearing assertion: workerd derives Durable Object storage
+  // identity from this value, and it must still be the id assigned at
+  // creation, not something regenerated at deploy time. A change here
+  // orphans every Durable Object sqlite file this worker will ever own.
+  assert.equal(deployed.resource.config.durableObjectUniqueKeyModifier, created.resource.id)
+
+  // The returned object must match what the store actually holds, not a
+  // stale snapshot from mid-deploy.
+  const stored = deps.store.getResource(created.resource.id)
+  assert.equal(stored?.state, deployed.resource.state)
+})
+
+test('a failed first deploy on a worker returns it to undeployed, not failed', async () => {
+  // `failed` means "there is code here and it broke". `undeployed` means
+  // "there is no code here". Collapsing the two leaves Studio unable to say
+  // which command fixes it, which is the whole reason the state exists. Same
+  // rule, same test shape, as deployApp's equivalent in
+  // packages/app/test/app.test.ts.
+  const runtime = createFakeRuntime()
+  runtime.build = async (): Promise<string> => {
+    throw new HobbyError('build_failed', 'docker build failed', 'step 3 of 7')
+  }
+  const deps = buildDeps({ runtime })
+  const project = makeProject(deps.store)
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: null,
+    databaseResourceId: null,
+  })
+
+  await assert.rejects(
+    () => deployWorker(deps, created.resource, { sourcePath: workerSource() }),
+    /docker build failed/
+  )
+
+  assert.equal(deps.store.getResource(created.resource.id)?.state, 'undeployed')
+})
+
 test('a bound database becomes a hyperdrive binding against the container name', async () => {
   const deps = buildDeps()
   const project = makeProject(deps.store)
