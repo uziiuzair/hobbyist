@@ -2,27 +2,27 @@
 name: Hobbyist Studio
 description: A status panel for a machine you own, not a console for a service you rent.
 colors:
-  ground: "#0b0c0d"
-  surface: "#121415"
-  surface-2: "#171a1c"
-  surface-3: "#1e2225"
-  line: "#24282b"
-  line-strong: "#32373b"
-  ink: "#e8eaec"
-  ink-2: "#a2a8ad"
-  ink-3: "#878d93"
-  accent: "#3ecf8e"
-  accent-hover: "#4fdb9c"
-  accent-ink: "#05231a"
-  accent-dim: "rgba(62, 207, 142, 0.13)"
-  accent-line: "rgba(62, 207, 142, 0.34)"
-  awake: "#3ecf8e"
-  awake-dim: "rgba(62, 207, 142, 0.18)"
-  awake-ring: "rgba(62, 207, 142, 0.36)"
-  waking: "#f0c674"
-  waking-dim: "rgba(240, 198, 116, 0.14)"
-  danger: "#f0857a"
-  danger-dim: "rgba(240, 133, 122, 0.12)"
+  ground: "#100f0d"
+  surface: "#171512"
+  surface-2: "#1e1b17"
+  surface-3: "#26221c"
+  line: "#2b2721"
+  line-strong: "#3c362d"
+  ink: "#ede9e3"
+  ink-2: "#b3aa9e"
+  ink-3: "#948b7e"
+  accent: "#45cd81"
+  accent-hover: "#58d992"
+  accent-ink: "#06231a"
+  accent-dim: "rgba(69, 205, 129, 0.13)"
+  accent-line: "rgba(69, 205, 129, 0.36)"
+  awake: "#45cd81"
+  awake-dim: "rgba(69, 205, 129, 0.18)"
+  awake-ring: "rgba(69, 205, 129, 0.36)"
+  waking: "#e6ae52"
+  waking-dim: "rgba(230, 174, 82, 0.14)"
+  danger: "#ec8577"
+  danger-dim: "rgba(236, 133, 119, 0.12)"
 typography:
   display:
     fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
@@ -74,8 +74,9 @@ typography:
     letterSpacing: "normal"
     fontFeature: "tabular-nums"
 rounded:
-  sm: "5px"
-  md: "8px"
+  sm: "7px"
+  md: "10px"
+  lg: "12px"
   pill: "50%"
   hairline: "3px"
 spacing:
@@ -135,7 +136,7 @@ components:
   modal:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.ink}"
-    rounded: "{rounded.md}"
+    rounded: "{rounded.lg}"
     width: "440px"
   rail-link:
     backgroundColor: "transparent"
@@ -143,7 +144,7 @@ components:
     rounded: "{rounded.sm}"
     padding: "7px 8px"
   rail-link-active:
-    backgroundColor: "{colors.accent-dim}"
+    backgroundColor: "{colors.surface-3}"
     textColor: "{colors.ink}"
   state-dot:
     size: "7px"
@@ -159,24 +160,29 @@ components:
 
 ## Overview
 
-**Creative North Star: "The Panel on the Machine You Own"**
+**Creative North Star: "The Panel on the Machine You Own", warm re-voice
+(2026-08-13)**
 
 This is a status panel for hardware in the next room, not a console for a
 service you rent. Every hosted dashboard treats a stopped database as a
 degraded condition and dresses it in a warning; here a sleeping database is
 the product working correctly, so it is the calmest thing on the screen. The
-surface is near-black layered ground, hairline rules, system faces and dense
-rows, with one green that appears rarely enough to mean something.
+surface is warm near-black layered ground (graphite and stone, hue around 38
+rather than the first build's cool blue-gray), hairline rules, system faces
+and dense rows, with one green that appears rarely enough to mean something.
 
-Density is high and ornament is absent. Nothing animates without a reason:
-the only motion in the build is a status pulse, a spinner, and a 120ms modal
-entrance, and all three are disabled or slowed under `prefers-reduced-motion`.
-Depth comes from tonal layering (four ground steps plus a hairline) rather
-than from shadow; only two shadows exist and one of them is a 1px card seat.
-Dark is the design's home because the operator is usually at a desk at night
-with this parked beside an editor, but light is a complete second theme with
-the same structure and the same one-chroma rule, because the machine is theirs
-and their OS may say light.
+Density is high and ornament is absent, but the surface is no longer inert:
+interactive elements answer the cursor. Hover states transition over
+120-160ms, a link card rises 1px onto a lift shadow, and the modal enters in
+140ms. Beyond that the motion inventory is unchanged (a status pulse, a
+spinner), and everything is gated or slowed under `prefers-reduced-motion`,
+including the card rise. Depth comes from tonal layering (four ground steps
+plus a hairline) rather than from shadow; three shadows exist and one of them
+is a 1px card seat. Dark is the design's home because the operator is usually
+at a desk at night with this parked beside an editor, but light is a complete
+second theme (warm paper, not an inversion) with the same structure and the
+same one-chroma rule, because the machine is theirs and their OS may say
+light.
 
 The world runs entirely offline: no `@font-face`, no CDN, no external anything.
 System UI and system mono are the type, and that constraint is permanent.
@@ -185,12 +191,14 @@ Product voice, terminology and interaction conventions live in `PRODUCT.md` and
 are not restated here; this file is strictly visual.
 
 **Key Characteristics:**
-- Near-black layered ground with hairline rules, no fills that read as panels-on-panels
+- Warm near-black layered ground with hairline rules, no fills that read as panels-on-panels
 - One green, split between action and state by form rather than by hue
-- Sleeping carries no chroma at all
+- Sleeping carries no chroma at all, and neither does not-deployed
 - Dense rows, tabular figures anywhere a number can change
-- System faces only, dark-first with a full light theme
-- Flat by default; two shadows exist and both are structural
+- System faces only, dark-first with a full light theme (warm paper, not inverted)
+- Flat by default; hover is the one earned rise, and all three shadows are structural
+- Active rows are neutral facts, never tinted pills (the No-Tinted-Pill Rule)
+- The browser's own surfaces are themed: green caret, hairline scrollbars, accent selection
 
 ## Colors
 
@@ -198,7 +206,7 @@ A near-monochrome ground with exactly one chromatic voice, plus an amber
 reserved for transitions and a red reserved for failure.
 
 ### Primary
-- **Signal Green** (`--accent` / `--awake`, #3ecf8e dark, #10794f light): the
+- **Signal Green** (`--accent` / `--awake`, #45cd81 dark, #147a48 light): the
   only saturated colour in normal operation. It does two jobs and the same hex
   serves both: action (a filled primary button, an active tab's underline, a
   focus ring, a hovered link, an active rail item's tint and edge) and state
@@ -207,13 +215,13 @@ reserved for transitions and a red reserved for failure.
   green on the screen.
 
 ### Secondary
-- **Transition Amber** (`--waking`, #f0c674 dark, #9a6410 light): waking,
+- **Transition Amber** (`--waking`, honey #e6ae52 dark, #9a6410 light): waking,
   starting, stopping, creating and removing. It never marks a resting state.
   Used as the waking dot, the waking banner's edge and wash, and the elapsed
   clock.
 
 ### Tertiary
-- **Fault Red** (`--danger`, #f0857a dark, #b3392c light): failure and
+- **Fault Red** (`--danger`, warm coral #ec8577 dark, #b3392c light): failure and
   destruction only. Error banners, failed dots, the delete affordance on a
   side-list row, and the danger button's text and hover wash.
 
@@ -225,19 +233,23 @@ reserved for transitions and a red reserved for failure.
   tall bar cannot take the 5px radius without reading as a lozenge.
 
 ### Neutral
-- **Ground** (#0b0c0d dark, #f7f7f6 light): the page behind everything.
-- **Surface** (#121415 / #ffffff): cards, panels, tables, the rail, modals.
-- **Surface 2** (#171a1c / #fbfbfa): inputs, buttons at rest, table headers,
+
+The whole neutral ramp is warm: graphite and stone around hue 38, in both
+themes. A cool gray anywhere in this file is a regression to the first build.
+
+- **Ground** (#100f0d dark, #faf9f7 light): the page behind everything.
+- **Surface** (#171512 / #ffffff): cards, panels, tables, the rail, modals.
+- **Surface 2** (#1e1b17 / #f6f4f1): inputs, buttons at rest, table headers,
   row hover, modal footers.
-- **Surface 3** (#1e2225 / #f1f1ef): the innermost step. Connection strings,
-  meter tracks, button hover.
-- **Line** (#24282b / #e3e3e0) and **Line Strong** (#32373b / #cfcfcb): every
+- **Surface 3** (#26221c / #edeae4): the innermost step. Connection strings,
+  meter tracks, button hover, and the active row's fill.
+- **Line** (#2b2721 / #e6e2db) and **Line Strong** (#3c362d / #cfc9bf): every
   border in the system is 1px of one of these. Line Strong is for edges that
   must be found (button outlines, dashed empty states, menus, modals).
-- **Ink** (#e8eaec / #16181a), **Ink 2** (#a2a8ad / #5c6166), **Ink 3**
-  (#878d93 / #6b7075): primary, secondary and tertiary text. All three clear
-  4.5:1 against ground, surface and surface-2 in both themes; Ink 3 measures
-  5.84:1 dark and 4.66:1 light on ground.
+- **Ink** (#ede9e3 / #1c1917), **Ink 2** (#b3aa9e / #5f5a52), **Ink 3**
+  (#948b7e / #6e685e): primary, secondary and tertiary text. All three clear
+  4.5:1 against every surface step in both themes, including Ink 3 on
+  Surface 3 (4.71 dark, 4.60 light), which the first ramp failed in light.
 
 ### Named Rules
 
@@ -262,9 +274,18 @@ the same distinction the colour does. Nothing in this interface is legible only
 to someone who can separate the hues.
 
 **The Ink 3 Floor Rule.** `--ink-3` is the dimmest text in the system and it is
-tuned to pass WCAG AA as body text in both themes. Nothing dimmer exists. Do
-not add a fourth ink step, and do not place `--ink-3` text on `--surface-3` in
-the light theme, where it falls to 4.42:1.
+tuned to pass WCAG AA as body text on every surface step in both themes.
+Nothing dimmer exists. Do not add a fourth ink step.
+
+**The No-Tinted-Pill Rule.** An active or selected row (rail link, workbench
+table, side-list item, pressed segment) is a neutral fact: `--surface-3` fill,
+`--ink` text, a touch more weight, and the green confined to the row's icon.
+Never the accent-tinted pill, and never an accent edge bar down the row's
+leading side: that pairing is the stock AI-dashboard active state, it spends
+chroma on something that is neither action nor state, and it is banned
+outright (operator's explicit call, 2026-08-13). The pressed segment
+substitutes an inset 1px `--line-strong` ring for the weight change, because a
+segment that gains weight gains width and the control jitters.
 
 ## Typography
 
@@ -365,11 +386,12 @@ containers because of their border, not their shadow.
 Only two shadow tokens exist, and both are structural rather than decorative.
 
 ### Shadow Vocabulary
-- **Card seat** (`--shadow-card`: `0 1px 0 rgba(255,255,255,0.02) inset, 0 1px 2px rgba(0,0,0,0.4)`
-  dark; `0 1px 2px rgba(0,0,0,0.05)` light): a hairline top highlight and a 1px
+- **Card seat** (`--shadow-card`): a hairline top highlight and a soft 1-3px
   drop that seats a card on the ground. Not perceived as lift.
-- **Pop** (`--shadow-pop`: `0 8px 28px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.4)`
-  dark; softer in light): only for things that genuinely float above the
+- **Lift** (`--shadow-lift`): one step of genuine rise, used only by a hovered
+  link card together with its 1px `translateY`. It is deliberately smaller
+  than pop: a hover is a moment, not a layer.
+- **Pop** (`--shadow-pop`): only for things that genuinely float above the
   document, which is exactly two: the project switcher menu and the modal.
 
 Beyond those, "elevation" is expressed as an inset ring: `box-shadow: inset 0 0 0 1px`
@@ -389,12 +411,13 @@ applied to text, buttons, cards or borders.
 
 ## Shapes
 
-Two radii carry everything: **8px** (`--radius`) for containers that hold
-content (cards, panels, tables, modals, the SQL editor, empty states, menus)
-and **5px** (`--radius-sm`) for controls and small chrome (buttons, inputs,
-segmented controls, notices, banners, rail links, the connection string, the
-20px brand mark). Below those, 3px appears on the two smallest marks (editable
-cell, key tags, the focus ring's own corner) and 50% on dots.
+Three radii carry everything: **10px** (`--radius`) for containers that hold
+content (cards, panels, tables, the SQL editor, empty states, menus), **7px**
+(`--radius-sm`) for controls and small chrome (buttons, inputs, segmented
+controls, notices, banners, rail links, the connection string, the 20px brand
+mark), and **12px** (`--radius-lg`) for the modal alone, one softer step for
+the one surface that floats. Below those, 3px appears on the two smallest
+marks (editable cell, key tags, the focus ring's own corner) and 50% on dots.
 
 Everything is a rectangle with a 1px border. There are no dividers that are not
 borders: separation is `border-bottom: 1px solid var(--line)` on the row, with
@@ -449,12 +472,20 @@ exceptions are deliberate marks, not borders: the 1.5px sleeping ring and the
 
 ### Navigation
 - **Rail:** 248px sticky full-height `--surface` column with a right hairline,
-  10px padding, 2px gaps. Links are 13.5px `--ink-2` with a 14px icon at 0.75
-  opacity and an optional tabular count pushed right. Hover lifts to `--ink` on
-  `--surface-2`. The active link (`[aria-current="page"]`) takes an
-  `--accent-dim` tint, an `--accent-line` border and a full-opacity `--accent`
-  icon. Group labels are micro uppercase `--ink-3` and disappear below 900px,
-  where the rail becomes a horizontally scrolling strip.
+  10px padding, 2px gaps. The rail is generic over resource kind: groups are
+  Project (Overview), Databases, Apps and Workers, each row an icon (database
+  cylinder, browser window, bolt), a truncating `.rail-name`, and a dot-only
+  state (`.rail-dot`) pushed to the trailing edge with the state word kept for
+  screen readers. A kind's group renders only when the project holds one, and
+  a kind with no Studio views yet (apps, workers, pre-D1) renders as a
+  `.rail-item`, the same anatomy with no hover and no link, because a reader
+  must never execute an aspiration. Postgres rows keep their caret and nested
+  Tables / SQL / Schema views. Links are 13.5px `--ink-2` with a 14px icon at
+  0.75 opacity. Hover lifts to `--ink` on `--surface-2` over 140ms. The active
+  link (`[aria-current="page"]`) follows the No-Tinted-Pill Rule:
+  `--surface-3`, `--ink` at 600, `--accent` icon. Group labels are micro
+  uppercase `--ink-3` and disappear below 900px, where the rail becomes a
+  horizontally scrolling strip.
 - **Brand mark:** a 20px rounded square holding a 7px dot. The dot is filled
   `--awake` with a halo when anything on the box is awake and flat `--ink-3`
   when everything sleeps. The mark is the product's state in one glyph.
@@ -465,10 +496,11 @@ exceptions are deliberate marks, not borders: the 1.5px sleeping ring and the
   the container's hairline; active takes `--ink`, weight 500 and an `--accent`
   underline. Both `[aria-current="page"]` and `.active` are styled, and both are
   used.
-- **Segmented control:** an inline group with one shared 1px border, 5px radius,
+- **Segmented control:** an inline group with one shared 1px border, 7px radius,
   `overflow: hidden`, and internal 1px dividers. Pressed
-  (`[aria-pressed="true"]`) takes `--accent-dim` and an inset 2px `--accent`
-  bottom edge.
+  (`[aria-pressed="true"]`) takes `--surface-3`, `--ink`, and an inset 1px
+  `--line-strong` ring (see the No-Tinted-Pill Rule for why not weight and
+  why not green).
 
 ### Tables
 - Wrapped in a bordered 8px `overflow: auto` container on `--surface`; the SQL
@@ -489,6 +521,13 @@ chroma. Waking, creating, stopping and removing share the amber dot with a 1.1s
 opacity pulse (disabled under reduced motion). Failed is a solid `--danger` dot
 and is the one state whose label text takes the colour, because failure is the
 one condition worth shouting.
+
+**Not deployed** (`state-undeployed`, arriving in core with the
+record-before-code work) is the second resting state: the record exists and no
+code has ever been uploaded. It renders as an 8px transparent dot with a 1.5px
+*dashed* `--ink-3` ring, the outline of a thing not there yet. No chroma, like
+sleeping, because a resource waiting for its first deploy is not a problem.
+A row in this state gets no wake affordance: there is nothing to start.
 
 Labels are the product's words, not the daemon's: running is "Awake", starting
 is "Waking", stopping is "Stopping". A stopping database is labelled for what it
@@ -524,7 +563,7 @@ unbordered, sticky under the topbar until 1040px.
 ### Modals
 Every form in the product lives in one (see `PRODUCT.md` for why). A fixed
 scrim at 55% black with a 2px blur centres a 440px `--surface` dialog with a
-`--line-strong` border, 8px radius, `--shadow-pop` and a 120ms fade-and-rise
+`--line-strong` border, 12px radius, `--shadow-pop` and a 140ms fade-and-rise
 entrance (none under reduced motion). Head is 16px/18px, body 14px/18px, foot is
 a right-aligned `--surface-2` strip with a top hairline and bottom-only radius.
 Behaviour: focus moves to the first typable control on open and is restored on
@@ -533,10 +572,15 @@ and body scroll is locked. Under 560px the scrim loses its padding and the
 dialog becomes a full-width bottom sheet with only its top corners rounded.
 
 ### Empty states and notices
-Empty states are a dashed `--line-strong` box, 8px radius, 40px/24px, centred,
-with a 15px `--ink` heading and a 42ch-capped `--ink-2` paragraph. Notices are a
-5px-radius bordered strip at 13px; the danger and waking variants take their
-hue's border, dim wash and text together.
+Empty states are a dashed `--line-strong` box, 10px radius, 44px/24px, centred,
+with a spot drawing above a 15px `--ink` heading and a 42ch-capped `--ink-2`
+paragraph. The spots live in `src/components/Spot.tsx`: 52x44 inline SVG,
+1.4 stroke, `currentColor`, dimmed to `--ink-3` by `.empty-art`. One drawing
+per situation (crate-and-sprout for no projects, terminal for idle results,
+column grid for no schema, row stack for pick-a-table); the drawing carries
+the warmth so the copy can stay plain, and no external asset is ever involved.
+Notices are a 7px-radius bordered strip at 13px; the danger and waking
+variants take their hue's border, dim wash and text together.
 
 ## Do's and Don'ts
 
@@ -578,9 +622,15 @@ hue's border, dim wash and text together.
 
 ## Verified
 
-The light theme has been viewed and works. The dark theme is the default and
-the one most of this was designed in, but both are real and neither is a
-fallback.
+The warm re-voice was inspected in a real browser (Playwright against the dev
+server, with a fixture daemon API): Login, Projects, a project overview with
+all four kinds in the rail, Tables, SQL and Schema empty states, the new
+project modal, and card hover, in dark; Login, Projects and the project
+overview in light; Projects under `prefers-reduced-motion`. Every ink step was
+contrast-checked numerically against every surface step in both themes. The
+`undeployed` state and the app and worker rail rows were verified against
+fixtures, because the daemon cannot yet produce them through Studio; they need
+a second look when record-before-code lands.
 
 Still unverified by anyone: how the interface behaves with a database in the
 `failed` state, and with a table wide enough or a result set long enough to
