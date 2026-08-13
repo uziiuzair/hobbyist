@@ -18,4 +18,7 @@ export {
   type ConsumerOptions,
   type LeasedBatch,
   type LeasedMessage,
+  applyResult,
+  type DeliveryResult,
+  type ApplyOutcome,
 } from './broker.js'
