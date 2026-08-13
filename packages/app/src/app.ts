@@ -423,6 +423,20 @@ export async function deployApp(
   }
   const source = opts.source ?? resource.config.source
   if (source === null) {
+    // Two different reasons land here now, and they read very differently.
+    // A record-before-code app (Task 4: createAppResource with neither a
+    // source nor an image) has no image either, so "was created from a
+    // prebuilt image" would be false of it. Only an app that actually has an
+    // image was created from one; an app with no image has simply never been
+    // deployed, and the fix is a first deploy naming a directory, not "pass a
+    // build context instead of an image reference."
+    if (resource.config.image === null) {
+      throw new HobbyError(
+        'usage',
+        `${resource.name} has never been deployed, so this deploy needs a directory to build from`,
+        `run \`hobby deploy <path> --project ${project.name} --name ${resource.name}\` from the directory holding its Dockerfile`
+      )
+    }
     throw new HobbyError(
       'usage',
       `app ${resource.name} was created from a prebuilt image and has no source to rebuild`,
@@ -430,17 +444,25 @@ export async function deployApp(
     )
   }
 
+  // A first deploy that fails must not leave the resource looking broken,
+  // because it is not: it is exactly as it was, a record with no code. Only
+  // a resource that already HAD an image can meaningfully be `failed`.
+  // Captured before anything below can throw, and used uniformly for every
+  // failure in this function (a build failure, a container failure, a
+  // readiness timeout): all three mean the same thing for rollback purposes.
+  const wasUndeployed = resource.state === 'undeployed'
+
   const now = deps.now ?? Date.now
-  const built = await buildAppImage(deps.runtime, {
-    source,
-    tag: buildTag(project.name, resource.name, now()),
-  })
-
-  const config: AppConfig = { ...resource.config, image: built.tag, source }
-  deps.store.updateResourceConfig(resource.id, config)
-
-  deps.store.setResourceState(resource.id, 'starting')
   try {
+    const built = await buildAppImage(deps.runtime, {
+      source,
+      tag: buildTag(project.name, resource.name, now()),
+    })
+
+    const config: AppConfig = { ...resource.config, image: built.tag, source }
+    deps.store.updateResourceConfig(resource.id, config)
+
+    deps.store.setResourceState(resource.id, 'starting')
     await replaceContainer(deps, config, project.networkName)
     await deps.runtime.start(config.containerName)
 
@@ -451,25 +473,22 @@ export async function deployApp(
       timeoutMs: deps.config.wakeTimeoutMs,
     })
     if (!result.ready) {
-      deps.store.setResourceState(resource.id, 'failed')
       throw notListening(config, result.waitedMs)
     }
 
     await deps.runtime.stop(config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
     deps.store.setResourceState(resource.id, 'sleeping')
     deps.activity?.reset(resource.id)
-  } catch (err) {
-    if (!(err instanceof HobbyError && err.code === 'wake_timeout')) {
-      deps.store.setResourceState(resource.id, 'failed')
+
+    const final = deps.store.getResource(resource.id)
+    if (final === null || final.kind !== 'app') {
+      throw new HobbyError('internal', `app ${resource.id} vanished during deploy`)
     }
+    return { resource: final, image: built.tag, logs: built.logs }
+  } catch (err) {
+    deps.store.setResourceState(resource.id, wasUndeployed ? 'undeployed' : 'failed')
     throw err
   }
-
-  const final = deps.store.getResource(resource.id)
-  if (final === null || final.kind !== 'app') {
-    throw new HobbyError('internal', `app ${resource.id} vanished during deploy`)
-  }
-  return { resource: final, image: built.tag, logs: built.logs }
 }
 
 export async function probeApp(deps: AppDeps, resource: AppResource): Promise<boolean> {

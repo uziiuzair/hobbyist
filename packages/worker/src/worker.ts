@@ -537,70 +537,90 @@ export async function deployWorker(
   // Falls back to the recorded source path on a redeploy. A worker whose
   // manifest is still null has never been deployed, so there is nothing
   // recorded to fall back to and the caller must say where the code is.
+  // Names the actual fixing command rather than the wire shape, matching
+  // deployApp's identical guard in packages/app/src/app.ts.
   let sourcePath = opts.sourcePath
   if (sourcePath === undefined) {
     if (resource.config.manifest === null) {
       throw new HobbyError(
         'usage',
-        `worker ${resource.id} has never been deployed`,
-        'a first deploy needs a source directory: pass { "source": { "path": "..." } }'
+        `${resource.name} has never been deployed, so this deploy needs a directory to build from`,
+        `run \`hobby deploy <path> --project ${project.name} --name ${resource.name}\` from the directory holding its wrangler config`
       )
     }
     sourcePath = resource.config.manifest.source.path
   }
-  const found = findWranglerManifest(sourcePath)
-  const manifest = found.manifest
-  const now = deps.now ?? Date.now
 
-  const dockerfilePath = await writeGeneratedDockerfile(deps, project.name, resource.name, manifest)
-  const tag = workerTag(project.name, resource.name, now())
-  const logs = await buildWorkerImage(deps.runtime, {
-    contextPath: sourcePath,
-    dockerfilePath,
-    tag,
-    memory: BUILD_MEMORY,
-    cpuShares: BUILD_CPU_SHARES,
-  })
+  // A first deploy that fails must not leave the resource looking broken,
+  // because it is not: it is exactly as it was, a record with no code. Only
+  // a resource that already HAD an image can meaningfully be `failed`.
+  // Captured before anything below can throw, and covers every failure in
+  // this function uniformly: a bad manifest, a failed build, a container
+  // that never starts, or a readiness timeout inside startWorker all mean
+  // the same thing for rollback purposes. Same rule as deployApp's,
+  // packages/app/src/app.ts.
+  const wasUndeployed = resource.state === 'undeployed'
 
-  const config: WorkerConfig = {
-    ...resource.config,
-    image: tag,
-    // Untouched on purpose. It is derived from the resource id and changing
-    // it here would orphan every Durable Object's storage on every deploy,
-    // which is the sharpest data-loss edge in this kind.
-    durableObjectUniqueKeyModifier: resource.config.durableObjectUniqueKeyModifier,
-    manifest: {
-      source: { path: sourcePath, manifest: found.file },
-      compatibilityDate: manifest.compatibilityDate,
-      compatibilityFlags: manifest.compatibilityFlags,
-      vars: manifest.vars,
-      kvNamespaces: manifest.kvNamespaces,
-      r2Buckets: manifest.r2Buckets,
-      d1Databases: manifest.d1Databases,
-      queues: manifest.queues,
-      durableObjects: manifest.durableObjects,
-    },
+  try {
+    const found = findWranglerManifest(sourcePath)
+    const manifest = found.manifest
+    const now = deps.now ?? Date.now
+
+    const dockerfilePath = await writeGeneratedDockerfile(deps, project.name, resource.name, manifest)
+    const tag = workerTag(project.name, resource.name, now())
+    const logs = await buildWorkerImage(deps.runtime, {
+      contextPath: sourcePath,
+      dockerfilePath,
+      tag,
+      memory: BUILD_MEMORY,
+      cpuShares: BUILD_CPU_SHARES,
+    })
+
+    const config: WorkerConfig = {
+      ...resource.config,
+      image: tag,
+      // Carried through explicitly rather than by spread alone, so that a
+      // future edit to this object cannot silently drop it. It is derived
+      // from the resource id and regenerating it here would orphan every
+      // Durable Object's storage on every deploy, the sharpest data-loss
+      // edge in this kind.
+      durableObjectUniqueKeyModifier: resource.config.durableObjectUniqueKeyModifier,
+      manifest: {
+        source: { path: sourcePath, manifest: found.file },
+        compatibilityDate: manifest.compatibilityDate,
+        compatibilityFlags: manifest.compatibilityFlags,
+        vars: manifest.vars,
+        kvNamespaces: manifest.kvNamespaces,
+        r2Buckets: manifest.r2Buckets,
+        d1Databases: manifest.d1Databases,
+        queues: manifest.queues,
+        durableObjects: manifest.durableObjects,
+      },
+    }
+    deps.store.updateResourceConfig(resource.id, config)
+
+    // Replaced, not restarted: the image and the manifest environment are
+    // both fixed at container create time.
+    await deps.runtime.stop(config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+    await deps.runtime.remove(config.containerName)
+
+    const updated = deps.store.getResource(resource.id)
+    if (updated === null || updated.kind !== 'worker') {
+      throw new HobbyError('internal', `worker ${resource.id} vanished during deploy`)
+    }
+
+    await startWorker(deps, updated)
+    await stopWorker(deps, updated)
+
+    const final = deps.store.getResource(resource.id)
+    if (final === null || final.kind !== 'worker') {
+      throw new HobbyError('internal', `worker ${resource.id} vanished during deploy`)
+    }
+    return { resource: final, image: tag, ignored: manifest.ignored, logs }
+  } catch (err) {
+    deps.store.setResourceState(resource.id, wasUndeployed ? 'undeployed' : 'failed')
+    throw err
   }
-  deps.store.updateResourceConfig(resource.id, config)
-
-  // Replaced, not restarted: the image and the manifest environment are both
-  // fixed at container create time.
-  await deps.runtime.stop(config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
-  await deps.runtime.remove(config.containerName)
-
-  const updated = deps.store.getResource(resource.id)
-  if (updated === null || updated.kind !== 'worker') {
-    throw new HobbyError('internal', `worker ${resource.id} vanished during deploy`)
-  }
-
-  await startWorker(deps, updated)
-  await stopWorker(deps, updated)
-
-  const final = deps.store.getResource(resource.id)
-  if (final === null || final.kind !== 'worker') {
-    throw new HobbyError('internal', `worker ${resource.id} vanished during deploy`)
-  }
-  return { resource: final, image: tag, ignored: manifest.ignored, logs }
 }
 
 function errorMessage(err: unknown): string {
