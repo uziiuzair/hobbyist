@@ -101,17 +101,19 @@ function seed(ctx: DaemonContext): { dbName: string; appName: string } {
     hostPort: 35433,
     containerPort: 8787,
     hostname: 'api.blog.localhost',
-    source: { path: '/home/user/code/blog-api', manifest: 'wrangler.toml' },
-    compatibilityDate: '2026-08-01',
-    compatibilityFlags: [],
-    vars: { GREETING: 'hello' },
-    kvNamespaces: [],
-    r2Buckets: [],
-    d1Databases: [],
-    queues: { producers: [], consumers: [] },
-    durableObjects: [{ binding: 'COUNTER', className: 'Counter' }],
     durableObjectUniqueKeyModifier: 'stable-id',
     databaseResourceId: db.id,
+    manifest: {
+      source: { path: '/home/user/code/blog-api', manifest: 'wrangler.toml' },
+      compatibilityDate: '2026-08-01',
+      compatibilityFlags: [],
+      vars: { GREETING: 'hello' },
+      kvNamespaces: [],
+      r2Buckets: [],
+      d1Databases: [],
+      queues: { producers: [], consumers: [] },
+      durableObjects: [{ binding: 'COUNTER', className: 'Counter' }],
+    },
   }
   ctx.store.createResource({ projectId: project.id, kind: 'worker', name: 'api', config: workerCfg })
 

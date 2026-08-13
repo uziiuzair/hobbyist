@@ -67,17 +67,19 @@ function workerConfig(): WorkerConfig {
     hostPort: 35433,
     containerPort: 8787,
     hostname: 'api.chat.localhost',
-    source: { path: '/code/api', manifest: 'wrangler.toml' },
-    compatibilityDate: '2026-08-01',
-    compatibilityFlags: [],
-    vars: {},
-    kvNamespaces: [],
-    r2Buckets: [],
-    d1Databases: [],
-    queues: { producers: [], consumers: [] },
-    durableObjects: [{ binding: 'ROOM', className: 'Room' }],
     durableObjectUniqueKeyModifier: 'unused-here',
     databaseResourceId: null,
+    manifest: {
+      source: { path: '/code/api', manifest: 'wrangler.toml' },
+      compatibilityDate: '2026-08-01',
+      compatibilityFlags: [],
+      vars: {},
+      kvNamespaces: [],
+      r2Buckets: [],
+      d1Databases: [],
+      queues: { producers: [], consumers: [] },
+      durableObjects: [{ binding: 'ROOM', className: 'Room' }],
+    },
   }
 }
 
