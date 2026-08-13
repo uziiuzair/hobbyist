@@ -248,12 +248,14 @@ function notListening(config: WorkerConfig, waitedMs: number): HobbyError {
 // passed a connect-only probe, was recorded `running`, and then refused every
 // request. Same bug reconcile.ts documents for Postgres.
 //
-// Duplicated rather than shared with @hobby.sh/app deliberately. A package
-// that exists to hold one twenty line function is a module pretending to be a
-// package (root CLAUDE.md), and a dependency edge between two sibling kinds
-// is worse than the duplication.
-function defaultProbeFactory(): (config: WorkerConfig) => () => Promise<boolean> {
-  return (config: WorkerConfig) => async (): Promise<boolean> => {
+// Shared between the main port and the control port rather than written
+// twice: both need exactly this, a status line over a real socket, on
+// different ports and routes. Duplicated rather than shared with
+// @hobby.sh/app deliberately, at the file boundary, for the reason recorded
+// where this used to live: a package that exists to hold one twenty line
+// function is a module pretending to be a package (root CLAUDE.md).
+function httpProbe(port: number, request: { method: string; path: string }): () => Promise<boolean> {
+  return async (): Promise<boolean> => {
     const net = await import('node:net')
     return new Promise((resolve) => {
       const socket = new net.Socket()
@@ -266,7 +268,9 @@ function defaultProbeFactory(): (config: WorkerConfig) => () => Promise<boolean>
       }
       socket.setTimeout(500)
       socket.once('connect', () => {
-        socket.write('GET / HTTP/1.1\r\nHost: hobby.probe\r\nConnection: close\r\n\r\n')
+        socket.write(
+          `${request.method} ${request.path} HTTP/1.1\r\nHost: hobby.probe\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`
+        )
       })
       socket.once('data', (chunk: Buffer) => {
         finish(chunk.subarray(0, 5).toString('latin1') === 'HTTP/')
@@ -275,8 +279,44 @@ function defaultProbeFactory(): (config: WorkerConfig) => () => Promise<boolean>
       socket.once('close', () => finish(false))
       socket.once('timeout', () => finish(false))
       socket.once('error', () => finish(false))
-      socket.connect(config.hostPort, '127.0.0.1')
+      socket.connect(port, '127.0.0.1')
     })
+  }
+}
+
+// Whether this worker has any reason to need the control port at all. A
+// producer never receives anything on it: the shim posts straight to the
+// daemon's enqueue listener. A consumer needs it for everything, since a
+// batch is DELIVERED by a POST to this exact port
+// (docs/queues/specs/2026-08-13-queues-design.md, "Delivery over a second
+// port, not a proxy"), so this checks both lists, not only producers, and a
+// worker with neither is never made to wait on a channel it will never use.
+function declaresQueueBindings(config: WorkerConfig): boolean {
+  return config.queues.producers.length > 0 || config.queues.consumers.length > 0
+}
+
+// A worker recorded `running` on the main port alone, while its control
+// port never came up, is the exact failure this whole capability exists to
+// prevent, arriving through the readiness probe instead of the broker: the
+// daemon would go on to deliver every batch to a port with nothing behind
+// it, and nothing about the worker would look wrong. So when the worker
+// declares a queue binding, readiness requires BOTH ports to answer, not
+// only the one already covered above.
+//
+// The control probe POSTs to /queue with an empty body on purpose.
+// CONTROL_SOURCE's fetch handler throws on `request.json()` for that, and
+// runtime-image.ts's node:http bridge turns any error, thrown or rejected,
+// into a real HTTP response rather than a hung socket, so this still proves
+// what a probe needs to prove: something on the other end is parsing HTTP.
+// The exact status code does not matter, 4xx and 5xx both count.
+function defaultProbeFactory(): (config: WorkerConfig) => () => Promise<boolean> {
+  return (config: WorkerConfig) => {
+    const mainProbe = httpProbe(config.hostPort, { method: 'GET', path: '/' })
+    if (!declaresQueueBindings(config)) {
+      return mainProbe
+    }
+    const controlProbe = httpProbe(config.controlPort, { method: 'POST', path: '/queue' })
+    return async (): Promise<boolean> => (await mainProbe()) && (await controlProbe())
   }
 }
 

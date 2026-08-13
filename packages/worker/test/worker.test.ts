@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { mkdtempSync, writeFileSync } from 'node:fs'
+import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -18,6 +19,7 @@ import {
   type PostgresConfig,
   type Project,
   type Store,
+  type WorkerConfig,
 } from '@hobby.sh/core'
 import {
   describeIgnored,
@@ -31,6 +33,7 @@ import {
   buildRunnerManifest,
   createWorkerResource,
   deployWorker,
+  probeWorker,
   startWorker,
   stopWorker,
   uniqueKeyFor,
@@ -520,6 +523,131 @@ test('a worker with no stored queueToken gets one backfilled on start, and never
 
   const manifest = buildRunnerManifest(deps, after)
   assert.equal(manifest.queueToken, after.config.queueToken)
+})
+
+// A minimal, hand-built WorkerConfig for the readiness tests below, which
+// need real ports pointing at real local servers rather than anything
+// createWorkerResource's own wrangler.toml flow would build, since the whole
+// point is to exercise defaultProbeFactory itself, not a fake one.
+function sampleWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
+  return {
+    image: 'hobby/workerd:1',
+    containerName: 'hobby-blog-api-readiness',
+    hostPort: 0,
+    controlPort: 0,
+    queueToken: 'test-queue-token',
+    containerPort: 8787,
+    hostname: 'api.blog.localhost',
+    source: { path: '/src/api', manifest: 'wrangler.toml' },
+    compatibilityDate: '2026-08-01',
+    compatibilityFlags: [],
+    vars: {},
+    kvNamespaces: [],
+    r2Buckets: [],
+    d1Databases: [],
+    queues: { producers: [], consumers: [] },
+    durableObjects: [],
+    durableObjectUniqueKeyModifier: 'stable-modifier',
+    databaseResourceId: null,
+    ...overrides,
+  }
+}
+
+// A tiny stand-in for "a real HTTP server is listening here", used instead
+// of a bare TCP listener because the whole point of these tests is that a
+// TCP connect is not enough (worker.ts's own httpProbe comment says why).
+function realHttpServer(status: number): Promise<{ server: Server; port: number }> {
+  return new Promise((resolve) => {
+    const server = createServer((_req, res) => {
+      res.writeHead(status, { 'content-type': 'application/json' })
+      res.end('{}')
+    })
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      const port = typeof address === 'object' && address !== null ? address.port : 0
+      resolve({ server, port })
+    })
+  })
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve) => server.close(() => resolve()))
+}
+
+// The regression this task exists to prevent, but arriving through the
+// readiness probe instead of the broker: if the control port's HTTP server
+// never came up (its listen() failed, or the runner crashed moments after
+// the main port started), a worker that only probes the main port would be
+// recorded running anyway, and every batch the daemon later delivers goes to
+// a port with nothing behind it, while the worker looks entirely healthy.
+//
+// Real sockets throughout, no workerProbeFactory override: a mocked probe
+// cannot demonstrate this, since the whole bug is in what the real one does.
+test('readiness requires the control port too, once the worker declares a queue binding', async () => {
+  const deps = buildDeps({ workerProbeFactory: undefined })
+  const project = makeProject(deps.store)
+  const { server: mainServer, port: hostPort } = await realHttpServer(200)
+
+  try {
+    const config = sampleWorkerConfig({
+      hostPort,
+      // Nothing is listening here yet, which is the first assertion below.
+      controlPort: hostPort + 1,
+      queues: { producers: [], consumers: [{ queue: 'jobs', maxBatchSize: null, maxBatchTimeoutSeconds: null, maxRetries: null, retryDelaySeconds: null, deadLetterQueue: null }] },
+    })
+    const created = deps.store.createResource({ projectId: project.id, kind: 'worker', name: 'api', config })
+    const resource = deps.store.getResource(created.id)
+    assert.ok(resource !== null && resource.kind === 'worker')
+
+    assert.equal(
+      await probeWorker(deps, resource),
+      false,
+      'the main port answers but nothing is listening on the control port yet'
+    )
+
+    const { server: controlServer, port: controlPort } = await realHttpServer(400)
+    // Same object, new controlPort: createResource already fixed the config
+    // this resource holds, so the probe (which reads resource.config) needs
+    // a resource that actually points at the server just opened.
+    deps.store.updateResourceConfig(resource.id, { ...resource.config, controlPort })
+    const updated = deps.store.getResource(resource.id)
+    assert.ok(updated !== null && updated.kind === 'worker')
+
+    try {
+      assert.equal(await probeWorker(deps, updated), true, 'both ports answer a real HTTP request now')
+    } finally {
+      await closeServer(controlServer)
+    }
+  } finally {
+    await closeServer(mainServer)
+  }
+})
+
+test('readiness does not wait on the control port for a worker with no queue binding at all', async () => {
+  const deps = buildDeps({ workerProbeFactory: undefined })
+  const project = makeProject(deps.store)
+  const { server: mainServer, port: hostPort } = await realHttpServer(200)
+
+  try {
+    const config = sampleWorkerConfig({
+      hostPort,
+      // Nothing is listening here, and nothing should ever have to be: this
+      // worker declares no producer and no consumer.
+      controlPort: hostPort + 1,
+      queues: { producers: [], consumers: [] },
+    })
+    const created = deps.store.createResource({ projectId: project.id, kind: 'worker', name: 'api', config })
+    const resource = deps.store.getResource(created.id)
+    assert.ok(resource !== null && resource.kind === 'worker')
+
+    assert.equal(
+      await probeWorker(deps, resource),
+      true,
+      'the control port is never checked, because this worker has nothing to deliver through it'
+    )
+  } finally {
+    await closeServer(mainServer)
+  }
 })
 
 // The whole point of ADR 0013: Miniflare's own queue broker keeps its

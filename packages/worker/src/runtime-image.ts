@@ -460,6 +460,17 @@ const controlServer = createServer((req, res) => {
     })()
   })
 })
+// Loud and immediate rather than a silent hang: an EventEmitter with no
+// error listener already crashes the process on its own, but a message that
+// says why is the difference between hobby logs pointing straight at the
+// cause and a bare stack trace nobody reading it can place. This is exactly
+// the failure the readiness probe's control-port check exists to catch
+// (worker.ts's defaultProbeFactory): should the two ever race, the probe is
+// the one that decides whether the worker is recorded running, not this.
+controlServer.on('error', (err) => {
+  console.error('hobby: control channel failed to start: ' + (err instanceof Error ? err.stack : String(err)))
+  process.exit(1)
+})
 // 0.0.0.0, for the same reason the worker port above is. Published to the
 // host's loopback only, exactly as the worker port already is.
 controlServer.listen(${CONTAINER_CONTROL_PORT}, '0.0.0.0', () => {
