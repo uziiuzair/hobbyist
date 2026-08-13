@@ -39,16 +39,16 @@
 
   /* Dark first. The physical scene is a developer at a desk, often at night,
      with this tab parked beside an editor, driving a machine in a cupboard. */
-  --ground: #100f0d;
-  --surface: #171512;
-  --surface-2: #1e1b17;
-  --surface-3: #26221c;
-  --line: #2b2721;
-  --line-strong: #3c362d;
+  --ground: #131110;
+  --surface: #1a1715;
+  --surface-2: #211d1a;
+  --surface-3: #2a2521;
+  --line: #2f2925;
+  --line-strong: #423a32;
 
-  --ink: #ede9e3;
-  --ink-2: #b3aa9e;
-  --ink-3: #948b7e;
+  --ink: #f2eee6;
+  --ink-2: #b9ae9f;
+  --ink-3: #998f80;
 
   /* Green does two jobs and the separation between them is deliberate.
      --accent is action: it only ever appears on things you can press or
@@ -56,28 +56,38 @@
      a meter fill. A large filled surface reads as a control, a 7px dot with a
      halo reads as a status, so the same hue stays unambiguous. Sleeping still
      has no chroma at all, because sleeping is the product working. */
-  --accent: #45cd81;
-  --accent-hover: #58d992;
-  --accent-ink: #06231a;
-  --accent-dim: rgba(69, 205, 129, 0.13);
-  --accent-line: rgba(69, 205, 129, 0.36);
+  --accent: #4ed492;
+  --accent-hover: #63e0a2;
+  --accent-ink: #052419;
+  --accent-dim: rgba(78, 212, 146, 0.14);
+  --accent-line: rgba(78, 212, 146, 0.34);
 
   --awake: var(--accent);
-  --awake-dim: rgba(69, 205, 129, 0.18);
-  --awake-ring: rgba(69, 205, 129, 0.36);
-  --waking: #e6ae52;
-  --waking-dim: rgba(230, 174, 82, 0.14);
+  --awake-dim: rgba(78, 212, 146, 0.14);
+  --awake-ring: rgba(78, 212, 146, 0.34);
+  --waking: #e9b45c;
+  --waking-dim: rgba(233, 180, 92, 0.13);
 
-  --danger: #ec8577;
-  --danger-dim: rgba(236, 133, 119, 0.12);
+  --danger: #ee8a7c;
+  --danger-dim: rgba(238, 138, 124, 0.12);
+
+  /* The jewel family: decorative only (tiles, kind icons). Never state. */
+  --sage: #97d8b0;
+  --iris: #b6acf5;
+  --honey-t: #e3b878;
+  --rose: #e9a3ab;
+
+  /* Glow lives on state dots, the awake card edge, and primary hover. */
+  --glow-awake: rgba(78, 212, 146, 0.28);
+  --glow-waking: rgba(233, 180, 92, 0.3);
 
   --focus: var(--accent);
 
-  --radius: 10px;
-  --radius-sm: 7px;
+  --radius: 13px;
+  --radius-sm: 9px;
   /* Modals float above the page and take one softer step than the containers
      in the flow. Only the modal uses this. */
-  --radius-lg: 12px;
+  --radius-lg: 16px;
   /* A 4px tall meter cannot take the 5px radius without looking like a
      lozenge, so the bar radius is its own documented step. */
   --radius-bar: 2px;
@@ -94,8 +104,8 @@
   --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 1px 3px rgba(0, 0, 0, 0.35);
   /* A hovered card rises one step, not to the pop layer: the pop shadow is
      reserved for things genuinely above the document (menu, modal). */
-  --shadow-lift: 0 3px 12px rgba(0, 0, 0, 0.28), 0 1px 3px rgba(0, 0, 0, 0.3);
-  --shadow-pop: 0 10px 32px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.35);
+  --shadow-lift: 0 10px 32px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-pop: 0 24px 70px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.35);
 }
 
 /* Someone's OS may be in light mode and this is their own machine, so light
