@@ -428,8 +428,10 @@ input, textarea { caret-color: var(--accent); }
 .machine-cluster i { width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--ink-3); box-sizing: border-box; }
 .machine-cluster i.on { background: var(--awake); border: 0; box-shadow: 0 0 8px 1px var(--glow-awake); }
 .machine-right { margin-left: auto; }
-.page-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
-.page-title { margin: 0; font-size: 21px; font-weight: 600; letter-spacing: -0.015em; }
+.page-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 22px; }
+/* The display voice: one serif title per view, a register the interface
+   itself never uses. */
+.page-title { margin: 0; font-family: var(--font-serif); font-size: 30px; font-weight: 600; letter-spacing: -0.012em; }
 .page-sub { margin: 4px 0 0; color: var(--ink-2); font-size: 13.5px; }
 .page-actions { margin-left: auto; display: flex; gap: 8px; flex: none; }
 
@@ -804,7 +806,7 @@ kbd {
 .connstring code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 
 .empty { border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: 44px 24px; text-align: center; color: var(--ink-2); }
-.empty h3 { margin: 0 0 6px; font-size: 15px; color: var(--ink); font-weight: 600; }
+.empty h3 { margin: 0 0 6px; font-family: var(--font-serif); font-size: 18px; color: var(--ink); font-weight: 600; }
 .empty p { margin: 0 auto; max-width: 42ch; font-size: 13.5px; }
 /* The spot drawing above an empty state's heading: dim ink, never chroma.
    The drawing carries the warmth so the words can stay plain. */
@@ -1300,7 +1302,7 @@ kbd {
 }
 
 .modal-head { padding: 16px 18px 0; }
-.modal-title { margin: 0; font-size: 15.5px; font-weight: 600; letter-spacing: -0.01em; }
+.modal-title { margin: 0; font-family: var(--font-serif); font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
 .modal-desc { margin: 5px 0 0; color: var(--ink-2); font-size: 13px; line-height: 1.5; }
 .modal-body { padding: 14px 18px 16px; }
 .modal-foot {
@@ -1321,25 +1323,44 @@ kbd {
 
 /* ---------- login ---------- */
 
-.login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+/* The door: a nocturne composition. A breathing radial of the product's own
+   green behind a single glowing mark; the one place the product gets to be
+   quiet and confident. */
+.login-wrap {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: radial-gradient(ellipse 640px 420px at 50% 38%, rgba(78, 212, 146, 0.05), transparent), var(--ground);
+}
 .login-card { width: 100%; max-width: 340px; }
-.login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
+.login-brand { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 14px; margin-bottom: 26px; }
 
-/* The rail mark at door size. Same anatomy: a box holding the state dot,
-   hollow here because nothing is known to be awake before you are in. */
+/* The rail mark at door size. The dot glows green here on purpose: the door
+   shows the product alive; the rail mark reports the truth once inside. */
 .login-mark {
-  width: 30px;
-  height: 30px;
-  border-radius: var(--radius-sm);
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius);
   border: 1px solid var(--line-strong);
-  background: var(--surface-3);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent), var(--surface-2);
   display: grid;
   place-items: center;
   flex: none;
 }
-.login-mark i { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); display: block; }
-.login-title { font-weight: 600; font-size: 16px; letter-spacing: -0.01em; }
-.login-sub { color: var(--ink-2); font-size: 13px; margin-top: 1px; }
+.login-mark i {
+  width: 9px; height: 9px; border-radius: 50%; display: block;
+  background: var(--awake);
+  box-shadow: 0 0 0 4px var(--awake-dim), 0 0 22px 4px var(--glow-awake);
+  animation: mark-breathe 3.2s ease-in-out infinite;
+}
+@keyframes mark-breathe {
+  0%, 100% { box-shadow: 0 0 0 4px var(--awake-dim), 0 0 22px 4px var(--glow-awake); }
+  50% { box-shadow: 0 0 0 4px var(--awake-dim), 0 0 32px 8px var(--glow-awake); }
+}
+@media (prefers-reduced-motion: reduce) { .login-mark i { animation: none; } }
+.login-title { font-family: var(--font-serif); font-weight: 600; font-size: 28px; letter-spacing: -0.01em; }
+.login-sub { color: var(--ink-2); font-size: 13.5px; margin-top: 3px; }
 
 /* ---------- responsive ---------- */
 
