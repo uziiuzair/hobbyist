@@ -12,17 +12,24 @@
 // both are torn down as part of this file's own shutdown sequence, and the
 // order that teardown happens in is deliberate: see performShutdown below.
 
+import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { chmod, rm } from 'node:fs/promises'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import net from 'node:net'
+import { promisify } from 'node:util'
 import { startAlarmMirror } from '@hobby.sh/do'
 import { startHttpRouter, startPgProxy } from '@hobby.sh/proxy'
+import { startQueueTick } from '@hobby.sh/queue'
 import { durableObjectNamespaces } from './alarms.js'
 import { createHttpProxyDeps, createProxyDeps, getOrCreateWake, type DaemonContext } from './context.js'
 import { startHibernator } from './hibernator.js'
+import { startQueueEndpoint } from './queue-endpoint.js'
+import { drainableQueues, queueDeliverFn, queueStateOf } from './queues.js'
 import { handleRequest } from './routes.js'
 import { createStudioApp } from './studio/routes.js'
+
+const execFileAsync = promisify(execFile)
 
 const SOCKET_MODE = 0o600
 
@@ -50,6 +57,14 @@ const HIBERNATION_TICK_MS = 10_000
 // one loop moments before being woken by the other.
 const ALARM_MIRROR_TICK_MS = 10_000
 
+// How often the queue tick checks every drainable queue for a ready batch.
+// docs/queues/specs/2026-08-13-queues-design.md's own "The tick" section
+// names 250ms; unlike the alarm mirror, this loop's lateness is on the
+// project's own keystone budget (root CLAUDE.md's "under 1 second target,
+// 3 second hard ceiling" for a cold start), not a cron-shaped tolerance, so
+// it runs far more often than the ten-second hibernation and alarm ticks.
+const QUEUE_TICK_MS = 250
+
 // How long to wait for a connection attempt against a possibly-stale socket
 // file before assuming nothing is listening. Generous enough that a real,
 // merely slow-to-accept daemon is never mistaken for a dead one, short
@@ -58,6 +73,82 @@ const SOCKET_PROBE_TIMEOUT_MS = 500
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+// A fast index for the enqueue listener's own authenticate() to consult
+// first (packages/cli/src/daemon/queue-endpoint.ts): token -> resourceId, or
+// null. Deliberately a plain linear scan rather than a maintained map: that
+// file's own comment is explicit that this is not the last word on
+// authentication ("even a tokenFor backed by a naive linear scan cannot turn
+// into a wrong resource being authenticated"), the actual pass/fail decision
+// is a constant-time compare against the store's own record, done inside
+// that file. A worker count in the tens to low hundreds on one box makes a
+// maintained index not worth the invalidation surface a rename, redeploy or
+// token rotation would each need to keep correct.
+function queueTokenFor(ctx: DaemonContext): (token: string) => string | null {
+  return (token: string): string | null => {
+    for (const resource of ctx.store.listResources()) {
+      if (resource.kind === 'worker' && resource.config.queueToken === token) {
+        return resource.id
+      }
+    }
+    return null
+  }
+}
+
+// Which addresses the enqueue listener binds, decided once at daemon start.
+// Always loopback: on macOS (Docker Desktop, OrbStack) `host.docker.internal`
+// and `host.orb.internal` both proxy to the host's own loopback, verified in
+// docs/queues/research/2026-08-13-miniflare-queues-are-in-memory.md's own
+// transport probes.
+//
+// On Linux that same hostname resolves via `--add-host=host.docker.internal:
+// host-gateway` to the BRIDGE GATEWAY of whichever network a container is
+// attached to (docs/queues/research/2026-08-13-miniflare-queues-are-in-memory.md,
+// "3. How does a container reach the daemon on the host?"), which a socket
+// bound only to 127.0.0.1 never sees. Every project gets its own docker
+// network (Project.networkName), so this asks docker directly for each one's
+// own gateway rather than guessing a single shared address.
+//
+// A best-effort snapshot taken once at startup, not re-read per project
+// created afterward: a project created while the daemon is already running
+// gets its network's gateway added only on the next daemon restart. Recorded
+// here rather than hidden, because docs/queues/specs/2026-08-13-queues-design.md's
+// own milestone table already marks the Linux gateway bind as owed, not
+// closed, and a daemon that silently only ever bound loopback on Linux would
+// look like it worked right up until the first real container tried to send.
+async function queueEndpointHosts(ctx: DaemonContext): Promise<string[]> {
+  const hosts = new Set<string>(['127.0.0.1'])
+  if (process.platform !== 'linux') {
+    return [...hosts]
+  }
+
+  for (const project of ctx.store.listProjects()) {
+    try {
+      const { stdout } = await execFileAsync('docker', [
+        'network',
+        'inspect',
+        project.networkName,
+        '--format',
+        '{{range .IPAM.Config}}{{.Gateway}}{{end}}',
+      ])
+      const gateway = stdout.trim()
+      if (gateway.length > 0) {
+        hosts.add(gateway)
+      }
+    } catch (err) {
+      // Best-effort: a project whose network has not been created yet (no
+      // resource in it has ever started), or a docker CLI failure, must not
+      // stop the daemon from starting. Queue delivery from that project's
+      // containers may simply not reach this listener until the network
+      // exists and the daemon is restarted.
+      console.error(
+        `daemon: could not read the docker network gateway for project ${project.name}, queue sends from its containers may not reach the enqueue listener: ${errorMessage(err)}`
+      )
+    }
+  }
+
+  return [...hosts]
 }
 
 // Deleting a live daemon's socket file out from under it would let a second
@@ -228,6 +319,38 @@ export async function startDaemon(
     intervalMs: ALARM_MIRROR_TICK_MS,
   })
 
+  // The listener a worker container's producer shim posts to when user code
+  // calls env.MY_QUEUE.send() / .sendBatch(). Its own security boundary is
+  // entirely inside queue-endpoint.ts (a per-resource bearer token, no
+  // sharing of the daemon's main router); this is only the platform-specific
+  // "which addresses" decision queueEndpointHosts exists for, and the token
+  // index queueTokenFor exists for. Bound to ctx.config.queuePort, same
+  // DEFAULT_CONFIG.queuePort (7434 in packages/core/src/config.ts) the worker
+  // kind already points a container's producer shim at
+  // (packages/worker/src/worker.ts's buildRunnerManifest).
+  const queueEndpoint = await startQueueEndpoint(ctx, {
+    port: ctx.config.queuePort ?? 7434,
+    hosts: await queueEndpointHosts(ctx),
+    tokenFor: queueTokenFor(ctx),
+  })
+
+  // The keystone's queue half: notices a batch is ready, wakes a sleeping
+  // consumer, delivers, and refuses to let expireLeases lose a message a
+  // container died mid-batch on. Reads the store fresh every tick through
+  // drainableQueues (packages/cli/src/daemon/queues.ts), the same "no cache
+  // to invalidate" shape durableObjectNamespaces above already uses. wake is
+  // the same idempotent, de-duplicated wake the proxy, the HTTP router and
+  // the alarm mirror all share (getOrCreateWake), so a queue message and an
+  // inbound request arriving for the same sleeping worker at once still cost
+  // exactly one start.
+  const queueTick = startQueueTick({
+    queues: () => drainableQueues(ctx),
+    wake: getOrCreateWake(ctx),
+    deliver: queueDeliverFn(ctx),
+    stateOf: queueStateOf(ctx),
+    intervalMs: QUEUE_TICK_MS,
+  })
+
   let shutdownPromise: Promise<void> | null = null
 
   // Idempotent and shared between the signal handlers and the returned
@@ -242,8 +365,15 @@ export async function startDaemon(
       // server.close() stops accepting new connections and waits for
       // in-flight requests to finish before its callback fires: this is
       // "stop accepting, finish in-flight requests" from the brief, for
-      // free, from node:http itself.
-      await Promise.all([closeServer(socketServer), tcpServer ? closeServer(tcpServer) : Promise.resolve()])
+      // free, from node:http itself. The queue endpoint closes alongside the
+      // other two listeners for the same reason: a producer shim mid-send
+      // finishes its request, but no new enqueue is accepted once shutdown
+      // has started.
+      await Promise.all([
+        closeServer(socketServer),
+        tcpServer ? closeServer(tcpServer) : Promise.resolve(),
+        queueEndpoint.stop(),
+      ])
 
       // The hibernator must stop deciding to sleep things before this
       // function starts explicitly stopping things itself, or the two could
@@ -258,6 +388,14 @@ export async function startDaemon(
       // worker must not still be calling wake while the loop underneath is
       // stopping resources.
       await alarmMirror.stop()
+
+      // Same ordering constraint as the alarm mirror, for the identical
+      // reason: a queue tick that has already decided to wake a consumer, or
+      // is mid-delivery to one, must not still be running while the loop
+      // below stops resources out from under it. Drained, not merely
+      // stopped, so an in-flight delivery finishes (or times out on its own)
+      // rather than being abandoned with its lease still held.
+      await queueTick.stop()
 
       // The proxy must close before any resource below is stopped: a proxy
       // still accepting connections would wake a resource right back up the

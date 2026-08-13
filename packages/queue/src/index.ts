@@ -2,6 +2,14 @@ export { openQueueDb } from './schema.js'
 export { queueDbPath, queueKindHandler } from './kind.js'
 export { newMessageId } from './ids.js'
 export { decodeBody, encodeBody } from './codec.js'
+export { deliverBatch } from './deliver.js'
+export { queueDeliveryGuard } from './guard.js'
+export {
+  startQueueTick,
+  tickOnce,
+  type DrainableQueue,
+  type QueueTickOptions,
+} from './tick.js'
 export {
   MAX_BATCH_BYTES,
   MAX_BATCH_COUNT,
