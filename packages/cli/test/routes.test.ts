@@ -475,6 +475,46 @@ test('GET /v1/resources/:id/connection renders a proxy connection string', async
   })
 })
 
+test('GET /v1/resources/:id/connection renders a tailnet string when a tailnet is detected', async () => {
+  const ctx = buildContext()
+  ctx.detectTailnet = async () => 'box.tail1234.ts.net'
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig({ superuser: 'postgres', password: 'secret', database: 'blog' }),
+  })
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'GET', `/v1/resources/${resource.id}/connection`)
+    assert.equal(res.status, 200)
+    const body = res.body as { connectionString: string; tailnetConnectionString: string | null }
+    assert.equal(body.connectionString, 'postgres://postgres:secret@127.0.0.1:5432/blog')
+    // Same proxyPort: the tailnet path terminates at the same wake proxy,
+    // only the host differs.
+    assert.equal(body.tailnetConnectionString, 'postgres://postgres:secret@box.tail1234.ts.net:5432/blog')
+  })
+})
+
+test('GET /v1/resources/:id/connection renders tailnetConnectionString null with no detector', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig(),
+  })
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'GET', `/v1/resources/${resource.id}/connection`)
+    assert.equal(res.status, 200)
+    const body = res.body as { tailnetConnectionString: string | null }
+    assert.equal(body.tailnetConnectionString, null)
+  })
+})
+
 test('GET /v1/resources/:id/logs returns the container logs', async () => {
   const ctx = buildContext()
   const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
