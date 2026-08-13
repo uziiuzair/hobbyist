@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { parseTarget, type ErrorCode } from '@hobby.sh/core'
+import { parseDeploy } from '../src/cli/commands.js'
 import { exitCodeForError } from '../src/cli/exit.js'
 import { parseArgs, UsageError } from '../src/cli/main.js'
 
@@ -88,6 +89,28 @@ test('exitCodeForError: every ErrorCode maps to its exact documented exit code',
   for (const [code, expected] of Object.entries(EXPECTED_EXIT_CODE) as Array<[ErrorCode, number]>) {
     assert.equal(exitCodeForError(code), expected, `${code} should map to exit ${expected}`)
   }
+})
+
+// `hobby deploy` takes exactly one positional, the path; a second optional
+// positional for the resource name cannot be disambiguated from the first,
+// so the name is `--name`, defaulting to the basename of the resolved path.
+// `hobby deploy ./site` therefore targets a resource called `site`. When
+// the path is left at its default `.`, there is no basename to take without
+// the caller's own cwd, which parseDeploy deliberately never reads (see its
+// own comment in commands.ts), so `name` comes back undefined in that one
+// case; cmdDeploy resolves it from `c.io.cwd` instead.
+test('parseDeploy: one positional path, --name overrides the basename default, "." leaves name undefined', () => {
+  assert.deepEqual(parseDeploy(['./site'], { project: 'blog' }), {
+    path: './site',
+    project: 'blog',
+    name: 'site',
+  })
+  assert.deepEqual(parseDeploy(['./site'], { project: 'blog', name: 'web' }), {
+    path: './site',
+    project: 'blog',
+    name: 'web',
+  })
+  assert.deepEqual(parseDeploy([], { project: 'blog' }), { path: '.', project: 'blog', name: undefined })
 })
 
 test('parseTarget: a bare project has no resource segment', () => {
