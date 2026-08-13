@@ -37,11 +37,12 @@ The routing rule is in `docs/CLAUDE.md`. The project context is in the root
 | `backups/` | Backup, restore, PITR | Phase 1.5 |
 | `compute/` | Stateless workers and apps. `app` and `worker` kinds, built 2026-08-10 | Phase 2 |
 | `durable-objects/` | Durable Objects: alarms across sleep, catalog, storage lifecycle | Phase 2 |
+| `queues/` | Queues: the broker outside the runtime, designed 2026-08-13, not built | Phase 2 |
 | `storage/` | S3-compatible buckets, volumes | Phase 3 |
 | `sdk/` | Client libraries, React first | Phase 3 |
 | `decisions/` | Architecture decision records, numbered and immutable | n/a |
 
-## The twelve decisions that define the project
+## The thirteen decisions that define the project
 
 Read these before proposing anything structural. **Start with 0007**, which is
 what makes this a platform rather than a database tool, and which supersedes the
@@ -63,6 +64,7 @@ longer in force.
 | `docs/decisions/0010` | Phase 2 begins without the 30-day gate |
 | `docs/decisions/0011` | workerd, via Miniflare, as the `worker` runtime |
 | `docs/decisions/0012` | Durable Objects as a resource kind, and the alarm mirror that lets them sleep |
+| `docs/decisions/0013` | Queues as a resource kind, with the broker held outside the runtime |
 
 ## The one number
 
