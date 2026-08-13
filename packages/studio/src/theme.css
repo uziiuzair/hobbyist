@@ -351,7 +351,9 @@ input, textarea { caret-color: var(--accent); }
   z-index: 40;
   top: calc(100% + 6px);
   left: 0; right: 0;
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--surface-2) 86%, transparent);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   box-shadow: var(--shadow-pop);
@@ -1192,6 +1194,8 @@ kbd {
    transition and not a resting state. */
 
 .waking-banner {
+  position: relative;
+  overflow: hidden;
   display: flex;
   align-items: center;
   gap: 11px;
@@ -1239,8 +1243,23 @@ kbd {
 .waking-banner-failed .waking-dot { background: var(--danger); box-shadow: none; animation: none; }
 .waking-banner-failed .waking-elapsed { color: var(--danger); }
 
+/* The one authored moment: while something wakes, a honey light sweeps the
+   banner's top edge. Gone under reduced motion, and the words and clock
+   carry everything without it. Subtle and failed banners say something
+   different, so they do not sweep. */
+.waking-banner::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; height: 1px; width: 100%;
+  background: linear-gradient(90deg, transparent, rgba(233, 180, 92, 0.7), transparent);
+  animation: wake-sweep 2.4s ease-in-out infinite;
+}
+@keyframes wake-sweep { 0% { transform: translateX(-100%); } 60%, 100% { transform: translateX(100%); } }
+.waking-banner-subtle::after, .waking-banner-failed::after { display: none; }
+
 @media (prefers-reduced-motion: reduce) {
   .waking-dot { animation: none; }
+  .waking-banner::after { display: none; }
 }
 
 /* ---------- modals: every form lives in one ---------- */
@@ -1260,7 +1279,12 @@ kbd {
 .modal {
   width: 100%;
   max-width: 440px;
-  background: var(--surface);
+  /* Glass: only things above the page get it (the modal and the switcher
+     menu). color-mix keeps 88% opacity so a browser without backdrop-filter
+     still renders a legible solid. */
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 40%), color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-pop);
