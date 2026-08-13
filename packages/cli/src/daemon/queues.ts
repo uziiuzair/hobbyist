@@ -54,6 +54,15 @@ const UNREACHABLE_CONSUMER_RESULT: DeliveryResult = {
 // consumer binding, which is what a worker created before any
 // `[[queues.consumers]]` block was ever deployed to it looks like on this
 // branch. Either signal alone is enough to skip.
+//
+// MERGE NOTE: `record-before-code` moved `queues` off `WorkerConfig` directly
+// and onto `WorkerConfig.manifest.queues` on `main`. `config.queues.consumers`
+// below will fail to COMPILE once this branch rebases onto that (the safe
+// failure, not a silent misbehavior), and needs rewriting to
+// `config.manifest?.queues.consumers` at that point, read together with
+// signal (a) above rather than as a second independent check: a null
+// `manifest` already covers "no consumers", so this becomes `config.manifest
+// === null || config.manifest.queues.consumers.length === 0`, or equivalent.
 function hasNoDeployedCode(config: WorkerConfig): boolean {
   const record = config as unknown as Record<string, unknown>
   if ('manifest' in record && record['manifest'] === null) {

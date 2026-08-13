@@ -208,6 +208,19 @@ async function tickOneQueue(
 // exactly as tickOnce in mirror.ts contains them per namespace: an unreadable
 // or corrupt queue database must not stop the other queues in the same tick
 // from being drained.
+//
+// This loop is sequential, one queue at a time, not Promise.all. A try/catch
+// around each queue only sees a throw, never a hang, so the worst case for
+// one tick is bounded by the SLOWEST single delivery, not the average: the
+// number of drainable queues multiplied by opts.deliver's own timeout, which
+// is deliver.ts's DELIVERY_TIMEOUT_MS in production. That is only acceptable
+// because that timeout is bounded (see deliver.ts's own comment on why it is
+// derived from LEASE_MS); with an unbounded deliver, one hung consumer would
+// stall every other queue in this tick and, through startQueueTick awaiting
+// the whole tick before scheduling the next, every later tick too. Making
+// this loop concurrent instead is a real design change, deliberately not
+// made here: it would need per-queue isolation decisions (a slow queue must
+// not starve a fast one of tick cadence) this task did not set out to make.
 export async function tickOnce(
   queues: DrainableQueue[],
   opts: Omit<QueueTickOptions, 'queues' | 'intervalMs'>
