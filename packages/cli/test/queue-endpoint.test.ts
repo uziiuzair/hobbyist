@@ -8,6 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import http from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -305,37 +306,77 @@ test('the token never appears in any response body', async () => {
 
 // Not one of the eight required cases, but the reason opts.hosts exists at
 // all: docs/decisions/0013 accepted a second bind on Linux specifically
-// because a container cannot reach a loopback-only listener there. A real
-// multi-address bind (127.0.0.1 plus a second 127.0.0.0/8 alias, which needs
-// no Docker and no Linux-specific bridge networking to exercise) was tried
-// here and rejected by this sandbox's own network namespace with
-// EADDRNOTAVAIL: binding anything other than 127.0.0.1 is not available in
-// this execution environment, which is itself worth recording rather than
-// silently working around. What IS verified: opts.hosts accepting more than
-// one entry runs the same multi-bind loop regardless of whether every
-// address turns out to be bindable, and a bind failure after the first
-// server is already listening does not leak that socket (see
-// startQueueEndpoint's own try/catch, added after this test caught it
-// hanging the whole suite). See the task report for the rollback fix and
-// this limitation, matching the same "not verified on real hardware"
-// honesty the research doc already carries for the Linux gateway bind
-// itself.
+// because a container cannot reach a loopback-only listener there.
+//
+// An earlier version of this test forced the failure by asking for
+// '127.0.0.2' as a second host and relying on it being unbindable. That is
+// macOS sandbox behaviour, not a property of the code: on Linux, 127.0.0.2
+// binds by default, because the whole of 127.0.0.0/8 is local without an
+// alias. On such a platform the old test would have seen startQueueEndpoint
+// RESOLVE instead of reject, `assert.rejects` would fail with "missing
+// expected rejection", and the two listeners it had just opened would leak,
+// because nothing closed them, which is exactly the hang this test exists to
+// catch. The test that guarded the bug had become the bug.
+//
+// Fixed by making the collision deterministic instead of address-dependent:
+// startQueueEndpoint binds every host in opts.hosts to the SAME resolved
+// port (see its own header comment on the multi-bind loop), so naming
+// '127.0.0.1' twice makes the second bind collide with the first server's
+// own listener. EADDRINUSE is produced by every platform for that, not a
+// sandbox-specific refusal, and no second real address is needed at all.
 test('a bind failure for a later host closes every socket already opened, and does not hang', async () => {
   const fixture = buildFixture()
   const tokenIndex = new Map([[fixture.workerToken, fixture.workerResourceId]])
 
-  await assert.rejects(
-    startQueueEndpoint(fixture.ctx, {
-      port: 0,
-      // 127.0.0.2 is unbindable in this sandbox (verified: node's http
-      // server reports EADDRNOTAVAIL), which is exactly the "a later host
-      // fails" case the rollback in startQueueEndpoint exists for. The
-      // first bind to 127.0.0.1 must succeed and then be closed again
-      // rather than left dangling.
-      hosts: ['127.0.0.1', '127.0.0.2'],
-      tokenFor: (token) => tokenIndex.get(token) ?? null,
-    })
-  )
+  // An explicit, pre-discovered port rather than 0: the collision needs both
+  // bind attempts to target the exact same host:port, and only an explicit
+  // port lets this test also verify afterward that IT is free again, which
+  // a port chosen internally by startQueueEndpoint would leave unobservable
+  // from out here.
+  const probe = http.createServer()
+  await new Promise<void>((resolve, reject) => {
+    probe.once('error', reject)
+    probe.listen(0, '127.0.0.1', () => resolve())
+  })
+  const address = probe.address()
+  const port = typeof address === 'object' && address !== null ? address.port : null
+  await new Promise<void>((resolve) => probe.close(() => resolve()))
+  assert.notEqual(port, null, 'the probe server must report a real port before this test can use it')
+
+  // Guards against a regression closing this test's own gap: if
+  // startQueueEndpoint ever stopped rejecting here (the collision no longer
+  // firing, say), the handle it returned must still be closed rather than
+  // leaked on top of the assertion below failing.
+  let leaked: QueueEndpointHandle | null = null
+  try {
+    await assert.rejects(
+      (async () => {
+        leaked = await startQueueEndpoint(fixture.ctx, {
+          port: port as number,
+          hosts: ['127.0.0.1', '127.0.0.1'],
+          tokenFor: (token) => tokenIndex.get(token) ?? null,
+        })
+      })(),
+      (err: unknown) => err instanceof Error && (err as NodeJS.ErrnoException).code === 'EADDRINUSE'
+    )
+  } finally {
+    if (leaked !== null) {
+      await (leaked as QueueEndpointHandle).stop()
+    }
+  }
+
+  // Rejecting is only half the contract: the other half is that the first
+  // server, which DID bind successfully before the second collided with it,
+  // was actually closed by the rollback rather than left listening. Binding
+  // the identical host:port again here succeeds only if that is true; if the
+  // rollback ever regressed into leaking that first socket, this bind would
+  // itself fail with EADDRINUSE and fail the test.
+  const verify = http.createServer()
+  await new Promise<void>((resolve, reject) => {
+    verify.once('error', reject)
+    verify.listen(port as number, '127.0.0.1', () => resolve())
+  })
+  await new Promise<void>((resolve) => verify.close(() => resolve()))
 
   fixture.ctx.store.close()
 })
