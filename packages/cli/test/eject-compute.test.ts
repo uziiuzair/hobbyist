@@ -228,10 +228,24 @@ test('an ejected worker carries an image, never a build context', async () => {
 // no-source path leaves behind (packages/app/src/app.ts:204) for an app
 // created from Studio or MCP with no code yet. Its skip is a distinct code
 // path from a worker's (the app loop never calls buildRunnerManifest), so it
-// earns its own test rather than trusting the worker case to generalise.
+// earns its own test rather than trusting the worker case to generalise. A
+// postgres sits alongside it so this project has something ejectable: an
+// undeployed app on its own, with nothing else in the project, is exactly
+// the refusal case covered separately below, and this test is about the skip
+// report, not the refusal.
 test('an undeployed app is skipped, with a reason naming it, and routed nowhere', async () => {
   const ctx = buildContext()
   const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const pgConfig: PostgresConfig = {
+    image: 'postgres:18-alpine',
+    containerName: 'hobby-blog-primary',
+    hostPort: 15432,
+    dataDir: '/home/user/.hobby/projects/blog/primary/pgdata',
+    superuser: 'postgres',
+    password: 'the-real-password',
+    database: 'blog',
+  }
+  ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: pgConfig })
   const appCfg: AppConfig = {
     image: null,
     containerName: 'hobby-blog-site',
@@ -307,21 +321,26 @@ test('a project with a deployed postgres and an undeployed worker ejects success
   const ctx = buildContext()
   const { dbName, workerName } = seedUndeployedWorker(ctx, 'blog')
   await withServer(ctx, async (baseUrl) => {
-    const res = await fetch(`${baseUrl}/v1/projects/blog/eject`, { method: 'POST' })
-    // The critical assertion: this call did not throw or 500. A prior version
-    // of this bug turned one undeployed worker into a failed eject for the
-    // whole project.
-    assert.equal(res.status, 200)
-    const { compose, notEjectable } = (await res.json()) as { compose: string; notEjectable: string[] }
+    // eject()'s own assert.equal(res.status, 200) carries the critical
+    // assertion: this call did not throw or 500. A prior version of this bug
+    // turned one undeployed worker into a failed eject for the whole
+    // project. seedUndeployedWorker always names its project 'blog', which
+    // is exactly what eject() is hardcoded to, so the helper fits and no
+    // cast is needed to read the response.
+    const { compose, notEjectable } = await eject(baseUrl)
 
     // The postgres service is present and fully, correctly rendered, exactly
-    // as it would be with no worker in the project at all.
+    // as it would be with no worker in the project at all. Includes the data
+    // directory mount, the single most important line in the block: it is
+    // where the user's actual data lives, and the whole point of this test
+    // is proving the healthy half survives an undeployed sibling untouched.
     assert.match(compose, new RegExp(`^ {2}${dbName}:$`, 'm'))
     assert.match(compose, /image: postgres:18-alpine/)
     assert.match(compose, /POSTGRES_USER: postgres/)
     assert.match(compose, /POSTGRES_PASSWORD: the-real-password/)
     assert.match(compose, /POSTGRES_DB: blog/)
     assert.match(compose, /- "127\.0\.0\.1:15432:5432"/)
+    assert.match(compose, /- "\/home\/user\/\.hobby\/projects\/blog\/primary\/pgdata:\/var\/lib\/postgresql"/)
 
     // The undeployed worker is absent, not merely broken.
     assert.equal(compose.includes(`  ${workerName}:`), false)
@@ -346,15 +365,19 @@ test('the emitted compose file never contains the literal string null in an imag
   })
 })
 
-// What happens when every resource in a project is undeployed: renderCompose
-// still emits a bare `services:` header with nothing under it, the same shape
-// it already produces for a project with zero resources at all (this is not
-// a new gap the skip guard introduces). An empty services block is almost
-// certainly not something `docker compose up` accepts, but there is nothing
-// real to eject here either: `notEjectable` says exactly why, which is the
-// half of "you can always leave" that is actually achievable when there is no
-// code to leave with.
-test('a project holding only undeployed resources still ejects, with nothing to run and a reason why', async () => {
+// What happens when every resource in a project is undeployed: eject REFUSES
+// rather than returning a compose file docker cannot even parse. Verified
+// against real docker compose, not assumed: `printf 'services:\n' >
+// empty-compose.yml && docker compose -f empty-compose.yml config` fails with
+// "services must be a mapping". Handing that file back with a 200 would tell
+// the departing user their eject worked when the result cannot start, which
+// fails CLAUDE.md's "you can always leave" worse than refusing plainly. Uses
+// a raw fetch rather than the eject() helper: eject() is hardcoded to project
+// 'blog' and asserts status 200, and this test needs a different project
+// name and a non-2xx status, so the helper does not fit here (the routes.ts
+// idiom this mirrors for asserting a HobbyError body, e.g.
+// packages/cli/test/routes.test.ts:181, already casts the same way).
+test('a project holding only undeployed resources refuses to eject, naming what was skipped', async () => {
   const ctx = buildContext()
   const project = ctx.store.createProject({ name: 'empty-shell', sleepAfterSeconds: 300 })
   const workerCfg: WorkerConfig = {
@@ -372,10 +395,30 @@ test('a project holding only undeployed resources still ejects, with nothing to 
 
   await withServer(ctx, async (baseUrl) => {
     const res = await fetch(`${baseUrl}/v1/projects/empty-shell/eject`, { method: 'POST' })
-    assert.equal(res.status, 200)
-    const { compose, notEjectable } = (await res.json()) as { compose: string; notEjectable: string[] }
-    assert.equal(compose, 'services:\n')
-    assert.deepEqual(notEjectable, ['sidecar: never deployed, so there is no image to run'])
+    assert.equal(res.status, 400)
+    const body = (await res.json()) as { error: { code: string; message: string } }
+    assert.equal(body.error.code, 'usage')
+    assert.match(body.error.message, /sidecar: never deployed, so there is no image to run/)
+  })
+})
+
+// The other shape the same refusal must cover: a project with no resources
+// at all, not merely all-skipped ones. Distinct code path through the same
+// guard (postgresResources.length + deployedApps.length +
+// deployedWorkers.length === 0 with an empty skippedReasons list), and it
+// earns its own test because the message is meant to read differently: "come
+// back once something has deployed" is the wrong thing to tell someone who
+// has never created a resource at all.
+test('a project with no resources at all refuses to eject, saying there is nothing there', async () => {
+  const ctx = buildContext()
+  ctx.store.createProject({ name: 'freshly-made', sleepAfterSeconds: 300 })
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/v1/projects/freshly-made/eject`, { method: 'POST' })
+    assert.equal(res.status, 400)
+    const body = (await res.json()) as { error: { code: string; message: string } }
+    assert.equal(body.error.code, 'usage')
+    assert.match(body.error.message, /freshly-made has no resources yet, so there is nothing to eject/)
   })
 })
 

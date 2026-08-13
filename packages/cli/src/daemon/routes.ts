@@ -730,12 +730,10 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
   // undeployed resource has never produced one, so there is no code to run
   // (isDeployed's comment above renderCompose). Its skip messages join
   // `notEjectable` below rather than a second field, reusing the one
-  // skip-reporting mechanism abe7582 added instead of inventing another. A
-  // project whose only resources are all skipped this way still gets a
-  // `services:` header with nothing under it: the same shape renderCompose
-  // already produces for a project with zero resources at all, and this is
-  // not a new gap this task introduces. `notEjectable` names every skipped
-  // resource and why, so nobody mistakes that empty stack for a complete one.
+  // skip-reporting mechanism abe7582 added instead of inventing another. When
+  // every resource lands in that list, the refusal a few lines down fires
+  // instead of returning a `services:` header with nothing under it: see that
+  // check for why an empty compose file is not an acceptable 200.
   const rendered = renderCompose(ctx, project.name, postgresResources, appResources, workerResources)
   // The same isDeployed predicate renderCompose used, applied here so Caddy
   // never routes a hostname to a service renderCompose just skipped. ADR 0009
@@ -747,6 +745,35 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
   // `image`.
   const deployedApps = appResources.filter(isDeployed)
   const deployedWorkers = workerResources.filter(isDeployed)
+  const skippedReasons = [...notEjectable, ...rendered.skipped]
+
+  // Nothing renderable: refuse rather than hand back a file that cannot
+  // start. `services:` with nothing under it is not valid compose (verified
+  // against real docker compose: `docker compose -f <file> config` on a bare
+  // `services:` key fails with "services must be a mapping"), so returning
+  // 200 here would hand the departing user a file docker cannot even parse,
+  // at exactly the moment they are trying to leave, which fails CLAUDE.md's
+  // "you can always leave" worse than saying plainly there is nothing here
+  // yet. Two distinct shapes land here now that a project is not guaranteed
+  // a postgres the instant it exists: every resource present was skipped
+  // (Task 4 let a project hold only undeployed compute, and a later task
+  // adds `hobby new --empty`), or the project holds no resources at all. The
+  // message distinguishes the two, reusing skippedReasons so it never says
+  // less than what renderCompose already knows: this is either "come back
+  // once something has deployed" or "there is genuinely nothing here yet,"
+  // never "hobby lost your data."
+  if (postgresResources.length + deployedApps.length + deployedWorkers.length === 0) {
+    throw new HobbyError(
+      'usage',
+      skippedReasons.length > 0
+        ? `${name} has nothing to eject yet: ${skippedReasons.join('; ')}`
+        : `${name} has no resources yet, so there is nothing to eject`,
+      skippedReasons.length > 0
+        ? 'deploy at least one app or worker, or wait for a resource to finish creating, then eject again'
+        : 'create a resource first (hobby pg create, or deploy an app or worker), then eject again'
+    )
+  }
+
   const body = {
     compose: rendered.compose,
     // ADR 0009: without this, an ejected app comes up on a loopback port with
@@ -758,7 +785,7 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
     ]),
     dataDirs: postgresResources.map((resource) => resource.config.dataDir),
     released: release,
-    notEjectable: [...notEjectable, ...rendered.skipped],
+    notEjectable: skippedReasons,
   }
 
   if (!release) {
