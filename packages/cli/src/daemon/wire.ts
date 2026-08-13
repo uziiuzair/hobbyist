@@ -36,6 +36,8 @@ import type {
   AppResource,
   PostgresConfig,
   PostgresResource,
+  QueueConfig,
+  QueueResource,
   Resource,
   ResourceConfig,
   WorkerConfig,
@@ -47,7 +49,8 @@ import { resourceSize } from './size.js'
 export type WirePostgresConfig = Omit<PostgresConfig, 'password'>
 export type WireAppConfig = AppConfig
 export type WireWorkerConfig = WorkerConfig
-export type WireResourceConfig = WirePostgresConfig | WireAppConfig | WireWorkerConfig
+export type WireQueueConfig = QueueConfig
+export type WireResourceConfig = WirePostgresConfig | WireAppConfig | WireWorkerConfig | WireQueueConfig
 
 interface WireExtras {
   sizeBytes: number | null
@@ -60,12 +63,14 @@ interface WireExtras {
 // narrows if the two travel together, and the flattened version silently
 // forced a cast at each print site in the CLI.
 //
-// App and worker configs keep their own types because redaction rewrites
-// values in place and does not change the shape; only postgres loses a field.
+// App, worker and queue configs keep their own types because redaction
+// rewrites values in place and does not change the shape; only postgres
+// loses a field.
 export type WireResource =
   | (Omit<PostgresResource, 'config'> & { config: WirePostgresConfig } & WireExtras)
   | (AppResource & WireExtras)
   | (WorkerResource & WireExtras)
+  | (QueueResource & WireExtras)
 
 // What a redacted value reads as. A visible placeholder rather than a
 // removed key, so a caller can still see that a variable is set without
@@ -95,8 +100,28 @@ function redactConfig(kind: Resource['kind'], config: ResourceConfig): WireResou
     const app = config as AppConfig
     return { ...app, env: redactValues(app.env) }
   }
-  const worker = config as WorkerConfig
-  return { ...worker, vars: redactValues(worker.vars) }
+  if (kind === 'queue') {
+    // A queue's config holds no user-supplied secret: no password, no env,
+    // no vars, only a retention period, a consumer resource id, the
+    // batching and retry numbers, and a dead letter queue name. Returned
+    // unredacted, deliberately, and handled in its own branch rather than
+    // falling through: the branch below used to be the implicit default
+    // for "anything that is not postgres or app", which is exactly how a
+    // queue config used to reach `worker.vars` and throw. The next kind
+    // added here should get its own branch too, not rely on the fallthrough.
+    return config as QueueConfig
+  }
+  if (kind === 'worker') {
+    const worker = config as WorkerConfig
+    return { ...worker, vars: redactValues(worker.vars) }
+  }
+  // Every known kind is handled above. Reaching here means a kind was added
+  // to ResourceKind with no branch here, which is exactly the bug a queue
+  // config hit: an unhandled kind used to fall through into the worker
+  // branch and crash inside redactValues with a TypeError that named
+  // neither the kind nor this function. Throwing here instead turns that
+  // into a message that says precisely what happened.
+  throw new Error(`redactConfig: no case for resource kind ${String(kind)}`)
 }
 
 export async function toWireResource(ctx: DaemonContext, resource: Resource): Promise<WireResource> {
