@@ -1,82 +1,88 @@
 ---
 name: Hobbyist Studio
-description: A status panel for a machine you own, not a console for a service you rent.
+description: The panel at night, lit like a workshop after hours.
 colors:
-  ground: "#100f0d"
-  surface: "#171512"
-  surface-2: "#1e1b17"
-  surface-3: "#26221c"
-  line: "#2b2721"
-  line-strong: "#3c362d"
-  ink: "#ede9e3"
-  ink-2: "#b3aa9e"
-  ink-3: "#948b7e"
-  accent: "#45cd81"
-  accent-hover: "#58d992"
-  accent-ink: "#06231a"
-  accent-dim: "rgba(69, 205, 129, 0.13)"
-  accent-line: "rgba(69, 205, 129, 0.36)"
-  awake: "#45cd81"
-  awake-dim: "rgba(69, 205, 129, 0.18)"
-  awake-ring: "rgba(69, 205, 129, 0.36)"
-  waking: "#e6ae52"
-  waking-dim: "rgba(230, 174, 82, 0.14)"
-  danger: "#ec8577"
-  danger-dim: "rgba(236, 133, 119, 0.12)"
+  ground: "#131110"
+  surface: "#1a1715"
+  surface-2: "#211d1a"
+  surface-3: "#2a2521"
+  line: "#2f2925"
+  line-strong: "#423a32"
+  ink: "#f2eee6"
+  ink-2: "#b9ae9f"
+  ink-3: "#998f80"
+  accent: "#4ed492"
+  accent-hover: "#63e0a2"
+  accent-ink: "#052419"
+  accent-dim: "rgba(78, 212, 146, 0.14)"
+  accent-line: "rgba(78, 212, 146, 0.34)"
+  awake: "#4ed492"
+  awake-dim: "rgba(78, 212, 146, 0.14)"
+  awake-ring: "rgba(78, 212, 146, 0.34)"
+  waking: "#e9b45c"
+  waking-dim: "rgba(233, 180, 92, 0.13)"
+  danger: "#ee8a7c"
+  danger-dim: "rgba(238, 138, 124, 0.12)"
+  sage: "#97d8b0"
+  iris: "#b6acf5"
+  honey: "#e3b878"
+  rose: "#e9a3ab"
+  glow-awake: "rgba(78, 212, 146, 0.28)"
+  glow-waking: "rgba(233, 180, 92, 0.3)"
 typography:
   display:
-    fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
-    fontSize: "21px"
+    fontFamily: "Fraunces, Georgia, Times New Roman, serif"
+    fontSize: "30px"
     fontWeight: 600
     lineHeight: 1.5
     letterSpacing: "-0.015em"
   title:
-    fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+    fontFamily: "IBM Plex Sans, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
     fontSize: "15.5px"
     fontWeight: 600
     lineHeight: 1.5
     letterSpacing: "-0.01em"
   subtitle:
-    fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+    fontFamily: "IBM Plex Sans, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
     fontSize: "14.5px"
     fontWeight: 600
     lineHeight: 1.5
     letterSpacing: "-0.01em"
   body:
-    fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+    fontFamily: "IBM Plex Sans, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
     fontSize: "14px"
     fontWeight: 400
     lineHeight: 1.5
     letterSpacing: "normal"
   body-secondary:
-    fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+    fontFamily: "IBM Plex Sans, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
     fontSize: "13.5px"
     fontWeight: 400
     lineHeight: 1.5
     letterSpacing: "normal"
   label:
-    fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+    fontFamily: "IBM Plex Sans, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
     fontSize: "12.5px"
     fontWeight: 500
     lineHeight: 1.5
     letterSpacing: "normal"
   micro:
-    fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+    fontFamily: "IBM Plex Sans, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
     fontSize: "10.5px"
     fontWeight: 600
     lineHeight: 1.5
     letterSpacing: "0.08em"
   mono:
-    fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace"
+    fontFamily: "JetBrains Mono, ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace"
     fontSize: "12.5px"
     fontWeight: 400
     lineHeight: 1.5
     letterSpacing: "normal"
     fontFeature: "tabular-nums"
 rounded:
-  sm: "7px"
-  md: "10px"
-  lg: "12px"
+  sm: "9px"
+  md: "13px"
+  lg: "16px"
   pill: "50%"
   hairline: "3px"
 spacing:
@@ -160,68 +166,81 @@ components:
 
 ## Overview
 
-**Creative North Star: "The Panel on the Machine You Own", warm re-voice
-(2026-08-13)**
+**Creative North Star: "Nocturne", the panel at night, lit like a workshop
+after hours (2026-08-14, owner-approved overhaul)**
 
 This is a status panel for hardware in the next room, not a console for a
-service you rent. Every hosted dashboard treats a stopped database as a
-degraded condition and dresses it in a warning; here a sleeping database is
-the product working correctly, so it is the calmest thing on the screen. The
-surface is warm near-black layered ground (graphite and stone, hue around 38
-rather than the first build's cool blue-gray), hairline rules, system faces
-and dense rows, with one green that appears rarely enough to mean something.
+service you rent. Sleep and wake are the product, so the design owns the
+night instead of borrowing daylight SaaS: a deep warm dark, a display serif
+with a voice, state dots that read as lights left on in a dark room, and one
+theatrical moment when something wakes. A sleeping database is the product
+working correctly, so it is the calmest thing on the screen.
 
-Density is high and ornament is absent, but the surface is no longer inert:
-interactive elements answer the cursor. Hover states transition over
-120-160ms, a link card rises 1px onto a lift shadow, and the modal enters in
-140ms. Beyond that the motion inventory is unchanged (a status pulse, a
-spinner), and everything is gated or slowed under `prefers-reduced-motion`,
-including the card rise. Depth comes from tonal layering (four ground steps
-plus a hairline) rather than from shadow; three shadows exist and one of them
-is a 1px card seat. Dark is the design's home because the operator is usually
-at a desk at night with this parked beside an editor, but light is a complete
-second theme (warm paper, not an inversion) with the same structure and the
-same one-chroma rule, because the machine is theirs and their OS may say
-light.
+Density is high and ornament is earned. Interactive elements answer the
+cursor over 120-160ms, a link card rises 2px onto a lift shadow, the waking
+banner carries a honey light sweep along its top edge, the login mark
+breathes, and every one of those disappears under `prefers-reduced-motion`.
+Depth is tonal layering plus a small disciplined glow vocabulary; the modal
+and the switcher menu are the only glass. Dark is the design's home because
+the operator is usually at a desk at night; light is a complete second theme
+(warm paper, jewels kept deep, never an inversion).
 
-The world runs entirely offline: no `@font-face`, no CDN, no external anything.
-System UI and system mono are the type, and that constraint is permanent.
+The world runs entirely offline: no CDN, no network-loaded asset, ever. The
+three faces (Fraunces, IBM Plex Sans, JetBrains Mono, all OFL) are bundled
+woff2 files in `src/fonts`, loaded by local `@font-face`. The old "system
+fonts only" wording was amended 2026-08-14: the real rule was always
+offline, and bundled files satisfy it (see the Nocturne spec).
 
 Product voice, terminology and interaction conventions live in `PRODUCT.md` and
 are not restated here; this file is strictly visual.
 
 **Key Characteristics:**
-- Warm near-black layered ground with hairline rules, no fills that read as panels-on-panels
-- One green, split between action and state by form rather than by hue
+- Warm near-black layered ground (graphite and stone) with hairline rules
+- Green is the brand and the awake state; a four-hue jewel family (sage,
+  iris, honey, rose) exists for decoration only: tiles and kind identity
 - Sleeping carries no chroma at all, and neither does not-deployed
+- Fraunces speaks only in the display register: page titles, tile numerals,
+  modal and empty-state headings; Plex Sans is the interface, JetBrains Mono
+  is the data
 - Dense rows, tabular figures anywhere a number can change
-- System faces only, dark-first with a full light theme (warm paper, not inverted)
-- Flat by default; hover is the one earned rise, and all three shadows are structural
+- Glow is a vocabulary, not a wash: state dots, the awake card's edge light,
+  primary hover, and nothing else
 - Active rows are neutral facts, never tinted pills (the No-Tinted-Pill Rule)
 - The browser's own surfaces are themed: green caret, hairline scrollbars, accent selection
 
 ## Colors
 
-A near-monochrome ground with exactly one chromatic voice, plus an amber
-reserved for transitions and a red reserved for failure.
+A warm dark ground with one brand voice (green), a decorative jewel family
+that never touches state, an amber reserved for transitions and a red
+reserved for failure.
 
 ### Primary
-- **Signal Green** (`--accent` / `--awake`, #45cd81 dark, #147a48 light): the
-  only saturated colour in normal operation. It does two jobs and the same hex
-  serves both: action (a filled primary button, an active tab's underline, a
-  focus ring, a hovered link, an active rail item's tint and edge) and state
-  (a 7px awake dot with a halo, an awake meter fill). `--awake` resolves to
-  `var(--accent)` in both themes, so there is one green in the file and one
-  green on the screen.
+- **Signal Green** (`--accent` / `--awake`, #4ed492 dark, #147a48 light): the
+  brand. It does two jobs and the same hex serves both: action (a filled
+  primary button, an active tab's underline, a focus ring, a hovered link)
+  and state (the 7px awake dot with its halo and glow, an awake meter fill,
+  the awake card's edge light). `--awake` resolves to `var(--accent)` in both
+  themes, so there is one green in the file and one green on the screen.
+
+### Jewels (decorative only)
+- **Sage** (`--sage`, #97d8b0 dark / #1f6b43 light): databases.
+- **Iris** (`--iris`, #b6acf5 / #5a4fb8): apps.
+- **Honey** (`--honey-t`, #e3b878 / #8a5f14): workers.
+- **Rose** (`--rose`, #e9a3ab / #a84a55): disk and the miscellaneous tile.
+
+The jewels exist in exactly two places: the stat tiles (border, glow and
+label, on a shared dark slate ground, per the owner's two amendments) and the
+rail's kind icons. They never mark state, never fill a surface, and never
+appear on a control.
 
 ### Secondary
-- **Transition Amber** (`--waking`, honey #e6ae52 dark, #9a6410 light): waking,
+- **Transition Amber** (`--waking`, honey #e9b45c dark, #8a5a0e light): waking,
   starting, stopping, creating and removing. It never marks a resting state.
   Used as the waking dot, the waking banner's edge and wash, and the elapsed
   clock.
 
 ### Tertiary
-- **Fault Red** (`--danger`, warm coral #ec8577 dark, #b3392c light): failure and
+- **Fault Red** (`--danger`, warm coral #ee8a7c dark, #b3392c light): failure and
   destruction only. Error banners, failed dots, the delete affordance on a
   side-list row, and the danger button's text and hover wash.
 
@@ -237,26 +256,30 @@ reserved for transitions and a red reserved for failure.
 The whole neutral ramp is warm: graphite and stone around hue 38, in both
 themes. A cool gray anywhere in this file is a regression to the first build.
 
-- **Ground** (#100f0d dark, #faf9f7 light): the page behind everything.
-- **Surface** (#171512 / #ffffff): cards, panels, tables, the rail, modals.
-- **Surface 2** (#1e1b17 / #f6f4f1): inputs, buttons at rest, table headers,
+- **Ground** (#131110 dark, #faf9f7 light): the page behind everything.
+- **Surface** (#1a1715 / #ffffff): cards, panels, tables, the rail, modals,
+  and the tiles' shared slate.
+- **Surface 2** (#211d1a / #f6f4f1): inputs, buttons at rest, table headers,
   row hover, modal footers.
-- **Surface 3** (#26221c / #edeae4): the innermost step. Connection strings,
+- **Surface 3** (#2a2521 / #edeae4): the innermost step. Connection strings,
   meter tracks, button hover, and the active row's fill.
-- **Line** (#2b2721 / #e6e2db) and **Line Strong** (#3c362d / #cfc9bf): every
+- **Line** (#2f2925 / #e6e2db) and **Line Strong** (#423a32 / #cfc9bf): every
   border in the system is 1px of one of these. Line Strong is for edges that
   must be found (button outlines, dashed empty states, menus, modals).
-- **Ink** (#ede9e3 / #1c1917), **Ink 2** (#b3aa9e / #5f5a52), **Ink 3**
-  (#948b7e / #6e685e): primary, secondary and tertiary text. All three clear
-  4.5:1 against every surface step in both themes, including Ink 3 on
-  Surface 3 (4.71 dark, 4.60 light), which the first ramp failed in light.
+- **Ink** (#f2eee6 / #1c1917), **Ink 2** (#b9ae9f / #5f5a52), **Ink 3**
+  (#998f80 / #6e685e): primary, secondary and tertiary text. Every pairing
+  in both themes is enforced numerically by `scripts/audit-contrast.mjs`,
+  which runs inside `npm run build` beside the class audit and fails the
+  build below 4.5:1. That gate, not this paragraph, is the authority.
 
 ### Named Rules
 
-**The One Green Rule.** There is one chromatic hue in normal operation and it
-resolves from a single token. Do not introduce a second accent, and do not fork
-`--awake` away from `--accent`; if action and state need to be told apart, that
-is form's job, not hue's.
+**The One Brand Rule** (amends the old One Green Rule, 2026-08-14). Green is
+the single brand and state voice and still resolves from one token: do not
+fork `--awake` away from `--accent`. The jewel family is not an exception but
+a separate register: decorative, confined to tiles and kind icons, never on a
+control, never marking state. If a jewel hue ever answers the question "can I
+press this" or "is this running", it is being misused.
 
 **The Action/State Form Rule.** Action is a large filled surface or an edge:
 a primary button, a 2px tab underline, a focus outline, a tinted active row.
@@ -289,21 +312,31 @@ segment that gains weight gains width and the control jitters.
 
 ## Typography
 
-**Display / Body Font:** system UI stack (`-apple-system`, `BlinkMacSystemFont`,
-`Segoe UI`, `Roboto`, Helvetica, Arial, sans-serif)
-**Mono Font:** system mono stack (`ui-monospace`, `SFMono-Regular`, `SF Mono`,
-Menlo, Consolas, `Liberation Mono`, monospace)
+**Display Font:** Fraunces (bundled, 400/600), falling back to Georgia.
+**Interface Font:** IBM Plex Sans (bundled, 400/500/600), falling back to the
+system stack.
+**Mono Font:** JetBrains Mono (bundled, 400), falling back to system mono.
 
-**Character:** the operating system's own voice. There is no display face and
-there will never be one, because the product must render on a box with no
-internet. Hierarchy is built from size, weight and letter-spacing inside a
-narrow range (10.5px to 21px), which is what makes the surface read as an
-instrument panel rather than a marketing page.
+All three ship as latin woff2 subsets in `src/fonts` (~128KB, OFL licenses
+alongside) and load via local `@font-face`. Nothing is fetched at runtime;
+the fallback stacks exist so a corrupted file degrades instead of breaking.
+Fraunces is a saturated choice on the open web; it is pinned here by the
+owner's explicit approval of the Nocturne comp, and the detector warning
+about it is acknowledged, not actionable.
+
+**Character:** a serif that speaks and an interface that works. Fraunces
+appears only in the display register: the page title, tile numerals, modal
+and empty-state headings, the login wordmark. It never sets body copy, a
+control, or a table. Plex Sans carries everything interactive at 10.5-14px;
+JetBrains Mono carries everything that is data. The register split is what
+keeps a dense instrument panel from reading as a marketing page even with a
+display face in the room.
 
 ### Hierarchy
-- **Display** (600, 21px, -0.015em): the page title, one per view.
-- **Title** (600, 15.5px, -0.01em): modal titles. Empty-state headings sit at
-  15px, login brand at 15px.
+- **Display** (Fraunces 600, 30px, -0.012em): the page title, one per view.
+  Tile numerals sit at 28px, the login wordmark at 28px.
+- **Title** (Fraunces 600, 18px, -0.01em): modal titles and empty-state
+  headings.
 - **Subtitle** (600, 14.5px, -0.01em): card titles, truncated with an ellipsis.
 - **Body** (400, 14px, 1.5): the document default set on `body`.
 - **Body secondary** (400, 13.5px): page subtitles, rail links, inputs, field
@@ -378,46 +411,53 @@ the text node itself, never a fixed width.
 
 ## Elevation & Depth
 
-This system is **tonally layered, not lifted**. Depth is four ground steps
-(`--ground` → `--surface` → `--surface-2` → `--surface-3`) separated by 1px
-hairlines. Cards, panels and tables sit flat on the page and are legible as
-containers because of their border, not their shadow.
-
-Only two shadow tokens exist, and both are structural rather than decorative.
+This system is **tonally layered, with light where something is alive**.
+Depth is four ground steps (`--ground` → `--surface` → `--surface-2` →
+`--surface-3`) separated by 1px hairlines, a 2-3% top-edge sheen gradient on
+cards and tiles, and a small glow vocabulary that only ever means "running".
 
 ### Shadow Vocabulary
 - **Card seat** (`--shadow-card`): a hairline top highlight and a soft 1-3px
   drop that seats a card on the ground. Not perceived as lift.
-- **Lift** (`--shadow-lift`): one step of genuine rise, used only by a hovered
-  link card together with its 1px `translateY`. It is deliberately smaller
-  than pop: a hover is a moment, not a layer.
+- **Lift** (`--shadow-lift`): genuine rise, used only by a hovered link card
+  together with its 2px `translateY`, and by the jewel tiles' colored
+  shadows. A hover is a moment, not a layer.
 - **Pop** (`--shadow-pop`): only for things that genuinely float above the
   document, which is exactly two: the project switcher menu and the modal.
+  Both are the system's only glass: translucent color-mix surface with a
+  20-24px backdrop blur, still legible where backdrop-filter is unsupported
+  because the mix keeps 86-90% opacity.
 
 Beyond those, "elevation" is expressed as an inset ring: `box-shadow: inset 0 0 0 1px`
 marks an editable cell on hover (`--line-strong`) and on focus (`--accent`),
-and `inset 0 -2px 0 var(--accent)` marks a pressed segment.
+and the pressed segment.
 
 ### Named Rules
 
-**The Flat-By-Default Rule.** A new container gets `--surface`, a 1px `--line`
-border and `--radius`. It does not get a shadow. `--shadow-pop` is reserved for
-elements in a stacking context above the page (z-index 40+); if it is in the
-document flow, it is flat.
+**The Flat-By-Default Rule.** A new container gets `--surface`, the sheen, a
+1px `--line` border and `--radius`. It does not get a lift or pop shadow.
+`--shadow-pop` is reserved for elements in a stacking context above the page
+(z-index 40+); if it is in the document flow, it is flat.
 
-**The Halo-Not-Glow Rule.** The only "glow" in the system is a 3px flat ring of
-a 13-20% alpha colour around a 7-8px dot. It marks live state. It is never
-applied to text, buttons, cards or borders.
+**The Glow-Means-Running Rule** (amends Halo-Not-Glow, 2026-08-14). Glow is
+`--glow-awake` / `--glow-waking` and appears in exactly five places: the
+state dots' outer bloom, the rail mark when anything is awake, the machine
+strip's lit cluster dots, the awake card's edge light and ambient, and the
+chart's endpoint. It marks live state and never decorates: no glowing text,
+no glowing buttons at rest, no glowing borders on things that are not
+running. The jewel tiles' colored shadows are shadows, not glows: they are
+static, they carry no state, and they never pulse.
 
 ## Shapes
 
-Three radii carry everything: **10px** (`--radius`) for containers that hold
-content (cards, panels, tables, the SQL editor, empty states, menus), **7px**
-(`--radius-sm`) for controls and small chrome (buttons, inputs, segmented
-controls, notices, banners, rail links, the connection string, the 20px brand
-mark), and **12px** (`--radius-lg`) for the modal alone, one softer step for
-the one surface that floats. Below those, 3px appears on the two smallest
-marks (editable cell, key tags, the focus ring's own corner) and 50% on dots.
+Three radii carry everything: **13px** (`--radius`) for containers that hold
+content (cards, tiles, panels, tables, the SQL editor, empty states, menus),
+**9px** (`--radius-sm`) for controls and small chrome (buttons, inputs,
+segmented controls, notices, banners, rail links, the connection string, the
+brand mark), and **16px** (`--radius-lg`) for the modal alone, one softer
+step for the one surface that floats. Below those, 3px appears on the two
+smallest marks (editable cell, key tags, the focus ring's own corner) and
+50% on dots.
 
 Everything is a rectangle with a 1px border. There are no dividers that are not
 borders: separation is `border-bottom: 1px solid var(--line)` on the row, with
@@ -552,6 +592,24 @@ Three variants, and the differences are the point:
   **keeps its account** rather than vanishing. How long it tried for is the
   useful part, and dropping it left a bare error with no context.
 
+### Jewel stat tiles (signature)
+The overview's figures as lit objects. Every tile shares one dark slate
+ground (the card surface plus sheen, owner's amendment: never a colored
+fill); the hue speaks through exactly three channels: a subtle border in the
+tile's own jewel, a soft colored shadow, and the micro label with its 6px
+dot. Numerals are Fraunces 600 at 28px in plain ink, tabular, with the unit
+in quiet Plex. Five tiles: sage Services, iris Awake, honey Data on disk,
+plain Connections (a tile is allowed to be quiet), rose Disk free. The hue
+map is fixed in `TILE_CLASS` (Project.tsx) so the class audit sees whole
+literals.
+
+### Machine strip (signature)
+A mono instrument line above the projects page: hostname
+(`window.location.hostname`), a dot cluster (max 12) with awake services lit
+and glowing, "N of M awake", and disk free pushed right. Every figure is
+real at render time; uptime and RAM are absent because the daemon does not
+serve them, and the strip never advertises what does not exist.
+
 ### Capacity panel (signature)
 Where a hosted product shows a plan quota, this shows the machine. A narrow
 268px `--surface` panel of meter rows: a micro uppercase label, a tabular value
@@ -622,19 +680,22 @@ variants take their hue's border, dim wash and text together.
 
 ## Verified
 
-The warm re-voice was inspected in a real browser (Playwright against the dev
-server, with a fixture daemon API): Login, Projects, a project overview with
-all four kinds in the rail, Tables, SQL and Schema empty states, the new
-project modal, and card hover, in dark; Login, Projects and the project
-overview in light; Projects under `prefers-reduced-motion`. Every ink step was
-contrast-checked numerically against every surface step in both themes. The
-`undeployed` state and the app and worker rail rows were verified against
-fixtures, because the daemon cannot yet produce them through Studio; they need
-a second look when record-before-code lands.
+Nocturne was inspected in a real browser (Playwright against the dev server,
+with a fixture daemon API): Login, Projects with the machine strip, a project
+overview with jewel tiles and all four kinds in the rail, Tables, SQL and
+Schema empty states, the glass modal, and card hover, in dark; Login,
+Projects and the overview in light; Projects under `prefers-reduced-motion`.
+Contrast is enforced by `scripts/audit-contrast.mjs` inside `npm run build`,
+which caught and forced one hue change during the build (light waking,
+#9a6410 → #8a5a0e, was 4.16 on surface-3). The build was also verified
+offline-clean: no http(s) fetch in the emitted CSS, six woff2 assets emitted
+from the repo's own files.
 
-Still unverified by anyone: how the interface behaves with a database in the
-`failed` state, and with a table wide enough or a result set long enough to
-test the scroll containers.
+The `undeployed` state and the app and worker rail rows were verified against
+fixtures, because the daemon cannot yet produce them through Studio; they
+need a second look when record-before-code lands. Still unverified by anyone:
+the `failed` state rendering, and a table wide enough or a result set long
+enough to test the scroll containers.
 
 ## Failure modes this build actually suffered
 
