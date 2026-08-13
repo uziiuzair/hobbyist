@@ -324,3 +324,112 @@ export function applyResult(
 
   return { acked, retried, deadLettered }
 }
+
+// Cloudflare's own bounds: four days by default, settable from 60 seconds to
+// 14 days (`wrangler queues update --message-retention-period-secs`).
+export const DEFAULT_RETENTION_SECONDS = 345600
+export const MIN_RETENTION_SECONDS = 60
+export const MAX_RETENTION_SECONDS = 1209600
+
+// A lease that ran out means the consumer never answered: it crashed, it was
+// slept, or the daemon restarted mid-batch. The attempt was counted when the
+// batch went out, so this only decides between another try and the dead
+// letter queue. Counting here instead would let a crash loop retry forever.
+export function expireLeases(
+  db: SqliteDatabase,
+  opts: ConsumerOptions,
+  nowMs: number,
+  onDeadLetter?: (message: LeasedMessage) => void
+): { requeued: number; deadLettered: LeasedMessage[] } {
+  const rows = db
+    .prepare(
+      `SELECT id, body, content_type, enqueued_at AS timestamp, attempts
+         FROM messages
+        WHERE lease_id IS NOT NULL AND lease_expires_at <= ?`
+    )
+    .all(nowMs) as LeasedRow[]
+
+  if (rows.length === 0) {
+    return { requeued: 0, deadLettered: [] }
+  }
+
+  const requeue = db.prepare(
+    'UPDATE messages SET lease_id = NULL, lease_expires_at = NULL, visible_at = ? WHERE id = ?'
+  )
+  const remove = db.prepare('DELETE FROM messages WHERE id = ?')
+
+  let requeued = 0
+  const deadLettered: LeasedMessage[] = []
+
+  db.exec('BEGIN')
+  try {
+    for (const row of rows) {
+      if (row.attempts > opts.maxRetries) {
+        const message: LeasedMessage = {
+          id: row.id,
+          body: row.body,
+          contentType: row.content_type as ContentType,
+          timestampMs: row.timestamp,
+          attempts: row.attempts,
+        }
+        deadLettered.push(message)
+        // Call the callback before deleting, inside the transaction. The dead
+        // letter queue is a different database and cannot join this
+        // transaction, so the ordering is the guarantee: writing to the dead
+        // letter queue before deleting from here turns a possible loss into a
+        // possible duplicate. At-least-once delivery is already this queue's
+        // contract (Cloudflare's too), so a duplicate is acceptable and a loss
+        // is not.
+        if (onDeadLetter) {
+          onDeadLetter(message)
+        }
+        remove.run(row.id)
+        continue
+      }
+      requeue.run(nowMs, row.id)
+      requeued += 1
+    }
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+
+  return { requeued, deadLettered }
+}
+
+// Returns the count so the tick can log it. A queue that silently drops what
+// it holds is a queue that lies about its depth.
+export function sweepRetention(db: SqliteDatabase, retentionSeconds: number, nowMs: number): number {
+  const cutoff = nowMs - retentionSeconds * 1000
+  const doomed = db
+    .prepare('SELECT count(*) AS n FROM messages WHERE enqueued_at <= ?')
+    .get(cutoff) as { n: number }
+  if (doomed.n === 0) return 0
+  db.prepare('DELETE FROM messages WHERE enqueued_at <= ?').run(cutoff)
+  return doomed.n
+}
+
+export function peek(db: SqliteDatabase, limit: number): LeasedMessage[] {
+  const rows = db
+    .prepare(
+      `SELECT id, body, content_type, enqueued_at AS timestamp, attempts
+         FROM messages
+        ORDER BY id
+        LIMIT ?`
+    )
+    .all(limit) as LeasedRow[]
+  return rows.map((row) => ({
+    id: row.id,
+    body: row.body,
+    contentType: row.content_type as ContentType,
+    timestampMs: row.timestamp,
+    attempts: row.attempts,
+  }))
+}
+
+export function purge(db: SqliteDatabase): number {
+  const before = depth(db)
+  db.exec('DELETE FROM messages')
+  return before
+}
