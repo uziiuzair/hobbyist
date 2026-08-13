@@ -171,9 +171,12 @@ export interface EjectResponse {
   // Empty when the project has no apps. ADR 0009: an ejected app that no
   // longer serves is not an ejected app.
   caddyfile?: string
-  // Resources this eject could not render, as "name (kind)". Reported rather
-  // than silently dropped, so an incomplete compose file is never mistaken
-  // for a complete one.
+  // Resources this eject could not render, one message per resource. Two
+  // distinct reasons land here: a kind eject has never learned to emit at all
+  // ("name (kind)"), and an app or worker with no image because it has never
+  // been deployed ("name: never deployed, so there is no image to run", see
+  // routes.ts's isDeployed). Reported rather than silently dropped either
+  // way, so an incomplete compose file is never mistaken for a complete one.
   notEjectable?: string[]
 }
 
