@@ -73,3 +73,28 @@ test('probe answers true for a queue whose file is readable', async () => {
   await queueKindHandler.start(ctx, resource)
   assert.equal(await queueKindHandler.probe(ctx, resource), true)
 })
+
+// The defect this pins: probe used to call openQueueDb, which creates the
+// directory, the file and the schema as a side effect of merely looking, so
+// a queue that had never been started still probed true. A probe
+// implemented as `return true` would pass every other test in this file
+// (they all call start() first) but fails these two.
+test('probe answers false for a queue that was never started', async () => {
+  const { ctx, resource } = context()
+  assert.equal(await queueKindHandler.probe(ctx, resource), false)
+})
+
+test('probe does not create the file it is asked to observe', async () => {
+  const { ctx, resource } = context()
+  const path = queueDbPath(ctx.paths, 'proj', 'vault-embed')
+  await queueKindHandler.probe(ctx, resource)
+  assert.equal(existsSync(path), false)
+})
+
+test('probe answers false once destroy has removed the queue directory', async () => {
+  const { ctx, resource } = context()
+  await queueKindHandler.start(ctx, resource)
+  assert.equal(await queueKindHandler.probe(ctx, resource), true)
+  await queueKindHandler.destroy(ctx, resource)
+  assert.equal(await queueKindHandler.probe(ctx, resource), false)
+})
