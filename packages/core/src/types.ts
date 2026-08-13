@@ -10,7 +10,7 @@ export type ResourceId = string
 // and ADR 0007 guard 1 requires the widening to happen before Phase 2 code
 // rather than during it: "if Phase 2 requires changing Phase 1's model, the
 // model was wrong and gets fixed before Phase 2 proceeds."
-export type ResourceKind = 'postgres' | 'app' | 'worker'
+export type ResourceKind = 'postgres' | 'app' | 'worker' | 'queue'
 
 export type ResourceState =
   | 'creating'
@@ -109,7 +109,29 @@ export interface WorkerConfig extends ResourceConfigBase {
   databaseResourceId: ResourceId | null
 }
 
-export type ResourceConfig = PostgresConfig | AppConfig | WorkerConfig
+// A queue. The only kind with no container: it is a sqlite file the daemon
+// owns, plus the rules for draining it. `image`, `containerName` and
+// `hostPort` come from ResourceConfigBase and are unused, because every
+// existing call site that reads them expects them to exist on any resource
+// (see the comment on ResourceConfigBase).
+//
+// The consumer is stored as a resource id rather than a name so a worker
+// rename cannot orphan a queue, which is the same reasoning
+// AppConfig.databaseResourceId records.
+export interface QueueConfig extends ResourceConfigBase {
+  retentionSeconds: number
+  consumerResourceId: ResourceId | null
+  maxBatchSize: number
+  maxBatchTimeoutSeconds: number
+  maxRetries: number
+  retryDelaySeconds: number
+  // The NAME of another queue in the same project, not an id: it is what the
+  // user wrote in wrangler.toml, and Cloudflare creates it if it is missing,
+  // so it can legitimately name a queue that does not exist yet.
+  deadLetterQueue: string | null
+}
+
+export type ResourceConfig = PostgresConfig | AppConfig | WorkerConfig | QueueConfig
 
 interface ResourceBase {
   id: ResourceId
@@ -138,7 +160,12 @@ export interface WorkerResource extends ResourceBase {
   config: WorkerConfig
 }
 
-export type Resource = PostgresResource | AppResource | WorkerResource
+export interface QueueResource extends ResourceBase {
+  kind: 'queue'
+  config: QueueConfig
+}
+
+export type Resource = PostgresResource | AppResource | WorkerResource | QueueResource
 
 // The write half of the proxy's ActivityTracker
 // (packages/proxy/src/activity.ts), named here so packages that must report

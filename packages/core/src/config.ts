@@ -19,10 +19,11 @@ import { dirname, join, resolve } from 'node:path'
 //           daemon's alarm mirror, which recovers pending alarm deadlines
 //           from stopped objects' sqlite files, since a stopped container
 //           cannot fire its own timer.
+//   queue   a queue's messages.sqlite, written only by the daemon.
 //
 // An `app` has no part at all: ADR 0007 makes Phase 2 compute stateless and
 // volumes wait for Phase 3.
-export type ResourcePart = 'pgdata' | 'bundle' | 'state' | 'do'
+export type ResourcePart = 'pgdata' | 'bundle' | 'state' | 'do' | 'queue'
 
 export interface Paths {
   home: string
