@@ -101,6 +101,15 @@ async function tick(
       continue
     }
 
+    // A queue holds no process, so it is `running` from creation and never
+    // changes: it matches the check above on every single pass, forever.
+    // This is not an optimisation, it is the difference between the
+    // hibernator working and the hibernator calling stop on every queue on
+    // the box, every pass, for as long as the daemon runs.
+    if (resource.kind === 'queue') {
+      continue
+    }
+
     const project = ctx.store.getProject(resource.projectId)
 
     // A released project is not hobby's to put to sleep. Its container is
