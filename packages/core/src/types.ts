@@ -105,12 +105,12 @@ export interface AppConfig extends ResourceConfigBase {
   databaseResourceId: ResourceId | null
 }
 
-// A Cloudflare Worker, running on Cloudflare's own runtime. See ADR 0011:
-// this is workerd, driven by the miniflare npm package, in a container we
-// build, one process per worker resource.
-export interface WorkerConfig extends ResourceConfigBase {
-  containerPort: number
-  hostname: string
+// Everything read out of the user's wrangler manifest. Null until a first
+// deploy, because none of it can be known before there is a file to read.
+// Split out of WorkerConfig rather than left inline so that the boundary
+// between "derived at record creation" and "read from the user's code" is
+// structural instead of a comment someone has to notice and honour.
+export interface WorkerManifest {
   // The directory holding the user's wrangler manifest and entry script,
   // and the name of the manifest file we actually read from it.
   source: { path: string; manifest: string }
@@ -122,6 +122,19 @@ export interface WorkerConfig extends ResourceConfigBase {
   d1Databases: string[]
   queues: { producers: string[]; consumers: string[] }
   durableObjects: Array<{ binding: string; className: string }>
+}
+
+// A Cloudflare Worker, running on Cloudflare's own runtime. See ADR 0011:
+// this is workerd, driven by the miniflare npm package, in a container we
+// build, one process per worker resource.
+export interface WorkerConfig extends ResourceConfigBase {
+  // Ours, not the user's: the port we tell Miniflare to listen on. Known at
+  // creation, unlike an app's containerPort, which is whatever the user's
+  // process happens to bind and is unknowable before there is code.
+  containerPort: number
+  hostname: string
+  databaseResourceId: ResourceId | null
+
   // workerd derives every Durable Object's storage identity from this. If
   // it ever changes, every object's sqlite file is orphaned and the user
   // silently loses state on a redeploy, which is the sharpest data-loss
@@ -130,8 +143,14 @@ export interface WorkerConfig extends ResourceConfigBase {
   // rename, redeploy, daemon restart and eject/adopt), and never
   // regenerated. Never derive it from the project or class name: both are
   // user-facing strings a rename would change.
+  //
+  // It sits above the manifest split because it exists before any code
+  // does. A worker created from Studio has a stable object identity from
+  // the moment the row exists, which is strictly better than deriving it in
+  // the same breath as a first build.
   durableObjectUniqueKeyModifier: string
-  databaseResourceId: ResourceId | null
+
+  manifest: WorkerManifest | null
 }
 
 export type ResourceConfig = PostgresConfig | AppConfig | WorkerConfig

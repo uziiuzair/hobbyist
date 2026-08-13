@@ -115,8 +115,22 @@ function hyperdriveUrl(config: PostgresConfig): string {
 
 export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource): RunnerManifest {
   const config = resource.config
+  // Every caller that can reach this function has already gone through a
+  // path that requires an image (containerSpec's own null-image check for
+  // start, or a stored row for eject's renderCompose), and image and
+  // manifest are populated together at first deploy. A null manifest here
+  // is therefore a bug, not a resting state, exactly like containerSpec's
+  // null-image check just above.
+  if (config.manifest === null) {
+    throw new HobbyError(
+      'internal',
+      `resource ${config.containerName} has no manifest, so there is nothing to run`,
+      'this is a bug: a resource with no manifest should be in state undeployed and should never reach a start path'
+    )
+  }
+
   const durableObjects: RunnerManifest['durableObjects'] = {}
-  for (const entry of config.durableObjects) {
+  for (const entry of config.manifest.durableObjects) {
     durableObjects[entry.binding] = {
       className: entry.className,
       // SQLite-backed, which is what makes `_cf_METADATA` (and therefore the
@@ -127,16 +141,16 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
     }
   }
 
-  const manifest: RunnerManifest = {
+  const runnerManifest: RunnerManifest = {
     port: CONTAINER_PORT,
-    compatibilityDate: config.compatibilityDate,
-    compatibilityFlags: config.compatibilityFlags,
-    vars: config.vars,
-    kvNamespaces: config.kvNamespaces,
-    r2Buckets: config.r2Buckets,
-    d1Databases: config.d1Databases,
-    queueProducers: config.queues.producers,
-    queueConsumers: config.queues.consumers,
+    compatibilityDate: config.manifest.compatibilityDate,
+    compatibilityFlags: config.manifest.compatibilityFlags,
+    vars: config.manifest.vars,
+    kvNamespaces: config.manifest.kvNamespaces,
+    r2Buckets: config.manifest.r2Buckets,
+    d1Databases: config.manifest.d1Databases,
+    queueProducers: config.manifest.queues.producers,
+    queueConsumers: config.manifest.queues.consumers,
     durableObjects,
   }
 
@@ -146,11 +160,11 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
   if (config.databaseResourceId !== null) {
     const sibling = deps.store.getResource(config.databaseResourceId)
     if (sibling !== null && sibling.kind === 'postgres') {
-      manifest.hyperdrives = { DB: hyperdriveUrl(sibling.config) }
+      runnerManifest.hyperdrives = { DB: hyperdriveUrl(sibling.config) }
     }
   }
 
-  return manifest
+  return runnerManifest
 }
 
 function containerSpec(deps: WorkerDeps, resource: WorkerResource, project: Project): ContainerSpec {
@@ -314,19 +328,21 @@ export async function createWorkerResource(
     hostPort,
     containerPort: CONTAINER_PORT,
     hostname: workerHostname(opts.project.name, opts.name, deps.config.domain),
-    source: { path: opts.sourcePath, manifest: found.file },
-    compatibilityDate: manifest.compatibilityDate,
-    compatibilityFlags: manifest.compatibilityFlags,
-    vars: manifest.vars,
-    kvNamespaces: manifest.kvNamespaces,
-    r2Buckets: manifest.r2Buckets,
-    d1Databases: manifest.d1Databases,
-    queues: manifest.queues,
-    durableObjects: manifest.durableObjects,
     // Placeholder until the row exists: the real value is derived from the
     // resource id, which the store assigns. Rewritten immediately below.
     durableObjectUniqueKeyModifier: '',
     databaseResourceId: opts.databaseResourceId,
+    manifest: {
+      source: { path: opts.sourcePath, manifest: found.file },
+      compatibilityDate: manifest.compatibilityDate,
+      compatibilityFlags: manifest.compatibilityFlags,
+      vars: manifest.vars,
+      kvNamespaces: manifest.kvNamespaces,
+      r2Buckets: manifest.r2Buckets,
+      d1Databases: manifest.d1Databases,
+      queues: manifest.queues,
+      durableObjects: manifest.durableObjects,
+    },
   }
 
   const created = deps.store.createResource({
@@ -480,7 +496,20 @@ export async function deployWorker(
   if (project === null) {
     throw new HobbyError('internal', `worker ${resource.id} has no owning project`)
   }
-  const sourcePath = opts.sourcePath ?? resource.config.source.path
+  // Falls back to the recorded source path on a redeploy. A worker whose
+  // manifest is still null has never been deployed, so there is nothing
+  // recorded to fall back to and the caller must say where the code is.
+  let sourcePath = opts.sourcePath
+  if (sourcePath === undefined) {
+    if (resource.config.manifest === null) {
+      throw new HobbyError(
+        'usage',
+        `worker ${resource.id} has never been deployed`,
+        'a first deploy needs a source directory: pass { "source": { "path": "..." } }'
+      )
+    }
+    sourcePath = resource.config.manifest.source.path
+  }
   const found = findWranglerManifest(sourcePath)
   const manifest = found.manifest
   const now = deps.now ?? Date.now
@@ -498,19 +527,21 @@ export async function deployWorker(
   const config: WorkerConfig = {
     ...resource.config,
     image: tag,
-    source: { path: sourcePath, manifest: found.file },
-    compatibilityDate: manifest.compatibilityDate,
-    compatibilityFlags: manifest.compatibilityFlags,
-    vars: manifest.vars,
-    kvNamespaces: manifest.kvNamespaces,
-    r2Buckets: manifest.r2Buckets,
-    d1Databases: manifest.d1Databases,
-    queues: manifest.queues,
-    durableObjects: manifest.durableObjects,
     // Untouched on purpose. It is derived from the resource id and changing
     // it here would orphan every Durable Object's storage on every deploy,
     // which is the sharpest data-loss edge in this kind.
     durableObjectUniqueKeyModifier: resource.config.durableObjectUniqueKeyModifier,
+    manifest: {
+      source: { path: sourcePath, manifest: found.file },
+      compatibilityDate: manifest.compatibilityDate,
+      compatibilityFlags: manifest.compatibilityFlags,
+      vars: manifest.vars,
+      kvNamespaces: manifest.kvNamespaces,
+      r2Buckets: manifest.r2Buckets,
+      d1Databases: manifest.d1Databases,
+      queues: manifest.queues,
+      durableObjects: manifest.durableObjects,
+    },
   }
   deps.store.updateResourceConfig(resource.id, config)
 

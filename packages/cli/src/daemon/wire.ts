@@ -96,7 +96,12 @@ function redactConfig(kind: Resource['kind'], config: ResourceConfig): WireResou
     return { ...app, env: redactValues(app.env) }
   }
   const worker = config as WorkerConfig
-  return { ...worker, vars: redactValues(worker.vars) }
+  // vars now lives one level deeper, inside manifest, and null until a first
+  // deploy: nothing to redact yet, and nothing to leak either.
+  return {
+    ...worker,
+    manifest: worker.manifest === null ? null : { ...worker.manifest, vars: redactValues(worker.manifest.vars) },
+  }
 }
 
 export async function toWireResource(ctx: DaemonContext, resource: Resource): Promise<WireResource> {
