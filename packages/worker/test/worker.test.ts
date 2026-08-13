@@ -22,6 +22,7 @@ import {
 import {
   describeIgnored,
   findWranglerManifest,
+  IGNORED_WITH_REASON,
   parseWranglerManifest,
   stripJsonComments,
 } from '../src/manifest.js'
@@ -126,7 +127,102 @@ test('a wrangler.toml is read into the subset we honour', () => {
   assert.deepEqual(manifest.r2Buckets, ['MEDIA'])
   assert.deepEqual(manifest.d1Databases, ['ANALYTICS'])
   assert.deepEqual(manifest.durableObjects, [{ binding: 'COUNTER', className: 'Counter' }])
-  assert.deepEqual(manifest.queues, { producers: ['jobs'], consumers: ['jobs'] })
+  assert.deepEqual(manifest.queues, {
+    producers: [{ queue: 'jobs', binding: 'JOBS' }],
+    consumers: [
+      {
+        queue: 'jobs',
+        maxBatchSize: null,
+        maxBatchTimeoutSeconds: null,
+        maxRetries: null,
+        retryDelaySeconds: null,
+        deadLetterQueue: null,
+      },
+    ],
+  })
+})
+
+test('a producer keeps its binding name, which is what the queue binding needs', () => {
+  const manifest = parseWranglerManifest(
+    `
+name = "embedder"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[[queues.producers]]
+queue = "vault-embed"
+binding = "VAULT_EMBED_QUEUE"
+`,
+    'toml'
+  )
+  assert.deepEqual(manifest.queues.producers, [{ queue: 'vault-embed', binding: 'VAULT_EMBED_QUEUE' }])
+})
+
+test('a consumer keeps every tuning key wrangler documents', () => {
+  const manifest = parseWranglerManifest(
+    `
+name = "embedder"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[[queues.consumers]]
+queue = "vault-embed"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+retry_delay = 30
+dead_letter_queue = "vault-embed-dlq"
+`,
+    'toml'
+  )
+  assert.deepEqual(manifest.queues.consumers, [
+    {
+      queue: 'vault-embed',
+      maxBatchSize: 10,
+      maxBatchTimeoutSeconds: 5,
+      maxRetries: 3,
+      retryDelaySeconds: 30,
+      deadLetterQueue: 'vault-embed-dlq',
+    },
+  ])
+})
+
+test('an absent tuning key stays null rather than guessing a default', () => {
+  const manifest = parseWranglerManifest(
+    `
+name = "embedder"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[[queues.consumers]]
+queue = "vault-embed"
+`,
+    'toml'
+  )
+  assert.equal(manifest.queues.consumers[0]?.maxBatchSize, null)
+})
+
+// max_concurrency lives nested inside queues.consumers, so the ordinary
+// top-level ignored-key scan can never see it. Both halves matter: the
+// reason has to exist in the map, and parsing a manifest containing the key
+// has to actually surface it through `ignored`, or the map entry sits next
+// to machinery nothing calls.
+test('max_concurrency is reported as honoured at one, not silently dropped', () => {
+  assert.match(IGNORED_WITH_REASON['queues.consumers.max_concurrency'] ?? '', /one box/)
+
+  const manifest = parseWranglerManifest(
+    `
+name = "embedder"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[[queues.consumers]]
+queue = "vault-embed"
+max_concurrency = 4
+`,
+    'toml'
+  )
+  assert.ok(manifest.ignored.includes('queues.consumers.max_concurrency'))
 })
 
 // Silence about a dropped key in a config file the user believes is

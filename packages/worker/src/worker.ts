@@ -135,8 +135,11 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
     kvNamespaces: config.kvNamespaces,
     r2Buckets: config.r2Buckets,
     d1Databases: config.d1Databases,
-    queueProducers: config.queues.producers,
-    queueConsumers: config.queues.consumers,
+    // Miniflare's manifest still wants names, not the richer wrangler
+    // shapes: what to hand it beyond the name is a later task's change, not
+    // this one's.
+    queueProducers: config.queues.producers.map((producer) => producer.queue),
+    queueConsumers: config.queues.consumers.map((consumer) => consumer.queue),
     durableObjects,
   }
 
