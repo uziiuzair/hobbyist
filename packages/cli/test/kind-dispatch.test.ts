@@ -26,6 +26,7 @@ import {
   type ResourceKindHandler,
   type Store,
   type WorkerConfig,
+  type WorkerManifest,
 } from '@hobby.sh/core'
 import { postgresKindHandler } from '@hobby.sh/pg'
 import { ActivityTracker } from '@hobby.sh/proxy'
@@ -100,6 +101,42 @@ function sampleAppConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     source: null,
     env: { STRIPE_SECRET_KEY: 'sk_live_do_not_leak', PUBLIC_URL: 'https://example.com' },
     databaseResourceId: null,
+    ...overrides,
+  }
+}
+
+// Split out from sampleWorkerConfig so a test that only wants to change
+// `vars` can do so without spreading a `WorkerManifest | null` field, which
+// widens every property to optional under TypeScript's spread rules and
+// defeats the point of a typed factory.
+function sampleWorkerManifest(overrides: Partial<WorkerManifest> = {}): WorkerManifest {
+  return {
+    source: { path: '/src/api', manifest: 'wrangler.toml' },
+    compatibilityDate: '2026-08-01',
+    compatibilityFlags: [],
+    vars: { API_KEY: 'sk-live-secret' },
+    kvNamespaces: [],
+    r2Buckets: [],
+    d1Databases: [],
+    queues: { producers: [], consumers: [] },
+    durableObjects: [],
+    ...overrides,
+  }
+}
+
+// Mirrors sampleAppConfig / samplePostgresConfig above: a full, valid
+// WorkerConfig with a deployed manifest, so tests that only care about one
+// field can override it and leave the rest alone.
+function sampleWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
+  return {
+    image: 'hobby/workerd:1',
+    containerName: `hobby-blog-api-${randomUUID()}`,
+    hostPort: 15600,
+    containerPort: 8787,
+    hostname: 'api.blog.localhost',
+    durableObjectUniqueKeyModifier: 'stable-modifier',
+    databaseResourceId: null,
+    manifest: sampleWorkerManifest(),
     ...overrides,
   }
 }
@@ -288,17 +325,19 @@ test('a worker vars value never crosses the wire boundary', async () => {
     hostPort: 15600,
     containerPort: 8787,
     hostname: 'api.blog.localhost',
-    source: { path: '/src/api', manifest: 'wrangler.toml' },
-    compatibilityDate: '2026-08-01',
-    compatibilityFlags: [],
-    vars: { OPENAI_API_KEY: 'sk-do-not-leak' },
-    kvNamespaces: [],
-    r2Buckets: [],
-    d1Databases: [],
-    queues: { producers: [], consumers: [] },
-    durableObjects: [],
     durableObjectUniqueKeyModifier: 'stable-modifier',
     databaseResourceId: null,
+    manifest: {
+      source: { path: '/src/api', manifest: 'wrangler.toml' },
+      compatibilityDate: '2026-08-01',
+      compatibilityFlags: [],
+      vars: { OPENAI_API_KEY: 'sk-do-not-leak' },
+      kvNamespaces: [],
+      r2Buckets: [],
+      d1Databases: [],
+      queues: { producers: [], consumers: [] },
+      durableObjects: [],
+    },
   }
   const resource = ctx.store.createResource({
     projectId: project.id,
@@ -312,6 +351,87 @@ test('a worker vars value never crosses the wire boundary', async () => {
 
   assert.equal(serialized.includes('sk-do-not-leak'), false)
   assert.match(serialized, /OPENAI_API_KEY/)
+})
+
+// `vars` moved inside `manifest` when the worker manifest split landed
+// (packages/core/src/types.ts's WorkerConfig). redactConfig
+// (packages/cli/src/daemon/wire.ts) had to follow it one level deeper. This
+// asserts the exact nested position rather than just "the secret is gone
+// somewhere", because a `return { ...worker }` fallback would also make the
+// secret vanish from `vars` (it would just still be sitting there, unredacted).
+test('a worker var is redacted in its nested position', async () => {
+  const ctx = buildContext(stubAppHandler())
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'api',
+    config: sampleWorkerConfig({ manifest: sampleWorkerManifest({ vars: { API_KEY: 'sk-live-secret' } }) }),
+  })
+
+  const wire = await toWireResource(ctx, resource)
+
+  assert.equal(wire.kind === 'worker' ? wire.config.manifest?.vars['API_KEY'] : undefined, '<redacted>')
+})
+
+// Separate from the nested-position test above on purpose: that test only
+// proves `vars.API_KEY` itself got overwritten. It would still pass if a
+// second, unredacted copy of the secret sat in some other field of the wire
+// payload. Asserting against the whole serialised payload is the assertion
+// that keeps catching a leak the next time this field moves.
+test('a worker secret does not appear anywhere in the serialised wire payload', async () => {
+  const ctx = buildContext(stubAppHandler())
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'api',
+    config: sampleWorkerConfig({ manifest: sampleWorkerManifest({ vars: { API_KEY: 'sk-live-secret' } }) }),
+  })
+
+  const wire = await toWireResource(ctx, resource)
+
+  assert.ok(!JSON.stringify(wire).includes('sk-live-secret'))
+})
+
+// A worker whose code has never been deployed has `manifest: null`
+// (WorkerConfig.manifest, packages/core/src/types.ts). redactConfig must
+// pass that through as null rather than throw on `worker.manifest.vars` or
+// fabricate an empty manifest object that was never actually deployed.
+test('a worker with no manifest survives the wire round trip', async () => {
+  const ctx = buildContext(stubAppHandler())
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'api',
+    config: sampleWorkerConfig({ image: null, manifest: null }),
+  })
+
+  const wire = await toWireResource(ctx, resource)
+
+  assert.equal(wire.kind === 'worker' ? wire.config.manifest : undefined, null)
+})
+
+// redactConfig's app and worker branches sit next to each other
+// (packages/cli/src/daemon/wire.ts), and the worker branch was the one
+// rewritten to reach into `manifest`. This guards that the neighbouring app
+// branch, which still redacts `env` at the top level (AppConfig.env,
+// packages/core/src/types.ts), was not disturbed by that edit.
+test('an app env value is still redacted after the manifest edit', async () => {
+  const ctx = buildContext(stubAppHandler())
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'app',
+    name: 'web',
+    config: sampleAppConfig({ env: { STRIPE_SECRET_KEY: 'sk_live_still_redacted' } }),
+  })
+
+  const wire = await toWireResource(ctx, resource)
+
+  assert.equal(wire.kind === 'app' ? wire.config.env['STRIPE_SECRET_KEY'] : undefined, '<redacted>')
+  assert.ok(!JSON.stringify(wire).includes('sk_live_still_redacted'))
 })
 
 // Size is a database question. Asking it of an app must not reach for a

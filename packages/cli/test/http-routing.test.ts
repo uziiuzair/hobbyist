@@ -5,6 +5,7 @@
 
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import { get as httpGet } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -17,7 +18,7 @@ import {
   type PostgresConfig,
   type Store,
 } from '@hobby.sh/core'
-import { ActivityTracker } from '@hobby.sh/proxy'
+import { ActivityTracker, startHttpRouter } from '@hobby.sh/proxy'
 import { createCaddyManager } from '../src/index.js'
 import {
   createDefaultKindRegistry,
@@ -161,6 +162,97 @@ test('the tls ask gate still allows a released project hostname', async () => {
   const deps = createHttpProxyDeps(ctx)
   assert.equal(await deps.allowHostname?.('web.blog.localhost'), true)
   assert.equal(await deps.allowHostname?.('nothing.here.localhost'), false)
+})
+
+interface Fetched {
+  status: number
+  body: string
+}
+
+// A real request through a real node:http router, the same shape
+// packages/proxy/test/http.test.ts uses for the router itself. This proves
+// the daemon's resolve(), not a fake, actually lands on the status a
+// browser would see, rather than just asserting on a rejected promise.
+function fetchThrough(port: number, host: string, path = '/'): Promise<Fetched> {
+  return new Promise((resolve, reject) => {
+    const req = httpGet({ host: '127.0.0.1', port, path, headers: { host } }, (res) => {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (chunk: string) => {
+        body += chunk
+      })
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }))
+    })
+    req.on('error', reject)
+  })
+}
+
+// Deliberately a throw from resolve(), not a failure in wake(). A wake
+// failure is bucketed `timeout` and rendered 504 (packages/proxy/src/http.ts:249-251),
+// which would tell the user their app was slow to start; nothing timed out
+// here, there is simply no code. A resolve() throw is bucketed `refused`
+// and rendered 503 with the message (packages/proxy/src/http.ts:245-247),
+// the same path the released-project test above already exercises.
+test('an undeployed hostname answers 503 naming the command that fixes it', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'app',
+    name: 'web',
+    config: appConfig(),
+  })
+  ctx.store.setResourceState(resource.id, 'undeployed')
+
+  const deps = createHttpProxyDeps(ctx)
+  const router = await startHttpRouter(deps, { port: 0 })
+  try {
+    const res = await fetchThrough(router.port, 'web.blog.localhost')
+    assert.equal(res.status, 503)
+    assert.match(res.body, /has no code deployed yet/)
+    assert.match(res.body, /hobby deploy <path> --project blog --name web/)
+  } finally {
+    await router.close()
+  }
+})
+
+// allowHostname wraps resolve() in a try and returns true on throw
+// (context.ts's createHttpProxyDeps.allowHostname), deliberately, so a
+// hostname that genuinely belongs to this box still gets a certificate. An
+// undeployed resource inherits that for free: without it, a user's first
+// deploy would also be their first TLS handshake and both would fail
+// together.
+test('an undeployed hostname is still allowed a certificate', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'app',
+    name: 'web',
+    config: appConfig(),
+  })
+  ctx.store.setResourceState(resource.id, 'undeployed')
+
+  const deps = createHttpProxyDeps(ctx)
+  assert.equal(await deps.allowHostname?.('web.blog.localhost'), true)
+})
+
+// The two failure modes must stay distinguishable: 404 means no resource
+// owns this name at all (a typo, or nothing was ever created), 503 means a
+// resource owns it and has no code yet. Collapsing them would make the
+// undeployed case indistinguishable from a hostname nobody ever registered.
+test('a hostname that does not exist at all still answers 404, not 503', async () => {
+  const ctx = buildContext()
+  ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+
+  const deps = createHttpProxyDeps(ctx)
+  const router = await startHttpRouter(deps, { port: 0 })
+  try {
+    const res = await fetchThrough(router.port, 'nope.blog.localhost')
+    assert.equal(res.status, 404)
+  } finally {
+    await router.close()
+  }
 })
 
 interface RecordedCall {

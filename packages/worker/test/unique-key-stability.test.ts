@@ -14,7 +14,9 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import type { WorkerConfig } from '@hobby.sh/core'
 import { parseUniqueKey } from '@hobby.sh/do'
+import { assertWorkerConfig } from '../src/assert-config.js'
 import { uniqueKeyFor } from '../src/worker.js'
 
 const RESOURCE_ID = '8f14e45f-ceea-467a-9e73-8bdb0d1e1c2b'
@@ -58,4 +60,64 @@ test('the key round-trips through the parser the catalog uses', () => {
   // hand-written string.
   const parsed = parseUniqueKey(uniqueKeyFor(RESOURCE_ID, 'Room'))
   assert.deepEqual(parsed, { resourceId: RESOURCE_ID, className: 'Room' })
+})
+
+test('the durable object unique key is assigned at creation, before any manifest exists', () => {
+  // The whole reason the modifier sits ABOVE the manifest split: it is
+  // derived from resource.id, which the store assigns when the row is
+  // created, so it is knowable before there is a wrangler.toml to read.
+  // A worker created from Studio has a stable Durable Object identity
+  // before it has seen a line of code.
+  const config: WorkerConfig = {
+    image: null,
+    containerName: 'hobby-blog-cron',
+    hostPort: 15501,
+    containerPort: 8787,
+    hostname: 'blog-cron.hobby.local',
+    durableObjectUniqueKeyModifier: 'res-abc-123',
+    manifest: null,
+    databaseResourceId: null,
+  }
+  assert.equal(config.manifest, null)
+  assert.equal(config.durableObjectUniqueKeyModifier, 'res-abc-123')
+})
+
+test('a worker row that predates the manifest split fails loudly, not silently', () => {
+  // store.ts:122 parses the config column with an unchecked cast, so a
+  // legacy flat row would arrive with manifest: undefined and fail
+  // somewhere unhelpful and far away. There are zero worker rows in
+  // existence (see the spec's "Migration: none, deliberately"), so this
+  // asserts rather than migrates.
+  const legacy = {
+    image: 'hobby-blog-cron:123',
+    containerName: 'hobby-blog-cron',
+    hostPort: 15501,
+    containerPort: 8787,
+    hostname: 'blog-cron.hobby.local',
+    compatibilityDate: '2026-07-30',
+    durableObjectUniqueKeyModifier: 'res-abc-123',
+    databaseResourceId: null,
+  } as unknown as WorkerConfig
+
+  assert.throws(() => assertWorkerConfig(legacy), /predates the manifest split/)
+})
+
+test('a worker created before its code passes the guard, because manifest: null is a shape it knows', () => {
+  // The negative case above proves a legacy row is rejected. This proves the
+  // guard distinguishes "no manifest key at all" (a row that predates the
+  // split) from "manifest deliberately null" (a worker whose code has never
+  // been deployed). Conflating them would reject every record created by
+  // Studio or MCP, which is the whole point of the record-before-code change.
+  const config: WorkerConfig = {
+    image: null,
+    containerName: 'hobby-blog-cron',
+    hostPort: 15501,
+    containerPort: 8787,
+    hostname: 'blog-cron.hobby.local',
+    durableObjectUniqueKeyModifier: 'res-abc-123',
+    manifest: null,
+    databaseResourceId: null,
+  }
+  assert.doesNotThrow(() => assertWorkerConfig(config))
+  assert.equal(assertWorkerConfig(config), config)
 })
