@@ -28,10 +28,12 @@ import {
   type HobbyConfig,
   type QueueConfig,
   type Store,
+  type WorkerConfig,
 } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
 import { reconcile, startHibernator, type DaemonContext } from '../src/index.js'
 import { createDefaultKindRegistry } from '../src/daemon/context.js'
+import { toWireResource } from '../src/daemon/wire.js'
 
 test('the registry resolves the queue kind', () => {
   const registry = createDefaultKindRegistry()
@@ -81,6 +83,34 @@ function sampleQueueConfig(overrides: Partial<QueueConfig> = {}): QueueConfig {
     maxRetries: 2,
     retryDelaySeconds: 0,
     deadLetterQueue: null,
+    ...overrides,
+  }
+}
+
+// Copied in shape from kind-dispatch.test.ts's own worker fixtures rather
+// than imported from that file: this test moved here specifically so it does
+// not depend on, or edit, a file another concurrent session is appending to
+// (packages/cli/test/kind-dispatch.test.ts).
+function sampleWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
+  return {
+    image: 'hobby/workerd:1',
+    containerName: 'hobby-blog-api',
+    hostPort: 15602,
+    controlPort: 15603,
+    queueToken: 'do-not-leak-this-bearer-token',
+    containerPort: 8787,
+    hostname: 'api.blog.localhost',
+    source: { path: '/src/api', manifest: 'wrangler.toml' },
+    compatibilityDate: '2026-08-01',
+    compatibilityFlags: [],
+    vars: {},
+    kvNamespaces: [],
+    r2Buckets: [],
+    d1Databases: [],
+    queues: { producers: [{ queue: 'jobs', binding: 'JOBS' }], consumers: [] },
+    durableObjects: [],
+    durableObjectUniqueKeyModifier: 'stable-modifier',
+    databaseResourceId: null,
     ...overrides,
   }
 }
@@ -200,4 +230,33 @@ test('reconcile: a queue recorded running is left alone, it has no container to 
   // container.
   assert.equal(ctx.store.getResource(resource.id)?.state, 'running')
   ctx.store.close()
+})
+
+// A worker producer binding, not a queue itself, but the wire boundary is a
+// daemon-wide concern and this file is the one that already owns the queue
+// kind's cross-cutting tests. Lives here rather than in kind-dispatch.test.ts
+// on purpose: that file is owned by a concurrent session and this test does
+// not belong to its worker-kind-dispatch subject matter anyway.
+//
+// The bearer token that authenticates a container to the daemon's enqueue
+// listener. resource.id is already returned unredacted on every WireResource
+// (it is the resource's own identity), so a token that WAS the id would be
+// published everywhere the id already is: `hobby ls --json`, Studio, CI logs,
+// agent transcripts. This pins that a real, distinct queueToken never
+// crosses the wire boundary as itself.
+test("a worker's queue token never crosses the wire boundary", async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'api',
+    config: sampleWorkerConfig(),
+  })
+
+  const wire = await toWireResource(ctx, resource)
+  const serialized = JSON.stringify(wire)
+
+  assert.equal(serialized.includes('do-not-leak-this-bearer-token'), false)
+  assert.equal(wire.kind === 'worker' ? wire.config.queueToken : undefined, '<redacted>')
 })
