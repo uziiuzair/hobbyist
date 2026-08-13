@@ -154,6 +154,9 @@ export interface DeletedResponse {
 }
 export interface ConnectionResponse {
   connectionString: string
+  // Null when the box has no running tailscaled; absent entirely from a
+  // daemon older than this field, so callers treat undefined as null.
+  tailnetConnectionString?: string | null
 }
 export interface LogsResponse {
   logs: string
