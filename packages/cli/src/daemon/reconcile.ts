@@ -223,6 +223,16 @@ export async function reconcile(ctx: DaemonContext, opts: ReconcileOptions = {})
       continue
     }
 
+    // Skipped whole, for the same structural reason `destroying` is above:
+    // this resource's recorded state is not a claim about a container. An
+    // undeployed app has never had one, so `inspect` reports missing, which
+    // correctedState() buckets as `missing` and maps to `failed` (:137).
+    // That would relabel every resource created from Studio as broken on the
+    // daemon's first tick after it was created.
+    if (resource.state === 'undeployed') {
+      continue
+    }
+
     // Released projects are skipped whole. Reconcile's job is to make the
     // world match the store, and for a released project the world is
     // deliberately not hobby's any more: the container it would find running

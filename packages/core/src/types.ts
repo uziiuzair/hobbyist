@@ -20,6 +20,15 @@ export type ResourceState =
   | 'stopping'
   | 'failed'
   | 'destroying'
+  // A RESTING state, unlike every other member above except `running` and
+  // `sleeping`. It means the row exists and no code has ever been uploaded
+  // into it, which is the normal condition for an `app` or `worker` created
+  // from Studio or MCP. Distinct from `creating`, which means a deploy is in
+  // flight right now and which reconcile.ts:43 correctly marks `failed` when
+  // no container appears. Here, having no container is expected, forever.
+  // Unreachable for `postgres`: its image is a registry reference known at
+  // creation, so it has nothing to deploy.
+  | 'undeployed'
 
 export interface Project {
   id: ProjectId

@@ -17,6 +17,7 @@ import {
   HobbyError,
   openStore,
   resolvePaths,
+  type AppConfig,
   type ComputeRuntime,
   type HobbyConfig,
   type PostgresConfig,
@@ -861,6 +862,37 @@ test('reconcile resumes a resource recorded destroying and removes it', async ()
   assert.equal(ctx.store.getResource(resource.id), null)
   const status = await ctx.runtime.inspect(config.containerName)
   assert.equal(status.exists, false)
+  ctx.store.close()
+})
+
+test('an undeployed resource survives a reconcile tick unchanged', async () => {
+  // An app that has never been deployed has no container by definition.
+  // Without an explicit exemption, correctedState() buckets that as
+  // `missing` (reconcile.ts:137) and maps it to `failed`, so the daemon
+  // would mark every code-less resource broken on its first tick.
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const config: AppConfig = {
+    image: 'hobby-blog-site:seed',
+    containerName: 'hobby-blog-site',
+    hostPort: 15500,
+    containerPort: 8080,
+    hostname: 'blog-site.hobby.local',
+    source: null,
+    env: {},
+    databaseResourceId: null,
+  }
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'app',
+    name: 'site',
+    config,
+  })
+  ctx.store.setResourceState(resource.id, 'undeployed')
+
+  await reconcile(ctx)
+
+  assert.equal(ctx.store.getResource(resource.id)?.state, 'undeployed')
   ctx.store.close()
 })
 
