@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
-import { resolvePaths, type KindContext, type QueueResource, type Store } from '@hobby.sh/core'
+import { resolvePaths, type ComputeRuntime, type KindContext, type QueueResource, type Store } from '@hobby.sh/core'
 import { queueDbPath, queueKindHandler } from '../src/kind.js'
 
 const homes: string[] = []
@@ -66,6 +66,56 @@ test('start creates the queue database and never asks for a container', async ()
 test('stop resolves and does nothing, because a queue has no process', async () => {
   const { ctx, resource } = context()
   await queueKindHandler.stop(ctx, resource)
+})
+
+// Three callers hold a resource and call stop() on it without checking its
+// kind first: the hibernator's sleep path (packages/cli/src/daemon
+// /hibernator.ts), the daemon's own shutdown sequence (server.ts), and
+// `hobby eject --release` (routes.ts). None of them special-case a queue,
+// and none of them needs to, because a queue holds no process, which makes
+// stopping one a no-op by construction rather than by omission. That is
+// only true for as long as this function stays empty, and nothing else
+// enforces it: there is no compile-time exhaustiveness on ResourceKind in
+// this repo, so a future stop() that reaches for the store, the runtime, or
+// the file it is holding would compile and pass every other test in this
+// file. This is the one that catches it, and its failure message names the
+// three callers that were relying on the old behaviour.
+test('stop does nothing, and three callers depend on that: the hibernator, the daemon shutdown, and eject --release', async () => {
+  const { ctx, resource } = context()
+  await queueKindHandler.start(ctx, resource)
+  const path = queueDbPath(ctx.paths, 'proj', 'vault-embed')
+  const before = readFileSync(path)
+
+  // Counting rather than asserting on an eventual side effect, the same
+  // reasoning as the hibernator's own guardCalls: any property read on
+  // either stub, called or not, is itself proof stop() reached for
+  // something it must not need.
+  let storeCalls = 0
+  let runtimeCalls = 0
+  const watchedStore = new Proxy(
+    {},
+    {
+      get(_target, prop) {
+        storeCalls++
+        return (): undefined => undefined
+      },
+    }
+  ) as unknown as Store
+  const watchedRuntime = new Proxy(
+    {},
+    {
+      get(_target, prop) {
+        runtimeCalls++
+        return (): undefined => undefined
+      },
+    }
+  ) as unknown as ComputeRuntime
+
+  await queueKindHandler.stop({ ...ctx, store: watchedStore, runtime: watchedRuntime }, resource)
+
+  assert.equal(storeCalls, 0, 'stop must never touch the store: none of its three callers checks first')
+  assert.equal(runtimeCalls, 0, 'stop must never touch the runtime: a queue has no container for any of its three callers to stop')
+  assert.deepEqual(readFileSync(path), before, "stop must leave the queue's database exactly as it found it")
 })
 
 test('probe answers true for a queue whose file is readable', async () => {
