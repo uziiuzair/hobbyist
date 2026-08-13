@@ -234,8 +234,16 @@ function hostnameOf(resource: WireResource): string {
 // a documented invariant is the right shape for output code: it costs
 // nothing to be correct for a null it does not currently receive, and a
 // future caller of this same branch is not a hypothetical, it is exactly
-// the shape of mistake Task 8 already found three more instances of in
-// renderCompose and a fourth in the Caddyfile.
+// the shape of mistake Task 8 already found two more instances of, in
+// renderCompose's app and worker loops (packages/cli/src/daemon/routes.ts,
+// both now guarded by `isDeployed`). The postgres loop in that same
+// function was never at risk: `PostgresConfig.image` is narrowed to
+// non-nullable `string` (types.ts:80), so comparing it to `null` does not
+// even compile. Task 8 also found a Caddyfile bug in the same review, but a
+// differently shaped one, not a fourth instance of this one: its caller was
+// passing every app and worker resource, deployed or not, into
+// `renderCaddyfile`, whose `hostname`/`hostPort` parameters are never null,
+// so nothing there was a null reaching a template literal.
 function imageLine(image: string | null): string {
   return image === null ? '(not built yet)' : image
 }
