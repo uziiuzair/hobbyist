@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import type { Project, Resource } from '@hobby.sh/core'
 import { navigate } from '../lib/router.js'
-import { State } from './State.js'
+import { stateClass, stateLabel } from './State.js'
 
 // The rail is the Cloudflare idea sized honestly to what exists. Cloudflare
 // can carry four labelled groups because it has roughly fifteen destinations.
@@ -42,6 +42,37 @@ function GridIcon() {
       <rect x="1.5" y="8" width="4.5" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.2" />
       <rect x="8" y="8" width="4.5" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.2" />
     </svg>
+  )
+}
+
+// A browser window: the app kind serves pages.
+function AppIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <rect x="1.5" y="2" width="11" height="10" rx="1.6" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M1.5 4.8h11" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="3.4" cy="3.4" r="0.5" fill="currentColor" />
+    </svg>
+  )
+}
+
+// A bolt: the worker kind runs on demand and goes away.
+function WorkerIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <path d="M7.8 1.5 3 8h3.4l-.9 4.5L10.8 6H7.4l.4-4.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+// The dot alone, pushed to the row's trailing edge. The state word still
+// exists for screen readers: colour and shape are never the only carrier.
+function RailDot({ state }: { state: string }) {
+  return (
+    <span className={`state rail-dot ${stateClass(state)}`}>
+      <span className="dot" aria-hidden="true" />
+      <span className="sr-only">{stateLabel(state)}</span>
+    </span>
   )
 }
 
@@ -192,6 +223,12 @@ export function Shell({
   const anyAwake = projects.some((row) => row.resources.some((r) => r.state === 'running'))
   const active = projects.find((row) => row.project.name === currentProject)
   const databases = active?.resources.filter((r) => r.kind === 'postgres') ?? []
+  // The rail is generic over resource kind: a node is a kind, a name, a state.
+  // Only postgres has inner views today, so apps and workers render as facts
+  // rather than destinations, and their groups appear only when a project
+  // actually holds one: a reader must never execute an aspiration.
+  const apps = active?.resources.filter((r) => r.kind === 'app') ?? []
+  const workers = active?.resources.filter((r) => r.kind === 'worker') ?? []
 
   // Each node remembers whether it was folded, falling back to a default the
   // route decides: the database you are inside starts open, the rest start
@@ -225,31 +262,27 @@ export function Shell({
             </a>
           </div>
         ) : (
-          <div className="rail-group">
-            <div className="rail-label">Services</div>
+          <>
+            <div className="rail-group">
+              <div className="rail-label">Project</div>
+              <a
+                className="rail-link"
+                href={`#/projects/${encodeURIComponent(currentProject)}`}
+                aria-current={currentSection === 'databases' && currentResource === undefined ? 'page' : undefined}
+              >
+                <GridIcon />
+                Overview
+              </a>
+            </div>
 
             {/* Cloudflare's rail is a tree you can fold, not a list that
                 changes shape as you navigate. Every database is present at
                 every moment, and its views hang off it, so the rail answers
                 "what else is in here" without making you leave the page you
                 are on. */}
-            <div className="rail-row">
-              <a
-                className="rail-link"
-                href={`#/projects/${encodeURIComponent(currentProject)}`}
-                aria-current={currentSection === 'databases' && currentResource === undefined ? 'page' : undefined}
-              >
-                <DatabaseIcon />
-                Databases
-                <span className="count">{databases.length}</span>
-              </a>
-              {databases.length > 0 && (
-                <Disclosure open={isOpen('databases', true)} onToggle={toggle('databases', true)} label="Databases" />
-              )}
-            </div>
-
-            {databases.length > 0 && isOpen('databases', true) && (
-              <div className="rail-sub">
+            {databases.length > 0 && (
+              <div className="rail-group">
+                <div className="rail-label">Databases</div>
                 {databases.map((db) => {
                   const key = `db:${db.name}`
                   const here = db.name === currentResource
@@ -258,11 +291,10 @@ export function Shell({
                   return (
                     <div className="rail-node" key={db.name}>
                       <div className="rail-row">
-                        <a
-                          className={`rail-link rail-link-sub${here ? ' is-trail' : ''}`}
-                          href={`${base}/tables`}
-                        >
-                          <State state={db.state} label={db.name} />
+                        <a className={`rail-link${here ? ' is-trail' : ''}`} href={`${base}/tables`}>
+                          <DatabaseIcon />
+                          <span className="rail-name">{db.name}</span>
+                          <RailDot state={db.state} />
                         </a>
                         <Disclosure open={open} onToggle={toggle(key, here)} label={db.name} />
                       </div>
@@ -285,7 +317,36 @@ export function Shell({
                 })}
               </div>
             )}
-          </div>
+
+            {/* Apps and workers exist in the daemon since Phase 2. They have
+                no Studio views yet, so each renders as a fact: kind, name,
+                state. The group itself appears only when the project holds
+                one. */}
+            {apps.length > 0 && (
+              <div className="rail-group">
+                <div className="rail-label">Apps</div>
+                {apps.map((r) => (
+                  <div className="rail-item" key={r.name}>
+                    <AppIcon />
+                    <span className="rail-name">{r.name}</span>
+                    <RailDot state={r.state} />
+                  </div>
+                ))}
+              </div>
+            )}
+            {workers.length > 0 && (
+              <div className="rail-group">
+                <div className="rail-label">Workers</div>
+                {workers.map((r) => (
+                  <div className="rail-item" key={r.name}>
+                    <WorkerIcon />
+                    <span className="rail-name">{r.name}</span>
+                    <RailDot state={r.state} />
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
         )}
 
         <div className="rail-foot">
