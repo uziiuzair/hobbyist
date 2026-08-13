@@ -204,6 +204,52 @@ test('a directory with no manifest says what it looked for', () => {
   )
 })
 
+// Record-before-code for the worker kind. This is the sharper of the two
+// (app has the same test in packages/app/test/app.test.ts): a sourceless
+// worker still writes durableObjectUniqueKeyModifier through the same
+// two-step create-then-update the built path uses, and a regression that
+// left the '' placeholder in place would orphan every Durable Object sqlite
+// file this worker will ever own, silently, on its first real deploy.
+test('a worker created without a source is undeployed, has its own id as its unique key modifier, and builds nothing', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+
+  const result = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: null,
+    databaseResourceId: null,
+  })
+  const resource = result.resource
+
+  assert.equal(resource.kind, 'worker')
+  assert.equal(resource.state, 'undeployed')
+  assert.equal(resource.config.image, null)
+  assert.equal(resource.config.manifest, null)
+  assert.equal(resource.config.hostname, 'api.blog.localhost')
+
+  // The specific regression this guards against: a broken two-step write
+  // leaves exactly the '' placeholder rather than the row's own id.
+  assert.notEqual(resource.config.durableObjectUniqueKeyModifier, '')
+  assert.equal(resource.config.durableObjectUniqueKeyModifier, resource.id)
+
+  // The returned object must match what the store actually holds, not a
+  // stale pre-write snapshot: this is the exact bug the brief's own sample
+  // code (spreading the pre-setResourceState `created`) would have shipped.
+  const stored = deps.store.getResource(resource.id)
+  assert.equal(stored?.state, resource.state)
+  assert.equal(stored?.kind, 'worker')
+  if (stored?.kind === 'worker') {
+    assert.equal(stored.config.durableObjectUniqueKeyModifier, resource.id)
+  }
+
+  // No build, no container: a record is a row, not a container.
+  assert.deepEqual(runtime._builds, [])
+  assert.equal(runtime._specs.has(resource.config.containerName), false)
+  assert.equal((await runtime.inspect(resource.config.containerName)).exists, false)
+})
+
 // The sharpest data-loss edge in the whole kind: workerd derives every
 // Durable Object's storage identity from this, so a value that changes
 // orphans every object silently.
