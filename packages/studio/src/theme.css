@@ -560,6 +560,30 @@ a.card.is-awake:hover { border-color: var(--accent-line); box-shadow: inset 0 1p
   color: var(--ink-3); font-size: 12px; line-height: 1.5;
 }
 
+/* ---------- jewel tiles ----------
+   One dark slate ground for all five (owner's call): the hue speaks only
+   through the border, the glow and the label. Serif numerals in plain ink.
+   Decorative only: state never lives here, and Connections shows that a
+   tile is allowed to be quiet. */
+
+.tiles { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.tile { border-radius: var(--radius); padding: 15px 17px 13px; border: 1px solid var(--line); background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 45%), var(--surface); min-width: 0; }
+.tile-label { font-size: 10.5px; letter-spacing: 0.09em; text-transform: uppercase; font-weight: 600; display: flex; align-items: center; gap: 7px; color: var(--ink-2); }
+.tile-label i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.tile-value { font-family: var(--font-serif); font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 6px; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile-value .of { font-family: var(--font-sans); font-size: 13px; color: var(--ink-3); font-weight: 400; letter-spacing: 0; margin-left: 6px; }
+.tile-sage { border-color: rgba(151, 216, 176, 0.28); box-shadow: 0 8px 30px rgba(151, 216, 176, 0.1), 0 1px 3px rgba(0, 0, 0, 0.3); }
+.tile-sage .tile-label { color: var(--sage); }
+.tile-iris { border-color: rgba(182, 172, 245, 0.3); box-shadow: 0 8px 30px rgba(182, 172, 245, 0.11), 0 1px 3px rgba(0, 0, 0, 0.3); }
+.tile-iris .tile-label { color: var(--iris); }
+.tile-honey { border-color: rgba(227, 184, 120, 0.28); box-shadow: 0 8px 30px rgba(227, 184, 120, 0.1), 0 1px 3px rgba(0, 0, 0, 0.3); }
+.tile-honey .tile-label { color: var(--honey-t); }
+.tile-rose { border-color: rgba(233, 163, 171, 0.28); box-shadow: 0 8px 30px rgba(233, 163, 171, 0.1), 0 1px 3px rgba(0, 0, 0, 0.3); }
+.tile-rose .tile-label { color: var(--rose); }
+.tile-plain { box-shadow: var(--shadow-card); }
+.tiles-note { margin: 12px 0 16px; color: var(--ink-3); font-size: 12px; line-height: 1.5; }
+@media (max-width: 900px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
 /* Chart left, the things you act on right, the way Neon ranks them. */
 .dash { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
 .dash-side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
