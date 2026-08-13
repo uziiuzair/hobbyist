@@ -138,7 +138,7 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
                   .sort()
                   .pop()
                 return (
-                  <a className="card" key={row.project.id} href={`#/projects/${encodeURIComponent(row.project.name)}`}>
+                  <a className={summary.state === 'running' ? 'card is-awake' : 'card'} key={row.project.id} href={`#/projects/${encodeURIComponent(row.project.name)}`}>
                     <div className="card-body">
                       {/* The project name is data, not chrome: validateName in core
                           enforces lowercase, so it is shown exactly as it is stored. */}
