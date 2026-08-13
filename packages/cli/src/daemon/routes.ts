@@ -358,7 +358,7 @@ async function stopResourceRoute(ctx: DaemonContext, id: string): Promise<RouteR
 // 127.0.0.1 because M1 only runs on one box the caller is already on;
 // HobbyConfig has no field yet for an externally reachable host, and adding
 // one is out of scope here.
-function connectionRoute(ctx: DaemonContext, id: string): RouteResult {
+async function connectionRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   // Genuinely postgres-only, unlike the lifecycle routes above: there is no
   // such thing as a connection string for an app or a worker, and an app's
   // reachable address is its hostname, served over HTTP. Answered with
@@ -374,7 +374,22 @@ function connectionRoute(ctx: DaemonContext, id: string): RouteResult {
     proxyPort: ctx.config.proxyPort,
     viaProxy: true,
   })
-  return { status: 200, body: { connectionString: value } }
+  // The tailnet variant is the same proxy on the same port, reached over
+  // the box's MagicDNS name: the 0.0.0.0 bind already answers there, this
+  // route only reports the address (docs/proxy/research/
+  // 2026-08-13-postgres-over-tailnet.md). Null when no detector is wired
+  // (tests, and any future caller of createApp that opts out) or when the
+  // box has no running tailscaled.
+  const tailnetHost = ctx.detectTailnet === undefined ? null : await ctx.detectTailnet()
+  const tailnetValue =
+    tailnetHost === null
+      ? null
+      : connectionString(project, resource, {
+          host: tailnetHost,
+          proxyPort: ctx.config.proxyPort,
+          viaProxy: true,
+        })
+  return { status: 200, body: { connectionString: value, tailnetConnectionString: tailnetValue } }
 }
 
 async function logsRoute(ctx: DaemonContext, id: string, url: URL): Promise<RouteResult> {
