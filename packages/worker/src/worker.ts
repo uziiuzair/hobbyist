@@ -155,6 +155,13 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
 
 function containerSpec(deps: WorkerDeps, resource: WorkerResource, project: Project): ContainerSpec {
   const config = resource.config
+  if (config.image === null) {
+    throw new HobbyError(
+      'internal',
+      `resource ${config.containerName} has no image, so there is nothing to start`,
+      'this is a bug: a resource with no image should be in state undeployed and should never reach a start path'
+    )
+  }
   return {
     name: config.containerName,
     image: config.image,
@@ -423,9 +430,13 @@ export async function destroyWorker(deps: WorkerDeps, resource: WorkerResource):
   } catch (err) {
     failures.push(`remove container: ${errorMessage(err)}`)
   }
-  if (deps.runtime.removeImage !== undefined) {
+  // A null image means an undeployed worker never built one in the first
+  // place, which is a normal thing to destroy, not a bug: there is simply
+  // nothing to remove.
+  const image = resource.config.image
+  if (image !== null && deps.runtime.removeImage !== undefined) {
     try {
-      await deps.runtime.removeImage(resource.config.image)
+      await deps.runtime.removeImage(image)
     } catch (err) {
       failures.push(`remove image: ${errorMessage(err)}`)
     }
