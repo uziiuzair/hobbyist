@@ -60,6 +60,7 @@ that matters, because it is the difference between a decision and a dogma.
 | [0010](0010-phase-2-begins-without-the-30-day-gate.md) | Phase 2 begins without the 30-day gate |
 | [0011](0011-workerd-via-miniflare-as-the-worker-runtime.md) | workerd, via Miniflare, as the `worker` runtime |
 | [0012](0012-durable-objects-and-the-alarm-mirror.md) | Durable Objects as a resource kind, and the alarm mirror that lets them sleep |
+| [0013](0013-queues-and-the-broker-outside-the-runtime.md) | Queues as a resource kind, with the broker held outside the runtime |
 
 0007 supersedes the scope section of the original root `CLAUDE.md` and is the one
 to read first if you are wondering why this is bigger than a database tool. 0001
