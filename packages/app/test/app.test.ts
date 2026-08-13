@@ -372,6 +372,85 @@ test('deploy refuses an app that was created from a prebuilt image', async () =>
   await assert.rejects(() => deployApp(deps, app), /has no source to rebuild/)
 })
 
+// Record-before-code's actual acceptance criterion: deploy is the transition
+// out of `undeployed`, for the CLI's create-and-deploy-in-one-call door and
+// for Studio/MCP's create-now-deploy-later door alike.
+test('deploying an undeployed app populates its image and leaves it sleeping', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const created = await createAppResource(deps, {
+    project,
+    name: 'site',
+    source: null,
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+  assert.equal(created.state, 'undeployed')
+
+  const result = await deployApp(deps, created, { source: sourceDir() })
+
+  assert.equal(result.resource.state, 'sleeping')
+  assert.notEqual(result.resource.config.image, null)
+  // The identity allocated at creation survives the deploy. A hostname that
+  // changed on first deploy would invalidate anything the user had already
+  // written down or pointed DNS at.
+  assert.equal(result.resource.config.hostname, created.config.hostname)
+  assert.equal(result.resource.config.hostPort, created.config.hostPort)
+})
+
+test('a failed first deploy returns the resource to undeployed, not failed', async () => {
+  // `failed` means "there is code here and it broke". `undeployed` means
+  // "there is no code here". Collapsing the two leaves Studio unable to say
+  // which command fixes it, which is the whole reason the state exists.
+  const runtime = createFakeRuntime()
+  runtime.build = async (): Promise<string> => {
+    throw new HobbyError('build_failed', 'docker build failed', 'step 3 of 7')
+  }
+  const deps = buildDeps({ runtime })
+  const project = makeProject(deps.store)
+  const created = await createAppResource(deps, {
+    project,
+    name: 'site',
+    source: null,
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+
+  await assert.rejects(() => deployApp(deps, created, { source: sourceDir() }), /docker build failed/)
+
+  assert.equal(deps.store.getResource(created.id)?.state, 'undeployed')
+})
+
+test('a failed redeploy of a working app leaves it failed, because it does have code', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const source = sourceDir()
+
+  const created = await createAppResource(deps, {
+    project,
+    name: 'site',
+    source,
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+  assert.equal(created.state, 'sleeping')
+
+  runtime.build = async (): Promise<string> => {
+    throw new HobbyError('build_failed', 'docker build failed', 'step 3 of 7')
+  }
+
+  await assert.rejects(() => deployApp(deps, created, { source }), /docker build failed/)
+
+  assert.equal(deps.store.getResource(created.id)?.state, 'failed')
+})
+
 test('destroy removes the container and only an image we built', async () => {
   const deps = buildDeps()
   const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
