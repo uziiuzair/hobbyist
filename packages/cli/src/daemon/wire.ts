@@ -113,7 +113,14 @@ function redactConfig(kind: Resource['kind'], config: ResourceConfig): WireResou
   }
   if (kind === 'worker') {
     const worker = config as WorkerConfig
-    return { ...worker, vars: redactValues(worker.vars) }
+    // queueToken is the bearer credential a container's producer shim sends
+    // to the daemon's enqueue listener (ADR 0013). resource.id is already
+    // returned unredacted elsewhere on this same payload, which is exactly
+    // why the token must never be resource.id and must never cross this
+    // boundary as itself: a secret this function forgets to touch is a
+    // secret every `--json` redirect, CI log and agent transcript gets a
+    // copy of.
+    return { ...worker, vars: redactValues(worker.vars), queueToken: REDACTED }
   }
   // Every known kind is handled above. Reaching here means a kind was added
   // to ResourceKind with no branch here, which is exactly the bug a queue
