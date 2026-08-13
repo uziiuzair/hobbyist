@@ -223,6 +223,23 @@ export async function reconcile(ctx: DaemonContext, opts: ReconcileOptions = {})
       continue
     }
 
+    // Skipped whole, for the same structural reason `destroying` is above:
+    // this resource's recorded state is not a claim about a container. An
+    // undeployed app or worker has never had one, so `inspect` would report
+    // missing, which correctedState() buckets as `missing` and maps to
+    // `failed` (:137). That would relabel every resource created from
+    // Studio as broken on the daemon's first tick after it was created. A
+    // `queue` resource (a different kind, added alongside this exemption)
+    // has no container in ANY state, which is a fact about that kind, not
+    // about this one state, so the check dispatches through the registry
+    // rather than naming a state here: see skipReconcile on
+    // ResourceKindHandler (packages/core/src/kinds.ts). This has to run
+    // before ctx.runtime.inspect below: an exempt resource must cost zero
+    // Docker round trips per tick.
+    if (ctx.kinds.get(resource.kind).skipReconcile?.(resource)) {
+      continue
+    }
+
     // Released projects are skipped whole. Reconcile's job is to make the
     // world match the store, and for a released project the world is
     // deliberately not hobby's any more: the container it would find running

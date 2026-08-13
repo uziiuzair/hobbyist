@@ -18,6 +18,8 @@ import {
   type PostgresConfig,
   type Project,
   type Store,
+  type WorkerConfig,
+  type WorkerResource,
 } from '@hobby.sh/core'
 import {
   describeIgnored,
@@ -204,6 +206,52 @@ test('a directory with no manifest says what it looked for', () => {
   )
 })
 
+// Record-before-code for the worker kind. This is the sharper of the two
+// (app has the same test in packages/app/test/app.test.ts): a sourceless
+// worker still writes durableObjectUniqueKeyModifier through the same
+// two-step create-then-update the built path uses, and a regression that
+// left the '' placeholder in place would orphan every Durable Object sqlite
+// file this worker will ever own, silently, on its first real deploy.
+test('a worker created without a source is undeployed, has its own id as its unique key modifier, and builds nothing', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+
+  const result = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: null,
+    databaseResourceId: null,
+  })
+  const resource = result.resource
+
+  assert.equal(resource.kind, 'worker')
+  assert.equal(resource.state, 'undeployed')
+  assert.equal(resource.config.image, null)
+  assert.equal(resource.config.manifest, null)
+  assert.equal(resource.config.hostname, 'api.blog.localhost')
+
+  // The specific regression this guards against: a broken two-step write
+  // leaves exactly the '' placeholder rather than the row's own id.
+  assert.notEqual(resource.config.durableObjectUniqueKeyModifier, '')
+  assert.equal(resource.config.durableObjectUniqueKeyModifier, resource.id)
+
+  // The returned object must match what the store actually holds, not a
+  // stale pre-write snapshot: this is the exact bug the brief's own sample
+  // code (spreading the pre-setResourceState `created`) would have shipped.
+  const stored = deps.store.getResource(resource.id)
+  assert.equal(stored?.state, resource.state)
+  assert.equal(stored?.kind, 'worker')
+  if (stored?.kind === 'worker') {
+    assert.equal(stored.config.durableObjectUniqueKeyModifier, resource.id)
+  }
+
+  // No build, no container: a record is a row, not a container.
+  assert.deepEqual(runtime._builds, [])
+  assert.equal(runtime._specs.has(resource.config.containerName), false)
+  assert.equal((await runtime.inspect(resource.config.containerName)).exists, false)
+})
+
 // The sharpest data-loss edge in the whole kind: workerd derives every
 // Durable Object's storage identity from this, so a value that changes
 // orphans every object silently.
@@ -243,6 +291,138 @@ test('a redeploy does not change the durable object unique key', async () => {
 
   assert.equal(after, before)
   assert.notEqual(deployed.image, created.resource.config.image, 'the image should have changed even though the key did not')
+})
+
+// Record-before-code's actual acceptance criterion for the worker kind: a
+// worker created with sourcePath: null (see the sourceless test above) is
+// deployed into, not recreated. This is the sharper of the two mirrored
+// tests (app's equivalent lives in packages/app/test/app.test.ts): a worker
+// carries a durable-object identity from the moment its row exists, and a
+// first deploy must not disturb it.
+test('a first deploy on an undeployed worker succeeds and preserves identity', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: null,
+    databaseResourceId: null,
+  })
+  assert.equal(created.resource.state, 'undeployed')
+
+  const deployed = await deployWorker(deps, created.resource, { sourcePath: workerSource() })
+
+  assert.equal(deployed.resource.state, 'sleeping')
+  assert.notEqual(deployed.resource.config.image, null)
+  assert.notEqual(deployed.resource.config.manifest, null)
+  // The identity allocated at creation survives the deploy. A hostname that
+  // moved on first deploy would invalidate anything the user had already
+  // written down or pointed DNS at.
+  assert.equal(deployed.resource.config.hostname, created.resource.config.hostname)
+  assert.equal(deployed.resource.config.hostPort, created.resource.config.hostPort)
+  // The load-bearing assertion: workerd derives Durable Object storage
+  // identity from this value, and it must still be the id assigned at
+  // creation, not something regenerated at deploy time. A change here
+  // orphans every Durable Object sqlite file this worker will ever own.
+  assert.equal(deployed.resource.config.durableObjectUniqueKeyModifier, created.resource.id)
+
+  // The returned object must match what the store actually holds, not a
+  // stale snapshot from mid-deploy.
+  const stored = deps.store.getResource(created.resource.id)
+  assert.equal(stored?.state, deployed.resource.state)
+})
+
+test('a failed first deploy on a worker returns it to undeployed, not failed', async () => {
+  // `failed` means "there is code here and it broke". `undeployed` means
+  // "there is no code here". Collapsing the two leaves Studio unable to say
+  // which command fixes it, which is the whole reason the state exists. Same
+  // rule, same test shape, as deployApp's equivalent in
+  // packages/app/test/app.test.ts.
+  const runtime = createFakeRuntime()
+  runtime.build = async (): Promise<string> => {
+    throw new HobbyError('build_failed', 'docker build failed', 'step 3 of 7')
+  }
+  const deps = buildDeps({ runtime })
+  const project = makeProject(deps.store)
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: null,
+    databaseResourceId: null,
+  })
+
+  await assert.rejects(
+    () => deployWorker(deps, created.resource, { sourcePath: workerSource() }),
+    /docker build failed/
+  )
+
+  assert.equal(deps.store.getResource(created.resource.id)?.state, 'undeployed')
+})
+
+// I4: unlike the build-failure test above, this fails AFTER startWorker
+// already created and started a real container (the build and the replace
+// both succeed, only the readiness probe fails), which is the shape that
+// used to leak a container nothing would ever stop: rolling `state` back to
+// `undeployed` hides it from reconcile.ts (skipReconcile) and from the
+// hibernator (its `state !== 'running'` gate), so a container left running
+// here would run forever. Same shape as deployApp's equivalent test in
+// packages/app/test/app.test.ts.
+test('a failed first deploy on the readiness probe leaves no running container', async () => {
+  const deps = buildDeps({ workerProbeFactory: () => async () => false })
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: null,
+    databaseResourceId: null,
+  })
+
+  await assert.rejects(
+    () => deployWorker(deps, created.resource, { sourcePath: workerSource() }),
+    /did not start serving/
+  )
+
+  assert.equal(deps.store.getResource(created.resource.id)?.state, 'undeployed')
+  const status = await runtime.inspect(created.resource.config.containerName)
+  assert.equal(status.exists, false)
+})
+
+// I5: assertWorkerConfig had no production call site despite its own file
+// comment and ADR 0014 both claiming it runs on every read of a stored
+// worker config. buildRunnerManifest is where it is now wired in, since that
+// is the one function both the start path (containerSpec) and the eject path
+// (routes.ts's renderCompose) flow through to actually dereference
+// config.manifest. Constructs the legacy row the same way
+// unique-key-stability.test.ts already does for assertWorkerConfig directly:
+// a config missing the `manifest` key entirely, which is the shape a
+// pre-split row parses into through store.ts's unchecked cast, and which the
+// `config.manifest === null` check just below assertWorkerConfig cannot
+// catch on its own since `undefined !== null`.
+test('buildRunnerManifest rejects a worker row that predates the manifest split', () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const legacyConfig = {
+    image: 'hobby-blog-legacy:old',
+    containerName: 'hobby-blog-legacy',
+    hostPort: 35500,
+    containerPort: 8787,
+    hostname: 'legacy.blog.hobby.local',
+    durableObjectUniqueKeyModifier: 'legacy-id',
+    databaseResourceId: null,
+  } as unknown as WorkerConfig
+  const legacyResource = {
+    id: 'legacy-id',
+    projectId: project.id,
+    kind: 'worker',
+    name: 'legacy',
+    state: 'sleeping',
+    config: legacyConfig,
+    lastActiveAt: null,
+    createdAt: new Date(),
+  } as unknown as WorkerResource
+
+  assert.throws(() => buildRunnerManifest(deps, legacyResource), /predates the manifest split/)
 })
 
 test('a bound database becomes a hyperdrive binding against the container name', async () => {

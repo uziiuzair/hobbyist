@@ -20,6 +20,15 @@ export type ResourceState =
   | 'stopping'
   | 'failed'
   | 'destroying'
+  // A RESTING state, unlike every other member above except `running` and
+  // `sleeping`. It means the row exists and no code has ever been uploaded
+  // into it, which is the normal condition for an `app` or `worker` created
+  // from Studio or MCP. Distinct from `creating`, which means a deploy is in
+  // flight right now and which reconcile.ts:43 correctly marks `failed` when
+  // no container appears. Here, having no container is expected, forever.
+  // Unreachable for `postgres`: its image is a registry reference known at
+  // creation, so it has nothing to deploy.
+  | 'undeployed'
 
 export interface Project {
   id: ProjectId
@@ -44,7 +53,14 @@ export interface Project {
 // Anything kind-specific lives on the member interfaces below, where the
 // compiler will refuse to read it until the caller has checked `kind`.
 export interface ResourceConfigBase {
-  image: string
+  // Null until a first deploy has produced one. A postgres resource always
+  // has an image (a registry reference chosen at creation), so in practice
+  // this is null only for an `app` or `worker` in state `undeployed`. Every
+  // path that starts a container runs from `running` or `sleeping` and must
+  // narrow this first: the compiler is the mechanism that finds them, which
+  // is the same technique commit abe7582 used to find every place Phase 1
+  // assumed postgres.
+  image: string | null
   containerName: string
   // Always on loopback, never 0.0.0.0. See DEFAULT_PORT_BIND in runtime.ts
   // for why the bind address, not a host firewall, is the thing that keeps
@@ -53,6 +69,15 @@ export interface ResourceConfigBase {
 }
 
 export interface PostgresConfig extends ResourceConfigBase {
+  // Narrowed back to non-null: a postgres resource's image is a registry
+  // reference chosen at creation (createPostgres, packages/pg/src/postgres.ts),
+  // and `postgres` never registers `undeployed` as a reachable state (see
+  // ResourceState above), so there is no postgres config to build before an
+  // image exists. Declaring that here, rather than null-checking it at every
+  // read in packages/pg, is what keeps createDefaultRemoveDataDir and
+  // containerSpec (packages/pg/src/postgres.ts) free of a branch that can
+  // never actually run.
+  image: string
   dataDir: string
   superuser: string
   password: string
@@ -80,12 +105,12 @@ export interface AppConfig extends ResourceConfigBase {
   databaseResourceId: ResourceId | null
 }
 
-// A Cloudflare Worker, running on Cloudflare's own runtime. See ADR 0011:
-// this is workerd, driven by the miniflare npm package, in a container we
-// build, one process per worker resource.
-export interface WorkerConfig extends ResourceConfigBase {
-  containerPort: number
-  hostname: string
+// Everything read out of the user's wrangler manifest. Null until a first
+// deploy, because none of it can be known before there is a file to read.
+// Split out of WorkerConfig rather than left inline so that the boundary
+// between "derived at record creation" and "read from the user's code" is
+// structural instead of a comment someone has to notice and honour.
+export interface WorkerManifest {
   // The directory holding the user's wrangler manifest and entry script,
   // and the name of the manifest file we actually read from it.
   source: { path: string; manifest: string }
@@ -97,6 +122,19 @@ export interface WorkerConfig extends ResourceConfigBase {
   d1Databases: string[]
   queues: { producers: string[]; consumers: string[] }
   durableObjects: Array<{ binding: string; className: string }>
+}
+
+// A Cloudflare Worker, running on Cloudflare's own runtime. See ADR 0011:
+// this is workerd, driven by the miniflare npm package, in a container we
+// build, one process per worker resource.
+export interface WorkerConfig extends ResourceConfigBase {
+  // Ours, not the user's: the port we tell Miniflare to listen on. Known at
+  // creation, unlike an app's containerPort, which is whatever the user's
+  // process happens to bind and is unknowable before there is code.
+  containerPort: number
+  hostname: string
+  databaseResourceId: ResourceId | null
+
   // workerd derives every Durable Object's storage identity from this. If
   // it ever changes, every object's sqlite file is orphaned and the user
   // silently loses state on a redeploy, which is the sharpest data-loss
@@ -105,8 +143,14 @@ export interface WorkerConfig extends ResourceConfigBase {
   // rename, redeploy, daemon restart and eject/adopt), and never
   // regenerated. Never derive it from the project or class name: both are
   // user-facing strings a rename would change.
+  //
+  // It sits above the manifest split because it exists before any code
+  // does. A worker created from Studio has a stable object identity from
+  // the moment the row exists, which is strictly better than deriving it in
+  // the same breath as a first build.
   durableObjectUniqueKeyModifier: string
-  databaseResourceId: ResourceId | null
+
+  manifest: WorkerManifest | null
 }
 
 export type ResourceConfig = PostgresConfig | AppConfig | WorkerConfig

@@ -95,6 +95,13 @@ function resolveDatabaseUrl(deps: AppDeps, databaseResourceId: ResourceId | null
 // a container's environment at create time. The container itself is recreated
 // whenever this changes, see ensureContainer below.
 function containerSpec(deps: AppDeps, config: AppConfig, network: string): ContainerSpec {
+  if (config.image === null) {
+    throw new HobbyError(
+      'internal',
+      `resource ${config.containerName} has no image, so there is nothing to start`,
+      'this is a bug: a resource with no image should be in state undeployed and should never reach a start path'
+    )
+  }
   const databaseUrl = resolveDatabaseUrl(deps, config.databaseResourceId)
   return {
     name: config.containerName,
@@ -166,17 +173,60 @@ export interface CreateAppOptions {
 
 export async function createAppResource(deps: AppDeps, opts: CreateAppOptions): Promise<AppResource> {
   validateName(opts.name)
-  if ((opts.source === null) === (opts.image === null)) {
+  // Three valid shapes now, not two. A record with neither a source nor an
+  // image is the Fly and Cloudflare model: the row, its id and its hostname
+  // exist first, and code arrives later through deploy. What is still
+  // refused is BOTH, which remains genuinely ambiguous.
+  if (opts.source !== null && opts.image !== null) {
     throw new HobbyError(
       'usage',
-      'an app needs either a build source or a prebuilt image, and not both',
-      'pass a directory containing a Dockerfile, or an image reference'
+      'an app takes either a build source or a prebuilt image, not both',
+      'pass a directory containing a Dockerfile, or an image reference, or neither to create the record and deploy into it later'
     )
   }
 
   const now = deps.now ?? Date.now
   const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
   const containerName = `hobby-${opts.project.name}-${opts.name}`
+
+  // A record with no code: allocate its identity, write the row, do nothing
+  // else. No build, no container, no probe, nothing to roll back.
+  //
+  // This deliberately reverses the invariant this function used to state,
+  // that a build happens before the row exists so a broken Dockerfile leaves
+  // nothing behind. That was right when creating and deploying were one act.
+  // Now that a name and a hostname are published before any build, a failed
+  // build leaving the record behind is the desired outcome: the user retries
+  // the deploy, they do not recreate the app. See the spec's "The invariant
+  // this reverses".
+  if (opts.source === null && opts.image === null) {
+    const config: AppConfig = {
+      image: null,
+      containerName,
+      hostPort,
+      containerPort: opts.containerPort,
+      hostname: appHostname(opts.project.name, opts.name, deps.config.domain),
+      source: null,
+      env: opts.env,
+      databaseResourceId: opts.databaseResourceId,
+    }
+    const created = deps.store.createResource({
+      projectId: opts.project.id,
+      kind: 'app',
+      name: opts.name,
+      config,
+    })
+    // setResourceState only writes the store; `created` is the pre-state
+    // snapshot createResource handed back (state 'creating'), so the
+    // resource is re-read rather than spread, the same way the built path
+    // below re-reads `final` instead of trusting its own in-memory copy.
+    deps.store.setResourceState(created.id, 'undeployed')
+    const undeployed = deps.store.getResource(created.id)
+    if (undeployed === null || undeployed.kind !== 'app') {
+      throw new HobbyError('internal', `app ${created.id} vanished immediately after creation`)
+    }
+    return undeployed
+  }
 
   // The build happens BEFORE the resource row exists. A Dockerfile that does
   // not compile should leave nothing behind at all: no row to clean up, no
@@ -189,9 +239,20 @@ export async function createAppResource(deps: AppDeps, opts: CreateAppOptions): 
     })
     image = built.tag
   }
+  // The xor check above guarantees one of opts.source/opts.image was set:
+  // if source was given, the build above just set image; otherwise
+  // opts.image was already required non-null. The compiler cannot see
+  // across that branch, so this is a real check, not a formality.
+  if (image === null) {
+    throw new HobbyError(
+      'internal',
+      `app ${opts.name} has no image after resolving source and image options`,
+      'this is a bug: createAppResource validates exactly one of source or image is provided, and should have produced one by this point'
+    )
+  }
 
   const config: AppConfig = {
-    image: image as string,
+    image,
     containerName,
     hostPort,
     containerPort: opts.containerPort,
@@ -315,10 +376,13 @@ export async function destroyApp(deps: AppDeps, resource: AppResource): Promise<
   // Only an image WE built. A user-supplied image reference may be shared
   // with anything else on the box, including their own work outside hobby,
   // and deleting it would be reaching well outside what destroying one
-  // resource means.
-  if (resource.config.source !== null && deps.runtime.removeImage !== undefined) {
+  // resource means. A null image means an undeployed app never built one in
+  // the first place, which is a normal thing to destroy, not a bug: there is
+  // simply nothing to remove.
+  const image = resource.config.image
+  if (resource.config.source !== null && image !== null && deps.runtime.removeImage !== undefined) {
     try {
-      await deps.runtime.removeImage(resource.config.image)
+      await deps.runtime.removeImage(image)
     } catch (err) {
       failures.push(`remove image: ${errorMessage(err)}`)
     }
@@ -359,6 +423,20 @@ export async function deployApp(
   }
   const source = opts.source ?? resource.config.source
   if (source === null) {
+    // Two different reasons land here now, and they read very differently.
+    // A record-before-code app (Task 4: createAppResource with neither a
+    // source nor an image) has no image either, so "was created from a
+    // prebuilt image" would be false of it. Only an app that actually has an
+    // image was created from one; an app with no image has simply never been
+    // deployed, and the fix is a first deploy naming a directory, not "pass a
+    // build context instead of an image reference."
+    if (resource.config.image === null) {
+      throw new HobbyError(
+        'usage',
+        `${resource.name} has never been deployed, so this deploy needs a directory to build from`,
+        `run \`hobby deploy <path> --project ${project.name} --name ${resource.name}\` from the directory holding its Dockerfile`
+      )
+    }
     throw new HobbyError(
       'usage',
       `app ${resource.name} was created from a prebuilt image and has no source to rebuild`,
@@ -366,17 +444,25 @@ export async function deployApp(
     )
   }
 
+  // A first deploy that fails must not leave the resource looking broken,
+  // because it is not: it is exactly as it was, a record with no code. Only
+  // a resource that already HAD an image can meaningfully be `failed`.
+  // Captured before anything below can throw, and used uniformly for every
+  // failure in this function (a build failure, a container failure, a
+  // readiness timeout): all three mean the same thing for rollback purposes.
+  const wasUndeployed = resource.state === 'undeployed'
+
   const now = deps.now ?? Date.now
-  const built = await buildAppImage(deps.runtime, {
-    source,
-    tag: buildTag(project.name, resource.name, now()),
-  })
-
-  const config: AppConfig = { ...resource.config, image: built.tag, source }
-  deps.store.updateResourceConfig(resource.id, config)
-
-  deps.store.setResourceState(resource.id, 'starting')
   try {
+    const built = await buildAppImage(deps.runtime, {
+      source,
+      tag: buildTag(project.name, resource.name, now()),
+    })
+
+    const config: AppConfig = { ...resource.config, image: built.tag, source }
+    deps.store.updateResourceConfig(resource.id, config)
+
+    deps.store.setResourceState(resource.id, 'starting')
     await replaceContainer(deps, config, project.networkName)
     await deps.runtime.start(config.containerName)
 
@@ -387,25 +473,41 @@ export async function deployApp(
       timeoutMs: deps.config.wakeTimeoutMs,
     })
     if (!result.ready) {
-      deps.store.setResourceState(resource.id, 'failed')
       throw notListening(config, result.waitedMs)
     }
 
     await deps.runtime.stop(config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
     deps.store.setResourceState(resource.id, 'sleeping')
     deps.activity?.reset(resource.id)
-  } catch (err) {
-    if (!(err instanceof HobbyError && err.code === 'wake_timeout')) {
-      deps.store.setResourceState(resource.id, 'failed')
+
+    const final = deps.store.getResource(resource.id)
+    if (final === null || final.kind !== 'app') {
+      throw new HobbyError('internal', `app ${resource.id} vanished during deploy`)
     }
+    return { resource: final, image: built.tag, logs: built.logs }
+  } catch (err) {
+    if (wasUndeployed) {
+      // A first deploy that fails here (the readiness probe, most commonly)
+      // can still have created and started a real container before it threw.
+      // Rolling `state` back to `undeployed` below is correct, but it also
+      // makes that container invisible to everything else in the daemon:
+      // skipReconcile (packages/app/src/kind.ts:39-40) hides an `undeployed`
+      // resource from reconcile.ts entirely, and the hibernator's
+      // `state !== 'running'` gate (packages/cli/src/daemon/hibernator.ts:35,
+      // :100) never reaches it either. Nothing left would ever stop it, so it
+      // is stopped and removed right here, before the state write. Best
+      // effort: a failure to clean up must not mask the original deploy
+      // error, which is what the user actually needs to see.
+      try {
+        await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+        await deps.runtime.remove(resource.config.containerName)
+      } catch {
+        // Deliberately swallowed, see the comment above.
+      }
+    }
+    deps.store.setResourceState(resource.id, wasUndeployed ? 'undeployed' : 'failed')
     throw err
   }
-
-  const final = deps.store.getResource(resource.id)
-  if (final === null || final.kind !== 'app') {
-    throw new HobbyError('internal', `app ${resource.id} vanished during deploy`)
-  }
-  return { resource: final, image: built.tag, logs: built.logs }
 }
 
 export async function probeApp(deps: AppDeps, resource: AppResource): Promise<boolean> {

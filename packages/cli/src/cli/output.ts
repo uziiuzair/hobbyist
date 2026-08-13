@@ -28,8 +28,21 @@ export function formatBytes(bytes: number): string {
   return `${value.toFixed(1)} ${units[unitIndex]}`
 }
 
+// Postgres is reached on its own port through the proxy, so its line shows
+// that. An app or worker is reached by hostname instead (its port is an
+// implementation detail nobody types), and an `undeployed` one (Task 4:
+// created with no source and nothing built yet) gets an explicit trailer,
+// because "no code yet" is the one piece of information this line exists to
+// surface for that state; the daemon's own wording for the same fact lives
+// in packages/app/src/app.ts:434-438 and packages/worker/src/worker.ts's
+// matching throw, and this is deliberately shorter, since a listing is read
+// many times and a usage command is not needed until the user acts on it.
 export function renderResourceLine(resource: WireResource): string {
-  return `${resource.name}  ${resource.kind}  ${resource.state}  port ${resource.config.hostPort}`
+  if (resource.kind === 'postgres') {
+    return `${resource.name}  ${resource.kind}  ${resource.state}  port ${resource.config.hostPort}`
+  }
+  const trailer = resource.state === 'undeployed' ? '  (no code yet)' : ''
+  return `${resource.name}  ${resource.kind}  ${resource.state}  ${resource.config.hostname}${trailer}`
 }
 
 // The reflink warning is deliberately not part of this function's output.

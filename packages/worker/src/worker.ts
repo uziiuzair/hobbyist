@@ -27,6 +27,7 @@ import {
   type WorkerConfig,
   type WorkerResource,
 } from '@hobby.sh/core'
+import { assertWorkerConfig } from './assert-config.js'
 import { findWranglerManifest, type WranglerManifest } from './manifest.js'
 import {
   buildWorkerImage,
@@ -114,9 +115,35 @@ function hyperdriveUrl(config: PostgresConfig): string {
 }
 
 export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource): RunnerManifest {
-  const config = resource.config
+  // The place both callers that flow through containerSpec (the start path)
+  // and routes.ts's renderCompose (the eject path) dereference
+  // `config.manifest`. Two other production reads still bypass this guard:
+  // packages/cli/src/daemon/wire.ts's redactConfig, which the parallel
+  // queue branch is expected to close by replacing it with an explicit
+  // four-way branch, and this file's own deployWorker redeploy fallback. A
+  // worker row that predates the manifest split parses out of the store
+  // with `manifest` absent rather than null (packages/core/src/store.ts:122's
+  // unchecked cast), which the explicit null check just below would not
+  // catch on its own, since `undefined !== null`, and the failure would
+  // instead surface three lines down as an unhelpful TypeError on
+  // `config.manifest.durableObjects`.
+  const config = assertWorkerConfig(resource.config)
+  // Every caller that can reach this function has already gone through a
+  // path that requires an image (containerSpec's own null-image check for
+  // start, or a stored row for eject's renderCompose), and image and
+  // manifest are populated together at first deploy. A null manifest here
+  // is therefore a bug, not a resting state, exactly like containerSpec's
+  // null-image check just above.
+  if (config.manifest === null) {
+    throw new HobbyError(
+      'internal',
+      `resource ${config.containerName} has no manifest, so there is nothing to run`,
+      'this is a bug: a resource with no manifest should be in state undeployed and should never reach a start path'
+    )
+  }
+
   const durableObjects: RunnerManifest['durableObjects'] = {}
-  for (const entry of config.durableObjects) {
+  for (const entry of config.manifest.durableObjects) {
     durableObjects[entry.binding] = {
       className: entry.className,
       // SQLite-backed, which is what makes `_cf_METADATA` (and therefore the
@@ -127,16 +154,16 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
     }
   }
 
-  const manifest: RunnerManifest = {
+  const runnerManifest: RunnerManifest = {
     port: CONTAINER_PORT,
-    compatibilityDate: config.compatibilityDate,
-    compatibilityFlags: config.compatibilityFlags,
-    vars: config.vars,
-    kvNamespaces: config.kvNamespaces,
-    r2Buckets: config.r2Buckets,
-    d1Databases: config.d1Databases,
-    queueProducers: config.queues.producers,
-    queueConsumers: config.queues.consumers,
+    compatibilityDate: config.manifest.compatibilityDate,
+    compatibilityFlags: config.manifest.compatibilityFlags,
+    vars: config.manifest.vars,
+    kvNamespaces: config.manifest.kvNamespaces,
+    r2Buckets: config.manifest.r2Buckets,
+    d1Databases: config.manifest.d1Databases,
+    queueProducers: config.manifest.queues.producers,
+    queueConsumers: config.manifest.queues.consumers,
     durableObjects,
   }
 
@@ -146,15 +173,22 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
   if (config.databaseResourceId !== null) {
     const sibling = deps.store.getResource(config.databaseResourceId)
     if (sibling !== null && sibling.kind === 'postgres') {
-      manifest.hyperdrives = { DB: hyperdriveUrl(sibling.config) }
+      runnerManifest.hyperdrives = { DB: hyperdriveUrl(sibling.config) }
     }
   }
 
-  return manifest
+  return runnerManifest
 }
 
 function containerSpec(deps: WorkerDeps, resource: WorkerResource, project: Project): ContainerSpec {
   const config = resource.config
+  if (config.image === null) {
+    throw new HobbyError(
+      'internal',
+      `resource ${config.containerName} has no image, so there is nothing to start`,
+      'this is a bug: a resource with no image should be in state undeployed and should never reach a start path'
+    )
+  }
   return {
     name: config.containerName,
     image: config.image,
@@ -263,7 +297,7 @@ async function writeGeneratedDockerfile(
 export interface CreateWorkerOptions {
   project: Project
   name: string
-  sourcePath: string
+  sourcePath: string | null
   databaseResourceId: ResourceId | null
 }
 
@@ -281,6 +315,44 @@ export async function createWorkerResource(
 ): Promise<CreateWorkerResult> {
   validateName(opts.name)
   const now = deps.now ?? Date.now
+
+  // Same shape as createAppResource's: identity now, code later. Allocated
+  // and written before any manifest is read, since there is no manifest yet
+  // to read: nothing to build, nothing to clean up, nothing to roll back.
+  // The modifier is still written in two steps, because it is derived from
+  // the id the store assigns, but there is no build between them any more.
+  if (opts.sourcePath === null) {
+    const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
+    const containerName = `hobby-${opts.project.name}-${opts.name}`
+    const config: WorkerConfig = {
+      image: null,
+      containerName,
+      hostPort,
+      containerPort: CONTAINER_PORT,
+      hostname: workerHostname(opts.project.name, opts.name, deps.config.domain),
+      durableObjectUniqueKeyModifier: '',
+      databaseResourceId: opts.databaseResourceId,
+      manifest: null,
+    }
+    const created = deps.store.createResource({
+      projectId: opts.project.id,
+      kind: 'worker',
+      name: opts.name,
+      config,
+    })
+    const withKey: WorkerConfig = { ...config, durableObjectUniqueKeyModifier: created.id }
+    deps.store.updateResourceConfig(created.id, withKey)
+    deps.store.setResourceState(created.id, 'undeployed')
+    // Both writes above only touch the store; `created` is the pre-write
+    // snapshot createResource handed back (placeholder modifier, state
+    // 'creating'), so the row is re-read rather than trusted, the same way
+    // the built path below re-reads `final` instead of its own in-memory copy.
+    const undeployed = deps.store.getResource(created.id)
+    if (undeployed === null || undeployed.kind !== 'worker') {
+      throw new HobbyError('internal', `worker ${created.id} vanished immediately after creation`)
+    }
+    return { resource: undeployed, ignored: [], logs: '' }
+  }
 
   // Read the manifest BEFORE anything else. A missing `main`, an absent
   // compatibility_date or a malformed file should cost nothing: no row, no
@@ -307,19 +379,21 @@ export async function createWorkerResource(
     hostPort,
     containerPort: CONTAINER_PORT,
     hostname: workerHostname(opts.project.name, opts.name, deps.config.domain),
-    source: { path: opts.sourcePath, manifest: found.file },
-    compatibilityDate: manifest.compatibilityDate,
-    compatibilityFlags: manifest.compatibilityFlags,
-    vars: manifest.vars,
-    kvNamespaces: manifest.kvNamespaces,
-    r2Buckets: manifest.r2Buckets,
-    d1Databases: manifest.d1Databases,
-    queues: manifest.queues,
-    durableObjects: manifest.durableObjects,
     // Placeholder until the row exists: the real value is derived from the
     // resource id, which the store assigns. Rewritten immediately below.
     durableObjectUniqueKeyModifier: '',
     databaseResourceId: opts.databaseResourceId,
+    manifest: {
+      source: { path: opts.sourcePath, manifest: found.file },
+      compatibilityDate: manifest.compatibilityDate,
+      compatibilityFlags: manifest.compatibilityFlags,
+      vars: manifest.vars,
+      kvNamespaces: manifest.kvNamespaces,
+      r2Buckets: manifest.r2Buckets,
+      d1Databases: manifest.d1Databases,
+      queues: manifest.queues,
+      durableObjects: manifest.durableObjects,
+    },
   }
 
   const created = deps.store.createResource({
@@ -423,9 +497,13 @@ export async function destroyWorker(deps: WorkerDeps, resource: WorkerResource):
   } catch (err) {
     failures.push(`remove container: ${errorMessage(err)}`)
   }
-  if (deps.runtime.removeImage !== undefined) {
+  // A null image means an undeployed worker never built one in the first
+  // place, which is a normal thing to destroy, not a bug: there is simply
+  // nothing to remove.
+  const image = resource.config.image
+  if (image !== null && deps.runtime.removeImage !== undefined) {
     try {
-      await deps.runtime.removeImage(resource.config.image)
+      await deps.runtime.removeImage(image)
     } catch (err) {
       failures.push(`remove image: ${errorMessage(err)}`)
     }
@@ -469,58 +547,112 @@ export async function deployWorker(
   if (project === null) {
     throw new HobbyError('internal', `worker ${resource.id} has no owning project`)
   }
-  const sourcePath = opts.sourcePath ?? resource.config.source.path
-  const found = findWranglerManifest(sourcePath)
-  const manifest = found.manifest
-  const now = deps.now ?? Date.now
-
-  const dockerfilePath = await writeGeneratedDockerfile(deps, project.name, resource.name, manifest)
-  const tag = workerTag(project.name, resource.name, now())
-  const logs = await buildWorkerImage(deps.runtime, {
-    contextPath: sourcePath,
-    dockerfilePath,
-    tag,
-    memory: BUILD_MEMORY,
-    cpuShares: BUILD_CPU_SHARES,
-  })
-
-  const config: WorkerConfig = {
-    ...resource.config,
-    image: tag,
-    source: { path: sourcePath, manifest: found.file },
-    compatibilityDate: manifest.compatibilityDate,
-    compatibilityFlags: manifest.compatibilityFlags,
-    vars: manifest.vars,
-    kvNamespaces: manifest.kvNamespaces,
-    r2Buckets: manifest.r2Buckets,
-    d1Databases: manifest.d1Databases,
-    queues: manifest.queues,
-    durableObjects: manifest.durableObjects,
-    // Untouched on purpose. It is derived from the resource id and changing
-    // it here would orphan every Durable Object's storage on every deploy,
-    // which is the sharpest data-loss edge in this kind.
-    durableObjectUniqueKeyModifier: resource.config.durableObjectUniqueKeyModifier,
-  }
-  deps.store.updateResourceConfig(resource.id, config)
-
-  // Replaced, not restarted: the image and the manifest environment are both
-  // fixed at container create time.
-  await deps.runtime.stop(config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
-  await deps.runtime.remove(config.containerName)
-
-  const updated = deps.store.getResource(resource.id)
-  if (updated === null || updated.kind !== 'worker') {
-    throw new HobbyError('internal', `worker ${resource.id} vanished during deploy`)
+  // Falls back to the recorded source path on a redeploy. A worker whose
+  // manifest is still null has never been deployed, so there is nothing
+  // recorded to fall back to and the caller must say where the code is.
+  // Names the actual fixing command rather than the wire shape, matching
+  // deployApp's identical guard in packages/app/src/app.ts.
+  let sourcePath = opts.sourcePath
+  if (sourcePath === undefined) {
+    if (resource.config.manifest === null) {
+      throw new HobbyError(
+        'usage',
+        `${resource.name} has never been deployed, so this deploy needs a directory to build from`,
+        `run \`hobby deploy <path> --project ${project.name} --name ${resource.name}\` from the directory holding its wrangler config`
+      )
+    }
+    sourcePath = resource.config.manifest.source.path
   }
 
-  await startWorker(deps, updated)
-  await stopWorker(deps, updated)
+  // A first deploy that fails must not leave the resource looking broken,
+  // because it is not: it is exactly as it was, a record with no code. Only
+  // a resource that already HAD an image can meaningfully be `failed`.
+  // Captured before anything below can throw, and covers every failure in
+  // this function uniformly: a bad manifest, a failed build, a container
+  // that never starts, or a readiness timeout inside startWorker all mean
+  // the same thing for rollback purposes. Same rule as deployApp's,
+  // packages/app/src/app.ts.
+  const wasUndeployed = resource.state === 'undeployed'
 
-  const final = deps.store.getResource(resource.id)
-  if (final === null || final.kind !== 'worker') {
-    throw new HobbyError('internal', `worker ${resource.id} vanished during deploy`)
+  try {
+    const found = findWranglerManifest(sourcePath)
+    const manifest = found.manifest
+    const now = deps.now ?? Date.now
+
+    const dockerfilePath = await writeGeneratedDockerfile(deps, project.name, resource.name, manifest)
+    const tag = workerTag(project.name, resource.name, now())
+    const logs = await buildWorkerImage(deps.runtime, {
+      contextPath: sourcePath,
+      dockerfilePath,
+      tag,
+      memory: BUILD_MEMORY,
+      cpuShares: BUILD_CPU_SHARES,
+    })
+
+    const config: WorkerConfig = {
+      ...resource.config,
+      image: tag,
+      // Carried through explicitly rather than by spread alone, so that a
+      // future edit to this object cannot silently drop it. It is derived
+      // from the resource id and regenerating it here would orphan every
+      // Durable Object's storage on every deploy, the sharpest data-loss
+      // edge in this kind.
+      durableObjectUniqueKeyModifier: resource.config.durableObjectUniqueKeyModifier,
+      manifest: {
+        source: { path: sourcePath, manifest: found.file },
+        compatibilityDate: manifest.compatibilityDate,
+        compatibilityFlags: manifest.compatibilityFlags,
+        vars: manifest.vars,
+        kvNamespaces: manifest.kvNamespaces,
+        r2Buckets: manifest.r2Buckets,
+        d1Databases: manifest.d1Databases,
+        queues: manifest.queues,
+        durableObjects: manifest.durableObjects,
+      },
+    }
+    deps.store.updateResourceConfig(resource.id, config)
+
+    // Replaced, not restarted: the image and the manifest environment are
+    // both fixed at container create time.
+    await deps.runtime.stop(config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+    await deps.runtime.remove(config.containerName)
+
+    const updated = deps.store.getResource(resource.id)
+    if (updated === null || updated.kind !== 'worker') {
+      throw new HobbyError('internal', `worker ${resource.id} vanished during deploy`)
+    }
+
+    await startWorker(deps, updated)
+    await stopWorker(deps, updated)
+
+    const final = deps.store.getResource(resource.id)
+    if (final === null || final.kind !== 'worker') {
+      throw new HobbyError('internal', `worker ${resource.id} vanished during deploy`)
+    }
+    return { resource: final, image: tag, ignored: manifest.ignored, logs }
+  } catch (err) {
+    if (wasUndeployed) {
+      // Same rule as deployApp's identical guard (packages/app/src/app.ts):
+      // a first deploy can fail after startWorker already created and
+      // started a real container (most commonly the readiness probe timing
+      // out), and rolling `state` back to `undeployed` below makes that
+      // container invisible to everything else in the daemon. skipReconcile
+      // (packages/worker/src/kind.ts:45-46) hides an `undeployed` resource
+      // from reconcile.ts entirely, and the hibernator's `state !== 'running'`
+      // gate (packages/cli/src/daemon/hibernator.ts:35, :100) never reaches
+      // it either. Stopped and removed right here, before the state write.
+      // Best effort: a failure to clean up must not mask the original deploy
+      // error, which is what the user actually needs to see.
+      try {
+        await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+        await deps.runtime.remove(resource.config.containerName)
+      } catch {
+        // Deliberately swallowed, see the comment above.
+      }
+    }
+    deps.store.setResourceState(resource.id, wasUndeployed ? 'undeployed' : 'failed')
+    throw err
   }
-  return { resource: final, image: tag, ignored: manifest.ignored, logs }
 }
 
 function errorMessage(err: unknown): string {

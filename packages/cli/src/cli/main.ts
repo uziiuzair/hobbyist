@@ -12,6 +12,7 @@ import {
   cmdConnect,
   cmdDaemon,
   cmdAdopt,
+  cmdCreate,
   cmdDeploy,
   cmdEject,
   cmdInit,
@@ -122,8 +123,10 @@ function printHelp(io: Io): void {
   io.out('  hobby init                          prepare the host, check the filesystem')
   io.out('  hobby daemon                         run the daemon in the foreground')
   io.out('  hobby new <name>                     project + postgres + connection string')
+  io.out('  hobby new <name> --empty             a project with nothing in it')
   io.out('  hobby ls                             everything, with sleep state')
   io.out('  hobby deploy [path]                  build a Dockerfile here and serve it')
+  io.out('  hobby create <kind> <name> --project <p>  a resource with no code yet')
   io.out('  hobby pg create --project <p> <name> the explicit form, for a second database')
   io.out('  hobby connect <target>                open psql against it')
   io.out('  hobby sleep <target>                  put it to sleep')
@@ -211,12 +214,16 @@ export async function run(argv: string[], io: Io): Promise<number> {
 
     switch (cmd) {
       case 'new': {
-        const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'empty'] })
         return await cmdNew(ctx, positionals, flags)
       }
       case 'ls': {
         const { flags } = parseArgs(rest, { bool: ['json'] })
         return await cmdLs(ctx, flags)
+      }
+      case 'create': {
+        const { positionals, flags } = parseArgs(rest, { bool: ['json'], value: ['project'] })
+        return await cmdCreate(ctx, positionals, flags)
       }
       case 'pg': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json'], value: ['project'] })
