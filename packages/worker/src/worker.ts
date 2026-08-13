@@ -284,7 +284,7 @@ async function writeGeneratedDockerfile(
 export interface CreateWorkerOptions {
   project: Project
   name: string
-  sourcePath: string
+  sourcePath: string | null
   databaseResourceId: ResourceId | null
 }
 
@@ -302,6 +302,44 @@ export async function createWorkerResource(
 ): Promise<CreateWorkerResult> {
   validateName(opts.name)
   const now = deps.now ?? Date.now
+
+  // Same shape as createAppResource's: identity now, code later. Allocated
+  // and written before any manifest is read, since there is no manifest yet
+  // to read: nothing to build, nothing to clean up, nothing to roll back.
+  // The modifier is still written in two steps, because it is derived from
+  // the id the store assigns, but there is no build between them any more.
+  if (opts.sourcePath === null) {
+    const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
+    const containerName = `hobby-${opts.project.name}-${opts.name}`
+    const config: WorkerConfig = {
+      image: null,
+      containerName,
+      hostPort,
+      containerPort: CONTAINER_PORT,
+      hostname: workerHostname(opts.project.name, opts.name, deps.config.domain),
+      durableObjectUniqueKeyModifier: '',
+      databaseResourceId: opts.databaseResourceId,
+      manifest: null,
+    }
+    const created = deps.store.createResource({
+      projectId: opts.project.id,
+      kind: 'worker',
+      name: opts.name,
+      config,
+    })
+    const withKey: WorkerConfig = { ...config, durableObjectUniqueKeyModifier: created.id }
+    deps.store.updateResourceConfig(created.id, withKey)
+    deps.store.setResourceState(created.id, 'undeployed')
+    // Both writes above only touch the store; `created` is the pre-write
+    // snapshot createResource handed back (placeholder modifier, state
+    // 'creating'), so the row is re-read rather than trusted, the same way
+    // the built path below re-reads `final` instead of its own in-memory copy.
+    const undeployed = deps.store.getResource(created.id)
+    if (undeployed === null || undeployed.kind !== 'worker') {
+      throw new HobbyError('internal', `worker ${created.id} vanished immediately after creation`)
+    }
+    return { resource: undeployed, ignored: [], logs: '' }
+  }
 
   // Read the manifest BEFORE anything else. A missing `main`, an absent
   // compatibility_date or a malformed file should cost nothing: no row, no

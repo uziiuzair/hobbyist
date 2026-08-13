@@ -181,19 +181,66 @@ test('an app that never listens fails with the loopback-bind hint, not a bare ti
   )
 })
 
-test('an app needs exactly one of a build source and a prebuilt image', async () => {
+// Renamed from "an app needs exactly one of a build source and a prebuilt
+// image": neither-supplied used to be rejected here and is now the
+// record-before-code path (see 'an app created without a source or an
+// image...' below), so only the both-supplied case is still ambiguous and
+// still refused.
+test('an app cannot take both a build source and a prebuilt image', async () => {
   const deps = buildDeps()
   const project = makeProject(deps.store)
   const base = { project, name: 'web', containerPort: 3000, env: {}, databaseResourceId: null }
 
   await assert.rejects(
-    () => createAppResource(deps, { ...base, source: null, image: null }),
-    /either a build source or a prebuilt image/
-  )
-  await assert.rejects(
     () => createAppResource(deps, { ...base, source: sourceDir(), image: 'nginx' }),
-    /either a build source or a prebuilt image/
+    /takes either a build source or a prebuilt image, not both/
   )
+})
+
+test('an app created without a source is undeployed, has a hostname, and has no image', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+
+  const app = await createAppResource(deps, {
+    project,
+    name: 'site',
+    source: null,
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+
+  assert.equal(app.kind, 'app')
+  assert.equal(app.state, 'undeployed')
+  assert.equal(app.config.image, null)
+  // The hostname is allocated now, not at deploy, so Studio can show the URL
+  // before there is anything behind it and Caddy can be asked for a
+  // certificate for it.
+  assert.equal(app.config.hostname, 'site.blog.localhost')
+  assert.ok(app.config.hostPort > 0)
+})
+
+test('creating an app without a source builds nothing and starts nothing', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+
+  const app = await createAppResource(deps, {
+    project,
+    name: 'site',
+    source: null,
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+
+  // The fake runtime records every build and every container it was asked to
+  // create. A record is a row, not a container.
+  assert.deepEqual(runtime._builds, [])
+  assert.equal(runtime._specs.has(app.config.containerName), false)
+  assert.equal((await runtime.inspect(app.config.containerName)).exists, false)
 })
 
 // The reason a project has a docker network at all. An app reaches its
