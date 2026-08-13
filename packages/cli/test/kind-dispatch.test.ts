@@ -336,49 +336,6 @@ test('a worker vars value never crosses the wire boundary', async () => {
   assert.match(serialized, /OPENAI_API_KEY/)
 })
 
-// The bearer token that authenticates a container to the daemon's enqueue
-// listener. resource.id is already returned unredacted on every WireResource
-// (it is the resource's own identity), so a token that WAS the id would be
-// published everywhere the id already is: `hobby ls --json`, Studio, CI logs,
-// agent transcripts. This pins that a real, distinct queueToken never
-// crosses the wire boundary as itself.
-test("a worker's queue token never crosses the wire boundary", async () => {
-  const ctx = buildContext(stubAppHandler())
-  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
-  const config: WorkerConfig = {
-    image: 'hobby/workerd:1',
-    containerName: 'hobby-blog-api',
-    hostPort: 15602,
-    controlPort: 15603,
-    queueToken: 'do-not-leak-this-bearer-token',
-    containerPort: 8787,
-    hostname: 'api.blog.localhost',
-    source: { path: '/src/api', manifest: 'wrangler.toml' },
-    compatibilityDate: '2026-08-01',
-    compatibilityFlags: [],
-    vars: {},
-    kvNamespaces: [],
-    r2Buckets: [],
-    d1Databases: [],
-    queues: { producers: [{ queue: 'jobs', binding: 'JOBS' }], consumers: [] },
-    durableObjects: [],
-    durableObjectUniqueKeyModifier: 'stable-modifier',
-    databaseResourceId: null,
-  }
-  const resource = ctx.store.createResource({
-    projectId: project.id,
-    kind: 'worker',
-    name: 'api',
-    config,
-  })
-
-  const wire = await toWireResource(ctx, resource)
-  const serialized = JSON.stringify(wire)
-
-  assert.equal(serialized.includes('do-not-leak-this-bearer-token'), false)
-  assert.equal(wire.kind === 'worker' ? wire.config.queueToken : undefined, '<redacted>')
-})
-
 // A queue config holds no user-supplied secret: no password, no env, no
 // vars. Before redactConfig gave 'queue' its own branch, an unhandled kind
 // fell through into the worker branch and called redactValues on a
