@@ -408,6 +408,15 @@ input, textarea { caret-color: var(--accent); }
 
 
 .page { padding-block: 26px 64px; }
+
+/* The machine strip: mono, quiet, true. The dot cluster is the box's state
+   at a glance: filled-and-lit dots are awake services. */
+.machine { display: flex; align-items: center; gap: 16px; padding: 0 0 16px; font-family: var(--font-mono); font-size: 12px; color: var(--ink-3); }
+.machine-host { color: var(--ink-2); }
+.machine-cluster { display: inline-flex; gap: 5px; align-items: center; }
+.machine-cluster i { width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--ink-3); box-sizing: border-box; }
+.machine-cluster i.on { background: var(--awake); border: 0; box-shadow: 0 0 8px 1px var(--glow-awake); }
+.machine-right { margin-left: auto; }
 .page-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
 .page-title { margin: 0; font-size: 21px; font-weight: 600; letter-spacing: -0.015em; }
 .page-sub { margin: 4px 0 0; color: var(--ink-2); font-size: 13.5px; }
