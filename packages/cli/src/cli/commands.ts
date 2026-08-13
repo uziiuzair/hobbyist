@@ -353,18 +353,22 @@ export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promi
     }
     throw err
   }
-  const { connectionString } = await c.api.getConnection(resource.id)
+  const { connectionString, tailnetConnectionString } = await c.api.getConnection(resource.id)
 
   if (flags.json) {
     // Not one raw API response (no single route did all of this), but a
     // composite object whose every field is exactly what its own call
     // returned. Human output below reads only connectionString off this
     // same object, never a second source.
-    c.io.out(JSON.stringify({ project, resource, connectionString }))
+    c.io.out(JSON.stringify({ project, resource, connectionString, tailnetConnectionString: tailnetConnectionString ?? null }))
     return 0
   }
 
   c.io.out(connectionString)
+  // Labelled second line, never a bare second string: the first line stays
+  // exactly what it always was so `hobby new blog | pbcopy` keeps grabbing
+  // one usable URI.
+  if (tailnetConnectionString != null) c.io.out(`tailnet: ${tailnetConnectionString}`)
   return 0
 }
 
@@ -470,10 +474,10 @@ export async function cmdConnect(c: Ctx, positionals: string[], flags: Flags): P
     throw new UsageError('usage: hobby connect <target>')
   }
   const { resource } = await resolveTarget(c.api, target)
-  const { connectionString } = await c.api.getConnection(resource.id)
+  const { connectionString, tailnetConnectionString } = await c.api.getConnection(resource.id)
 
   if (flags.json) {
-    c.io.out(JSON.stringify({ connectionString }))
+    c.io.out(JSON.stringify({ connectionString, tailnetConnectionString: tailnetConnectionString ?? null }))
     return 0
   }
 

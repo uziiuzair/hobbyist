@@ -37,6 +37,7 @@ import {
   type ProxyDeps,
   type ProxyTarget,
 } from '@hobby.sh/proxy'
+import { createTailnetDetector } from './tailnet.js'
 
 // Every kind this daemon knows how to run. One list, built here, read by
 // every dispatch site (routes, hibernator, reconcile, the wake path). Adding
@@ -63,6 +64,12 @@ export interface DaemonContext {
   // listening. reconcile.ts reads the same field for its own readiness
   // probe. Production never sets it and gets pgProbe, a real connection.
   probeFactory?: (config: PostgresConfig) => () => Promise<boolean>
+  // Same polarity as probeFactory, inverted purpose: production sets it
+  // (createDaemonContext wires the real `tailscale status --json` probe,
+  // see tailnet.ts) and tests either leave it unset, getting a
+  // deterministic null with no binary executed, or set a fake. Returns the
+  // box's MagicDNS name when a tailnet is up, null otherwise.
+  detectTailnet?: () => Promise<string | null>
 }
 
 // A convenience factory for the real, production wiring: opens the real
@@ -82,6 +89,7 @@ export function createDaemonContext(opts: {
     config: opts.config,
     activity: new ActivityTracker(),
     kinds: createDefaultKindRegistry(),
+    detectTailnet: createTailnetDetector(),
   }
 }
 
