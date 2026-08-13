@@ -225,7 +225,7 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
     throw new HobbyError(
       'usage',
       'name is required',
-      'POST /v1/projects/:name/resources expects { "kind": "postgres" | "app", "name": string }'
+      'POST /v1/projects/:name/resources expects { "kind": "postgres" | "app" | "worker", "name": string }'
     )
   }
 
@@ -253,21 +253,19 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
   }
 
   if (kind === 'worker') {
+    // Sourceless is legal now: the row, its id and its hostname are
+    // allocated first, and code arrives later through deploy (see
+    // createWorkerResource, packages/worker/src/worker.ts). readAppSource
+    // already returns null when no source was given, so there is nothing
+    // left to reject here.
     const source = readAppSource(fields)
-    if (source === null) {
-      throw new HobbyError(
-        'usage',
-        'a worker needs a source directory holding its wrangler manifest',
-        'POST /v1/projects/:name/resources expects { "kind": "worker", "name": string, "source": { "path": string } }'
-      )
-    }
     const databaseResourceId =
       typeof fields['databaseResourceId'] === 'string' ? fields['databaseResourceId'] : null
 
     const result = await createWorkerResource(ctx, {
       project,
       name,
-      sourcePath: source.path,
+      sourcePath: source === null ? null : source.path,
       databaseResourceId,
     })
     // Every wrangler key we read and did not act on, reported at the moment

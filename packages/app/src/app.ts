@@ -173,17 +173,60 @@ export interface CreateAppOptions {
 
 export async function createAppResource(deps: AppDeps, opts: CreateAppOptions): Promise<AppResource> {
   validateName(opts.name)
-  if ((opts.source === null) === (opts.image === null)) {
+  // Three valid shapes now, not two. A record with neither a source nor an
+  // image is the Fly and Cloudflare model: the row, its id and its hostname
+  // exist first, and code arrives later through deploy. What is still
+  // refused is BOTH, which remains genuinely ambiguous.
+  if (opts.source !== null && opts.image !== null) {
     throw new HobbyError(
       'usage',
-      'an app needs either a build source or a prebuilt image, and not both',
-      'pass a directory containing a Dockerfile, or an image reference'
+      'an app takes either a build source or a prebuilt image, not both',
+      'pass a directory containing a Dockerfile, or an image reference, or neither to create the record and deploy into it later'
     )
   }
 
   const now = deps.now ?? Date.now
   const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
   const containerName = `hobby-${opts.project.name}-${opts.name}`
+
+  // A record with no code: allocate its identity, write the row, do nothing
+  // else. No build, no container, no probe, nothing to roll back.
+  //
+  // This deliberately reverses the invariant this function used to state,
+  // that a build happens before the row exists so a broken Dockerfile leaves
+  // nothing behind. That was right when creating and deploying were one act.
+  // Now that a name and a hostname are published before any build, a failed
+  // build leaving the record behind is the desired outcome: the user retries
+  // the deploy, they do not recreate the app. See the spec's "The invariant
+  // this reverses".
+  if (opts.source === null && opts.image === null) {
+    const config: AppConfig = {
+      image: null,
+      containerName,
+      hostPort,
+      containerPort: opts.containerPort,
+      hostname: appHostname(opts.project.name, opts.name, deps.config.domain),
+      source: null,
+      env: opts.env,
+      databaseResourceId: opts.databaseResourceId,
+    }
+    const created = deps.store.createResource({
+      projectId: opts.project.id,
+      kind: 'app',
+      name: opts.name,
+      config,
+    })
+    // setResourceState only writes the store; `created` is the pre-state
+    // snapshot createResource handed back (state 'creating'), so the
+    // resource is re-read rather than spread, the same way the built path
+    // below re-reads `final` instead of trusting its own in-memory copy.
+    deps.store.setResourceState(created.id, 'undeployed')
+    const undeployed = deps.store.getResource(created.id)
+    if (undeployed === null || undeployed.kind !== 'app') {
+      throw new HobbyError('internal', `app ${created.id} vanished immediately after creation`)
+    }
+    return undeployed
+  }
 
   // The build happens BEFORE the resource row exists. A Dockerfile that does
   // not compile should leave nothing behind at all: no row to clean up, no
