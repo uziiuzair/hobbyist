@@ -115,16 +115,18 @@ function hyperdriveUrl(config: PostgresConfig): string {
 }
 
 export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource): RunnerManifest {
-  // The one place both callers that actually dereference `config.manifest`
-  // flow through: containerSpec (the start path) and routes.ts's
-  // renderCompose (the eject path). assertWorkerConfig's own file comment
-  // and ADR 0014 both say it runs "on every read" of a stored worker config;
-  // this call is what makes that true. A worker row that predates the
-  // manifest split parses out of the store with `manifest` absent rather
-  // than null (packages/core/src/store.ts:122's unchecked cast), which the
-  // explicit null check just below would not catch on its own, since
-  // `undefined !== null`, and the failure would instead surface three lines
-  // down as an unhelpful TypeError on `config.manifest.durableObjects`.
+  // The place both callers that flow through containerSpec (the start path)
+  // and routes.ts's renderCompose (the eject path) dereference
+  // `config.manifest`. Two other production reads still bypass this guard:
+  // packages/cli/src/daemon/wire.ts's redactConfig, which the parallel
+  // queue branch is expected to close by replacing it with an explicit
+  // four-way branch, and this file's own deployWorker redeploy fallback. A
+  // worker row that predates the manifest split parses out of the store
+  // with `manifest` absent rather than null (packages/core/src/store.ts:122's
+  // unchecked cast), which the explicit null check just below would not
+  // catch on its own, since `undefined !== null`, and the failure would
+  // instead surface three lines down as an unhelpful TypeError on
+  // `config.manifest.durableObjects`.
   const config = assertWorkerConfig(resource.config)
   // Every caller that can reach this function has already gone through a
   // path that requires an image (containerSpec's own null-image check for
