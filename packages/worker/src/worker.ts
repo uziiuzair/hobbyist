@@ -27,6 +27,7 @@ import {
   type WorkerConfig,
   type WorkerResource,
 } from '@hobby.sh/core'
+import { assertWorkerConfig } from './assert-config.js'
 import { findWranglerManifest, type WranglerManifest } from './manifest.js'
 import {
   buildWorkerImage,
@@ -114,7 +115,17 @@ function hyperdriveUrl(config: PostgresConfig): string {
 }
 
 export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource): RunnerManifest {
-  const config = resource.config
+  // The one place both callers that actually dereference `config.manifest`
+  // flow through: containerSpec (the start path) and routes.ts's
+  // renderCompose (the eject path). assertWorkerConfig's own file comment
+  // and ADR 0014 both say it runs "on every read" of a stored worker config;
+  // this call is what makes that true. A worker row that predates the
+  // manifest split parses out of the store with `manifest` absent rather
+  // than null (packages/core/src/store.ts:122's unchecked cast), which the
+  // explicit null check just below would not catch on its own, since
+  // `undefined !== null`, and the failure would instead surface three lines
+  // down as an unhelpful TypeError on `config.manifest.durableObjects`.
+  const config = assertWorkerConfig(resource.config)
   // Every caller that can reach this function has already gone through a
   // path that requires an image (containerSpec's own null-image check for
   // start, or a stored row for eject's renderCompose), and image and
@@ -618,6 +629,25 @@ export async function deployWorker(
     }
     return { resource: final, image: tag, ignored: manifest.ignored, logs }
   } catch (err) {
+    if (wasUndeployed) {
+      // Same rule as deployApp's identical guard (packages/app/src/app.ts):
+      // a first deploy can fail after startWorker already created and
+      // started a real container (most commonly the readiness probe timing
+      // out), and rolling `state` back to `undeployed` below makes that
+      // container invisible to everything else in the daemon. skipReconcile
+      // (packages/worker/src/kind.ts:45-46) hides an `undeployed` resource
+      // from reconcile.ts entirely, and the hibernator's `state !== 'running'`
+      // gate (packages/cli/src/daemon/hibernator.ts:35, :100) never reaches
+      // it either. Stopped and removed right here, before the state write.
+      // Best effort: a failure to clean up must not mask the original deploy
+      // error, which is what the user actually needs to see.
+      try {
+        await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+        await deps.runtime.remove(resource.config.containerName)
+      } catch {
+        // Deliberately swallowed, see the comment above.
+      }
+    }
     deps.store.setResourceState(resource.id, wasUndeployed ? 'undeployed' : 'failed')
     throw err
   }

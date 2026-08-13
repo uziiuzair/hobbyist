@@ -486,6 +486,25 @@ export async function deployApp(
     }
     return { resource: final, image: built.tag, logs: built.logs }
   } catch (err) {
+    if (wasUndeployed) {
+      // A first deploy that fails here (the readiness probe, most commonly)
+      // can still have created and started a real container before it threw.
+      // Rolling `state` back to `undeployed` below is correct, but it also
+      // makes that container invisible to everything else in the daemon:
+      // skipReconcile (packages/app/src/kind.ts:39-40) hides an `undeployed`
+      // resource from reconcile.ts entirely, and the hibernator's
+      // `state !== 'running'` gate (packages/cli/src/daemon/hibernator.ts:35,
+      // :100) never reaches it either. Nothing left would ever stop it, so it
+      // is stopped and removed right here, before the state write. Best
+      // effort: a failure to clean up must not mask the original deploy
+      // error, which is what the user actually needs to see.
+      try {
+        await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+        await deps.runtime.remove(resource.config.containerName)
+      } catch {
+        // Deliberately swallowed, see the comment above.
+      }
+    }
     deps.store.setResourceState(resource.id, wasUndeployed ? 'undeployed' : 'failed')
     throw err
   }
