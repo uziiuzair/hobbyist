@@ -255,6 +255,37 @@ declares, each with its own `HOBBY_QUEUE_NAME`. This was not exercised by the
 with one producer too, since the fixture worker declares one; a worker with
 two or more distinct producer bindings has not yet been run for real.
 
+## Addendum: readiness now covers both ports
+
+Added after the run above, in a later fix round on the same date, so this
+section is appended rather than folding into the narrative that already
+happened: at the time of the run this document records, `startWorker`'s
+readiness probe checked only the main port. A worker whose control server
+failed to bind, or whose runner crashed in the moment between the main port
+coming up and the control server's own `.listen()` call, would have been
+recorded `running` on the strength of the main port alone, main port serving
+fine, control port answering nothing, and the daemon would have gone on to
+deliver every batch to a port with nothing behind it. Queue delivery would
+have silently never worked while the worker looked entirely healthy, which
+is the exact symptom this whole capability exists to prevent, arriving
+through the readiness probe instead of the broker.
+
+Fixed in `packages/worker/src/worker.ts`: `defaultProbeFactory` now checks
+the control port too, whenever the worker declares a producer or a consumer
+(`declaresQueueBindings`), with the same "send a real request, require a
+real status line" discipline the main port's probe already used, POSTing an
+empty body to `/queue` rather than opening a bare TCP connection. This was
+not re-verified against a fresh real container build: the readiness change
+is exercised end to end with real local sockets in
+`packages/worker/test/worker.test.ts` (two tests, one asserting a worker
+with a queue binding is NOT ready until both ports answer, one asserting a
+worker with no queue binding is never made to wait on the control port at
+all), and the transport itself, what the control port actually does once it
+answers, is unchanged from what the run above already confirmed against real
+Docker. A full container rebuild to re-confirm the same transport again was
+judged not worth the build time; the readiness LOGIC is what changed, and
+that is covered by real sockets, just not inside a real container.
+
 ## Reproducing
 
 Fixture and script lived in a scratchpad directory, none of them kept:
