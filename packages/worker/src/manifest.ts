@@ -18,6 +18,27 @@ export interface WranglerDurableObject {
   className: string
 }
 
+// The binding name is the whole point of keeping this shape: it is what the
+// producer's JS object must be bound to (`env.MY_QUEUE.send()`), and a queue
+// name alone cannot rebuild it.
+export interface WranglerQueueProducer {
+  queue: string
+  binding: string
+}
+
+// Absent tuning keys stay `null` here rather than being filled with a
+// guessed default: the broker owns the defaults (DEFAULT_CONSUMER_OPTIONS in
+// packages/queue/src/broker.ts), and baking a copy of them into the parser
+// would create a second source of truth that drifts.
+export interface WranglerQueueConsumer {
+  queue: string
+  maxBatchSize: number | null
+  maxBatchTimeoutSeconds: number | null
+  maxRetries: number | null
+  retryDelaySeconds: number | null
+  deadLetterQueue: string | null
+}
+
 export interface WranglerManifest {
   name: string | null
   main: string
@@ -27,7 +48,7 @@ export interface WranglerManifest {
   kvNamespaces: string[]
   r2Buckets: string[]
   d1Databases: string[]
-  queues: { producers: string[]; consumers: string[] }
+  queues: { producers: WranglerQueueProducer[]; consumers: WranglerQueueConsumer[] }
   durableObjects: WranglerDurableObject[]
   // Every top-level key we saw and did not act on, so the deploy can print
   // them. Sorted, so the output is stable between runs.
@@ -60,6 +81,11 @@ export const IGNORED_WITH_REASON: Record<string, string> = {
   observability: 'Cloudflare-side telemetry; use `hobby logs`',
   placement: 'smart placement is a global-network feature; this is one box',
   limits: 'not enforced here (ADR 0004: no metering, no quotas)',
+  // Nested under `queues`, not a top-level key, so it can never be found by
+  // the ignored-key scan below. `queuesFrom` pushes the literal string
+  // 'queues.consumers.max_concurrency' into `ignored` by hand when it sees
+  // the key, which is what makes this entry reachable at all.
+  'queues.consumers.max_concurrency': 'one box, one consumer container; honoured as 1',
 }
 
 // JSONC, the format wrangler.jsonc actually uses. Comments only, no trailing
@@ -169,16 +195,49 @@ function durableObjectsFrom(value: unknown): WranglerDurableObject[] {
   return out
 }
 
-function queuesFrom(value: unknown): { producers: string[]; consumers: string[] } {
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' ? value : null
+}
+
+// `ignored` is mutated in place: `max_concurrency` lives nested inside
+// `queues.consumers`, not at the top level, so the ordinary "key we didn't
+// act on" scan in parseWranglerManifest can never see it. This is the one
+// place that can, which is why it reports it directly rather than through
+// HONOURED/IGNORED_WITH_REASON's usual top-level path.
+function queuesFrom(
+  value: unknown,
+  ignored: string[]
+): { producers: WranglerQueueProducer[]; consumers: WranglerQueueConsumer[] } {
   if (!isRecord(value)) return { producers: [], consumers: [] }
-  const producers: string[] = []
-  const consumers: string[] = []
+
+  const producers: WranglerQueueProducer[] = []
   for (const entry of Array.isArray(value['producers']) ? value['producers'] : []) {
-    if (isRecord(entry) && typeof entry['queue'] === 'string') producers.push(entry['queue'])
+    if (!isRecord(entry)) continue
+    const queue = entry['queue']
+    const binding = entry['binding']
+    if (typeof queue === 'string' && typeof binding === 'string') {
+      producers.push({ queue, binding })
+    }
   }
+
+  const consumers: WranglerQueueConsumer[] = []
+  let sawMaxConcurrency = false
   for (const entry of Array.isArray(value['consumers']) ? value['consumers'] : []) {
-    if (isRecord(entry) && typeof entry['queue'] === 'string') consumers.push(entry['queue'])
+    if (!isRecord(entry)) continue
+    const queue = entry['queue']
+    if (typeof queue !== 'string') continue
+    if ('max_concurrency' in entry) sawMaxConcurrency = true
+    consumers.push({
+      queue,
+      maxBatchSize: numberOrNull(entry['max_batch_size']),
+      maxBatchTimeoutSeconds: numberOrNull(entry['max_batch_timeout']),
+      maxRetries: numberOrNull(entry['max_retries']),
+      retryDelaySeconds: numberOrNull(entry['retry_delay']),
+      deadLetterQueue: typeof entry['dead_letter_queue'] === 'string' ? entry['dead_letter_queue'] : null,
+    })
   }
+  if (sawMaxConcurrency) ignored.push('queues.consumers.max_concurrency')
+
   return { producers, consumers }
 }
 
@@ -215,9 +274,11 @@ export function parseWranglerManifest(text: string, format: 'toml' | 'json'): Wr
     )
   }
 
-  const ignored = Object.keys(raw)
-    .filter((key) => !HONOURED.has(key))
-    .sort()
+  // Not sorted yet: queuesFrom below can still push
+  // 'queues.consumers.max_concurrency' into it.
+  const ignored = Object.keys(raw).filter((key) => !HONOURED.has(key))
+  const queues = queuesFrom(raw['queues'], ignored)
+  ignored.sort()
 
   return {
     name: typeof raw['name'] === 'string' ? raw['name'] : null,
@@ -230,7 +291,7 @@ export function parseWranglerManifest(text: string, format: 'toml' | 'json'): Wr
     kvNamespaces: stringArray(raw['kv_namespaces'], 'binding'),
     r2Buckets: stringArray(raw['r2_buckets'], 'binding'),
     d1Databases: stringArray(raw['d1_databases'], 'binding'),
-    queues: queuesFrom(raw['queues']),
+    queues,
     durableObjects: durableObjectsFrom(raw['durable_objects']),
     ignored,
   }

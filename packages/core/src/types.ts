@@ -95,7 +95,17 @@ export interface WorkerConfig extends ResourceConfigBase {
   kvNamespaces: string[]
   r2Buckets: string[]
   d1Databases: string[]
-  queues: { producers: string[]; consumers: string[] }
+  queues: {
+    producers: Array<{ queue: string; binding: string }>
+    consumers: Array<{
+      queue: string
+      maxBatchSize: number | null
+      maxBatchTimeoutSeconds: number | null
+      maxRetries: number | null
+      retryDelaySeconds: number | null
+      deadLetterQueue: string | null
+    }>
+  }
   durableObjects: Array<{ binding: string; className: string }>
   // workerd derives every Durable Object's storage identity from this. If
   // it ever changes, every object's sqlite file is orphaned and the user
