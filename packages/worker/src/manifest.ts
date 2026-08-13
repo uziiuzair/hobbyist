@@ -86,6 +86,26 @@ export const IGNORED_WITH_REASON: Record<string, string> = {
   // 'queues.consumers.max_concurrency' into `ignored` by hand when it sees
   // the key, which is what makes this entry reachable at all.
   'queues.consumers.max_concurrency': 'one box, one consumer container; honoured as 1',
+  // A producer entry is dropped, not adapted, when `binding` is missing or
+  // not a string: `queuesFrom` reports it the same way it reports
+  // `max_concurrency`, by hand, since a malformed binding array element
+  // never reaches the top-level scan either.
+  'queues.producers.binding':
+    'a producer with no binding has nothing to call send() on, so the queue it names is declared but unreachable from code',
+  // Wrong-typed tuning keys are worse than absent ones: an absent key gets
+  // the broker's own default and the deploy output never mentions it, but a
+  // wrong-typed key looks like it was honoured while it was quietly dropped
+  // and the default applied underneath it anyway.
+  'queues.consumers.max_batch_size':
+    'not a number; ignored, so the broker default of 5 messages per batch applies instead of the value written',
+  'queues.consumers.max_batch_timeout':
+    'not a number; ignored, so the broker default of 1 second applies instead of the value written',
+  'queues.consumers.max_retries':
+    'not a number; ignored, so the broker default of 2 retries applies instead of the value written',
+  'queues.consumers.retry_delay':
+    'not a number; ignored, so retries fire with no delay instead of the value written',
+  'queues.consumers.dead_letter_queue':
+    'not a string queue name; ignored, so this consumer ends up with no dead letter queue configured',
 }
 
 // JSONC, the format wrangler.jsonc actually uses. Comments only, no trailing
@@ -195,48 +215,74 @@ function durableObjectsFrom(value: unknown): WranglerDurableObject[] {
   return out
 }
 
-function numberOrNull(value: unknown): number | null {
-  return typeof value === 'number' ? value : null
+// A tuning key that is present but the wrong JS type is a worse silence than
+// an absent one: the value is still dropped and the broker's default still
+// applies, but the user wrote a value and has no way to know it never took
+// effect. `flagged` collects the manifest keys for that, same as
+// `max_concurrency` below, so `queuesFrom` can report every one of them
+// through the one path `IGNORED_WITH_REASON` already renders.
+function numberOrFlag(entry: Record<string, unknown>, tomlKey: string, flagged: Set<string>): number | null {
+  const value = entry[tomlKey]
+  if (value === undefined) return null
+  if (typeof value === 'number') return value
+  flagged.add(`queues.consumers.${tomlKey}`)
+  return null
 }
 
-// `ignored` is mutated in place: `max_concurrency` lives nested inside
-// `queues.consumers`, not at the top level, so the ordinary "key we didn't
-// act on" scan in parseWranglerManifest can never see it. This is the one
-// place that can, which is why it reports it directly rather than through
-// HONOURED/IGNORED_WITH_REASON's usual top-level path.
+function stringOrFlag(entry: Record<string, unknown>, tomlKey: string, flagged: Set<string>): string | null {
+  const value = entry[tomlKey]
+  if (value === undefined) return null
+  if (typeof value === 'string') return value
+  flagged.add(`queues.consumers.${tomlKey}`)
+  return null
+}
+
+// `ignored` is mutated in place: everything this function flags (a missing
+// producer binding, a wrong-typed tuning key, `max_concurrency`) lives
+// nested inside `queues`, not at the top level, so the ordinary "key we
+// didn't act on" scan in parseWranglerManifest can never see any of it.
+// This is the one place that can, which is why it reports these directly
+// rather than through HONOURED/IGNORED_WITH_REASON's usual top-level path.
 function queuesFrom(
   value: unknown,
   ignored: string[]
 ): { producers: WranglerQueueProducer[]; consumers: WranglerQueueConsumer[] } {
   if (!isRecord(value)) return { producers: [], consumers: [] }
 
+  const flagged = new Set<string>()
+
   const producers: WranglerQueueProducer[] = []
   for (const entry of Array.isArray(value['producers']) ? value['producers'] : []) {
     if (!isRecord(entry)) continue
     const queue = entry['queue']
+    if (typeof queue !== 'string') continue
     const binding = entry['binding']
-    if (typeof queue === 'string' && typeof binding === 'string') {
+    if (typeof binding === 'string') {
       producers.push({ queue, binding })
+    } else {
+      // Still dropped: nothing downstream can call send() on a producer
+      // with no binding name. The change is that the deploy now says so.
+      flagged.add('queues.producers.binding')
     }
   }
 
   const consumers: WranglerQueueConsumer[] = []
-  let sawMaxConcurrency = false
   for (const entry of Array.isArray(value['consumers']) ? value['consumers'] : []) {
     if (!isRecord(entry)) continue
     const queue = entry['queue']
     if (typeof queue !== 'string') continue
-    if ('max_concurrency' in entry) sawMaxConcurrency = true
+    if ('max_concurrency' in entry) flagged.add('queues.consumers.max_concurrency')
     consumers.push({
       queue,
-      maxBatchSize: numberOrNull(entry['max_batch_size']),
-      maxBatchTimeoutSeconds: numberOrNull(entry['max_batch_timeout']),
-      maxRetries: numberOrNull(entry['max_retries']),
-      retryDelaySeconds: numberOrNull(entry['retry_delay']),
-      deadLetterQueue: typeof entry['dead_letter_queue'] === 'string' ? entry['dead_letter_queue'] : null,
+      maxBatchSize: numberOrFlag(entry, 'max_batch_size', flagged),
+      maxBatchTimeoutSeconds: numberOrFlag(entry, 'max_batch_timeout', flagged),
+      maxRetries: numberOrFlag(entry, 'max_retries', flagged),
+      retryDelaySeconds: numberOrFlag(entry, 'retry_delay', flagged),
+      deadLetterQueue: stringOrFlag(entry, 'dead_letter_queue', flagged),
     })
   }
-  if (sawMaxConcurrency) ignored.push('queues.consumers.max_concurrency')
+
+  for (const key of flagged) ignored.push(key)
 
   return { producers, consumers }
 }

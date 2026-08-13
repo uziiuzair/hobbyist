@@ -225,6 +225,51 @@ max_concurrency = 4
   assert.ok(manifest.ignored.includes('queues.consumers.max_concurrency'))
 })
 
+// A producer with no binding has nothing for env.WHATEVER.send() to call:
+// the TypeError shows up far from the manifest that caused it, so silence
+// here is exactly the "dropped binding means a runtime crash blamed on us"
+// case this file's own top comment warns about.
+test('a producer with no binding is dropped and reported, not silently discarded', () => {
+  assert.match(IGNORED_WITH_REASON['queues.producers.binding'] ?? '', /send\(\)/)
+
+  const manifest = parseWranglerManifest(
+    `
+name = "embedder"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[[queues.producers]]
+queue = "vault-embed"
+`,
+    'toml'
+  )
+  assert.deepEqual(manifest.queues.producers, [])
+  assert.ok(manifest.ignored.includes('queues.producers.binding'))
+})
+
+// A wrong-typed tuning key is the worse silence: an absent key gets the
+// broker's default and the deploy output never has to mention it, but a
+// quoted number here looks like it took effect while the parser quietly
+// dropped it and the same default applied underneath.
+test('a tuning key of the wrong type is dropped and reported, not silently defaulted', () => {
+  assert.match(IGNORED_WITH_REASON['queues.consumers.max_batch_size'] ?? '', /default/)
+
+  const manifest = parseWranglerManifest(
+    `
+name = "embedder"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[[queues.consumers]]
+queue = "vault-embed"
+max_batch_size = "10"
+`,
+    'toml'
+  )
+  assert.equal(manifest.queues.consumers[0]?.maxBatchSize, null)
+  assert.ok(manifest.ignored.includes('queues.consumers.max_batch_size'))
+})
+
 // Silence about a dropped key in a config file the user believes is
 // authoritative is how a platform earns a reputation for lying.
 test('keys we do not act on are reported, with a reason where we have one', () => {
