@@ -8,6 +8,7 @@ import { WakingBanner } from '../components/WakingBanner.js'
 import { Modal } from '../components/Modal.js'
 import { Workbench } from '../components/Workbench.js'
 import { State } from '../components/State.js'
+import { SpotTerminal } from '../components/Spot.js'
 import {
   loadHistory,
   loadSnippets,
@@ -219,7 +220,12 @@ export function Sql({ projectName, resourceName, onChanged }: { projectName: str
       <div className="result-pane">
         {queryError !== null && <div className="notice notice-danger">{queryError}</div>}
         {queryError === null && result === null && (
-          <div className="result-idle">Results appear here once you run something.</div>
+          <div className="result-idle">
+            <div>
+              <SpotTerminal />
+              <p style={{ margin: 0 }}>Results appear here once you run something.</p>
+            </div>
+          </div>
         )}
         {result !== null && (
           <>

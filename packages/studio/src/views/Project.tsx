@@ -204,7 +204,7 @@ export function Project({ projectName, onChanged }: { projectName: string; onCha
         <div className="dash-side">
           <section className="panel">
             <div className="panel-head">
-              <span className="panel-title">Databases</span>
+              <span className="panel-title">Services</span>
               <button type="button" className="btn btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setDialog('new')}>
                 New database
               </button>
@@ -292,7 +292,7 @@ function StatStrip({
   return (
     <div className="stats">
       <div className="stat-row">
-        <Stat label="Databases" value={String(totals.databases)} />
+        <Stat label="Services" value={String(totals.databases)} />
         <Stat label="Awake" value={`${totals.awake}`} unit={`of ${totals.databases}`} live={totals.awake > 0} />
         <Stat label="Data on disk" value={formatBytes(totals.bytes)} />
         <Stat label="Connections" value={String(totals.connections)} />
@@ -373,16 +373,24 @@ function DatabaseRow({
           {stats.connectionCount ?? 0} connection{(stats.connectionCount ?? 0) === 1 ? '' : 's'}
         </span>
         <span>Last active {formatSince(stats.lastActiveAt)}</span>
-        <button
-          type="button"
-          className="btn btn-sm btn-ghost"
-          style={{ marginLeft: 'auto' }}
-          onClick={() => act(resource.state === 'running' ? 'sleep' : 'wake')}
-          disabled={busy !== null}
-        >
-          {busy !== null && <span className="spinner" />}
-          {resource.state === 'running' ? 'Sleep' : 'Wake'}
-        </button>
+        {/* No wake affordance on an undeployed record: there is no code to
+            start, and a button that cannot succeed advertises a capability
+            that does not exist. Compared as string because 'undeployed'
+            joins core's ResourceState with the record-before-code work
+            (docs/superpowers/specs/2026-08-13-record-before-code-design.md);
+            Studio renders it correctly either way. */}
+        {(resource.state as string) !== 'undeployed' && (
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            style={{ marginLeft: 'auto' }}
+            onClick={() => act(resource.state === 'running' ? 'sleep' : 'wake')}
+            disabled={busy !== null}
+          >
+            {busy !== null && <span className="spinner" />}
+            {resource.state === 'running' ? 'Sleep' : 'Wake'}
+          </button>
+        )}
       </div>
 
       {actionError !== null && <div className="notice notice-danger">{actionError}</div>}
