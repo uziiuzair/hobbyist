@@ -22,6 +22,7 @@ import {
   type HobbyConfig,
   type KindContext,
   type PostgresConfig,
+  type QueueConfig,
   type Resource,
   type ResourceKindHandler,
   type Store,
@@ -113,6 +114,25 @@ function samplePostgresConfig(overrides: Partial<PostgresConfig> = {}): Postgres
     superuser: 'postgres',
     password: 'a'.repeat(32),
     database: 'blog',
+    ...overrides,
+  }
+}
+
+function sampleQueueConfig(overrides: Partial<QueueConfig> = {}): QueueConfig {
+  return {
+    // Unused by a queue, present only because every existing call site that
+    // reads them expects them on any resource. See the comment on
+    // ResourceConfigBase and on QueueConfig itself in core's types.ts.
+    image: '',
+    containerName: '',
+    hostPort: 0,
+    retentionSeconds: 345600,
+    consumerResourceId: null,
+    maxBatchSize: 5,
+    maxBatchTimeoutSeconds: 1,
+    maxRetries: 2,
+    retryDelaySeconds: 0,
+    deadLetterQueue: null,
     ...overrides,
   }
 }
@@ -312,6 +332,31 @@ test('a worker vars value never crosses the wire boundary', async () => {
 
   assert.equal(serialized.includes('sk-do-not-leak'), false)
   assert.match(serialized, /OPENAI_API_KEY/)
+})
+
+// A queue config holds no user-supplied secret: no password, no env, no
+// vars. Before redactConfig gave 'queue' its own branch, an unhandled kind
+// fell through into the worker branch and called redactValues on a
+// QueueConfig's missing `vars` field, which threw a TypeError the moment any
+// route listed or fetched a queue resource (Object.keys(undefined) throws).
+// This asserts the fix: the call does not throw, and every field survives
+// unredacted, because none of them is a secret.
+test('a queue config crosses the wire boundary unredacted, and toWireResource does not throw', async () => {
+  const ctx = buildContext(stubAppHandler())
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'queue',
+    name: 'events',
+    config: sampleQueueConfig({ deadLetterQueue: 'events-dlq', maxBatchSize: 7 }),
+  })
+
+  const wire = await toWireResource(ctx, resource)
+  const serialized = JSON.stringify(wire)
+
+  assert.match(serialized, /"deadLetterQueue":"events-dlq"/)
+  assert.match(serialized, /"maxBatchSize":7/)
+  assert.match(serialized, /"retentionSeconds":345600/)
 })
 
 // Size is a database question. Asking it of an app must not reach for a
