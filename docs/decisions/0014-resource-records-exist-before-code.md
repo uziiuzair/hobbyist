@@ -100,11 +100,11 @@ to remember to cross-check.
 
 ### A project no longer implies a Postgres
 
-`hobby new <name>` (`packages/cli/src/cli/commands.ts:405-451`) still creates
+`hobby new <name>` (`packages/cli/src/cli/commands.ts:413-491`) still creates
 a project and a `primary` postgres resource in one call, and that stays
 unchanged: it is the one-command ergonomic root `CLAUDE.md` sells as the whole
 point of the product, and there is no reason to spend it. `hobby new <name>
---empty` (`commands.ts:420-430`) is the new door: a project and nothing else,
+--empty` (`commands.ts:428-438`) is the new door: a project and nothing else,
 because a **project** is a namespace holding typed resources (root
 `CLAUDE.md`'s Scope section), not a database with a name, and Studio and MCP
 creating compute (D1) needs an empty project to create compute *into*.
@@ -195,15 +195,15 @@ reused one.
 ## A subtlety worth preserving
 
 `hobby eject`'s skip condition for an undeployed compute resource,
-`isDeployed` (`packages/cli/src/daemon/routes.ts:418-419`), keys on
+`isDeployed` (`packages/cli/src/daemon/routes.ts:459-460`), keys on
 `resource.config.image !== null`, not on `resource.state === 'undeployed'`.
 The two are **not** equivalent, and the difference is documented in the
-comment directly above the function (`:404-417`):
+comment directly above the function (`:445-458`):
 
 `deployApp` writes the freshly built image into the stored config
 (`packages/app/src/app.ts:462-463`) before the readiness check that can still
 throw (`:469-477`). If that probe times out, the `catch` block
-(`:488-490`) rolls `state` back to `undeployed` when the deploy was a first
+(`:488-510`) rolls `state` back to `undeployed` when the deploy was a first
 deploy (the `wasUndeployed` flag captured at `:453`, before anything could
 throw), but it does **not** clear `config.image` back to `null`. The result is
 a resource that is `undeployed` in `state` while already holding a real,

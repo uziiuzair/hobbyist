@@ -1,7 +1,7 @@
 # Record before code
 
 **Date:** 2026-08-13
-**Status:** approved, not implemented
+**Status:** approved, implemented
 **Capability:** `compute`, with changes reaching into `core`, `cli` and `proxy`
 **Sub-project:** A of five (A record before code, B wire Caddy, D1 Studio and MCP
 for all kinds, D2 Studio API tokens, C remote deploy)
