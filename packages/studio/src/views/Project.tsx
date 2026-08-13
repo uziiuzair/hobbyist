@@ -291,30 +291,51 @@ function StatStrip({
   totals: { databases: number; awake: number; bytes: number; connections: number }
   free: { freeBytes: number; reflink: boolean } | null
 }) {
+  const [disk, diskUnit] = splitBytes(totals.bytes)
+  const [freeVal, freeUnit] = free === null ? ['--', undefined] : splitBytes(free.freeBytes)
   return (
-    <div className="stats">
-      <div className="stat-row">
-        <Stat label="Services" value={String(totals.databases)} />
-        <Stat label="Awake" value={`${totals.awake}`} unit={`of ${totals.databases}`} live={totals.awake > 0} />
-        <Stat label="Data on disk" value={formatBytes(totals.bytes)} />
-        <Stat label="Connections" value={String(totals.connections)} />
-        <Stat label="Disk free" value={free === null ? '--' : formatBytes(free.freeBytes)} />
+    <>
+      <div className="tiles">
+        <Tile hue="sage" label="Services" value={String(totals.databases)} />
+        <Tile hue="iris" label="Awake" value={String(totals.awake)} of={`of ${totals.databases}`} />
+        <Tile hue="honey" label="Data on disk" value={disk} of={diskUnit} />
+        <Tile hue="plain" label="Connections" value={String(totals.connections)} />
+        <Tile hue="rose" label="Disk free" value={freeVal} of={freeUnit} />
       </div>
-      <p className="stats-note">
+      <p className="tiles-note">
         Read from this machine, right now. Size comes from a running database; a sleeping one reports the last
         figure the daemon saw, because waking it to answer would defeat the point.
       </p>
-    </div>
+    </>
   )
 }
 
-function Stat({ label, value, unit, live }: { label: string; value: string; unit?: string; live?: boolean }) {
+// formatBytes renders "132 MB"; the tile sets the figure in the display face
+// and the unit in the quiet one, so the string splits at its only space.
+function splitBytes(bytes: number): [string, string | undefined] {
+  const parts = formatBytes(bytes).split(' ')
+  return [parts[0] ?? '--', parts[1]]
+}
+
+// Written out as whole literals so the class audit can see every one.
+const TILE_CLASS = {
+  sage: 'tile tile-sage',
+  iris: 'tile tile-iris',
+  honey: 'tile tile-honey',
+  rose: 'tile tile-rose',
+  plain: 'tile tile-plain',
+} as const
+
+function Tile({ hue, label, value, of }: { hue: keyof typeof TILE_CLASS; label: string; value: string; of?: string }) {
   return (
-    <div className="stat">
-      <div className="stat-label">{label}</div>
-      <div className={`stat-value${live === true ? ' is-live' : ''}`}>
+    <div className={TILE_CLASS[hue]}>
+      <div className="tile-label">
+        <i aria-hidden="true" />
+        {label}
+      </div>
+      <div className="tile-value">
         {value}
-        {unit !== undefined && <span className="stat-unit">{unit}</span>}
+        {of !== undefined && <span className="of">{of}</span>}
       </div>
     </div>
   )
