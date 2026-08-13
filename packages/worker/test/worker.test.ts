@@ -87,6 +87,7 @@ function testConfig(): HobbyConfig {
     sleepAfterSeconds: 300,
     wakeTimeoutMs: 100,
     readinessPollMs: 10,
+    queuePort: 7434,
   }
 }
 
@@ -432,6 +433,99 @@ test('the container mounts state and durable object storage separately', async (
   assert.match(doBind?.host ?? '', /projects\/blog\/api\/do$/)
   assert.equal(spec.ports[0]?.container, 8787)
   assert.equal(spec.ports[0]?.bind, '127.0.0.1')
+})
+
+// The control channel is a second published port, not a proxy in front of
+// the worker's own: see docs/queues/specs/2026-08-13-queues-design.md,
+// "Delivery over a second port, not a proxy".
+test('the container publishes a second port for the control channel', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const result = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(),
+    databaseResourceId: null,
+  })
+
+  const spec = runtime._specs.get(result.resource.config.containerName)
+  assert.ok(spec !== undefined)
+  assert.equal(spec.ports.length, 2)
+  assert.equal(spec.ports[1]?.host, result.resource.config.controlPort)
+  assert.equal(spec.ports[1]?.container, 8788)
+  assert.equal(spec.ports[1]?.bind, '127.0.0.1')
+  // Allocated from the same range as hostPort, and distinct from it: two
+  // sequential allocatePort calls before either is persisted must not
+  // collide (packages/core/test/store.test.ts pins the mechanism this
+  // depends on).
+  assert.notEqual(result.resource.config.controlPort, result.resource.config.hostPort)
+})
+
+// SAMPLE_TOML declares one producer, binding JOBS on queue jobs, which is
+// what makes this manifest worth reading: the shim needs both the binding
+// name and the queue name, and the runner needs the daemon's future enqueue
+// listener URL and a token, none of which existed before this task.
+test('the runner manifest carries the control port and the queue endpoint', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const result = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(),
+    databaseResourceId: null,
+  })
+
+  const manifest = buildRunnerManifest(deps, result.resource)
+  assert.equal(manifest.controlPort, result.resource.config.controlPort)
+  assert.equal(manifest.queueEndpoint, 'http://host.docker.internal:7434/enqueue')
+  assert.equal(manifest.queueToken, result.resource.id)
+  assert.deepEqual(manifest.queueBindings, [{ binding: 'JOBS', queue: 'jobs' }])
+})
+
+// The whole point of ADR 0013: Miniflare's own queue broker keeps its
+// backlog in memory, so if it is ever constructed here it will accept sends
+// and never deliver them. This has to hold even for a worker that DOES
+// declare producers and consumers in its wrangler manifest.
+test('miniflare is never given queueProducers or queueConsumers, so its in-memory broker is not built', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const result = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(),
+    databaseResourceId: null,
+  })
+
+  const manifest = buildRunnerManifest(deps, result.resource)
+  assert.deepEqual(manifest.queueProducers, [])
+  assert.deepEqual(manifest.queueConsumers, [])
+})
+
+// A worker with no producer binding has nothing for the shim to reach: a
+// live URL and a real token with no binding pointed at them would just be
+// an unused credential sitting in the manifest.
+test('a worker with no queue producer gets no queue endpoint or token', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const result = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(
+      `
+name = "api"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+`,
+      'wrangler.toml'
+    ),
+    databaseResourceId: null,
+  })
+
+  const manifest = buildRunnerManifest(deps, result.resource)
+  assert.equal(manifest.queueEndpoint, null)
+  assert.equal(manifest.queueToken, null)
+  assert.deepEqual(manifest.queueBindings, [])
 })
 
 test('a worker is created asleep, having been proven to serve', async () => {

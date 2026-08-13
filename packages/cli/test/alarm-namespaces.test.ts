@@ -65,6 +65,7 @@ function workerConfig(): WorkerConfig {
     image: 'hobby/api-worker:1',
     containerName: 'hobby-chat-api',
     hostPort: 35433,
+    controlPort: 35434,
     containerPort: 8787,
     hostname: 'api.chat.localhost',
     source: { path: '/code/api', manifest: 'wrangler.toml' },

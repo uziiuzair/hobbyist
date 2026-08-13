@@ -99,6 +99,7 @@ function seed(ctx: DaemonContext): { dbName: string; appName: string } {
     image: 'hobby/blog-api-worker:1754870400',
     containerName: 'hobby-blog-api',
     hostPort: 35433,
+    controlPort: 35434,
     containerPort: 8787,
     hostname: 'api.blog.localhost',
     source: { path: '/home/user/code/blog-api', manifest: 'wrangler.toml' },

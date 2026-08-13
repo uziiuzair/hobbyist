@@ -7,7 +7,7 @@ import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { openStore, type PostgresConfig } from '../src/index.js'
+import { openStore, type PostgresConfig, type WorkerConfig } from '../src/index.js'
 
 function samplePostgresConfig(hostPort: number): PostgresConfig {
   return {
@@ -18,6 +18,28 @@ function samplePostgresConfig(hostPort: number): PostgresConfig {
     superuser: 'postgres',
     password: 'secret',
     database: 'blog',
+  }
+}
+
+function sampleWorkerConfig(ports: { hostPort: number; controlPort: number }): WorkerConfig {
+  return {
+    image: 'hobby/blog-api-worker:1',
+    containerName: 'hobby-blog-api',
+    hostPort: ports.hostPort,
+    controlPort: ports.controlPort,
+    containerPort: 8787,
+    hostname: 'api.blog.localhost',
+    source: { path: '/src', manifest: 'wrangler.toml' },
+    compatibilityDate: '2026-08-01',
+    compatibilityFlags: [],
+    vars: {},
+    kvNamespaces: [],
+    r2Buckets: [],
+    d1Databases: [],
+    queues: { producers: [], consumers: [] },
+    durableObjects: [],
+    durableObjectUniqueKeyModifier: 'placeholder',
+    databaseResourceId: null,
   }
 }
 
@@ -112,6 +134,38 @@ test('allocatePort skips a taken port', () => {
       config: samplePostgresConfig(15432),
     })
     assert.equal(store.allocatePort(15432, 15440), 15433)
+  } finally {
+    store.close()
+  }
+})
+
+// A worker resource allocates two ports (hostPort and controlPort) from the
+// same range, before either is persisted, so the second call cannot see the
+// first call's answer through the store. Without `exclude`, both calls would
+// return the same free port.
+test('allocatePort excludes a port handed out earlier in the same call', () => {
+  const store = openStore(':memory:')
+  try {
+    const first = store.allocatePort(35433, 35440)
+    const second = store.allocatePort(35433, 35440, [first])
+    assert.notEqual(first, second)
+    assert.equal(first, 35433)
+    assert.equal(second, 35434)
+  } finally {
+    store.close()
+  }
+})
+
+// controlPort is stored under its own field name, not hostPort, so a later
+// caller has to know to look for it too or it can hand the same number to
+// two different resources.
+test('allocatePort will not hand back a stored controlPort either', () => {
+  const store = openStore(':memory:')
+  try {
+    const project = store.createProject({ name: 'blog', sleepAfterSeconds: null })
+    const config = sampleWorkerConfig({ hostPort: 35433, controlPort: 35434 })
+    store.createResource({ projectId: project.id, kind: 'worker', name: 'api', config })
+    assert.equal(store.allocatePort(35433, 35440), 35435)
   } finally {
     store.close()
   }

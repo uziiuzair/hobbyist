@@ -85,6 +85,11 @@ export interface AppConfig extends ResourceConfigBase {
 // build, one process per worker resource.
 export interface WorkerConfig extends ResourceConfigBase {
   containerPort: number
+  // The host-side port the runner's control channel is published on,
+  // loopback only, same as hostPort. The daemon posts queue batches here;
+  // see docs/queues/specs/2026-08-13-queues-design.md, "Delivery over a
+  // second port, not a proxy".
+  controlPort: number
   hostname: string
   // The directory holding the user's wrangler manifest and entry script,
   // and the name of the manifest file we actually read from it.

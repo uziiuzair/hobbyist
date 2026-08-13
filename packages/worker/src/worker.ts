@@ -30,6 +30,7 @@ import {
 import { findWranglerManifest, type WranglerManifest } from './manifest.js'
 import {
   buildWorkerImage,
+  CONTAINER_CONTROL_PORT,
   CONTAINER_DO,
   CONTAINER_STATE,
   renderWorkerDockerfile,
@@ -91,14 +92,33 @@ export function uniqueKeyFor(resourceId: ResourceId, className: string): string 
 // binding is picked up rather than frozen into an image.
 export interface RunnerManifest {
   port: number
+  // The host-side port the daemon posts queue batches to, carried through
+  // for logging/observability inside the runner: the container's own control
+  // server listens on CONTAINER_CONTROL_PORT, a fixed constant, not on this
+  // value, exactly as the main port is fixed and hostPort is a Docker-side
+  // remap of it.
+  controlPort: number
   compatibilityDate: string
   compatibilityFlags: string[]
   vars: Record<string, string>
   kvNamespaces: string[]
   r2Buckets: string[]
   d1Databases: string[]
+  // ALWAYS []. See the comment where these are handed to Miniflare in
+  // runtime-image.ts's RUNNER_SOURCE for why: its in-memory queue broker
+  // must never be constructed. Kept as fields (rather than deleted) so a
+  // caller reading the manifest can see the intent stated rather than
+  // inferred from absence.
   queueProducers: string[]
   queueConsumers: string[]
+  // Where the container's producer shim posts enqueue requests, and the
+  // bearer token it sends. Both null when the worker declares no producer
+  // bindings, since there is then nothing for the shim to reach.
+  queueEndpoint: string | null
+  queueToken: string | null
+  // Every producer binding this worker declares, so the runner can give each
+  // one its own wrappedBindings entry pointing at the shim worker.
+  queueBindings: Array<{ binding: string; queue: string }>
   durableObjects: Record<string, { className: string; useSQLite: true; unsafeUniqueKey: string }>
   hyperdrives?: Record<string, string>
 }
@@ -127,19 +147,40 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
     }
   }
 
+  // Both null when there is nothing for the producer shim to reach: an empty
+  // wrappedBindings target is dead weight, and a minted token nobody can use
+  // is one more thing that could leak for no reason.
+  const hasProducers = config.queues.producers.length > 0
+
   const manifest: RunnerManifest = {
     port: CONTAINER_PORT,
+    controlPort: config.controlPort,
     compatibilityDate: config.compatibilityDate,
     compatibilityFlags: config.compatibilityFlags,
     vars: config.vars,
     kvNamespaces: config.kvNamespaces,
     r2Buckets: config.r2Buckets,
     d1Databases: config.d1Databases,
-    // Miniflare's manifest still wants names, not the richer wrangler
-    // shapes: what to hand it beyond the name is a later task's change, not
-    // this one's.
-    queueProducers: config.queues.producers.map((producer) => producer.queue),
-    queueConsumers: config.queues.consumers.map((consumer) => consumer.queue),
+    // ALWAYS []. See RunnerManifest's own comment: Miniflare's queue plugin
+    // is never wired up, on purpose (ADR 0013).
+    queueProducers: [],
+    queueConsumers: [],
+    // host.docker.internal reaches the host's loopback from inside the
+    // container (verified against a running Miniflare on 2026-08-13,
+    // docs/queues/research/2026-08-13-wrapped-bindings-spike.md). The
+    // daemon's own enqueue listener is a later task; this is the URL a
+    // future one binds to. queuePort is optional on HobbyConfig (so existing
+    // fixtures elsewhere do not need touching); 7434 matches
+    // DEFAULT_CONFIG.queuePort in packages/core/src/config.ts.
+    queueEndpoint: hasProducers ? `http://host.docker.internal:${deps.config.queuePort ?? 7434}/enqueue` : null,
+    // Minted from the resource's own id rather than stored: WorkerConfig
+    // carries no token field, and the id is already a unique, unguessable
+    // (randomUUID), already-persisted value that survives rename and
+    // redeploy, which is everything a bearer credential needs here given
+    // this project's own threat model (root CLAUDE.md: no multi-tenancy, no
+    // isolation hardening, single owner).
+    queueToken: hasProducers ? resource.id : null,
+    queueBindings: config.queues.producers.map((producer) => ({ binding: producer.binding, queue: producer.queue })),
     durableObjects,
   }
 
@@ -164,7 +205,14 @@ function containerSpec(deps: WorkerDeps, resource: WorkerResource, project: Proj
     env: {
       HOBBY_WORKER_MANIFEST: JSON.stringify(buildRunnerManifest(deps, resource)),
     },
-    ports: [{ host: config.hostPort, container: CONTAINER_PORT }],
+    ports: [
+      { host: config.hostPort, container: CONTAINER_PORT },
+      // The control channel: a second published port, loopback only (bind
+      // defaults to DEFAULT_PORT_BIND, same as the port above), so the
+      // daemon can deliver queue batches without anything of ours sitting in
+      // front of the worker on its own request path.
+      { host: config.controlPort, container: CONTAINER_CONTROL_PORT },
+    ],
     binds: [
       { host: deps.paths.resourcePath(project.name, resource.name, 'state'), container: CONTAINER_STATE },
       // The directory the daemon's alarm mirror scans read-only to recover
@@ -292,6 +340,9 @@ export async function createWorkerResource(
   const manifest = found.manifest
 
   const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
+  // Excludes hostPort: both come from the store before this resource has a
+  // row, so the store cannot yet see hostPort's own answer to skip it.
+  const controlPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO, [hostPort])
   const containerName = `hobby-${opts.project.name}-${opts.name}`
 
   const dockerfilePath = await writeGeneratedDockerfile(deps, opts.project.name, opts.name, manifest)
@@ -308,6 +359,7 @@ export async function createWorkerResource(
     image: tag,
     containerName,
     hostPort,
+    controlPort,
     containerPort: CONTAINER_PORT,
     hostname: workerHostname(opts.project.name, opts.name, deps.config.domain),
     source: { path: opts.sourcePath, manifest: found.file },

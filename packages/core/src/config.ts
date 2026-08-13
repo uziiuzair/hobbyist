@@ -88,6 +88,17 @@ export interface HobbyConfig {
   sleepAfterSeconds: number | null
   wakeTimeoutMs: number
   readinessPollMs: number
+  // Where the daemon's queue enqueue listener answers `POST /enqueue`.
+  // Separate from apiPort: a compromised container should be able to reach
+  // only this endpoint, with its own per-resource token, not the operator
+  // control surface. See docs/queues/specs/2026-08-13-queues-design.md,
+  // "Daemon API, two listeners". The listener itself is a later task; this
+  // package only needs the number, to build the URL a worker's producer
+  // binding is given. Optional (unlike the ports above) so every existing
+  // hand-built HobbyConfig fixture across the repo, most of them owned by
+  // other work, does not have to be touched to add a field it does not care
+  // about; DEFAULT_CONFIG still supplies it for real use.
+  queuePort?: number
 }
 
 const DEFAULT_CONFIG: HobbyConfig = {
@@ -100,6 +111,7 @@ const DEFAULT_CONFIG: HobbyConfig = {
   sleepAfterSeconds: 300,
   wakeTimeoutMs: 30000,
   readinessPollMs: 25,
+  queuePort: 7434,
 }
 
 function findConfigFile(cwd: string): string | null {
@@ -136,6 +148,9 @@ function readEnvConfig(env: NodeJS.ProcessEnv): Partial<HobbyConfig> {
   }
   if (env.HOBBY_READINESS_POLL_MS !== undefined) {
     config.readinessPollMs = Number(env.HOBBY_READINESS_POLL_MS)
+  }
+  if (env.HOBBY_QUEUE_PORT !== undefined) {
+    config.queuePort = Number(env.HOBBY_QUEUE_PORT)
   }
   return config
 }

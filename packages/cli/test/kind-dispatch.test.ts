@@ -306,6 +306,7 @@ test('a worker vars value never crosses the wire boundary', async () => {
     image: 'hobby/workerd:1',
     containerName: 'hobby-blog-api',
     hostPort: 15600,
+    controlPort: 15601,
     containerPort: 8787,
     hostname: 'api.blog.localhost',
     source: { path: '/src/api', manifest: 'wrangler.toml' },
