@@ -1,10 +1,17 @@
-// One guard, called wherever a stored worker config is read back out of the
-// store. See the spec's "Migration: none, deliberately": there are zero
-// worker rows in existence, both kinds are days old and unreleased, so a
-// normaliser would be carried for rows that do not exist. A loud failure is
-// the honest alternative to a silent `undefined`, because store.ts:122
-// parses the config column with an unchecked cast and would otherwise let a
-// legacy row travel a long way before breaking.
+// One guard, wired into buildRunnerManifest (packages/worker/src/worker.ts),
+// which sits on two paths: container start, via containerSpec, and eject,
+// via packages/cli/src/daemon/routes.ts's renderCompose. It does NOT run on
+// every read of a stored worker config. Two production reads of
+// `config.manifest` are still unguarded: packages/cli/src/daemon/wire.ts's
+// redactConfig, reached by every `hobby ls`, resource GET, Studio call and
+// MCP call, and this package's deployWorker redeploy fallback
+// (packages/worker/src/worker.ts). See the spec's "Migration: none,
+// deliberately": there are zero worker rows in existence anywhere, both
+// kinds are days old and unreleased, which is the same fact those two
+// unguarded reads currently lean on instead of a normaliser or this guard.
+// A loud failure here is the honest alternative to a silent `undefined`,
+// because store.ts:122 parses the config column with an unchecked cast and
+// would otherwise let a legacy row travel a long way before breaking.
 
 import { HobbyError, type WorkerConfig } from '@hobby.sh/core'
 

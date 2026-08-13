@@ -126,8 +126,14 @@ tried to read `manifest.source`.
 No normaliser was written. `hobby ls` on the author's own box shows six
 postgres resources and nothing else; both `app` and `worker` were three days
 old and unreleased at the time this shipped. `packages/worker/src/assert-config.ts`'s
-`assertWorkerConfig` (`:11-20`) instead asserts the shape on every read and
-fails loudly:
+`assertWorkerConfig` (`:11-20`) is wired into `buildRunnerManifest`
+(`packages/worker/src/worker.ts`), which covers container start and eject,
+not every read. `packages/cli/src/daemon/wire.ts`'s `redactConfig` and
+`deployWorker`'s redeploy fallback (`packages/worker/src/worker.ts`) both
+still dereference `config.manifest` unguarded. That gap is acceptable only
+because it rests on the same fact the no-migration decision below rests on:
+zero legacy worker rows exist anywhere. Where the guard does run, it fails
+loudly:
 
 > this worker row predates the manifest split and cannot be read
 
