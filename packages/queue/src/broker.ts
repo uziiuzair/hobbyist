@@ -242,7 +242,8 @@ export function applyResult(
   leaseId: string,
   result: DeliveryResult,
   opts: ConsumerOptions,
-  nowMs: number
+  nowMs: number,
+  onDeadLetter?: (message: LeasedMessage) => void
 ): ApplyOutcome {
   const rows = db
     .prepare(
@@ -271,32 +272,54 @@ export function applyResult(
   let retried = 0
   const deadLettered: LeasedMessage[] = []
 
-  for (const row of rows) {
-    const isRetry = retryAll || perMessage.has(row.id)
-    if (!isRetry) {
-      remove.run(row.id)
-      acked += 1
-      continue
-    }
+  // Wrap writes in an explicit transaction. This covers only this database:
+  // the dead letter queue is separate and cannot join this transaction, so
+  // finding 2's fix is the ordering below (callback before delete), not the
+  // transaction.
+  db.exec('BEGIN')
+  try {
+    for (const row of rows) {
+      const isRetry = retryAll || perMessage.has(row.id)
+      if (!isRetry) {
+        remove.run(row.id)
+        acked += 1
+        continue
+      }
 
-    // attempts was incremented at lease time, so it already counts the
-    // delivery that just failed.
-    if (row.attempts > opts.maxRetries) {
-      deadLettered.push({
-        id: row.id,
-        body: row.body,
-        contentType: row.content_type as ContentType,
-        timestampMs: row.timestamp,
-        attempts: row.attempts,
-      })
-      remove.run(row.id)
-      continue
-    }
+      // attempts was incremented at lease time, so it already counts the
+      // delivery that just failed.
+      if (row.attempts > opts.maxRetries) {
+        const message: LeasedMessage = {
+          id: row.id,
+          body: row.body,
+          contentType: row.content_type as ContentType,
+          timestampMs: row.timestamp,
+          attempts: row.attempts,
+        }
+        deadLettered.push(message)
+        // Call the callback before deleting, inside the transaction. The dead
+        // letter queue is a different database and cannot join this
+        // transaction, so the ordering is the guarantee: writing to the dead
+        // letter queue before deleting from here turns a possible loss into a
+        // possible duplicate. At-least-once delivery is already this queue's
+        // contract (Cloudflare's too), so a duplicate is acceptable and a loss
+        // is not.
+        if (onDeadLetter) {
+          onDeadLetter(message)
+        }
+        remove.run(row.id)
+        continue
+      }
 
-    const delaySeconds =
-      perMessage.get(row.id) ?? result.retryBatch.delaySeconds ?? opts.retryDelaySeconds
-    requeue.run(nowMs + delaySeconds * 1000, row.id)
-    retried += 1
+      const delaySeconds =
+        perMessage.get(row.id) ?? result.retryBatch.delaySeconds ?? opts.retryDelaySeconds
+      requeue.run(nowMs + delaySeconds * 1000, row.id)
+      retried += 1
+    }
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
   }
 
   return { acked, retried, deadLettered }
