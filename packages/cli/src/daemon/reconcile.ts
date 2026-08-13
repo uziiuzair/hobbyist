@@ -223,6 +223,14 @@ export async function reconcile(ctx: DaemonContext, opts: ReconcileOptions = {})
       continue
     }
 
+    // A queue has no container, so there is no observed reality here to
+    // reconcile its recorded state against: runtime.inspect would be asked
+    // about a containerName that was never created, read that as `missing`,
+    // and relabel a healthy queue `failed` on every daemon start.
+    if (resource.kind === 'queue') {
+      continue
+    }
+
     // Released projects are skipped whole. Reconcile's job is to make the
     // world match the store, and for a released project the world is
     // deliberately not hobby's any more: the container it would find running

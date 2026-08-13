@@ -19,6 +19,7 @@
     "@hobby.sh/core": "*",
     "@hobby.sh/pg": "*",
     "@hobby.sh/proxy": "*",
+    "@hobby.sh/queue": "*",
     "@hobby.sh/worker": "*",
     "argon2": "^0.45.1",
     "@hobby.sh/do": "*"
