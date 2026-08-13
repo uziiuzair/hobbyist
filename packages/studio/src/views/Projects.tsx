@@ -4,6 +4,7 @@ import * as api from '../api.js'
 import { navigate } from '../lib/router.js'
 import { formatBytes, formatSince, readStats } from '../lib/format.js'
 import { State, summarise } from '../components/State.js'
+import { MachineStrip } from '../components/MachineStrip.js'
 import { SpotCrate } from '../components/Spot.js'
 import { Modal } from '../components/Modal.js'
 import type { RailProject } from '../components/Shell.js'
@@ -43,6 +44,7 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
 
   return (
     <div className="page measure">
+      <MachineStrip awake={totals.awake} total={totals.databases} freeBytes={freeBytes} />
       <div className="page-head">
         <div>
           <h1 className="page-title">Projects</h1>
@@ -138,7 +140,7 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
                   .sort()
                   .pop()
                 return (
-                  <a className="card" key={row.project.id} href={`#/projects/${encodeURIComponent(row.project.name)}`}>
+                  <a className={summary.state === 'running' ? 'card is-awake' : 'card'} key={row.project.id} href={`#/projects/${encodeURIComponent(row.project.name)}`}>
                     <div className="card-body">
                       {/* The project name is data, not chrome: validateName in core
                           enforces lowercase, so it is shown exactly as it is stored. */}
