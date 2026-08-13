@@ -301,6 +301,33 @@ export function createHttpProxyDeps(ctx: DaemonContext): HttpProxyDeps {
       return null
     }
 
+    // Same shape as the released-project refusal just above: thrown, not
+    // returned as null. Returning null renders 404 "nothing is deployed at
+    // this hostname" (packages/proxy/src/http.ts:242), which is false here.
+    // Something IS at this hostname: a row exists, it was created
+    // deliberately (Task 4's createAppResource / createWorkerResource), and
+    // it owns the name. Throwing renders 503 with this message
+    // (packages/proxy/src/http.ts:246), and leaves allowHostname's catch
+    // below free to still return true so a certificate can be issued before
+    // any code ships.
+    //
+    // The whole sentence, command included, lives in the message argument
+    // because resolveAndWake reads err.message alone
+    // (packages/proxy/src/http.ts:174); hint is for API callers that read
+    // HobbyError.toWire() (packages/core/src/errors.ts:59-66) rather than a
+    // browser body. The command shape matches deployApp's identical usage
+    // error (packages/app/src/app.ts:434-438) and deployWorker's
+    // (packages/worker/src/worker.ts:545-549), so the proxy and the CLI
+    // never disagree about how to fix this.
+    if (resource.state === 'undeployed') {
+      const command = `hobby deploy <path> --project ${project.name} --name ${resource.name}`
+      throw new HobbyError(
+        'conflict',
+        `${hostname} has no code deployed yet, run \`${command}\` from the directory holding its code`,
+        `run \`${command}\` from the directory holding its code`
+      )
+    }
+
     return {
       resourceId: resource.id,
       host: '127.0.0.1',
