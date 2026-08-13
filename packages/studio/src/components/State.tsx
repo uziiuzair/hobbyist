@@ -19,6 +19,10 @@ const LABELS: Record<string, string> = {
   stopping: 'Stopping',
   failed: 'Failed',
   destroying: 'Removing',
+  // Resting, not transitional: the record exists and no code has been
+  // uploaded yet. Rendered without chroma, like sleeping, because a resource
+  // waiting for its first deploy is not a problem.
+  undeployed: 'Not deployed',
 }
 
 const CLASSES: Record<string, string> = {
@@ -29,6 +33,15 @@ const CLASSES: Record<string, string> = {
   stopping: 'state-waking',
   failed: 'state-failed',
   destroying: 'state-waking',
+  undeployed: 'state-undeployed',
+}
+
+export function stateClass(state: string): string {
+  return CLASSES[state] ?? 'state-sleeping'
+}
+
+export function stateLabel(state: string): string {
+  return LABELS[state] ?? state
 }
 
 export function State({ state, label }: { state: ResourceState | string; label?: string }) {
@@ -43,11 +56,16 @@ export function State({ state, label }: { state: ResourceState | string; label?:
 }
 
 export function summarise(states: string[]): { state: string; label: string } {
-  if (states.length === 0) return { state: 'sleeping', label: 'No databases' }
+  if (states.length === 0) return { state: 'sleeping', label: 'No services' }
   if (states.some((s) => s === 'failed')) return { state: 'failed', label: 'Failed' }
   if (states.some((s) => s === 'starting' || s === 'creating')) return { state: 'starting', label: 'Waking' }
   const awake = states.filter((s) => s === 'running').length
-  if (awake === 0) return { state: 'sleeping', label: 'Sleeping' }
+  if (awake === 0) {
+    // A project whose every service is waiting for its first deploy is not
+    // asleep: saying "Sleeping" about code that never arrived would be a lie.
+    if (states.every((s) => s === 'undeployed')) return { state: 'undeployed', label: 'Not deployed' }
+    return { state: 'sleeping', label: 'Sleeping' }
+  }
   if (awake === states.length) return { state: 'running', label: 'Awake' }
   return { state: 'running', label: `${awake} of ${states.length} awake` }
 }

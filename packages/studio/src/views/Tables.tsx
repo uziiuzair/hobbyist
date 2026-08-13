@@ -5,6 +5,7 @@ import { useResource } from '../lib/useResource.js'
 import { useWakeAwareRun } from '../lib/useWaking.js'
 import { WakingBanner } from '../components/WakingBanner.js'
 import { Workbench } from '../components/Workbench.js'
+import { SpotRows } from '../components/Spot.js'
 import { quoteIdentifier } from '../lib/identifiers.js'
 import { loadSchema, type TableInfo } from '../lib/schema.js'
 
@@ -210,7 +211,11 @@ export function Tables({
       <WakingBanner resourceName={resourceName} snapshot={snapshot} />
       {schemaError !== null && <div className="notice notice-danger">{schemaError}</div>}
           {active === undefined ? (
-            <div className="empty"><h3>Pick a table</h3><p>Choose a table on the left to browse its rows.</p></div>
+            <div className="empty">
+              <SpotRows />
+              <h3>Pick a table</h3>
+              <p>Choose a table on the left to browse its rows.</p>
+            </div>
           ) : (
             <>
               <div className="grid-toolbar">

@@ -5,6 +5,7 @@ import { useWakeAwareRun } from '../lib/useWaking.js'
 import { WakingBanner } from '../components/WakingBanner.js'
 import { Workbench } from '../components/Workbench.js'
 import { State } from '../components/State.js'
+import { SpotColumns } from '../components/Spot.js'
 import { loadSchema, columnModifiers, tableDdl, type ColumnInfo, type TableInfo } from '../lib/schema.js'
 
 // Read only, deliberately: root CLAUDE.md and docs/studio/CLAUDE.md both
@@ -136,6 +137,7 @@ export function Schema({
           <span className="dim">Reading the schema</span>
         ) : active === undefined ? (
           <div className="empty">
+            <SpotColumns />
             <h3>Nothing to describe yet</h3>
             <p>This database has no tables in the public schema. Create one from the SQL editor and it appears here.</p>
           </div>
