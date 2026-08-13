@@ -271,8 +271,17 @@ input, textarea { caret-color: var(--accent); }
   color: var(--ink);
   font-weight: 600;
 }
-.rail-link[aria-current="page"] svg { color: var(--accent); opacity: 1; }
 .rail-link svg { flex: none; opacity: 0.75; }
+.rail-link[aria-current="page"] svg { opacity: 1; }
+
+/* Kind identity in the rail: sage databases, iris apps, honey workers, at
+   rest opacity so the tree stays quiet until you read it. The active row's
+   mark is its fill and weight, never a recolored icon: kind hue survives
+   selection. */
+.ic-sage { color: var(--sage); }
+.ic-iris { color: var(--iris); }
+.ic-honey { color: var(--honey-t); }
+.rail-link:hover svg { opacity: 1; }
 .rail-link .count { margin-left: auto; color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
 
 /* A row is a destination and a fold sitting together. The label owns the
