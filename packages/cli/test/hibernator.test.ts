@@ -52,6 +52,9 @@ function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
     // fast rather than three-minutes-slow. Same pattern as task-4's tests.
     wakeTimeoutMs: 150,
     readinessPollMs: 20,
+    caddyEnabled: false,
+    caddyAdminPort: 2019,
+    caddyStudioHost: null,
     ...overrides,
   }
 }

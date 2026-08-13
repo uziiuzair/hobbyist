@@ -88,6 +88,9 @@ function testConfig(): HobbyConfig {
     sleepAfterSeconds: 300,
     wakeTimeoutMs: 100,
     readinessPollMs: 10,
+    caddyEnabled: false,
+    caddyAdminPort: 2019,
+    caddyStudioHost: null,
   }
 }
 

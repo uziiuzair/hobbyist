@@ -87,6 +87,23 @@ export interface HobbyConfig {
   sleepAfterSeconds: number | null
   wakeTimeoutMs: number
   readinessPollMs: number
+  // The HTTP front door (ADR 0009), opt-in and off by default. Starting it
+  // binds :80 and :443 on the operator's box, which is a surprising side
+  // effect for a daemon restart, and packages/cli/src/daemon/caddy.ts's own
+  // warnOnFirstExposure says plainly that the auth surface behind it has
+  // not been reviewed against a live host. See the spec's Decision 1.
+  //
+  // Deliberately named `caddy` rather than `ingress`: a parallel session
+  // owns the ingress-mode taxonomy (decision
+  // hobbyist.ingress-two-lanes-tailscale-byo, ADR 0015 pending), and this
+  // implements exactly one of its two lanes. Squatting `ingress` from here
+  // would make their ADR undo a name before defining one.
+  caddyEnabled: boolean
+  caddyAdminPort: number
+  // Null means no Studio route is published and Caddy serves only the
+  // catch-all, which is correct for a box that runs apps and does not
+  // want its control plane on the network.
+  caddyStudioHost: string | null
 }
 
 const DEFAULT_CONFIG: HobbyConfig = {
@@ -99,6 +116,9 @@ const DEFAULT_CONFIG: HobbyConfig = {
   sleepAfterSeconds: 300,
   wakeTimeoutMs: 30000,
   readinessPollMs: 25,
+  caddyEnabled: false,
+  caddyAdminPort: 2019,
+  caddyStudioHost: null,
 }
 
 function findConfigFile(cwd: string): string | null {
@@ -135,6 +155,22 @@ function readEnvConfig(env: NodeJS.ProcessEnv): Partial<HobbyConfig> {
   }
   if (env.HOBBY_READINESS_POLL_MS !== undefined) {
     config.readinessPollMs = Number(env.HOBBY_READINESS_POLL_MS)
+  }
+  // Fail closed: only the two conventional truthy spellings turn this on.
+  // Everything else, including a typo like 'tru' or 'yes', is treated as
+  // false rather than coerced with a bare Boolean(...), which would treat
+  // any non-empty string ('0', 'false', 'off') as true. Starting Caddy binds
+  // :80 and :443 on the operator's box (see HobbyConfig.caddyEnabled), so an
+  // unrecognized value should not enable it.
+  if (env.HOBBY_CADDY_ENABLED !== undefined) {
+    const value = env.HOBBY_CADDY_ENABLED.toLowerCase()
+    config.caddyEnabled = value === '1' || value === 'true'
+  }
+  if (env.HOBBY_CADDY_ADMIN_PORT !== undefined) {
+    config.caddyAdminPort = Number(env.HOBBY_CADDY_ADMIN_PORT)
+  }
+  if (env.HOBBY_CADDY_STUDIO_HOST !== undefined) {
+    config.caddyStudioHost = env.HOBBY_CADDY_STUDIO_HOST
   }
   return config
 }
