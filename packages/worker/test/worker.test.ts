@@ -479,8 +479,47 @@ test('the runner manifest carries the control port and the queue endpoint', asyn
   const manifest = buildRunnerManifest(deps, result.resource)
   assert.equal(manifest.controlPort, result.resource.config.controlPort)
   assert.equal(manifest.queueEndpoint, 'http://host.docker.internal:7434/enqueue')
-  assert.equal(manifest.queueToken, result.resource.id)
+  // The token comes from config, generated once at creation, NOT from
+  // resource.id: the id is published by every daemon route that lists or
+  // reads a resource (see the wire.ts redaction test), so using it as a
+  // bearer credential would defeat the scoping the token exists to provide.
+  assert.equal(manifest.queueToken, result.resource.config.queueToken)
+  assert.notEqual(manifest.queueToken, result.resource.id)
+  assert.ok(manifest.queueToken !== null && manifest.queueToken.length > 0)
   assert.deepEqual(manifest.queueBindings, [{ binding: 'JOBS', queue: 'jobs' }])
+})
+
+// A resource created before queueToken existed has none: the stored JSON
+// simply lacks the key. startWorker backfills it once rather than leaving a
+// producer silently disabled until a redeploy.
+test('a worker with no stored queueToken gets one backfilled on start, and never "undefined"', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const result = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(),
+    databaseResourceId: null,
+  })
+
+  // Simulate a resource created before this field existed: strip it from
+  // the stored config directly, bypassing the type.
+  const stale = { ...result.resource.config } as Record<string, unknown>
+  delete stale['queueToken']
+  deps.store.updateResourceConfig(result.resource.id, stale as never)
+  const before = deps.store.getResource(result.resource.id)
+  assert.ok(before !== null && before.kind === 'worker')
+  assert.equal(before.config.queueToken, undefined)
+
+  await startWorker(deps, before)
+
+  const after = deps.store.getResource(result.resource.id)
+  assert.ok(after !== null && after.kind === 'worker')
+  assert.equal(typeof after.config.queueToken, 'string')
+  assert.ok(after.config.queueToken.length > 0)
+
+  const manifest = buildRunnerManifest(deps, after)
+  assert.equal(manifest.queueToken, after.config.queueToken)
 })
 
 // The whole point of ADR 0013: Miniflare's own queue broker keeps its

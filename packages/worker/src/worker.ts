@@ -9,6 +9,7 @@
 // isolate start. The sub-5ms isolate figure that makes Workers famous applies
 // only once this container is already up.
 
+import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
@@ -149,8 +150,14 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
 
   // Both null when there is nothing for the producer shim to reach: an empty
   // wrappedBindings target is dead weight, and a minted token nobody can use
-  // is one more thing that could leak for no reason.
-  const hasProducers = config.queues.producers.length > 0
+  // is one more thing that could leak for no reason. Also gated on a real
+  // token being present, not just producers being declared: a resource
+  // created before queueToken existed reads back as undefined rather than
+  // "", and this is what stops that from becoming the literal string
+  // "undefined" wherever the runner concatenates it into a header. In
+  // practice startWorker backfills the token before this ever runs, so the
+  // gate is a belt-and-suspenders check, not the primary fix.
+  const hasProducers = config.queues.producers.length > 0 && typeof config.queueToken === 'string' && config.queueToken.length > 0
 
   const manifest: RunnerManifest = {
     port: CONTAINER_PORT,
@@ -173,13 +180,13 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
     // fixtures elsewhere do not need touching); 7434 matches
     // DEFAULT_CONFIG.queuePort in packages/core/src/config.ts.
     queueEndpoint: hasProducers ? `http://host.docker.internal:${deps.config.queuePort ?? 7434}/enqueue` : null,
-    // Minted from the resource's own id rather than stored: WorkerConfig
-    // carries no token field, and the id is already a unique, unguessable
-    // (randomUUID), already-persisted value that survives rename and
-    // redeploy, which is everything a bearer credential needs here given
-    // this project's own threat model (root CLAUDE.md: no multi-tenancy, no
-    // isolation hardening, single owner).
-    queueToken: hasProducers ? resource.id : null,
+    // config.queueToken, never resource.id: the id is returned by every
+    // daemon route that lists or reads a resource (WireResource in
+    // packages/cli/src/daemon/wire.ts is the whole resource), so using it as
+    // a bearer credential would mean the token is published everywhere the
+    // id already is, which defeats the scoping ADR 0013 introduced the token
+    // for. See the comment on WorkerConfig.queueToken.
+    queueToken: hasProducers ? config.queueToken : null,
     queueBindings: config.queues.producers.map((producer) => ({ binding: producer.binding, queue: producer.queue })),
     durableObjects,
   }
@@ -360,6 +367,11 @@ export async function createWorkerResource(
     containerName,
     hostPort,
     controlPort,
+    // Generated once here, unlike durableObjectUniqueKeyModifier below: it
+    // does not need the resource's own id (the store has not assigned one
+    // yet), so there is no placeholder-then-rewrite step for it to go
+    // through.
+    queueToken: randomUUID(),
     containerPort: CONTAINER_PORT,
     hostname: workerHostname(opts.project.name, opts.name, deps.config.domain),
     source: { path: opts.sourcePath, manifest: found.file },
@@ -415,6 +427,24 @@ export async function startWorker(deps: WorkerDeps, resource: WorkerResource): P
   const project = deps.store.getProject(resource.projectId)
   if (project === null) {
     throw new HobbyError('internal', `worker ${resource.id} has no owning project`)
+  }
+
+  // A worker created before queueToken existed has none: the stored JSON
+  // simply lacks the key, so it reads back as undefined despite the type
+  // saying string. Backfilled here, once, rather than left broken until a
+  // redeploy: without this, buildRunnerManifest's own guard would treat the
+  // worker as having no usable producer at all, silently disabling a
+  // binding that used to work. Persisted immediately so this only ever runs
+  // once per resource, matching durableObjectUniqueKeyModifier's own
+  // never-regenerate reasoning: a producer holding the old value across a
+  // wake should not find it rotated out from under it later.
+  if (!resource.config.queueToken) {
+    deps.store.updateResourceConfig(resource.id, { ...resource.config, queueToken: randomUUID() })
+    const backfilled = deps.store.getResource(resource.id)
+    if (backfilled === null || backfilled.kind !== 'worker') {
+      throw new HobbyError('internal', `worker ${resource.id} vanished while backfilling its queue token`)
+    }
+    resource = backfilled
   }
 
   deps.store.setResourceState(resource.id, 'starting')

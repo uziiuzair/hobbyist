@@ -90,6 +90,16 @@ export interface WorkerConfig extends ResourceConfigBase {
   // see docs/queues/specs/2026-08-13-queues-design.md, "Delivery over a
   // second port, not a proxy".
   controlPort: number
+  // The bearer token a container's producer shim sends to the daemon's
+  // enqueue listener. Generated once with randomUUID() at resource creation
+  // and never regenerated: the reasoning is the same as
+  // durableObjectUniqueKeyModifier's below, for a different failure mode. A
+  // rotated token is fine (every running container gets restarted with the
+  // new one); an ACCIDENTALLY regenerated one is not, because it would
+  // silently break a producer that is still holding the old value. Must
+  // never be handed out over the wire boundary unredacted: see
+  // packages/cli/src/daemon/wire.ts's redactConfig.
+  queueToken: string
   hostname: string
   // The directory holding the user's wrangler manifest and entry script,
   // and the name of the manifest file we actually read from it.

@@ -27,6 +27,7 @@ function sampleWorkerConfig(ports: { hostPort: number; controlPort: number }): W
     containerName: 'hobby-blog-api',
     hostPort: ports.hostPort,
     controlPort: ports.controlPort,
+    queueToken: 'test-queue-token',
     containerPort: 8787,
     hostname: 'api.blog.localhost',
     source: { path: '/src', manifest: 'wrangler.toml' },

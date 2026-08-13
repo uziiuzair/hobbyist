@@ -66,6 +66,7 @@ function workerConfig(): WorkerConfig {
     containerName: 'hobby-chat-api',
     hostPort: 35433,
     controlPort: 35434,
+    queueToken: 'test-queue-token',
     containerPort: 8787,
     hostname: 'api.chat.localhost',
     source: { path: '/code/api', manifest: 'wrangler.toml' },

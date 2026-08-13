@@ -100,6 +100,7 @@ function seed(ctx: DaemonContext): { dbName: string; appName: string } {
     containerName: 'hobby-blog-api',
     hostPort: 35433,
     controlPort: 35434,
+    queueToken: 'test-queue-token',
     containerPort: 8787,
     hostname: 'api.blog.localhost',
     source: { path: '/home/user/code/blog-api', manifest: 'wrangler.toml' },
