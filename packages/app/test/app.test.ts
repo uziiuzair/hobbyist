@@ -425,6 +425,34 @@ test('a failed first deploy returns the resource to undeployed, not failed', asy
   assert.equal(deps.store.getResource(created.id)?.state, 'undeployed')
 })
 
+// I4: unlike the build-failure test above, this fails AFTER the container was
+// created and started (the build succeeds, replaceContainer and
+// runtime.start both succeed, only the readiness probe fails), which is the
+// shape that used to leak a container nothing would ever stop: rolling
+// `state` back to `undeployed` hides it from reconcile.ts (skipReconcile)
+// and from the hibernator (its `state !== 'running'` gate), so a container
+// left running here would run forever.
+test('a failed first deploy on the readiness probe leaves no running container', async () => {
+  const deps = buildDeps({ appProbeFactory: () => async () => false })
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const created = await createAppResource(deps, {
+    project,
+    name: 'site',
+    source: null,
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+
+  await assert.rejects(() => deployApp(deps, created, { source: sourceDir() }), /did not start listening/)
+
+  assert.equal(deps.store.getResource(created.id)?.state, 'undeployed')
+  const status = await runtime.inspect(created.config.containerName)
+  assert.equal(status.exists, false)
+})
+
 test('a failed redeploy of a working app leaves it failed, because it does have code', async () => {
   const deps = buildDeps()
   const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>

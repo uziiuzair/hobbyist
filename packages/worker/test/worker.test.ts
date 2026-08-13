@@ -18,6 +18,8 @@ import {
   type PostgresConfig,
   type Project,
   type Store,
+  type WorkerConfig,
+  type WorkerResource,
 } from '@hobby.sh/core'
 import {
   describeIgnored,
@@ -355,6 +357,72 @@ test('a failed first deploy on a worker returns it to undeployed, not failed', a
   )
 
   assert.equal(deps.store.getResource(created.resource.id)?.state, 'undeployed')
+})
+
+// I4: unlike the build-failure test above, this fails AFTER startWorker
+// already created and started a real container (the build and the replace
+// both succeed, only the readiness probe fails), which is the shape that
+// used to leak a container nothing would ever stop: rolling `state` back to
+// `undeployed` hides it from reconcile.ts (skipReconcile) and from the
+// hibernator (its `state !== 'running'` gate), so a container left running
+// here would run forever. Same shape as deployApp's equivalent test in
+// packages/app/test/app.test.ts.
+test('a failed first deploy on the readiness probe leaves no running container', async () => {
+  const deps = buildDeps({ workerProbeFactory: () => async () => false })
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: null,
+    databaseResourceId: null,
+  })
+
+  await assert.rejects(
+    () => deployWorker(deps, created.resource, { sourcePath: workerSource() }),
+    /did not start serving/
+  )
+
+  assert.equal(deps.store.getResource(created.resource.id)?.state, 'undeployed')
+  const status = await runtime.inspect(created.resource.config.containerName)
+  assert.equal(status.exists, false)
+})
+
+// I5: assertWorkerConfig had no production call site despite its own file
+// comment and ADR 0014 both claiming it runs on every read of a stored
+// worker config. buildRunnerManifest is where it is now wired in, since that
+// is the one function both the start path (containerSpec) and the eject path
+// (routes.ts's renderCompose) flow through to actually dereference
+// config.manifest. Constructs the legacy row the same way
+// unique-key-stability.test.ts already does for assertWorkerConfig directly:
+// a config missing the `manifest` key entirely, which is the shape a
+// pre-split row parses into through store.ts's unchecked cast, and which the
+// `config.manifest === null` check just below assertWorkerConfig cannot
+// catch on its own since `undefined !== null`.
+test('buildRunnerManifest rejects a worker row that predates the manifest split', () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const legacyConfig = {
+    image: 'hobby-blog-legacy:old',
+    containerName: 'hobby-blog-legacy',
+    hostPort: 35500,
+    containerPort: 8787,
+    hostname: 'legacy.blog.hobby.local',
+    durableObjectUniqueKeyModifier: 'legacy-id',
+    databaseResourceId: null,
+  } as unknown as WorkerConfig
+  const legacyResource = {
+    id: 'legacy-id',
+    projectId: project.id,
+    kind: 'worker',
+    name: 'legacy',
+    state: 'sleeping',
+    config: legacyConfig,
+    lastActiveAt: null,
+    createdAt: new Date(),
+  } as unknown as WorkerResource
+
+  assert.throws(() => buildRunnerManifest(deps, legacyResource), /predates the manifest split/)
 })
 
 test('a bound database becomes a hyperdrive binding against the container name', async () => {
