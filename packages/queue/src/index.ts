@@ -10,4 +10,12 @@ export {
   enqueue,
   type ContentType,
   type EnqueueInput,
+  DEFAULT_CONSUMER_OPTIONS,
+  LEASE_MS,
+  hasOutstandingLease,
+  isBatchReady,
+  leaseBatch,
+  type ConsumerOptions,
+  type LeasedBatch,
+  type LeasedMessage,
 } from './broker.js'
