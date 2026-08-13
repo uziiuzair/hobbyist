@@ -291,6 +291,11 @@ test('deploy rebuilds, replaces the container, and keeps the previous image on d
     databaseResourceId: null,
   })
   const firstImage = app.config.image
+  // Built from a source, so createAppResource must have produced a real
+  // image by the time it returned; narrowed rather than asserted away so a
+  // regression that leaves it null fails this test loudly instead of at the
+  // Set lookup below.
+  assert.ok(firstImage !== null)
 
   // A later clock so the new tag differs from the first.
   deps.now = () => 1_754_870_500_000
@@ -335,6 +340,9 @@ test('destroy removes the container and only an image we built', async () => {
     databaseResourceId: null,
   })
   const builtImage = built.config.image
+  // Built from a source, so createAppResource must have produced a real
+  // image by the time it returned.
+  assert.ok(builtImage !== null)
   await destroyApp(deps, built)
   assert.equal(runtime._images.has(builtImage), false, 'an image we built goes with the resource')
   assert.equal((await runtime.inspect(built.config.containerName)).exists, false)

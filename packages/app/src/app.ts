@@ -95,6 +95,13 @@ function resolveDatabaseUrl(deps: AppDeps, databaseResourceId: ResourceId | null
 // a container's environment at create time. The container itself is recreated
 // whenever this changes, see ensureContainer below.
 function containerSpec(deps: AppDeps, config: AppConfig, network: string): ContainerSpec {
+  if (config.image === null) {
+    throw new HobbyError(
+      'internal',
+      `resource ${config.containerName} has no image, so there is nothing to start`,
+      'this is a bug: a resource with no image should be in state undeployed and should never reach a start path'
+    )
+  }
   const databaseUrl = resolveDatabaseUrl(deps, config.databaseResourceId)
   return {
     name: config.containerName,
@@ -189,9 +196,20 @@ export async function createAppResource(deps: AppDeps, opts: CreateAppOptions): 
     })
     image = built.tag
   }
+  // The xor check above guarantees one of opts.source/opts.image was set:
+  // if source was given, the build above just set image; otherwise
+  // opts.image was already required non-null. The compiler cannot see
+  // across that branch, so this is a real check, not a formality.
+  if (image === null) {
+    throw new HobbyError(
+      'internal',
+      `app ${opts.name} has no image after resolving source and image options`,
+      'this is a bug: createAppResource validates exactly one of source or image is provided, and should have produced one by this point'
+    )
+  }
 
   const config: AppConfig = {
-    image: image as string,
+    image,
     containerName,
     hostPort,
     containerPort: opts.containerPort,
@@ -315,10 +333,13 @@ export async function destroyApp(deps: AppDeps, resource: AppResource): Promise<
   // Only an image WE built. A user-supplied image reference may be shared
   // with anything else on the box, including their own work outside hobby,
   // and deleting it would be reaching well outside what destroying one
-  // resource means.
-  if (resource.config.source !== null && deps.runtime.removeImage !== undefined) {
+  // resource means. A null image means an undeployed app never built one in
+  // the first place, which is a normal thing to destroy, not a bug: there is
+  // simply nothing to remove.
+  const image = resource.config.image
+  if (resource.config.source !== null && image !== null && deps.runtime.removeImage !== undefined) {
     try {
-      await deps.runtime.removeImage(resource.config.image)
+      await deps.runtime.removeImage(image)
     } catch (err) {
       failures.push(`remove image: ${errorMessage(err)}`)
     }

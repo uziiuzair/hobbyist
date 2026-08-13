@@ -53,7 +53,14 @@ export interface Project {
 // Anything kind-specific lives on the member interfaces below, where the
 // compiler will refuse to read it until the caller has checked `kind`.
 export interface ResourceConfigBase {
-  image: string
+  // Null until a first deploy has produced one. A postgres resource always
+  // has an image (a registry reference chosen at creation), so in practice
+  // this is null only for an `app` or `worker` in state `undeployed`. Every
+  // path that starts a container runs from `running` or `sleeping` and must
+  // narrow this first: the compiler is the mechanism that finds them, which
+  // is the same technique commit abe7582 used to find every place Phase 1
+  // assumed postgres.
+  image: string | null
   containerName: string
   // Always on loopback, never 0.0.0.0. See DEFAULT_PORT_BIND in runtime.ts
   // for why the bind address, not a host firewall, is the thing that keeps
@@ -62,6 +69,15 @@ export interface ResourceConfigBase {
 }
 
 export interface PostgresConfig extends ResourceConfigBase {
+  // Narrowed back to non-null: a postgres resource's image is a registry
+  // reference chosen at creation (createPostgres, packages/pg/src/postgres.ts),
+  // and `postgres` never registers `undeployed` as a reachable state (see
+  // ResourceState above), so there is no postgres config to build before an
+  // image exists. Declaring that here, rather than null-checking it at every
+  // read in packages/pg, is what keeps createDefaultRemoveDataDir and
+  // containerSpec (packages/pg/src/postgres.ts) free of a branch that can
+  // never actually run.
+  image: string
   dataDir: string
   superuser: string
   password: string
