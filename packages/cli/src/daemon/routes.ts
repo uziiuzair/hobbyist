@@ -339,14 +339,51 @@ async function destroyResourceRoute(ctx: DaemonContext, id: string): Promise<Rou
   return { status: 200, body: { deleted: true } }
 }
 
+// Shared refusal for the two lifecycle routes below, checked before either
+// dispatches to the kind registry. An `undeployed` resource has never had a
+// container (that is the whole point of the state, see ADR 0014's
+// "`undeployed` is a state, not a derived condition"), so letting either verb
+// through corrupts it: `stop` (runtime.stop on a container that never
+// existed is a documented no-op) completed and wrote `sleeping` with `image`
+// still null, which is verbatim the failure the state exists to prevent,
+// `hobby ls` claiming a resource can wake when it never can. `start` fell
+// through to containerSpec's internal assertion (packages/app/src/app.ts:98-104,
+// packages/worker/src/worker.ts:183-189) and wrote `failed`, an irreversible
+// state change for what is actually the user's own mistake.
+//
+// `usage`, not `internal`: asking to sleep or wake a resource you just
+// created is a reasonable mistake, not a daemon bug. The message matches the
+// identical refusal in resolve (packages/cli/src/daemon/context.ts:322-329),
+// so the proxy and the CLI say the same thing about how to fix this.
+function refuseUndeployed(ctx: DaemonContext, resource: Resource): void {
+  if (resource.state !== 'undeployed') {
+    return
+  }
+  const project = ctx.store.getProject(resource.projectId)
+  if (project === null) {
+    throw new HobbyError(
+      'internal',
+      `resource ${resource.id} has no owning project (project ${resource.projectId} is gone)`
+    )
+  }
+  const command = `hobby deploy <path> --project ${project.name} --name ${resource.name}`
+  throw new HobbyError(
+    'usage',
+    `${resource.name} has no code deployed yet, run \`${command}\` from the directory holding its code`,
+    `run \`${command}\` from the directory holding its code`
+  )
+}
+
 async function startResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
+  refuseUndeployed(ctx, resource)
   await ctx.kinds.get(resource.kind).start(ctx, resource)
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
 
 async function stopResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
+  refuseUndeployed(ctx, resource)
   await ctx.kinds.get(resource.kind).stop(ctx, resource)
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
@@ -394,6 +431,10 @@ async function connectionRoute(ctx: DaemonContext, id: string): Promise<RouteRes
 
 async function logsRoute(ctx: DaemonContext, id: string, url: URL): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
+  // Same refusal as the lifecycle routes: an undeployed resource has no
+  // container, so runtime.logs would otherwise surface a raw runtime error
+  // ("no such container") instead of telling the caller what to actually do.
+  refuseUndeployed(ctx, resource)
   const tailParam = url.searchParams.get('tail')
   const parsedTail = tailParam === null ? Number.NaN : Number(tailParam)
   const tail = Number.isFinite(parsedTail) && parsedTail > 0 ? Math.floor(parsedTail) : DEFAULT_LOG_TAIL
@@ -411,10 +452,10 @@ async function logsRoute(ctx: DaemonContext, id: string, url: URL): Promise<Rout
 // `undeployed` when there was never an image to roll back to). Checking
 // `state` here instead would also mis-skip one real edge case: a first
 // deploy that builds an image and then fails before it proves it listens
-// rolls `state` back to `undeployed` (packages/app/src/app.ts:489) while
+// rolls `state` back to `undeployed` (packages/app/src/app.ts:508) while
 // `config.image` is already the freshly built tag. Matches the guard
 // deployApp and deployWorker already use for the identical question
-// (packages/app/src/app.ts:433, packages/worker/src/worker.ts:544).
+// (packages/app/src/app.ts:433, packages/worker/src/worker.ts:555).
 function isDeployed(resource: AppResource | WorkerResource): boolean {
   return resource.config.image !== null
 }
@@ -540,12 +581,12 @@ function renderCompose(
   for (const worker of workers) {
     const cfg = worker.config
     // Same guard as the app loop above, and load-bearing here in a second,
-    // sharper way: buildRunnerManifest (packages/worker/src/worker.ts:124)
+    // sharper way: buildRunnerManifest (packages/worker/src/worker.ts:135)
     // THROWS when config.manifest is null, and deployWorker always writes
     // image and manifest together in the same updateResourceConfig call,
-    // never one without the other (packages/worker/src/worker.ts:579-600;
+    // never one without the other (packages/worker/src/worker.ts:590-610;
     // createWorkerResource's no-source path sets both null together too,
-    // packages/worker/src/worker.ts:311-323), so `!isDeployed(worker)` here
+    // packages/worker/src/worker.ts:322-334), so `!isDeployed(worker)` here
     // guarantees `cfg.manifest !== null` at the call below. Without this
     // guard, one undeployed worker throws out of renderCompose entirely,
     // aborting eject for every healthy postgres in the same project, which
@@ -709,13 +750,13 @@ async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string):
 async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): Promise<RouteResult> {
   const project = getProjectByNameOrThrow(ctx, name)
   const resources = ctx.store.listResources(project.id)
-  // Only postgres resources are rendered today. Emitting compose services for
-  // `app` and `worker` is M8 and M9 respectively (see
-  // docs/compute/specs/2026-08-10-phase-2-compute-design.md), and ADR 0007 is
-  // explicit that a kind which cannot be ejected does not ship. Filtering
-  // rather than throwing keeps eject working for the database half of a mixed
-  // project; the count of skipped resources is reported so nobody reads an
-  // incomplete compose file as a complete one.
+  // All three kinds are rendered: the call to renderCompose below, at :778,
+  // emits a service for postgres, app and worker alike. ADR 0007 is explicit that a
+  // kind which cannot be ejected does not ship, and EJECTABLE just below is
+  // what keeps that true. What is filtered is not the kind but whether a
+  // compute resource has ever been deployed: an app or worker with no image
+  // is skipped and reported rather than rendered, see isDeployed's comment
+  // above renderCompose and the skip-reporting note a few lines down.
   const postgresResources = resources.filter((r) => r.kind === 'postgres')
   const appResources = resources.filter((r) => r.kind === 'app')
   const workerResources = resources.filter((r) => r.kind === 'worker')

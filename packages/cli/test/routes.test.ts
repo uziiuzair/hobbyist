@@ -22,6 +22,7 @@ import {
   type HobbyConfig,
   type PostgresConfig,
   type Store,
+  type WorkerConfig,
 } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
 import { createDefaultKindRegistry } from '../src/daemon/context.js'
@@ -62,6 +63,40 @@ function samplePostgresConfig(overrides: Partial<PostgresConfig> = {}): Postgres
     superuser: 'postgres',
     password: 'secret',
     database: 'blog',
+    ...overrides,
+  }
+}
+
+// A record-before-code app: a row, an id and a hostname, and no code. Every
+// field a real undeployed app carries, not a shortcut shape, since the whole
+// point of the tests that use this is to prove the daemon treats `image:
+// null` faithfully rather than assuming a build already happened.
+function sampleUndeployedAppConfig(overrides: Partial<AppConfig> = {}): AppConfig {
+  return {
+    image: null,
+    containerName: `hobby-blog-site-${randomUUID()}`,
+    hostPort: 25500,
+    containerPort: 8080,
+    hostname: 'site.blog.hobby.local',
+    source: null,
+    env: {},
+    databaseResourceId: null,
+    ...overrides,
+  }
+}
+
+// Same shape, for the worker kind: a record-before-code worker has no
+// manifest either, which is the field buildRunnerManifest actually reads.
+function sampleUndeployedWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
+  return {
+    image: null,
+    containerName: `hobby-blog-cron-${randomUUID()}`,
+    hostPort: 35500,
+    containerPort: 8787,
+    hostname: 'cron.blog.hobby.local',
+    databaseResourceId: null,
+    durableObjectUniqueKeyModifier: 'res-placeholder',
+    manifest: null,
     ...overrides,
   }
 }
@@ -453,6 +488,121 @@ test('POST /v1/resources/:id/start for an unknown id returns 404 resource_not_fo
     assert.equal(res.status, 404)
     const body = res.body as { error: { code: string } }
     assert.equal(body.error.code, 'resource_not_found')
+  })
+})
+
+// I2/I3: before this refusal, POST .../stop on an undeployed app wrote
+// state=sleeping while image stayed null, exactly the failure `undeployed`
+// exists to prevent (`hobby ls` claiming a resource can wake when it never
+// can, ADR 0014's "`undeployed` is a state, not a derived condition"). Both
+// kinds are covered deliberately: this branch has repeatedly shipped
+// app-only coverage, and worker is the kind with the data-loss edge.
+test('POST /v1/resources/:id/stop on an undeployed app refuses and leaves it undeployed', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'app',
+    name: 'site',
+    config: sampleUndeployedAppConfig(),
+  })
+  ctx.store.setResourceState(resource.id, 'undeployed')
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/stop`)
+    assert.equal(res.status, 400)
+    const body = res.body as { error: { code: string; message: string } }
+    assert.equal(body.error.code, 'usage')
+    assert.match(body.error.message, /hobby deploy/)
+    assert.equal(ctx.store.getResource(resource.id)?.state, 'undeployed')
+  })
+})
+
+test('POST /v1/resources/:id/stop on an undeployed worker refuses and leaves it undeployed', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'cron',
+    config: sampleUndeployedWorkerConfig(),
+  })
+  ctx.store.setResourceState(resource.id, 'undeployed')
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/stop`)
+    assert.equal(res.status, 400)
+    const body = res.body as { error: { code: string; message: string } }
+    assert.equal(body.error.code, 'usage')
+    assert.match(body.error.message, /hobby deploy/)
+    assert.equal(ctx.store.getResource(resource.id)?.state, 'undeployed')
+  })
+})
+
+// Before this refusal, POST .../start on an undeployed resource fell through
+// to containerSpec's internal assertion and wrote state=failed: wrong code
+// (`internal`, blaming the daemon for the user's own action) and an
+// irreversible state change out of `undeployed`.
+test('POST /v1/resources/:id/start on an undeployed app refuses and leaves it undeployed', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'app',
+    name: 'site',
+    config: sampleUndeployedAppConfig(),
+  })
+  ctx.store.setResourceState(resource.id, 'undeployed')
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/start`)
+    assert.equal(res.status, 400)
+    const body = res.body as { error: { code: string; message: string } }
+    assert.equal(body.error.code, 'usage')
+    assert.match(body.error.message, /hobby deploy/)
+    assert.equal(ctx.store.getResource(resource.id)?.state, 'undeployed')
+  })
+})
+
+test('POST /v1/resources/:id/start on an undeployed worker refuses and leaves it undeployed', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'cron',
+    config: sampleUndeployedWorkerConfig(),
+  })
+  ctx.store.setResourceState(resource.id, 'undeployed')
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/start`)
+    assert.equal(res.status, 400)
+    const body = res.body as { error: { code: string; message: string } }
+    assert.equal(body.error.code, 'usage')
+    assert.match(body.error.message, /hobby deploy/)
+    assert.equal(ctx.store.getResource(resource.id)?.state, 'undeployed')
+  })
+})
+
+// Minor fix, same guard: `hobby logs` on an undeployed resource used to
+// surface a raw runtime error instead of telling the caller what to do.
+test('GET /v1/resources/:id/logs on an undeployed app refuses with a usage error', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'app',
+    name: 'site',
+    config: sampleUndeployedAppConfig(),
+  })
+  ctx.store.setResourceState(resource.id, 'undeployed')
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'GET', `/v1/resources/${resource.id}/logs`)
+    assert.equal(res.status, 400)
+    const body = res.body as { error: { code: string } }
+    assert.equal(body.error.code, 'usage')
   })
 })
 
