@@ -124,3 +124,34 @@ test('a throwing onDeadLetter leaves the row in place', () => {
   assert.ok(errorThrown, 'error should have been thrown')
   assert.equal(depth(db), initialDepth, 'depth should be unchanged after rollback')
 })
+
+test('a message exactly at the retention cutoff is swept, because the comparison is inclusive', () => {
+  const db = tempQueue()
+  enqueue(db, [json({ old: true })], NOW)
+  const swept = sweepRetention(db, DEFAULT_RETENTION_SECONDS, NOW + DEFAULT_RETENTION_SECONDS * 1000)
+  assert.equal(swept, 1)
+  assert.equal(depth(db), 0)
+})
+
+test('peek returns messages in insertion order by comparing the decoded bodies', () => {
+  const db = tempQueue()
+  enqueue(
+    db,
+    [json({ order: 'first' }), json({ order: 'second' }), json({ order: 'third' })],
+    NOW
+  )
+  const seen = peek(db, 3)
+  assert.equal(seen.length, 3)
+  const first = seen[0]
+  const second = seen[1]
+  const third = seen[2]
+  assert.ok(first !== undefined)
+  assert.ok(second !== undefined)
+  assert.ok(third !== undefined)
+  const firstBody = JSON.parse(first.body)
+  const secondBody = JSON.parse(second.body)
+  const thirdBody = JSON.parse(third.body)
+  assert.equal(firstBody.order, 'first')
+  assert.equal(secondBody.order, 'second')
+  assert.equal(thirdBody.order, 'third')
+})
