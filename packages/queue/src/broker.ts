@@ -214,3 +214,90 @@ export function hasOutstandingLease(db: SqliteDatabase, nowMs: number): boolean 
     .get(nowMs) as { n: number }
   return row.n > 0
 }
+
+export interface DeliveryResult {
+  outcome: 'ok' | 'exception'
+  retryBatch: { retry: boolean; delaySeconds?: number }
+  retryMessages: Array<{ msgId: string; delaySeconds?: number }>
+}
+
+export interface ApplyOutcome {
+  acked: number
+  retried: number
+  // Returned rather than written: this module owns one database and the dead
+  // letter queue is a different one. The tick routes them.
+  deadLettered: LeasedMessage[]
+}
+
+interface LeasedRow {
+  id: string
+  body: string
+  content_type: string
+  timestamp: number
+  attempts: number
+}
+
+export function applyResult(
+  db: SqliteDatabase,
+  leaseId: string,
+  result: DeliveryResult,
+  opts: ConsumerOptions,
+  nowMs: number
+): ApplyOutcome {
+  const rows = db
+    .prepare(
+      `SELECT id, body, content_type, enqueued_at AS timestamp, attempts
+         FROM messages
+        WHERE lease_id = ?
+        ORDER BY id`
+    )
+    .all(leaseId) as LeasedRow[]
+  if (rows.length === 0) {
+    return { acked: 0, retried: 0, deadLettered: [] }
+  }
+
+  // An outcome that is not `ok` retries everything, matching
+  // broker.worker.js:250. A handler that threw told us nothing about which
+  // messages it got through.
+  const retryAll = result.retryBatch.retry || result.outcome !== 'ok'
+  const perMessage = new Map(result.retryMessages.map((entry) => [entry.msgId, entry.delaySeconds]))
+
+  const requeue = db.prepare(
+    'UPDATE messages SET lease_id = NULL, lease_expires_at = NULL, visible_at = ? WHERE id = ?'
+  )
+  const remove = db.prepare('DELETE FROM messages WHERE id = ?')
+
+  let acked = 0
+  let retried = 0
+  const deadLettered: LeasedMessage[] = []
+
+  for (const row of rows) {
+    const isRetry = retryAll || perMessage.has(row.id)
+    if (!isRetry) {
+      remove.run(row.id)
+      acked += 1
+      continue
+    }
+
+    // attempts was incremented at lease time, so it already counts the
+    // delivery that just failed.
+    if (row.attempts > opts.maxRetries) {
+      deadLettered.push({
+        id: row.id,
+        body: row.body,
+        contentType: row.content_type as ContentType,
+        timestampMs: row.timestamp,
+        attempts: row.attempts,
+      })
+      remove.run(row.id)
+      continue
+    }
+
+    const delaySeconds =
+      perMessage.get(row.id) ?? result.retryBatch.delaySeconds ?? opts.retryDelaySeconds
+    requeue.run(nowMs + delaySeconds * 1000, row.id)
+    retried += 1
+  }
+
+  return { acked, retried, deadLettered }
+}
