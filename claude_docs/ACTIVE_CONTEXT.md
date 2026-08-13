@@ -32,6 +32,14 @@ alongside the public Caddy path. Research is filed at
 `docs/proxy/research/2026-08-13-postgres-over-tailnet.md`. An ADR for it is
 expected but not yet filed as of this writing.
 
+**Main also gained a Studio visual pass.** `7f7e4a7` (2026-08-14) merged the
+Studio warm re-voice: `Shell.tsx`, `Spot.tsx`, `State.tsx`, `theme.css`, and
+the `Login`, `Project`, `Projects`, `Schema`, `Sql` and `Tables` views all
+changed, plus `packages/studio/DESIGN.md`. Cosmetic and layout work, not a
+model or API change, so nothing in this file's build order or open risks
+moves because of it, but a session touching Studio should read `DESIGN.md`
+before assuming the old look is still current.
+
 **The phase gate is gone.** ADR 0007 required 30 consecutive days of Phase 1
 daily use before Phase 2 began. `docs/decisions/0010` removes it, two days
 after Phase 1 merged, and says plainly that the gate was correct and was

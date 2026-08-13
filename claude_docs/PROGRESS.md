@@ -41,19 +41,26 @@ baseline this branch started against to 500, tracked task by task in
   only writes the store and `created` never sees it. The implementer caught
   this by re-fetching instead of spreading, on both the app and worker sides,
   which also removed the `as` cast the plan's version required.
-- Template literals accept `null` with no compile error, and did, at four
-  separate sites, until each was found by reading rather than by the type
-  checker: three in `renderCompose`
-  (`packages/cli/src/daemon/routes.ts:453`, `:505`, `:558`, `` `image: ${cfg.image}` ``),
-  and one in `hobby deploy`'s own output (`packages/cli/src/cli/commands.ts`,
-  now routed through the guarding `imageLine` at `:239-241` instead). A fifth,
-  related but not the same shape, surfaced in the same review pass: eject's
-  Caddyfile step routed a hostname for every app and worker regardless of
-  whether it had ever been deployed, which is a filter that was never applied
-  rather than a null that slipped through one; fixed by reusing the same
-  `isDeployed` predicate (`routes.ts:418-419`) that renderCompose now uses,
+- Template literals accept `null` with no compile error, and did, at three
+  genuine sites, until each was found by reading rather than by the type
+  checker: `renderCompose`'s app loop and its worker loop
+  (`packages/cli/src/daemon/routes.ts:505` and `:558`, both
+  `` `image: ${cfg.image}` ``), and `hobby deploy`'s own output
+  (`packages/cli/src/cli/commands.ts`, now routed through the guarding
+  `imageLine` at `:239-241` instead). `renderCompose`'s third `image:`
+  interpolation, in its postgres loop (`routes.ts:453`), was never actually
+  at risk: `PostgresConfig.image` is narrowed to non-nullable `string`
+  (`packages/core/src/types.ts:80`), so a `null` could not reach it and the
+  type checker would refuse the comparison outright (TS2367) had anyone
+  tried to guard it anyway. A fourth defect, related but a genuinely
+  different shape, surfaced in the same review pass: eject's Caddyfile step
+  routed a hostname for every app and worker regardless of whether it had
+  ever been deployed. That one was never a null reaching a template literal;
+  `hostname` and `hostPort` are allocated at creation and are never null. It
+  was a filter that was never applied, fixed by reusing the same
+  `isDeployed` predicate (`routes.ts:418-419`) that `renderCompose` now uses,
   so the two consumers cannot drift apart again. Types find shape errors.
-  They do not find output errors, and four of these five were exactly that.
+  They do not find output errors, and three of these four were exactly that.
 
 **`hobby eject` was broken outright by this branch, and repaired within it.**
 Once resource creation and deploy split, a project could legitimately hold an
