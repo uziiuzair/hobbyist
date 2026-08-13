@@ -19,6 +19,13 @@ const PAIRS = [
   ['light ink', '1c1917', LIGHT, 4.5],
   ['light ink-2', '5f5a52', LIGHT, 4.5],
   ['light ink-3', '6e685e', LIGHT, 4.5],
+  ['light sage label', '1f6b43', LIGHT, 4.5],
+  ['light iris label', '5a4fb8', LIGHT, 4.5],
+  ['light honey label', '8a5f14', LIGHT, 4.5],
+  ['light rose label', 'a84a55', LIGHT, 4.5],
+  ['light waking', '8a5a0e', LIGHT, 4.5],
+  ['light danger', 'b3392c', LIGHT, 4.5],
+  ['light accent-ink on accent', 'ffffff', { accent: '147a48' }, 4.5],
 ]
 
 function lum(hex) {
