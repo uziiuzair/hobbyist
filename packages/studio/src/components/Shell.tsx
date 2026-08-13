@@ -26,7 +26,7 @@ function Chevron() {
 
 function DatabaseIcon() {
   return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+    <svg className="ic-sage" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
       <ellipse cx="7" cy="3.2" rx="4.6" ry="1.9" stroke="currentColor" strokeWidth="1.2" />
       <path d="M2.4 3.2v7.6c0 1.05 2.06 1.9 4.6 1.9s4.6-.85 4.6-1.9V3.2" stroke="currentColor" strokeWidth="1.2" />
       <path d="M2.4 7c0 1.05 2.06 1.9 4.6 1.9s4.6-.85 4.6-1.9" stroke="currentColor" strokeWidth="1.2" />
@@ -48,7 +48,7 @@ function GridIcon() {
 // A browser window: the app kind serves pages.
 function AppIcon() {
   return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+    <svg className="ic-iris" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
       <rect x="1.5" y="2" width="11" height="10" rx="1.6" stroke="currentColor" strokeWidth="1.2" />
       <path d="M1.5 4.8h11" stroke="currentColor" strokeWidth="1.2" />
       <circle cx="3.4" cy="3.4" r="0.5" fill="currentColor" />
@@ -59,7 +59,7 @@ function AppIcon() {
 // A bolt: the worker kind runs on demand and goes away.
 function WorkerIcon() {
   return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+    <svg className="ic-honey" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
       <path d="M7.8 1.5 3 8h3.4l-.9 4.5L10.8 6H7.4l.4-4.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
     </svg>
   )
