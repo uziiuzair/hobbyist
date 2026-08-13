@@ -21,4 +21,11 @@ export {
   applyResult,
   type DeliveryResult,
   type ApplyOutcome,
+  DEFAULT_RETENTION_SECONDS,
+  MIN_RETENTION_SECONDS,
+  MAX_RETENTION_SECONDS,
+  expireLeases,
+  sweepRetention,
+  peek,
+  purge,
 } from './broker.js'
