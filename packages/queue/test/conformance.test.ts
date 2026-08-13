@@ -107,11 +107,13 @@ test('conformance: per-message ack and retry can be mixed in one batch', () => {
 test('conformance: a dead lettered message leaves the queue exactly once', () => {
   const db = tempQueue()
   enqueue(db, [json({ a: 1 })], NOW)
-  const collected: string[] = []
+  let deliveries = 0
+  let deadLettered: Array<{ id: string; attempts: number }> = []
   for (let round = 0; round < 6; round += 1) {
     const at = NOW + 2000 + round * 5000
     const batch = leaseBatch(db, OPTS, at)
     if (batch === null) break
+    deliveries += 1
     const outcome = applyResult(
       db,
       batch.leaseId,
@@ -119,8 +121,14 @@ test('conformance: a dead lettered message leaves the queue exactly once', () =>
       OPTS,
       at + 100
     )
-    for (const message of outcome.deadLettered) collected.push(message.id)
+    for (const message of outcome.deadLettered) {
+      deadLettered.push({ id: message.id, attempts: message.attempts })
+    }
   }
-  assert.equal(collected.length, 1)
+  assert.equal(deliveries, OPTS.maxRetries + 1)
+  assert.equal(deadLettered.length, 1)
+  const dead = deadLettered[0]
+  assert.ok(dead !== undefined)
+  assert.equal(dead.attempts, OPTS.maxRetries + 1)
   assert.equal(depth(db), 0)
 })
