@@ -93,6 +93,12 @@ export function ActivityChart({ samples, windowMs }: { samples: Sample[]; window
             <pattern id="idle-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
               <line x1="0" y1="0" x2="0" y2="6" stroke="var(--line-strong)" strokeWidth="1.6" />
             </pattern>
+            {/* The area under the line fades to nothing, so the fill reads
+                as the line's own light rather than a second data series. */}
+            <linearGradient id="chart-fill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.22" />
+              <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
+            </linearGradient>
           </defs>
 
           {/* Baseline and ceiling only. A full grid on a chart this short is
@@ -119,12 +125,17 @@ export function ActivityChart({ samples, windowMs }: { samples: Sample[]; window
             />
           ))}
 
-          {area !== null && <path d={area} fill="var(--accent-dim)" />}
+          {area !== null && <path d={area} fill="url(#chart-fill)" />}
           {samples.length > 1 && (
             <polyline points={line} fill="none" stroke="var(--accent)" strokeWidth="1.6" strokeLinejoin="round" />
           )}
-          {samples.length === 1 && last !== undefined && (
-            <circle cx={xFor(last.at)} cy={yFor(last.connections)} r="2.5" fill="var(--accent)" />
+          {/* The newest sample is the one that is true right now, so it gets
+              the light: a solid endpoint inside a soft halo. */}
+          {lastPoint !== undefined && last !== undefined && (
+            <>
+              <circle cx={lastPoint[0]} cy={lastPoint[1]} r="6" fill="var(--accent)" opacity="0.22" />
+              <circle cx={lastPoint[0]} cy={lastPoint[1]} r="2.5" fill="var(--accent)" />
+            </>
           )}
 
           <text x="0" y={PAD_TOP + 4} className="chart-axis">
