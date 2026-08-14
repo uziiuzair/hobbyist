@@ -126,3 +126,21 @@ export function reflinkWarning(report: PreflightReport): string | null {
     'see docs/branching for detail.'
   )
 }
+
+// Same shape and reasoning as reflinkWarning above, and routed to io.err by
+// cmdInit the same way: null when there is nothing to warn about. That
+// includes report.hostNetworking === null (caddy disabled, so the check
+// never ran and there is nothing to say about it), not just the supported
+// case, so this only ever fires when caddy is enabled and the probe found a
+// real problem.
+export function hostNetworkingWarning(report: PreflightReport): string | null {
+  if (report.hostNetworking === null || report.hostNetworking.supported) {
+    return null
+  }
+  return (
+    'caddy: this container runtime does not appear to support host networking, which Caddy needs ' +
+    'in order to bind :80 and :443 and to reach the daemon. Docker Desktop for macOS is the known ' +
+    'case. Linux and OrbStack both work. Hobbyist will start without a front door: apps are ' +
+    'reachable on their loopback ports and `hobby studio` still works.'
+  )
+}

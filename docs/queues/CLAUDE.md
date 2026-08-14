@@ -93,6 +93,39 @@ anywhere near the 3 second ceiling.
 
 Every one of these is from a Mac, like every other measurement in this repo.
 
+## Follow-ups, most consequential first
+
+- **THE PRODUCER PATH DOES NOT WORK ON LINUX.** Not untested: unimplemented on
+  the container side. `packages/worker/src/worker.ts` hands every producer
+  container `http://host.docker.internal:<port>/enqueue`, which macOS resolves
+  and Linux does not unless the container was created with
+  `--add-host=host.docker.internal:host-gateway`. Nothing passes that flag:
+  `buildCreateArgs` (`packages/core/src/docker.ts`) never emits `--add-host` and
+  `ContainerSpec` (`packages/core/src/runtime.ts`) has no field for one. The
+  daemon's side is right (it binds the project bridge gateway on Linux); the two
+  halves live in different packages and never meet. `env.MY_QUEUE.send()` fails
+  DNS on the five dollar VPS this project is aimed at. Fix: add extra hosts to
+  `ContainerSpec` and emit the flag, or resolve the gateway IP into the URL at
+  container start. Found by whole-branch review 2026-08-14, after every
+  end-to-end run passed on macOS.
+
+- **Retention never sweeps a queue with no drainable consumer, which includes
+  every dead letter queue.** `sweepRetention` has exactly one caller,
+  `tickOneQueue` (`packages/queue/src/tick.ts`), and `drainableQueues`
+  (`packages/cli/src/daemon/queues.ts`) excludes any queue whose consumer is
+  null, undeployed or released. A dead letter queue is auto-created with
+  `consumerResourceId: null`, so **dead letters are kept forever**. Three places
+  claim otherwise, including this file's own earlier wording and the comment on
+  `QueueConfig`. No data is lost and the depth is visible in `hobby queue ls`,
+  but it is unbounded disk growth on a one-box product.
+
+- **Consumer tuning keys are sticky across redeploys.** `syncWorkerQueueBindings`
+  (`packages/cli/src/daemon/routes.ts`) writes each key only when the manifest
+  value is non-null, so deleting `max_batch_timeout` or `dead_letter_queue` from
+  a wrangler file and redeploying leaves the old value in force forever.
+  `QueueConfig`'s own comment states the opposite. Undiscoverable, because
+  nothing prints effective tuning values, so fix these two together.
+
 ## Follow-ups the verification named
 
 - **The readiness probe writes a stack trace into every worker's log on every

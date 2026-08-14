@@ -93,6 +93,9 @@ function testConfig(): HobbyConfig {
     wakeTimeoutMs: 100,
     readinessPollMs: 10,
     queuePort: 7434,
+    caddyEnabled: false,
+    caddyAdminPort: 2019,
+    caddyStudioHost: null,
   }
 }
 

@@ -18,7 +18,7 @@ the HTTP wake router. The design is at
 The daemon originally required a build source before it would commit a
 resource row at all, which meant Studio and MCP could not create an `app` or
 `worker`, having no filesystem path to hand the daemon. `docs/decisions/0014`
-(branch `record-before-code`, not yet merged to `main`) splits `POST
+(merged to `main` at `e0d56a2`) splits `POST
 /v1/projects/:name/resources` from `POST /v1/resources/:id/deploy`: a resource
 can now exist as a row with an id and a hostname, holding no code, in a new
 resting state `undeployed`. `hobby deploy` still resolves-or-creates and
@@ -44,6 +44,30 @@ before assuming the old look is still current.
 daily use before Phase 2 began. `docs/decisions/0010` removes it, two days
 after Phase 1 merged, and says plainly that the gate was correct and was
 removed anyway. Nothing now paces this project except the author.
+
+**Sub-project B, wiring Caddy, is done, on branch `caddy-wiring`, not yet
+merged to `main`.** `createCaddyManager` (`packages/cli/src/daemon/caddy.ts`)
+now has a production caller: `startDaemon`
+(`packages/cli/src/daemon/server.ts`) calls `ensureRunning()`,
+`setFallback()`, an optional Studio `addRoute()`, and `stop()` on shutdown,
+all behind `caddyEnabled` (default off), and `hobby studio` prints the public
+host instead of the loopback URL once one is configured
+(`packages/cli/src/cli/commands.ts`'s `cmdStudio`). This section, until this
+update, listed wiring Caddy as an open next step and said `network: 'host'`
+"does not exist on Docker Desktop for macOS, so this fails on the author's
+own machine first." That was written from an assumption, never run. Measured
+2026-08-14, on OrbStack, not Docker Desktop: host networking works in both
+directions, a host-network container reached a daemon loopback listener, and
+`caddy:2-alpine` on `--network host` bound :80 and :2019 visibly from the
+host. Docker Desktop for macOS remains the one genuinely unmeasured,
+expected-to-fail case, and `hobby init` now detects its absence and warns
+rather than failing at the first request. Decision record:
+`hobbyist.caddy-host-networking-works`. Spec:
+`docs/proxy/specs/2026-08-14-wiring-caddy-design.md`. Two things this
+sub-project deliberately did not do: Caddy's certificate store is not
+persisted (a container replacement re-issues certificates, which matters
+against Let's Encrypt rate limits on a busy box), and Docker Desktop for
+macOS has been detected but never actually run against.
 
 ## What is settled
 
@@ -79,28 +103,22 @@ order they were scoped:
 
 | Sub-project | Ships | State |
 |---|---|---|
-| **A** record before code | Resource creation split from deploy; `undeployed` state; ADR 0014 | **built, branch `record-before-code`, not yet merged to `main`** |
-| **B** wire Caddy | `createCaddyManager` gets a production caller | not started |
-| **D1** Studio and MCP for all kinds | Drop the hardcoded `kind: 'postgres'` at `packages/studio/src/api.ts:152` and `packages/mcp/src/tools.ts:116`, once A is merged and gives them something else to send | not started |
+| **A** record before code | Resource creation split from deploy; `undeployed` state; ADR 0014 | **merged to `main` at `e0d56a2`** |
+| **B** wire Caddy | `createCaddyManager` gets a production caller | **built, branch `caddy-wiring`, not yet merged to `main`** |
+| **D1** Studio and MCP for all kinds | Drop the hardcoded `kind: 'postgres'` at `packages/studio/src/api.ts:152` and `packages/mcp/src/tools.ts:116`. A has merged, so there is now something else to send | not started |
 | **D2** Studio API tokens | Not yet designed beyond the label; no spec filed as of this writing | not started |
 | **C** remote deploy | Laptop to VPS. Needs its own ADR: the CLI talks to a unix socket (`packages/cli/src/cli/client.ts`), so today it must run on the daemon's own box | not started |
 
 ## The immediate next steps
 
-1. **Merge `record-before-code` (sub-project A) to `main`.** This is Task 10
-   of that plan, the docs commit, landing now; the code (Tasks 1 through 9b)
-   is already done and reviewed on the branch.
-2. **Wire Caddy (sub-project B).** `createCaddyManager` still has no caller,
-   which is a Phase 1 loose end (see `HANDOFF-2026-08-07.md`), and compute
-   makes it load-bearing: an `undeployed` resource has an allocated hostname
-   with nothing behind it, so Caddy's on-demand TLS ask has to answer for it
-   before there is any code to serve. `network: 'host'` does not exist on
-   Docker Desktop for macOS, so this fails on the author's own machine first.
-3. **D1: give Studio and MCP the ability to create compute**, now that A
+1. **`record-before-code` (sub-project A) is merged to `main`**, at `e0d56a2`,
+   which is also `caddy-wiring`'s own base. Task 10 of that plan, the docs
+   commit, is the one that landed it.
+2. **D1: give Studio and MCP the ability to create compute**, now that A
    makes it possible.
-4. **D2: Studio API tokens.**
-5. **C: remote deploy**, laptop to VPS.
-6. **Run the cold start matrix on a five dollar VPS.** Still unmeasured, still
+3. **D2: Studio API tokens.**
+4. **C: remote deploy**, laptop to VPS.
+5. **Run the cold start matrix on a five dollar VPS.** Still unmeasured, still
    the easy end of the matrix having been the only end run so far. Not part
    of the five-project sequence above, but not forgotten either.
 
@@ -120,7 +138,14 @@ order they were scoped:
   handler's `guard` refuses to sleep with an alarm imminent, and the daemon's
   mirror wakes one whose deadline arrives. Remaining caveat: an alarm can be up
   to one mirror tick (10s) late, plus a cold start.
-- **Caddy on macOS.** Above.
+- **Caddy on Docker Desktop for macOS is unmeasured.** `hobby init` detects
+  the absence of host networking and warns, but nobody has actually run Caddy
+  against Docker Desktop to confirm the warning fires or that the daemon
+  behaves sanely without a front door. OrbStack and Linux are both measured
+  and fine. See the sub-project B note above.
+- **Caddy's certificate store is not persisted.** The container is created
+  with no volume, so replacing it re-issues certificates, which is a real
+  problem against Let's Encrypt rate limits on a busy box.
 - **The ext4 problem.** Unchanged: instant branching needs reflinks, ext4 has
   none, detect at `hobby init` and warn.
 - **Studio has not been read by a person.** Unchanged from Phase 1 and still
@@ -137,4 +162,4 @@ the next kind by itself.
 
 ---
 
-Last Updated: 2026-08-13
+Last Updated: 2026-08-14
