@@ -638,3 +638,203 @@ test('a queue no longer appears in notEjectable: it is handed over as data, not 
     )
   })
 })
+
+// ---------------------------------------------------------------------------
+// Fix round 1: JSON.stringify silently annihilates a Map or a Set
+// (`JSON.stringify(new Map([[1,2]]))` is '{}', every entry gone), which
+// reintroduces, one layer further out, exactly the failure codec.ts exists to
+// prevent, in the one file a departing user is supposed to trust. toJsonSafe
+// (routes.ts) walks the decoded value and wraps what plain JSON cannot hold
+// in a small, self-describing marker before JSON.stringify ever sees it.
+// fromJsonSafe below is the test's own reverse of that mapping: proving a
+// round trip (recovered value deep-equals the original) is a stronger claim
+// than asserting the wrapper merely has the right shape, and it is the
+// reviewer's own explicit ask.
+// ---------------------------------------------------------------------------
+
+function fromJsonSafe(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') {
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => fromJsonSafe(item))
+  }
+  const obj = value as Record<string, unknown>
+  if ('$undefined' in obj) {
+    return undefined
+  }
+  if ('$bigint' in obj) {
+    return BigInt(obj['$bigint'] as string)
+  }
+  if ('$date' in obj) {
+    return new Date(obj['$date'] as string)
+  }
+  if ('$regexp' in obj) {
+    const r = obj['$regexp'] as { source: string; flags: string }
+    return new RegExp(r.source, r.flags)
+  }
+  if ('$map' in obj) {
+    const entries = obj['$map'] as Array<[unknown, unknown]>
+    return new Map(entries.map(([key, item]) => [fromJsonSafe(key), fromJsonSafe(item)]))
+  }
+  if ('$set' in obj) {
+    const items = obj['$set'] as unknown[]
+    return new Set(items.map((item) => fromJsonSafe(item)))
+  }
+  // $circular is deliberately not reversible: the whole point of that marker
+  // is that the original reference is gone by design, not recoverable.
+  if ('$circular' in obj) {
+    return obj
+  }
+  const out: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(obj)) {
+    out[key] = fromJsonSafe(item)
+  }
+  return out
+}
+
+test('a Map, a Set, a Date, and a Map nested inside another Map all round-trip losslessly through eject', async () => {
+  const ctx = buildContext()
+  seedProjectWithQueue(ctx, 'blog', 'jobs')
+  const when = new Date('2026-08-14T09:12:00.000Z')
+  const originals: unknown[] = [
+    new Map<number, string>([
+      [1, 'a'],
+      [2, 'b'],
+    ]),
+    new Set([1, 2, 3]),
+    when,
+    // The nested case: a Map holding a Date and a Set, so recovering it
+    // requires the walk to recurse into $map's own values, not just handle
+    // one tag at the top level.
+    new Map<string, unknown>([
+      ['when', when],
+      ['tags', new Set(['x', 'y'])],
+    ]),
+  ]
+  seedQueueMessages(ctx, 'blog', 'jobs', originals)
+  await withServer(ctx, async (baseUrl) => {
+    const { queues } = await eject(baseUrl)
+    const jobs = queues?.find((q) => q.name === 'jobs')
+    assert.ok(jobs !== undefined)
+    const lines = jobs.jsonl.split('\n').filter((line) => line.length > 0)
+    assert.equal(lines.length, originals.length)
+    // A naive JSON.stringify would have collapsed the Map and the Set to
+    // '{}': assert the tagged wrapper survives in the raw text, not just
+    // after parsing it back.
+    assert.match(jobs.jsonl, /"\$map"/)
+    assert.match(jobs.jsonl, /"\$set"/)
+    assert.match(jobs.jsonl, /"\$date"/)
+    assert.doesNotMatch(jobs.jsonl, /"body":\{\}/, 'a Map or Set body must never collapse to an empty object')
+    for (const [i, line] of lines.entries()) {
+      const parsed = JSON.parse(line) as { body: unknown }
+      assert.deepEqual(fromJsonSafe(parsed.body), originals[i])
+    }
+  })
+})
+
+test('a BigInt, a RegExp and an undefined body all survive eject as tagged, recoverable wrappers rather than throwing or vanishing', async () => {
+  const ctx = buildContext()
+  seedProjectWithQueue(ctx, 'blog', 'jobs')
+  const originals: unknown[] = [10n, /ab+c/gi, undefined]
+  seedQueueMessages(ctx, 'blog', 'jobs', originals)
+  await withServer(ctx, async (baseUrl) => {
+    const { queues } = await eject(baseUrl)
+    const jobs = queues?.find((q) => q.name === 'jobs')
+    assert.ok(jobs !== undefined)
+    const lines = jobs.jsonl.split('\n').filter((line) => line.length > 0)
+    assert.equal(lines.length, originals.length)
+    assert.match(jobs.jsonl, /"\$bigint":"10"/)
+    assert.match(jobs.jsonl, /"\$regexp"/)
+    assert.match(jobs.jsonl, /"\$undefined":true/)
+    for (const [i, line] of lines.entries()) {
+      const parsed = JSON.parse(line) as { body: unknown }
+      assert.deepEqual(fromJsonSafe(parsed.body), originals[i])
+    }
+  })
+})
+
+test('a message body that refers back to itself does not fail the whole eject, and the repeat is marked $circular', async () => {
+  const ctx = buildContext()
+  seedProjectWithQueue(ctx, 'blog', 'jobs')
+  const circular: Record<string, unknown> = { name: 'self-referential' }
+  circular['self'] = circular
+  seedQueueMessages(ctx, 'blog', 'jobs', [circular, 'a plain message right after it'])
+  await withServer(ctx, async (baseUrl) => {
+    // A raw fetch, not the eject() helper: the point being proven is that
+    // this still returns 200 at all. A version that ran the decoded value
+    // through raw JSON.stringify would throw "Converting circular structure
+    // to JSON" here and this project would fail to eject over one message.
+    const res = await fetch(`${baseUrl}/v1/projects/blog/eject`, { method: 'POST' })
+    assert.equal(res.status, 200, 'one self-referential message must not fail the whole eject')
+    const body = (await res.json()) as { queues?: EjectQueueBacklog[] }
+    const jobs = body.queues?.find((q) => q.name === 'jobs')
+    assert.ok(jobs !== undefined)
+    const lines = jobs.jsonl.split('\n').filter((line) => line.length > 0)
+    assert.equal(lines.length, 2)
+    const first = JSON.parse(lines[0] as string) as { body: { name: string; self: { $circular: boolean } } }
+    assert.equal(first.body.name, 'self-referential')
+    assert.deepEqual(first.body.self, { $circular: true })
+    const second = JSON.parse(lines[1] as string) as { body: unknown }
+    assert.equal(second.body, 'a plain message right after it')
+  })
+})
+
+test("the compose comment documents the wrapper convention, and no wrapper is documented inside the JSONL file itself", async () => {
+  const ctx = buildContext()
+  seedProjectWithQueue(ctx, 'blog', 'jobs')
+  seedQueueMessages(ctx, 'blog', 'jobs', [new Map([['a', 1]])])
+  await withServer(ctx, async (baseUrl) => {
+    const { compose, queues } = await eject(baseUrl)
+    assert.match(compose, /\$map/)
+    assert.match(compose, /\$set/)
+    assert.match(compose, /\$date/)
+    assert.match(compose, /\$circular/)
+    const jobs = queues?.find((q) => q.name === 'jobs')
+    assert.ok(jobs !== undefined)
+    // Every line must parse as exactly the message shape, with nothing extra
+    // (like a header row) that a naive `lines.map(JSON.parse)` consumer
+    // would trip on.
+    for (const line of jobs.jsonl.split('\n').filter((l) => l.length > 0)) {
+      const parsed = JSON.parse(line) as Record<string, unknown>
+      assert.deepEqual(Object.keys(parsed).sort(), ['attempts', 'body', 'enqueuedAt', 'id'])
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix round 1, Important: EJECTABLE gained 'queue', which means a project
+// holding only queues now has an empty skippedReasons (queues are no longer
+// reported as unhandled), and that used to fall straight into the generic
+// "has no resources yet" refusal even though a queue resource plainly
+// exists. Judgment call 1 (this refusal itself) is accepted; the message
+// it produces has to be true.
+// ---------------------------------------------------------------------------
+
+test('a project holding only a queue refuses to eject, but says a queue exists rather than claiming the project is empty', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'queue-only', sleepAfterSeconds: 300 })
+  const queueConfig: QueueConfig = {
+    image: '',
+    containerName: '',
+    hostPort: 0,
+    retentionSeconds: DEFAULT_RETENTION_SECONDS,
+    consumerResourceId: null,
+    maxBatchSize: null,
+    maxBatchTimeoutSeconds: null,
+    maxRetries: null,
+    retryDelaySeconds: null,
+    deadLetterQueue: null,
+  }
+  ctx.store.createResource({ projectId: project.id, kind: 'queue', name: 'jobs', config: queueConfig })
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/v1/projects/queue-only/eject`, { method: 'POST' })
+    assert.equal(res.status, 400)
+    const body = (await res.json()) as { error: { code: string; message: string } }
+    assert.equal(body.error.code, 'usage')
+    assert.doesNotMatch(body.error.message, /has no resources yet/)
+    assert.match(body.error.message, /jobs/)
+    assert.match(body.error.message, /queue/i)
+  })
+})
