@@ -43,7 +43,7 @@ export interface Store {
   touchResource(id: ResourceId, at: Date): void
   updateResourceConfig(id: ResourceId, config: ResourceConfig): void
   deleteResource(id: ResourceId): void
-  allocatePort(from: number, to: number): number
+  allocatePort(from: number, to: number, exclude?: number[]): number
   close(): void
 }
 
@@ -325,13 +325,27 @@ export function openStore(path: string): Store {
     // while one kind existed and would have silently added `undefined` to
     // the taken set the first time a kind without a port appeared, handing
     // two resources the same port with no error anywhere.
-    allocatePort(from: number, to: number): number {
+    // `exclude` is for a caller allocating more than one port for the same
+    // not-yet-created resource in one breath (the worker kind's controlPort
+    // alongside its hostPort): the second call cannot see the first call's
+    // answer in the store yet, because nothing has been written, so without
+    // this the two calls would hand back the same free port twice.
+    allocatePort(from: number, to: number, exclude: number[] = []): number {
       const rows = db.prepare('SELECT config FROM resources').all() as unknown as ConfigRow[]
-      const taken = new Set<number>()
+      const taken = new Set<number>(exclude)
       for (const row of rows) {
         const config = JSON.parse(row.config) as Partial<ResourceConfig>
         if (typeof config.hostPort === 'number') {
           taken.add(config.hostPort)
+        }
+        // WorkerConfig's controlPort is a second port on the same resource,
+        // stored under a field name allocatePort does not otherwise know
+        // about. Without tracking it here too, a later call (for anyone's
+        // hostPort or controlPort) could hand out a number this resource
+        // already holds.
+        const controlPort = (config as { controlPort?: unknown }).controlPort
+        if (typeof controlPort === 'number') {
+          taken.add(controlPort)
         }
       }
       for (let port = from; port <= to; port++) {

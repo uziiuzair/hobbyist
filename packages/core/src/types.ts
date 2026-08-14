@@ -10,7 +10,7 @@ export type ResourceId = string
 // and ADR 0007 guard 1 requires the widening to happen before Phase 2 code
 // rather than during it: "if Phase 2 requires changing Phase 1's model, the
 // model was wrong and gets fixed before Phase 2 proceeds."
-export type ResourceKind = 'postgres' | 'app' | 'worker'
+export type ResourceKind = 'postgres' | 'app' | 'worker' | 'queue'
 
 export type ResourceState =
   | 'creating'
@@ -120,7 +120,22 @@ export interface WorkerManifest {
   kvNamespaces: string[]
   r2Buckets: string[]
   d1Databases: string[]
-  queues: { producers: string[]; consumers: string[] }
+  // A key the user left out of wrangler.toml stays null here, and is never
+  // filled in with a default. The broker owns the defaults, in
+  // DEFAULT_CONSUMER_OPTIONS (packages/queue/src/broker.ts); a second copy
+  // written at deploy time would freeze whatever the value was on that day
+  // and drift from the broker's the moment either changed.
+  queues: {
+    producers: Array<{ queue: string; binding: string }>
+    consumers: Array<{
+      queue: string
+      maxBatchSize: number | null
+      maxBatchTimeoutSeconds: number | null
+      maxRetries: number | null
+      retryDelaySeconds: number | null
+      deadLetterQueue: string | null
+    }>
+  }
   durableObjects: Array<{ binding: string; className: string }>
 }
 
@@ -132,6 +147,31 @@ export interface WorkerConfig extends ResourceConfigBase {
   // creation, unlike an app's containerPort, which is whatever the user's
   // process happens to bind and is unknowable before there is code.
   containerPort: number
+  // The host-side port the runner's control channel is published on,
+  // loopback only, same as hostPort. The daemon posts queue batches here;
+  // see docs/queues/specs/2026-08-13-queues-design.md, "Delivery over a
+  // second port, not a proxy".
+  //
+  // Above the manifest split, and it has to stay there. The manifest is
+  // rebuilt wholesale on every deploy, so a field that lived inside it would
+  // be re-derived on each one: a changed controlPort sends queue batches to
+  // a port nothing is listening on.
+  controlPort: number
+  // The bearer token a container's producer shim sends to the daemon's
+  // enqueue listener. Generated once with randomUUID() at resource creation
+  // and never regenerated: the reasoning is the same as
+  // durableObjectUniqueKeyModifier's below, for a different failure mode. A
+  // rotated token is fine (every running container gets restarted with the
+  // new one); an ACCIDENTALLY regenerated one is not, because it would
+  // silently break a producer that is still holding the old value. Must
+  // never be handed out over the wire boundary unredacted: see
+  // packages/cli/src/daemon/wire.ts's redactConfig.
+  //
+  // Above the manifest split for the same reason controlPort is: rotating it
+  // on every deploy would give already-running containers 401s from the
+  // enqueue listener, which reads as a broker outage rather than a token
+  // problem.
+  queueToken: string
   hostname: string
   databaseResourceId: ResourceId | null
 
@@ -153,7 +193,38 @@ export interface WorkerConfig extends ResourceConfigBase {
   manifest: WorkerManifest | null
 }
 
-export type ResourceConfig = PostgresConfig | AppConfig | WorkerConfig
+// A queue. The only kind with no container: it is a sqlite file the daemon
+// owns, plus the rules for draining it. `image`, `containerName` and
+// `hostPort` come from ResourceConfigBase and are unused, because every
+// existing call site that reads them expects them to exist on any resource
+// (see the comment on ResourceConfigBase).
+//
+// The consumer is stored as a resource id rather than a name so a worker
+// rename cannot orphan a queue, which is the same reasoning
+// AppConfig.databaseResourceId records.
+export interface QueueConfig extends ResourceConfigBase {
+  retentionSeconds: number
+  consumerResourceId: ResourceId | null
+  // Null until a consumer's deployed manifest actually sets one, and null
+  // again whenever that manifest omits the key, mirroring
+  // WorkerManifest.queues.consumers's own comment above verbatim: the broker
+  // owns the defaults (DEFAULT_CONSUMER_OPTIONS, packages/queue/src/broker.ts),
+  // applied where this config is read (packages/cli/src/daemon/queues.ts's
+  // drainableQueues), never stamped into the row. Stamping a default in here
+  // at creation was the actual defect a fix round found: a queue created
+  // before any worker had deployed held concrete numbers nothing had ever
+  // configured, indistinguishable from a value a deploy genuinely set.
+  maxBatchSize: number | null
+  maxBatchTimeoutSeconds: number | null
+  maxRetries: number | null
+  retryDelaySeconds: number | null
+  // The NAME of another queue in the same project, not an id: it is what the
+  // user wrote in wrangler.toml, and Cloudflare creates it if it is missing,
+  // so it can legitimately name a queue that does not exist yet.
+  deadLetterQueue: string | null
+}
+
+export type ResourceConfig = PostgresConfig | AppConfig | WorkerConfig | QueueConfig
 
 interface ResourceBase {
   id: ResourceId
@@ -182,7 +253,12 @@ export interface WorkerResource extends ResourceBase {
   config: WorkerConfig
 }
 
-export type Resource = PostgresResource | AppResource | WorkerResource
+export interface QueueResource extends ResourceBase {
+  kind: 'queue'
+  config: QueueConfig
+}
+
+export type Resource = PostgresResource | AppResource | WorkerResource | QueueResource
 
 // The write half of the proxy's ActivityTracker
 // (packages/proxy/src/activity.ts), named here so packages that must report

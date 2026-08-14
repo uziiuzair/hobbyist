@@ -19,10 +19,11 @@ import { dirname, join, resolve } from 'node:path'
 //           daemon's alarm mirror, which recovers pending alarm deadlines
 //           from stopped objects' sqlite files, since a stopped container
 //           cannot fire its own timer.
+//   queue   a queue's messages.sqlite, written only by the daemon.
 //
 // An `app` has no part at all: ADR 0007 makes Phase 2 compute stateless and
 // volumes wait for Phase 3.
-export type ResourcePart = 'pgdata' | 'bundle' | 'state' | 'do'
+export type ResourcePart = 'pgdata' | 'bundle' | 'state' | 'do' | 'queue'
 
 export interface Paths {
   home: string
@@ -87,6 +88,17 @@ export interface HobbyConfig {
   sleepAfterSeconds: number | null
   wakeTimeoutMs: number
   readinessPollMs: number
+  // Where the daemon's queue enqueue listener answers `POST /enqueue`.
+  // Separate from apiPort: a compromised container should be able to reach
+  // only this endpoint, with its own per-resource token, not the operator
+  // control surface. See docs/queues/specs/2026-08-13-queues-design.md,
+  // "Daemon API, two listeners". The listener itself is a later task; this
+  // package only needs the number, to build the URL a worker's producer
+  // binding is given. Optional (unlike the ports above) so every existing
+  // hand-built HobbyConfig fixture across the repo, most of them owned by
+  // other work, does not have to be touched to add a field it does not care
+  // about; DEFAULT_CONFIG still supplies it for real use.
+  queuePort?: number
   // The HTTP front door (ADR 0009), opt-in and off by default. Starting it
   // binds :80 and :443 on the operator's box, which is a surprising side
   // effect for a daemon restart, and packages/cli/src/daemon/caddy.ts's own
@@ -116,6 +128,7 @@ const DEFAULT_CONFIG: HobbyConfig = {
   sleepAfterSeconds: 300,
   wakeTimeoutMs: 30000,
   readinessPollMs: 25,
+  queuePort: 7434,
   caddyEnabled: false,
   caddyAdminPort: 2019,
   caddyStudioHost: null,
@@ -176,6 +189,9 @@ function readEnvConfig(env: NodeJS.ProcessEnv): Partial<HobbyConfig> {
   }
   if (env.HOBBY_READINESS_POLL_MS !== undefined) {
     config.readinessPollMs = Number(env.HOBBY_READINESS_POLL_MS)
+  }
+  if (env.HOBBY_QUEUE_PORT !== undefined) {
+    config.queuePort = Number(env.HOBBY_QUEUE_PORT)
   }
   // Fail closed: only the two conventional truthy spellings turn this on.
   // Everything else, including a typo like 'tru' or 'yes', is treated as

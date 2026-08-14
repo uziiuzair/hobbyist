@@ -16,6 +16,7 @@
 
 import type { PreflightReport } from '../daemon/preflight.js'
 import type { WireResource } from '../daemon/wire.js'
+import type { QueueListEntry, QueueMessage } from './client.js'
 
 export function formatBytes(bytes: number): string {
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -41,8 +42,56 @@ export function renderResourceLine(resource: WireResource): string {
   if (resource.kind === 'postgres') {
     return `${resource.name}  ${resource.kind}  ${resource.state}  port ${resource.config.hostPort}`
   }
+  // A queue is reached by neither: no port anybody dials, no hostname
+  // anybody types, so the line simply ends. Its own branch rather than a
+  // fallthrough, for the same reason redactConfig
+  // (packages/cli/src/daemon/wire.ts) grew one: `queue` landed in the
+  // app-and-worker case below and read a `hostname` a QueueConfig does not
+  // have. Depth would be the useful column here and is deliberately not it:
+  // it is a per-queue sqlite read, and `hobby ls` must stay one cheap call.
+  if (resource.kind === 'queue') {
+    return `${resource.name}  ${resource.kind}  ${resource.state}`
+  }
   const trailer = resource.state === 'undeployed' ? '  (no code yet)' : ''
   return `${resource.name}  ${resource.kind}  ${resource.state}  ${resource.config.hostname}${trailer}`
+}
+
+// The consumer column of `hobby queue ls`. Deliberately the same wording
+// `hobby ls` already uses for an undeployed worker (renderResourceLine's own
+// trailer above), because the underlying fact is identical: no code has ever
+// been deployed to it. A queue with no consumer bound at all is `(none)`, a
+// different phrase for a different fact: nothing is wrong, nobody has bound
+// a consumer yet, and messages simply accumulate until retention expires.
+export function renderQueueConsumer(consumer: WireResource | null): string {
+  if (consumer === null) {
+    return '(none)'
+  }
+  if (consumer.kind === 'worker' && consumer.config.manifest === null) {
+    return `${consumer.name} (no code yet)`
+  }
+  return consumer.name
+}
+
+// One line per queue for `hobby queue ls`: depth and oldest-message age come
+// straight from the route's own sqlite read (routes.ts's readQueueStats), so
+// this function only formats, never decides. `resource.config` is read only
+// after narrowing to `kind === 'queue'`, the same discipline every other
+// branch in this file already applies to a WireResource union.
+export function renderQueueLine(entry: QueueListEntry): string {
+  if (entry.resource.kind !== 'queue') {
+    return entry.resource.name
+  }
+  const oldest = entry.oldestMessageAgeSeconds === null ? 'empty' : `oldest ${entry.oldestMessageAgeSeconds}s ago`
+  const dlq = entry.resource.config.deadLetterQueue === null ? 'no dlq' : `dlq ${entry.resource.config.deadLetterQueue}`
+  return `${entry.resource.name}  depth ${entry.depth}  ${oldest}  consumer ${renderQueueConsumer(entry.consumer)}  ${dlq}`
+}
+
+// One line per message for `hobby queue peek`. The body is already decoded
+// JSON (routes.ts's peek route runs decodeBody before this ever sees it), so
+// this is a plain JSON.stringify, the same rendering --json would show for
+// the same field.
+export function renderQueueMessageLine(message: QueueMessage): string {
+  return `${message.id}  attempts ${message.attempts}  ${JSON.stringify(message.body)}`
 }
 
 // The reflink warning is deliberately not part of this function's output.

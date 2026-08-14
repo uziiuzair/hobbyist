@@ -80,6 +80,7 @@ docs/<capability>/
 | [`backups/`](backups/) | Backup, restore and point-in-time recovery, wrapping existing tools. | Phase 1.5 |
 | [`compute/`](compute/) | Stateless workers and apps. Build, deploy, wake on request. | Phase 2 |
 | [`durable-objects/`](durable-objects/) | The durable half of Durable Objects: alarms that survive sleep, the object catalog, storage lifecycle. The runtime is `compute/`. | Phase 2 |
+| [`queues/`](queues/) | The broker that holds messages outside the runtime, so a backlog survives sleep and a message can wake its consumer. | Phase 2 |
 | [`storage/`](storage/) | S3-compatible buckets and volumes for compute. | Phase 3 |
 | [`sdk/`](sdk/) | Client libraries, React first, if they earn their place. | Phase 3 |
 

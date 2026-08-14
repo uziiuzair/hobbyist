@@ -38,6 +38,24 @@ function errorMessage(err: unknown): string {
 // A single attempt, no retry. A hung CLI waiting on a dead daemon is worse
 // than a clear, immediate error, per the brief's explicit instruction not
 // to retry silently.
+//
+// decision hobbyist.bound-every-outbound-call: checked here, per that
+// decision's own instruction, before adding the queue methods below rather
+// than after. This function has no request timeout today, and that gap is
+// pre-existing and shared by every one of the 20-odd calls this file already
+// makes (health, listProjects, deploy, and so on), not something the queue
+// routes introduce. The new queue methods (listQueues, peekQueue,
+// sendMessage, purgeQueue, setRetention) add no second transport and no
+// second gap: they call the exact same request() above, over the same
+// unix socket to the same box, so their blast radius if this socket ever
+// hangs is identical to `hobby ls` hanging today, not a new failure mode.
+// The routes those methods reach (packages/cli/src/daemon/routes.ts) make no
+// outbound network call of their own either: enqueue, peek and purge are
+// synchronous sqlite operations, the same shape as every other route in that
+// file. Giving this transport a timeout is a real gap worth closing, but
+// doing it here would silently change the failure mode of every existing
+// command in one diff meant to add queue support, which is a different,
+// riskier change than this task asked for.
 export function createClient(socketPath: string): DaemonClient {
   return {
     request(method: string, path: string, body?: unknown): Promise<RawResponse> {
@@ -161,6 +179,39 @@ export interface ConnectionResponse {
 export interface LogsResponse {
   logs: string
 }
+// One entry per queue, from GET /v1/projects/:name/queues. `consumer` is the
+// full WireResource of whatever consumerResourceId points at, or null:
+// carrying the whole resource (not just a name) is what lets output.ts read
+// `consumer.config.manifest === null` and print "(no code yet)" using the
+// exact same fact `hobby ls` already renders for an undeployed worker,
+// rather than a second, possibly-drifting signal invented for this table.
+export interface QueueListEntry {
+  resource: WireResource
+  depth: number
+  oldestMessageAgeSeconds: number | null
+  consumer: WireResource | null
+}
+export interface QueueListResponse {
+  queues: QueueListEntry[]
+}
+// A peeked message, body already decoded (see routes.ts's decodeMessageBody):
+// neither the CLI nor MCP ever has to know this queue's on-disk codec.
+export interface QueueMessage {
+  id: string
+  timestampMs: number
+  attempts: number
+  contentType: string
+  body: unknown
+}
+export interface QueuePeekResponse {
+  messages: QueueMessage[]
+}
+export interface QueueSendResponse {
+  id: string
+}
+export interface QueuePurgeResponse {
+  purged: number
+}
 export interface EjectResponse {
   compose: string
   dataDirs: string[]
@@ -178,6 +229,14 @@ export interface EjectResponse {
   // routes.ts's isDeployed). Reported rather than silently dropped either
   // way, so an incomplete compose file is never mistaken for a complete one.
   notEjectable?: string[]
+  // Every queue in the project, backlog included: `jsonl` is the whole
+  // handover for that queue, one JSON object per line (id, body, attempts,
+  // enqueuedAt), decoded rather than left as @hobby.sh/queue's codec-encoded
+  // string (routes.ts's toBacklogLine explains why: this file's reader has
+  // no hobbyist installation left to decode it with). Present with `count: 0`
+  // and `jsonl: ''` for a queue holding nothing, never omitted, so a missing
+  // entry always means "no such queue," never "hobby forgot."
+  queues?: Array<{ name: string; jsonl: string; count: number }>
 }
 
 export interface Api {
@@ -224,6 +283,16 @@ export interface Api {
   getLogs(id: string, tail?: number): Promise<LogsResponse>
   eject(project: string, opts?: { release?: boolean }): Promise<EjectResponse>
   adopt(project: string): Promise<{ project: Project }>
+  // Queue routes. `id` is always a resource id, not a name: resolveQueueTarget
+  // (packages/cli/src/cli/commands.ts) turns a CLI `project`/`project/name`
+  // target into one before any of these are called, the same resolution
+  // sleep/wake/logs already go through for every other kind.
+  listQueues(project: string): Promise<QueueListResponse>
+  createQueue(project: string, name: string): Promise<ResourceResponse>
+  peekQueue(id: string, limit?: number): Promise<QueuePeekResponse>
+  sendMessage(id: string, input: { body: unknown; delaySeconds?: number }): Promise<QueueSendResponse>
+  purgeQueue(id: string): Promise<QueuePurgeResponse>
+  setRetention(id: string, retentionSeconds: number): Promise<ResourceResponse>
 }
 
 export function createApi(socketPath: string): Api {
@@ -248,5 +317,13 @@ export function createApi(socketPath: string): Api {
     eject: (project, opts) =>
       call(client, 'POST', `/v1/projects/${p(project)}/eject${opts?.release === true ? '?release=true' : ''}`),
     adopt: (project) => call(client, 'POST', `/v1/projects/${p(project)}/adopt`),
+    listQueues: (project) => call(client, 'GET', `/v1/projects/${p(project)}/queues`),
+    createQueue: (project, name) => call(client, 'POST', `/v1/projects/${p(project)}/resources`, { kind: 'queue', name }),
+    peekQueue: (id, limit) =>
+      call(client, 'GET', `/v1/resources/${p(id)}/queue/messages${limit === undefined ? '' : `?limit=${limit}`}`),
+    sendMessage: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/queue/messages`, input),
+    purgeQueue: (id) => call(client, 'DELETE', `/v1/resources/${p(id)}/queue/messages`),
+    setRetention: (id, retentionSeconds) =>
+      call(client, 'POST', `/v1/resources/${p(id)}/queue/retention`, { retentionSeconds }),
   }
 }

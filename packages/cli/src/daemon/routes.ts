@@ -10,22 +10,50 @@
 // handling for free and none of them can accidentally diverge from it.
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { existsSync } from 'node:fs'
 import {
   DEFAULT_PORT_BIND,
   HobbyError,
+  openDatabaseReadOnly,
   validateName,
   type AppResource,
   type PostgresResource,
+  type QueueConfig,
+  type QueueResource,
+  type SqliteDatabase,
+  type Store,
   type WorkerResource,
   type Project,
   type Resource,
 } from '@hobby.sh/core'
 import { createAppResource, deployApp, type AppSource } from '@hobby.sh/app'
 import { connectionString, createPostgres, runQuery } from '@hobby.sh/pg'
-import { buildRunnerManifest, createWorkerResource, deployWorker, describeIgnored } from '@hobby.sh/worker'
+import {
+  DEFAULT_RETENTION_SECONDS,
+  MAX_RETENTION_SECONDS,
+  MIN_RETENTION_SECONDS,
+  decodeBody,
+  depth as queueDepth,
+  encodeBody,
+  enqueue,
+  openQueueDb,
+  peek,
+  purge,
+  queueDbPath,
+  type ContentType,
+  type LeasedMessage,
+} from '@hobby.sh/queue'
+import {
+  buildRunnerManifest,
+  createWorkerResource,
+  deployWorker,
+  describeIgnored,
+  findWranglerManifest,
+  resolveWorkerSourcePath,
+} from '@hobby.sh/worker'
 import { getOrCreateWake, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
-import { toWireResource, toWireResources } from './wire.js'
+import { toWireResource, toWireResources, type WireResource } from './wire.js'
 
 interface RouteResult {
   status: number
@@ -117,6 +145,30 @@ function expectPostgres(resource: Resource, what: string): PostgresResource {
     )
   }
   return resource
+}
+
+// The same narrowing gate as expectPostgres, for the handful of routes below
+// that are genuinely queue-only: peeking, sending and purging messages, and
+// setting retention, mean nothing for a postgres, app or worker resource.
+function expectQueue(resource: Resource, what: string): QueueResource {
+  if (resource.kind !== 'queue') {
+    throw new HobbyError(
+      'usage',
+      `resource ${resource.name} is a ${resource.kind}, and ${what} is only meaningful for a queue`
+    )
+  }
+  return resource
+}
+
+function getOwningProjectOrThrow(ctx: DaemonContext, resource: Resource): Project {
+  const project = ctx.store.getProject(resource.projectId)
+  if (project === null) {
+    throw new HobbyError(
+      'internal',
+      `resource ${resource.id} has no owning project (project ${resource.projectId} is gone)`
+    )
+  }
+  return project
 }
 
 async function createProjectRoute(ctx: DaemonContext, req: IncomingMessage): Promise<Project> {
@@ -214,6 +266,65 @@ function readStringMap(value: unknown): Record<string, string> {
   return out
 }
 
+// The one place a queue resource is built: from `hobby queue create` /
+// POST /v1/projects/:name/resources with kind 'queue' (createResourceRoute
+// below), and from syncWorkerQueueBindings (further down) auto-creating one
+// a deployed worker's manifest names but that does not exist yet, matching
+// the spec's own promise that a queue named in a binding is created if
+// missing, the same way Cloudflare itself behaves.
+//
+// No dedicated createQueueResource function exists in @hobby.sh/queue
+// (unlike createPostgres/createAppResource/createWorkerResource): a queue's
+// row is just its defaults, so validateName plus store.createResource is
+// the whole of it.
+//
+// The four tuning fields are seeded null, not DEFAULT_CONSUMER_OPTIONS's
+// concrete numbers: see QueueConfig's own comment (packages/core/src/types.ts)
+// for why a stamped default is a second source of truth that drifts. A
+// producer-only queue, or one auto-created for a not-yet-deployed consumer,
+// genuinely has no tuning configured yet, and null says so honestly.
+//
+// Exported, alongside syncWorkerQueueBindings below, so routes.test.ts can
+// exercise the manifest-to-store wiring directly against a DaemonContext
+// without also having to drive a full worker deploy (a real build and a
+// real readiness probe, which this daemon's test harness has no seam to
+// fake for a worker the way postgres's probeFactory lets it fake postgres).
+// Nothing in production calls either of these except the two routes below.
+export async function createQueueResource(ctx: DaemonContext, project: Project, name: string): Promise<QueueResource> {
+  validateName(name)
+  const config: QueueConfig = {
+    // image, containerName and hostPort are unused for this kind (see
+    // QueueConfig's own comment on ResourceConfigBase): every field here
+    // matches the shape kind-dispatch and queue-kind tests already fix as
+    // this kind's zero value, so a resource built by this route and one
+    // built by a test fixture are never distinguishable later.
+    image: '',
+    containerName: '',
+    hostPort: 0,
+    retentionSeconds: DEFAULT_RETENTION_SECONDS,
+    consumerResourceId: null,
+    maxBatchSize: null,
+    maxBatchTimeoutSeconds: null,
+    maxRetries: null,
+    retryDelaySeconds: null,
+    deadLetterQueue: null,
+  }
+  const resource = ctx.store.createResource({ projectId: project.id, kind: 'queue', name, config })
+  // start() only creates the sqlite file (queueKindHandler.start,
+  // packages/queue/src/kind.ts): synchronous, cheap, and nothing to poll
+  // for readiness the way a container has. A queue is `running` from the
+  // moment it exists and never anything else (queue-kind.test.ts's own
+  // header comment), which is what lets the hibernator and reconcile both
+  // treat every queue row identically forever.
+  await ctx.kinds.get('queue').start(ctx, resource)
+  ctx.store.setResourceState(resource.id, 'running')
+  const created = getResourceOrThrow(ctx, resource.id)
+  if (created.kind !== 'queue') {
+    throw new HobbyError('internal', `queue ${name} was created but reads back as a ${created.kind}`)
+  }
+  return created
+}
+
 async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, projectName: string): Promise<Resource> {
   const project = getProjectByNameOrThrow(ctx, projectName)
   const body = await readJsonBody(req)
@@ -262,6 +373,23 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
     const databaseResourceId =
       typeof fields['databaseResourceId'] === 'string' ? fields['databaseResourceId'] : null
 
+    // A worker created WITH a source builds and deploys in this one call
+    // (createWorkerResource, packages/worker/src/worker.ts), never through
+    // deployResourceRoute: that is the path `hobby deploy` takes for a
+    // brand new worker, and it is a genuinely separate call site from a
+    // redeploy of an existing one. The same pre-build legality check that
+    // guards a redeploy has to guard this path too, or a worker's very
+    // first deploy could still build an image, start a container and prove
+    // it serves, then get refused for a queue binding conflict discoverable
+    // from its manifest alone: the identical bug this fix round exists to
+    // close, reachable through the other door. `workerId: null` because
+    // this resource does not exist yet: it cannot already be any queue's
+    // recorded consumer, so it always loses a conflict against one that is.
+    if (source !== null) {
+      const found = findWranglerManifest(source.path)
+      assertQueueBindingsAreLegal(ctx.store, project, null, name, found.manifest.queues)
+    }
+
     const result = await createWorkerResource(ctx, {
       project,
       name,
@@ -275,7 +403,12 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
     for (const line of describeIgnored(result.ignored)) {
       console.error(`worker ${name}: ignoring ${line}`)
     }
+    await syncWorkerQueueBindings(ctx, project, result.resource)
     return result.resource
+  }
+
+  if (kind === 'queue') {
+    return createQueueResource(ctx, project, name)
   }
 
   throw new HobbyError(
@@ -283,6 +416,200 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
     `unsupported resource kind: ${String(kind)}`,
     `registered kinds: ${ctx.kinds.kinds().join(', ')}`
   )
+}
+
+// The shape both a parsed WranglerManifest and a stored WorkerManifest
+// already satisfy structurally, which is what lets one predicate check both
+// the PRE-deploy manifest (nothing built yet) and the POST-deploy one
+// (defense in depth inside syncWorkerQueueBindings) without a conversion
+// step between them.
+interface QueueBindingsToCheck {
+  producers: Array<{ queue: string }>
+  consumers: Array<{ queue: string; deadLetterQueue: string | null }>
+}
+
+// Two things a manifest's queue bindings can conflict about, and both are
+// knowable from the store alone: no image built, no container started, no
+// readiness probe run. Called BEFORE any build, from createResourceRoute
+// (a worker's first-ever deploy, created with a source in one call) and
+// deployResourceRoute (every deploy after that), so a deploy that cannot
+// legally take its declared bindings never builds an image at all. This
+// was a real bug in the previous fix round: the same check ran only AFTER
+// deployWorker had already built the image, started the container, and
+// proven it served, so a refused deploy still left the user with a running
+// worker whose queue() handler would never receive anything, and an error
+// message on the terminal that contradicted the container in front of them.
+//
+// `workerId: null` means "a worker that does not exist yet" (a brand new
+// resource being created and deployed in the same call): it can never
+// already be the id recorded as some queue's consumer, so it always loses
+// a conflict against an existing binding, which is the correct answer for
+// something that has no history yet.
+//
+// Called again from inside syncWorkerQueueBindings, unconditionally, as
+// defense in depth: that function is exported and callable directly (this
+// file's own tests do exactly that), and a caller that reaches it without
+// going through either pre-check must not be able to steal a binding or
+// squat a name silently just because it skipped a step.
+function assertQueueBindingsAreLegal(
+  store: Store,
+  project: Project,
+  workerId: string | null,
+  workerName: string,
+  queues: QueueBindingsToCheck
+): void {
+  const names = new Set<string>()
+  for (const producer of queues.producers) {
+    names.add(producer.queue)
+  }
+  for (const consumer of queues.consumers) {
+    names.add(consumer.queue)
+    if (consumer.deadLetterQueue !== null) {
+      names.add(consumer.deadLetterQueue)
+    }
+  }
+
+  for (const name of names) {
+    const existing = store.getResourceByName(project.id, name)
+    if (existing !== null && existing.kind !== 'queue') {
+      throw new HobbyError(
+        'usage',
+        `${workerName}'s wrangler config names a queue "${name}", but ${project.name}/${name} is already a ${existing.kind}`,
+        `rename the queue in ${workerName}'s wrangler config, or rename the existing ${existing.kind}`
+      )
+    }
+  }
+
+  for (const consumer of queues.consumers) {
+    const existing = store.getResourceByName(project.id, consumer.queue)
+    if (existing === null || existing.kind !== 'queue') {
+      continue
+    }
+    if (existing.config.consumerResourceId !== null && existing.config.consumerResourceId !== workerId) {
+      const other = store.getResource(existing.config.consumerResourceId)
+      const otherName = other === null ? existing.config.consumerResourceId : other.name
+      throw new HobbyError(
+        'usage',
+        `queue ${existing.name} already has worker ${otherName} as its consumer, and worker ${workerName} also declares itself one`,
+        `a queue can have exactly one consumer; remove the [[queues.consumers]] block naming ${existing.name} from ${workerName} or from ${otherName}`
+      )
+    }
+  }
+}
+
+// The spec's own promise: a queue named in a deployed manifest's producers,
+// consumers, or a consumer's dead letter queue is created if it does not
+// exist yet, the same way Cloudflare itself auto-creates a missing one.
+// Runs on every worker deploy that produces a non-null manifest, which is
+// what lets a queue binding written into wrangler.toml be usable the moment
+// the deploy that declares it succeeds, with no separate `hobby queue
+// create` step required first.
+//
+// Three things happen here, in order:
+//   1. legality: assertQueueBindingsAreLegal, see its own comment. Always
+//      passes here in production, because both callers already ran it
+//      before building anything; kept as a real check rather than an
+//      assertion because this function is directly testable and reachable.
+//   2. every named queue exists, created via createQueueResource above (the
+//      same defaults `hobby queue create` uses) if it did not already.
+//   3. every consumer entry claims its queue: consumerResourceId is set to
+//      this worker, and its non-null tuning keys are copied onto the row
+//      (QueueConfig's own comment explains why only non-null ones).
+//   4. any queue this worker used to consume that its current manifest no
+//      longer names is released back to consumerResourceId: null. A stale
+//      pointer would leave the tick delivering to a worker with no handler
+//      for it, which is worse than delivering to nobody.
+//
+// Lives beside deployResourceRoute rather than inside deployWorker
+// (packages/worker/src/worker.ts) because this is a join between a
+// manifest and OTHER resources in the same project, and WorkerDeps
+// deliberately carries no KindRegistry: nothing else in that package ever
+// creates a sibling resource, and giving it one only for this would widen a
+// dependency the rest of that package does not need. By the time this
+// function runs, deployWorker (or createWorkerResource, for a first
+// deploy) has already parsed and persisted the manifest and started and
+// stopped the container to prove it serves; only the HTTP response, which
+// is what "reported deployed" means to a caller, is still pending.
+export async function syncWorkerQueueBindings(ctx: DaemonContext, project: Project, worker: WorkerResource): Promise<void> {
+  const manifest = worker.config.manifest
+  if (manifest === null) {
+    return
+  }
+
+  assertQueueBindingsAreLegal(ctx.store, project, worker.id, worker.name, manifest.queues)
+
+  // Every name this manifest references at all, producer or consumer or
+  // dead letter target, deduplicated: a name in more than one role is only
+  // ever created once.
+  const names = new Set<string>()
+  for (const producer of manifest.queues.producers) {
+    names.add(producer.queue)
+  }
+  for (const consumer of manifest.queues.consumers) {
+    names.add(consumer.queue)
+    if (consumer.deadLetterQueue !== null) {
+      names.add(consumer.deadLetterQueue)
+    }
+  }
+
+  const byName = new Map<string, QueueResource>()
+  for (const name of names) {
+    const existing = ctx.store.getResourceByName(project.id, name)
+    if (existing === null) {
+      byName.set(name, await createQueueResource(ctx, project, name))
+      continue
+    }
+    // assertQueueBindingsAreLegal above already ruled out a name held by a
+    // different kind; this narrow is for the type checker, not a second
+    // policy decision.
+    if (existing.kind === 'queue') {
+      byName.set(name, existing)
+    }
+  }
+
+  for (const consumerEntry of manifest.queues.consumers) {
+    const queue = byName.get(consumerEntry.queue)
+    if (queue === undefined) {
+      continue
+    }
+    const config: QueueConfig = { ...queue.config, consumerResourceId: worker.id }
+    if (consumerEntry.maxBatchSize !== null) {
+      config.maxBatchSize = consumerEntry.maxBatchSize
+    }
+    if (consumerEntry.maxBatchTimeoutSeconds !== null) {
+      config.maxBatchTimeoutSeconds = consumerEntry.maxBatchTimeoutSeconds
+    }
+    if (consumerEntry.maxRetries !== null) {
+      config.maxRetries = consumerEntry.maxRetries
+    }
+    if (consumerEntry.retryDelaySeconds !== null) {
+      config.retryDelaySeconds = consumerEntry.retryDelaySeconds
+    }
+    if (consumerEntry.deadLetterQueue !== null) {
+      config.deadLetterQueue = consumerEntry.deadLetterQueue
+    }
+    ctx.store.updateResourceConfig(queue.id, config)
+    byName.set(queue.name, { ...queue, config })
+  }
+
+  // Release a stale claim: this worker consumed a queue before and its
+  // current manifest no longer names it. Scoped to consumerResourceId ===
+  // worker.id specifically, never to a queue this worker merely produces to
+  // or does not mention at all, so an unrelated queue's binding is never
+  // touched by someone else's deploy.
+  const stillConsumed = new Set(manifest.queues.consumers.map((c) => c.queue))
+  for (const candidate of ctx.store.listResources(project.id)) {
+    if (candidate.kind !== 'queue') {
+      continue
+    }
+    if (candidate.config.consumerResourceId !== worker.id) {
+      continue
+    }
+    if (stillConsumed.has(candidate.name)) {
+      continue
+    }
+    ctx.store.updateResourceConfig(candidate.id, { ...candidate.config, consumerResourceId: null })
+  }
 }
 
 // Rebuild an app from its source and prove the result serves before calling
@@ -306,10 +633,34 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
   }
 
   if (resource.kind === 'worker') {
+    const project = getOwningProjectOrThrow(ctx, resource)
+    // Refuse BEFORE deployWorker ever builds an image, not after. The
+    // conflict is knowable from the parsed manifest and the store alone, no
+    // build or readiness probe required, and finding out after the fact was
+    // a real bug in the previous round: a refused deploy still left a
+    // genuinely running, serving container behind, with an error message on
+    // the terminal that contradicted it, and a queue() handler that would
+    // silently never receive anything because consumerResourceId still
+    // pointed at the other worker. resolveWorkerSourcePath and
+    // findWranglerManifest are the identical two calls deployWorker is
+    // about to make internally; parsing the manifest twice is the accepted
+    // cost of catching this before committing anything, not a new failure
+    // mode, since any error either call raises here is the exact error
+    // deployWorker would have raised at the same point anyway.
+    const sourcePath = resolveWorkerSourcePath(resource, project.name, source === null ? undefined : source.path)
+    const found = findWranglerManifest(sourcePath)
+    assertQueueBindingsAreLegal(ctx.store, project, resource.id, resource.name, found.manifest.queues)
+
     const result = await deployWorker(ctx, resource, source === null ? {} : { sourcePath: source.path })
     for (const line of describeIgnored(result.ignored)) {
       console.error(`worker ${resource.name}: ignoring ${line}`)
     }
+    // By now the manifest is parsed and persisted and the container has
+    // proven it serves; the only thing still pending is the HTTP response,
+    // which is what "reported deployed" means to a caller. The legality
+    // check just above means syncWorkerQueueBindings's own defense-in-depth
+    // copy of it can never actually fire here.
+    await syncWorkerQueueBindings(ctx, project, result.resource)
     return {
       status: 200,
       body: {
@@ -332,8 +683,55 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
 // now mean the same thing for a database, an app and a worker, which is what
 // makes the wedge ("everything sleeps, everything wakes on demand") one
 // mechanism rather than three.
+// Every worker in the queue's own project whose DEPLOYED manifest names this
+// queue, either as a consumer or as a producer, plus the stored consumer
+// relationship itself. Two sources rather than one: consumerResourceId is
+// the join drainableQueues (daemon/queues.ts) already trusts for delivery,
+// but nothing before this route has ever required it to be set, so a worker
+// whose manifest declares a binding is checked too, independently, so a
+// producer that would start throwing `env.X.send()` errors the moment this
+// queue vanished is caught even when consumerResourceId was never wired up.
+// Returns the first binder found; there is exactly one refusal message to
+// write regardless of how many exist.
+function findBindingWorker(ctx: DaemonContext, queue: QueueResource): WorkerResource | null {
+  if (queue.config.consumerResourceId !== null) {
+    const consumer = ctx.store.getResource(queue.config.consumerResourceId)
+    if (consumer !== null && consumer.kind === 'worker') {
+      return consumer
+    }
+  }
+  for (const candidate of ctx.store.listResources(queue.projectId)) {
+    if (candidate.kind !== 'worker' || candidate.config.manifest === null) {
+      continue
+    }
+    const { producers, consumers } = candidate.config.manifest.queues
+    if (producers.some((p) => p.queue === queue.name) || consumers.some((c) => c.queue === queue.name)) {
+      return candidate
+    }
+  }
+  return null
+}
+
 async function destroyResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
+  // Refused before anything is torn down, and before state ever moves to
+  // `destroying`: deleting a queue out from under a worker that still binds
+  // it turns a working `env.X.send()`/`queue()` handler into a silent
+  // failure the moment the container is next deployed or restarted, with
+  // nothing in the worker's own logs pointing back at a queue that used to
+  // exist. `hobby rm` and `hobby queue rm` both go through this one route
+  // (root CLAUDE.md: the daemon API is the only control surface), so neither
+  // can diverge from the other on this.
+  if (resource.kind === 'queue') {
+    const binder = findBindingWorker(ctx, resource)
+    if (binder !== null) {
+      throw new HobbyError(
+        'usage',
+        `queue ${resource.name} is still bound to worker ${binder.name}, refusing to delete it`,
+        `remove the queue binding from ${binder.name}'s wrangler config and redeploy, or delete ${binder.name} first`
+      )
+    }
+  }
   ctx.store.setResourceState(resource.id, 'destroying')
   await ctx.kinds.get(resource.kind).destroy(ctx, resource)
   return { status: 200, body: { deleted: true } }
@@ -744,6 +1142,196 @@ async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string):
 // only record of it are different operations, and only one of them is what
 // this verb means. Deleting is what `hobby rm` is for, and it asks first.
 //
+// The full backlog of one queue, not a page: peek() takes a limit, and
+// eject's whole point is handing over everything the project holds, so
+// truncating this at some default page size (peekQueueRoute's
+// DEFAULT_PEEK_LIMIT) would silently drop messages at exactly the moment
+// nobody is left to notice. depth() first, then a peek() sized to it: peek's
+// SQL carries no WHERE clause narrower than "every row in this table", so a
+// limit equal to the row count returns the whole table in one call.
+function readFullBacklog(path: string): LeasedMessage[] {
+  return withQueueDbReadOnly<LeasedMessage[]>(path, [], (db) => {
+    const total = queueDepth(db)
+    return total === 0 ? [] : peek(db, total)
+  })
+}
+
+// One line per message, decoded rather than left as codec.ts's encoded
+// string. The reader of this file has, by definition, no hobbyist
+// installation left to decode it with: codec.ts is not exported from
+// @hobby.sh/queue's public surface (see index.ts), so an encoded string
+// handed to a departing user is unreadable unless they go excavate that file
+// out of this repository first. decodeMessageBody already carries the
+// fallback peekQueueRoute relies on for the identical reason: a body this
+// queue did not itself write, or one that fails to decode, is written out as
+// the raw stored string rather than aborting the whole export.
+// A queue message decoded through codec.ts can be a Map, a Set, a Date, a
+// BigInt, a RegExp, or `undefined` (codec.ts's own Node union: 'map' | 'set'
+// | 'date' | 'big' | 'regexp' | 'undef'), because that codec exists
+// precisely to carry the types Cloudflare's structured-clone-compatible
+// queue bodies support and plain JSON cannot. Handing a decoded value
+// straight to JSON.stringify is silently wrong for most of that list,
+// checked with `node -e` rather than assumed:
+//
+//   JSON.stringify(new Map([[1, 2]]))  -> '{}'    every entry gone
+//   JSON.stringify(new Set([1, 2]))    -> '{}'    every entry gone
+//   JSON.stringify(/abc/gi)            -> '{}'    pattern and flags gone
+//   JSON.stringify(10n)                -> throws  aborts the whole export
+//   JSON.stringify({ a: undefined })   -> '{}'    the key silently vanishes
+//   JSON.stringify(new Date(0))        -> a bare ISO string, indistinguishable
+//                                          from a real string the sender wrote
+//
+// toJsonSafe runs before JSON.stringify ever sees the value and turns each of
+// those into a small, self-describing, JSON-safe wrapper: $map, $set,
+// $date, $bigint, $regexp, $undefined. Lossless and readable without any of
+// hobby's code: `["map",[[1,2]]]`, the codec's OWN encoding, was already
+// more recoverable by hand than the '{}' this replaces, so the bar this
+// clears is "at least as recoverable as the thing it decoded," not merely
+// "does not crash." The convention is documented once, in the compose
+// comment (renderQueueEjectNotice), not as a header line inside the JSONL
+// files themselves: every line of every JSONL file stays exactly one
+// message object, so the simplest possible consumer
+// (`lines.map(JSON.parse)`) never has to know to skip a non-message first
+// row.
+//
+// A visited-set guards a case codec.ts also supports and none of the above
+// does: a circular or shared reference (codec.ts represents both with its
+// own index-based node array). A plain recursive walk, or a raw
+// JSON.stringify, throws "Converting circular structure to JSON" for a
+// self-referential object, which would fail eject for the WHOLE project
+// over one oddly-shaped message. A repeated ancestor becomes
+// `{ "$circular": true }` instead: lossy for that one reference, but the
+// rest of the backlog, and every other queue, still comes out intact.
+const CIRCULAR_MARKER = { $circular: true }
+
+function toJsonSafe(value: unknown, ancestors: ReadonlySet<unknown> = new Set()): unknown {
+  if (value === undefined) {
+    return { $undefined: true }
+  }
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return value
+  }
+  if (typeof value === 'bigint') {
+    return { $bigint: value.toString() }
+  }
+  if (value instanceof Date) {
+    return { $date: value.toISOString() }
+  }
+  if (value instanceof RegExp) {
+    return { $regexp: { source: value.source, flags: value.flags } }
+  }
+  if (ancestors.has(value)) {
+    return CIRCULAR_MARKER
+  }
+  const seenHere = new Set(ancestors)
+  seenHere.add(value)
+  if (value instanceof Map) {
+    return {
+      $map: Array.from(value.entries()).map(([key, item]) => [toJsonSafe(key, seenHere), toJsonSafe(item, seenHere)]),
+    }
+  }
+  if (value instanceof Set) {
+    return { $set: Array.from(value.values()).map((item) => toJsonSafe(item, seenHere)) }
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => toJsonSafe(item, seenHere))
+  }
+  // Everything else codec.ts can decode is a plain object (its own 'object'
+  // tag, built from Object.entries on the way in), so walking own
+  // enumerable properties here mirrors exactly what encodeBody read.
+  const out: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = toJsonSafe(item, seenHere)
+  }
+  return out
+}
+
+interface QueueBacklogLine {
+  id: string
+  body: unknown
+  attempts: number
+  enqueuedAt: number
+}
+
+function toBacklogLine(message: LeasedMessage): QueueBacklogLine {
+  return {
+    id: message.id,
+    body: toJsonSafe(decodeMessageBody(message)),
+    attempts: message.attempts,
+    // timestampMs is broker.ts's own alias for the enqueued_at column
+    // (readyRows, leaseBatch, peek all select "enqueued_at AS timestamp"),
+    // not a delivery or visibility time, so this is a direct rename, not a
+    // reinterpretation.
+    enqueuedAt: message.timestampMs,
+  }
+}
+
+// JSON Lines, not a JSON array: a script reading the handover can process one
+// message at a time without holding the whole backlog in memory, the same
+// reason the broker itself never materialises a full result set. An empty
+// queue renders as an empty string (see ejectRoute for why a queue that
+// genuinely holds nothing still gets a file rather than no file at all).
+function renderBacklogJsonl(messages: LeasedMessage[]): string {
+  if (messages.length === 0) {
+    return ''
+  }
+  return `${messages.map((message) => JSON.stringify(toBacklogLine(message))).join('\n')}\n`
+}
+
+interface QueueBacklog {
+  name: string
+  jsonl: string
+  count: number
+}
+
+// Prepended to the compose file, not appended: this is what someone reads
+// first when they open the file to see what they got, which is the only
+// place a claim this important is guaranteed to be seen. A leading `#` line
+// is a comment to docker compose (verified against real docker compose:
+// `docker compose -f <file> config` on a file starting with one parses
+// identically to the same file without it), so this changes nothing about
+// whether the stack starts.
+//
+// ADR 0013 keeps the broker outside the runtime on purpose, which is exactly
+// why there is no queue service to render here the way postgres, apps and
+// workers get one: there is no container to hand over. What crosses instead
+// is the data, written to queues/<name>.jsonl alongside this file, and this
+// comment is what stops a departing user from assuming their queues came
+// with them just because their database and their workers did.
+function renderQueueEjectNotice(backlogs: QueueBacklog[]): string {
+  const lines = [
+    "# hobby's queue broker is not part of this stack. postgres, apps and",
+    '# workers run in containers here; queues never did (ADR 0013), so an',
+    "# ejected worker has nothing behind env.QUEUE.send() or a queue() handler,",
+    '# even though its code is unchanged.',
+    '#',
+    '# Each queue below still had a backlog, and it was written to disk before',
+    '# this file was generated, one JSON object per line (id, body, attempts,',
+    '# enqueuedAt):',
+    ...backlogs.map(
+      (backlog) => `#   ${backlog.name}: queues/${backlog.name}.jsonl (${backlog.count} message${backlog.count === 1 ? '' : 's'})`
+    ),
+    '#',
+    '# A body is plain JSON wherever the original value was plain JSON. Where',
+    '# it was not (a JS Map, Set, Date, BigInt, RegExp, or `undefined`), it is a',
+    '# small tagged wrapper instead of being silently emptied:',
+    '#   Map        { "$map": [[key, value], ...] }',
+    '#   Set        { "$set": [value, ...] }',
+    '#   Date       { "$date": "<ISO 8601 string>" }',
+    '#   BigInt     { "$bigint": "<digits>" }',
+    '#   RegExp     { "$regexp": { "source": "...", "flags": "..." } }',
+    '#   undefined  { "$undefined": true }',
+    '# A value that refers back to itself, directly or through a shared',
+    '# reference, reads as { "$circular": true } at the repeat.',
+    '#',
+    "# Wire your own broker (SQS, a self-hosted NATS, plain Postgres, whatever",
+    "# you choose) and replay those files into it by hand; hobby's broker does",
+    '# not come with you.',
+    '',
+  ]
+  return `${lines.join('\n')}\n`
+}
+
 // The compose file is still rendered before anything else runs, because it is
 // rendered from the store rows, credentials included, and it is the artifact
 // the whole call exists to produce.
@@ -760,10 +1348,14 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
   const postgresResources = resources.filter((r) => r.kind === 'postgres')
   const appResources = resources.filter((r) => r.kind === 'app')
   const workerResources = resources.filter((r) => r.kind === 'worker')
+  const queueResources = resources.filter((r): r is QueueResource => r.kind === 'queue')
   // Every kind registered today can be ejected, which is what ADR 0007
-  // requires before a kind ships. Kept as a computed list rather than deleted
-  // so the next kind cannot quietly ship without one.
-  const EJECTABLE: ReadonlySet<string> = new Set(['postgres', 'app', 'worker'])
+  // requires before a kind ships. 'queue' earns its place here differently
+  // from the other three: it never becomes a compose service (no container,
+  // no image, ADR 0013), it hands over its backlog as queues/<name>.jsonl
+  // instead, computed a few lines down. Kept as a computed list rather than
+  // deleted so the next kind cannot quietly ship without one.
+  const EJECTABLE: ReadonlySet<string> = new Set(['postgres', 'app', 'worker', 'queue'])
   const notEjectable = resources
     .filter((r) => !EJECTABLE.has(r.kind))
     .map((r) => `${r.name} (${r.kind})`)
@@ -804,19 +1396,56 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
   // once something has deployed" or "there is genuinely nothing here yet,"
   // never "hobby lost your data."
   if (postgresResources.length + deployedApps.length + deployedWorkers.length === 0) {
+    // Accepted, tracked gap, not closed by this fix round: a project holding
+    // ONLY a queue (no postgres, app or worker at all) still refuses here
+    // rather than emitting a `services:` key with nothing under it, which is
+    // not valid compose (the comment above this block). Nothing is lost by
+    // that refusal: nothing is released, hobby keeps managing the project,
+    // and `hobby queue peek` still reads every message right up until this
+    // project also has something a compose file can be built around.
+    //
+    // What this fix round DOES close: the message must not claim the
+    // project "has no resources yet" when a queue resource plainly exists.
+    // 'queue' moved into EJECTABLE above, so a project holding only queues
+    // now has an empty skippedReasons (queues are no longer reported as
+    // unhandled), which is exactly the condition that used to fall through
+    // to the generic "no resources" message. Named explicitly instead.
+    const queueOnlyMessage =
+      queueResources.length === 0
+        ? `${name} has no resources yet, so there is nothing to eject`
+        : `${name} has ${queueResources.length === 1 ? 'a queue' : `${queueResources.length} queues`} ` +
+          `(${queueResources.map((r) => r.name).join(', ')}) but no database, app or worker yet, so there is no ` +
+          'compose file to build around them'
     throw new HobbyError(
       'usage',
-      skippedReasons.length > 0
-        ? `${name} has nothing to eject yet: ${skippedReasons.join('; ')}`
-        : `${name} has no resources yet, so there is nothing to eject`,
+      skippedReasons.length > 0 ? `${name} has nothing to eject yet: ${skippedReasons.join('; ')}` : queueOnlyMessage,
       skippedReasons.length > 0
         ? 'deploy at least one app or worker, or wait for a resource to finish creating, then eject again'
-        : 'create a resource first (hobby pg create, or deploy an app or worker), then eject again'
+        : queueResources.length === 0
+          ? 'create a resource first (hobby pg create, or deploy an app or worker), then eject again'
+          : 'deploy a database, app or worker first (your queued messages are safe: `hobby queue peek` reads them any time), then eject again'
     )
   }
 
+  // Read here, before `body` exists and well before the release branch below
+  // touches anything: CLAUDE.md's first promise is "you can always leave",
+  // and a queue's backlog is user data exactly as much as a postgres data
+  // directory is. Reading it after --release had torn a container down would
+  // be the same mistake `queueKindHandler.stop()` (a no-op today) happens
+  // not to punish yet; computing the backlog in this same data-gathering
+  // phase as `rendered` above means it never depends on that staying true.
+  const queueBacklogs: QueueBacklog[] = queueResources.map((resource) => {
+    const messages = readFullBacklog(queueDbPath(ctx.paths, project.name, resource.name))
+    return { name: resource.name, jsonl: renderBacklogJsonl(messages), count: messages.length }
+  })
+
   const body = {
-    compose: rendered.compose,
+    // The queue notice is prepended, never appended, so it is the first
+    // thing visible when the file is opened. Only rendered when this
+    // project actually holds a queue: a project with none gets the exact
+    // compose file it always did, with no disclaimer about a capability it
+    // never touched.
+    compose: queueBacklogs.length === 0 ? rendered.compose : renderQueueEjectNotice(queueBacklogs) + rendered.compose,
     // ADR 0009: without this, an ejected app comes up on a loopback port with
     // nothing routing a hostname to it, which is a running container rather
     // than a working site.
@@ -827,6 +1456,11 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
     dataDirs: postgresResources.map((resource) => resource.config.dataDir),
     released: release,
     notEjectable: skippedReasons,
+    // One entry per queue in the project, EVERY queue, including one with
+    // count 0: a missing entry must always mean "this project has no queue
+    // named that," never "hobby forgot to hand it over," and the only way to
+    // keep that distinction real is to always report, never omit on empty.
+    queues: queueBacklogs,
   }
 
   if (!release) {
@@ -872,6 +1506,233 @@ function adoptRoute(ctx: DaemonContext, name: string): RouteResult {
   }
   ctx.store.setProjectReleased(project.id, null)
   return { status: 200, body: { project: ctx.store.getProject(project.id) } }
+}
+
+// ---------------------------------------------------------------------------
+// Queue routes. This file is the only one that ever opens a queue's sqlite
+// database (root CLAUDE.md: the daemon API is the only control surface, and
+// keeping every open() call in one file is what stops the CLI and MCP from
+// ever diverging on what a queue looks like). Every handler below reads or
+// writes through @hobby.sh/queue's broker functions and nothing else.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_PEEK_LIMIT = 10
+
+// A queue whose sqlite file does not exist yet reads as empty rather than
+// throwing. In normal operation createResourceRoute's queue branch above
+// always creates the file at row-creation time, so this only matters for a
+// row that reached the store some other way (a test fixture, or a future
+// path that skips that step); a listing or a peek must never 500 because one
+// queue's file is not there.
+function withQueueDbReadOnly<T>(path: string, fallback: T, fn: (db: SqliteDatabase) => T): T {
+  if (!existsSync(path)) {
+    return fallback
+  }
+  const db = openDatabaseReadOnly(path)
+  try {
+    return fn(db)
+  } finally {
+    db.close()
+  }
+}
+
+interface QueueStats {
+  depth: number
+  oldestTimestampMs: number | null
+}
+
+function readQueueStats(path: string): QueueStats {
+  return withQueueDbReadOnly<QueueStats>(path, { depth: 0, oldestTimestampMs: null }, (db) => {
+    const n = queueDepth(db)
+    if (n === 0) {
+      return { depth: 0, oldestTimestampMs: null }
+    }
+    // peek() orders by id, which sorts by creation (packages/queue/src/ids.ts),
+    // so the first row of an unfiltered peek(db, 1) is the oldest message
+    // this queue currently holds, delayed or leased ones included. That is
+    // deliberately a different question from "the oldest ready message":
+    // this is a listing, not a delivery decision.
+    const [oldest] = peek(db, 1)
+    return { depth: n, oldestTimestampMs: oldest === undefined ? null : oldest.timestampMs }
+  })
+}
+
+interface QueueListEntry {
+  resource: WireResource
+  depth: number
+  oldestMessageAgeSeconds: number | null
+  consumer: WireResource | null
+}
+
+// GET /v1/projects/:name/queues. Every queue in the project, each enriched
+// with what its own sqlite file and its consumer resource know: depth and
+// oldest-message age come from the queue's own database, `consumer` is the
+// full WireResource of whatever resource.config.consumerResourceId points
+// at (or null), so the caller can read its state and, for a worker, its
+// manifest, exactly the same way `hobby ls` already does for any other
+// resource. That is what lets an undeployed consumer be rendered
+// consistently: this route does not decide the wording, it hands back the
+// fact (`config.manifest === null`) and lets the CLI's existing "(no code
+// yet)" phrasing (packages/cli/src/cli/output.ts) speak for both places at
+// once.
+async function listQueuesRoute(ctx: DaemonContext, projectName: string): Promise<RouteResult> {
+  const project = getProjectByNameOrThrow(ctx, projectName)
+  const resources = ctx.store.listResources(project.id).filter((r): r is QueueResource => r.kind === 'queue')
+  const nowMs = Date.now()
+
+  const entries: QueueListEntry[] = []
+  for (const resource of resources) {
+    const stats = readQueueStats(queueDbPath(ctx.paths, project.name, resource.name))
+    const consumerResource =
+      resource.config.consumerResourceId === null ? null : ctx.store.getResource(resource.config.consumerResourceId)
+    entries.push({
+      resource: await toWireResource(ctx, resource),
+      depth: stats.depth,
+      oldestMessageAgeSeconds:
+        stats.oldestTimestampMs === null ? null : Math.max(0, Math.round((nowMs - stats.oldestTimestampMs) / 1000)),
+      consumer: consumerResource === null ? null : await toWireResource(ctx, consumerResource),
+    })
+  }
+
+  return { status: 200, body: { queues: entries } }
+}
+
+interface QueueMessageWire {
+  id: string
+  timestampMs: number
+  attempts: number
+  contentType: ContentType
+  body: unknown
+}
+
+// Decodes a codec-encoded body back into the value the sender actually gave
+// (every real sender, the runner shim in packages/worker/src/runtime-image.ts
+// and this file's own enqueueRoute below, always writes contentType 'json'
+// through encodeBody). Wrapped rather than left to throw: a body written by
+// something else, or corrupted on disk, must not turn an otherwise-successful
+// peek into a 500, it should just show up as the raw stored text.
+function decodeMessageBody(message: LeasedMessage): unknown {
+  if (message.contentType !== 'json') {
+    return message.body
+  }
+  try {
+    return decodeBody(message.body)
+  } catch {
+    return message.body
+  }
+}
+
+function toWireMessage(message: LeasedMessage): QueueMessageWire {
+  return {
+    id: message.id,
+    timestampMs: message.timestampMs,
+    attempts: message.attempts,
+    contentType: message.contentType,
+    body: decodeMessageBody(message),
+  }
+}
+
+// GET /v1/resources/:id/queue/messages?limit=. Non-destructive: peek() never
+// touches lease_id, so a message read here is still exactly as deliverable
+// afterward as it was before, unlike leaseBatch which is a real claim.
+async function peekQueueRoute(ctx: DaemonContext, id: string, url: URL): Promise<RouteResult> {
+  const resource = expectQueue(getResourceOrThrow(ctx, id), 'peeking messages')
+  const project = getOwningProjectOrThrow(ctx, resource)
+
+  const limitParam = url.searchParams.get('limit')
+  const parsedLimit = limitParam === null ? Number.NaN : Number(limitParam)
+  const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.floor(parsedLimit) : DEFAULT_PEEK_LIMIT
+
+  const path = queueDbPath(ctx.paths, project.name, resource.name)
+  const messages = withQueueDbReadOnly<LeasedMessage[]>(path, [], (db) => peek(db, limit))
+  return { status: 200, body: { messages: messages.map(toWireMessage) } }
+}
+
+// POST /v1/resources/:id/queue/messages. Body: { "body": <any JSON value>,
+// "delaySeconds"?: number }. `body` is the value itself, not a pre-encoded
+// string: encodeBody runs here, once, so neither the CLI nor MCP ever needs
+// to know this queue's wire format, the same reason peek's response above is
+// already decoded rather than handing back an opaque codec string.
+async function enqueueRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
+  const resource = expectQueue(getResourceOrThrow(ctx, id), 'sending a message')
+  const project = getOwningProjectOrThrow(ctx, resource)
+
+  const parsed = await readJsonBody(req)
+  const fields = isRecord(parsed) ? parsed : {}
+  if (!('body' in fields)) {
+    throw new HobbyError(
+      'usage',
+      'body is required',
+      'POST /v1/resources/:id/queue/messages expects { "body": <json value>, "delaySeconds"?: number }'
+    )
+  }
+  const rawDelay = fields['delaySeconds']
+  const delaySeconds = typeof rawDelay === 'number' ? rawDelay : undefined
+
+  const path = queueDbPath(ctx.paths, project.name, resource.name)
+  const db = openQueueDb(path)
+  try {
+    // enqueue() itself throws HobbyError('usage', ...) for every one of
+    // Cloudflare's own limits (message size, batch size, delaySeconds
+    // range), which propagates straight through dispatch's catch: this
+    // route adds no second copy of those checks.
+    const ids = enqueue(db, [{ body: encodeBody(fields['body']), contentType: 'json', delaySeconds }], Date.now())
+    return { status: 201, body: { id: ids[0] } }
+  } finally {
+    db.close()
+  }
+}
+
+// DELETE /v1/resources/:id/queue/messages. Returns the count purged so the
+// caller can report what was actually lost, per broker.ts's own purge()
+// comment: a queue that cannot say how much it dropped is a queue that
+// silently lied about it.
+async function purgeQueueRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
+  const resource = expectQueue(getResourceOrThrow(ctx, id), 'purging messages')
+  const project = getOwningProjectOrThrow(ctx, resource)
+
+  const path = queueDbPath(ctx.paths, project.name, resource.name)
+  if (!existsSync(path)) {
+    return { status: 200, body: { purged: 0 } }
+  }
+  const db = openQueueDb(path)
+  try {
+    const count = purge(db)
+    return { status: 200, body: { purged: count } }
+  } finally {
+    db.close()
+  }
+}
+
+// POST /v1/resources/:id/queue/retention. Body: { "retentionSeconds": number }.
+// Validated against Cloudflare's own bounds (MIN/MAX_RETENTION_SECONDS,
+// packages/queue/src/broker.ts) and rejected outright outside them, never
+// clamped: a silently clamped value is a value the caller thinks they set
+// and did not, which is worse than an error naming the real bounds.
+async function setRetentionRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
+  const resource = expectQueue(getResourceOrThrow(ctx, id), 'setting retention')
+
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const raw = fields['retentionSeconds']
+  if (typeof raw !== 'number' || !Number.isInteger(raw)) {
+    throw new HobbyError(
+      'usage',
+      'retentionSeconds is required and must be a whole number of seconds',
+      'POST /v1/resources/:id/queue/retention expects { "retentionSeconds": number }'
+    )
+  }
+  if (raw < MIN_RETENTION_SECONDS || raw > MAX_RETENTION_SECONDS) {
+    throw new HobbyError(
+      'usage',
+      `retentionSeconds must be between ${MIN_RETENTION_SECONDS} and ${MAX_RETENTION_SECONDS} (Cloudflare's own bounds: 60 seconds to 14 days), got ${raw}`,
+      `pick a value from ${MIN_RETENTION_SECONDS} to ${MAX_RETENTION_SECONDS}`
+    )
+  }
+
+  const config: QueueConfig = { ...resource.config, retentionSeconds: raw }
+  ctx.store.updateResourceConfig(resource.id, config)
+  return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
 
 async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<RouteResult> {
@@ -920,6 +1781,11 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       const name = decodeURIComponent(segments[2] as string)
       return adoptRoute(ctx, name)
     }
+
+    if (segments.length === 4 && method === 'GET' && segments[3] === 'queues') {
+      const name = decodeURIComponent(segments[2] as string)
+      return await listQueuesRoute(ctx, name)
+    }
   }
 
   if (segments[1] === 'resources') {
@@ -940,6 +1806,21 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       if (method === 'GET' && action === 'logs') return logsRoute(ctx, id, url)
       if (method === 'POST' && action === 'query') return queryRoute(ctx, req, id)
       if (method === 'POST' && action === 'deploy') return deployResourceRoute(ctx, req, id)
+    }
+
+    // /v1/resources/:id/queue/messages and /v1/resources/:id/queue/retention.
+    // A resource id, not a project+name pair, addresses a queue the same way
+    // it already addresses every other resource-scoped route above; the CLI
+    // and MCP resolve a `project`/`project/name` target to an id first (see
+    // resolveQueueTarget, packages/cli/src/cli/commands.ts), exactly as they
+    // already do for sleep/wake/logs.
+    if (segments.length === 5 && segments[3] === 'queue') {
+      const id = decodeURIComponent(segments[2] as string)
+      const action = segments[4]
+      if (method === 'GET' && action === 'messages') return peekQueueRoute(ctx, id, url)
+      if (method === 'POST' && action === 'messages') return enqueueRoute(ctx, req, id)
+      if (method === 'DELETE' && action === 'messages') return purgeQueueRoute(ctx, id)
+      if (method === 'POST' && action === 'retention') return setRetentionRoute(ctx, req, id)
     }
   }
 

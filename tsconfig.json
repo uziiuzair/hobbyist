@@ -11,6 +11,9 @@
       "path": "packages/do"
     },
     {
+      "path": "packages/queue"
+    },
+    {
       "path": "packages/app"
     },
     {

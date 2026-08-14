@@ -12,7 +12,7 @@
 // invents a new route or a new capability.
 
 import { HobbyError, parseTarget } from '@hobby.sh/core'
-import { DaemonUnreachableError, resolveTarget, type Api } from '@hobby.sh/cli'
+import { DaemonUnreachableError, resolveQueueTarget, resolveTarget, type Api } from '@hobby.sh/cli'
 
 // The MCP SDK's CallToolResult shape, reproduced by hand rather than
 // imported, so this file has zero dependency on @modelcontextprotocol/sdk.
@@ -77,6 +77,41 @@ export interface LogsArgs {
 export interface RmArgs {
   target: string
   confirm: boolean
+}
+
+export interface QueueLsArgs {
+  project?: string
+}
+
+export interface QueueCreateArgs {
+  project: string
+  name: string
+}
+
+export interface QueuePeekArgs {
+  target: string
+  limit?: number
+}
+
+export interface QueueSendArgs {
+  target: string
+  body: unknown
+  delaySeconds?: number
+}
+
+export interface QueuePurgeArgs {
+  target: string
+  confirm: boolean
+}
+
+export interface QueueRmArgs {
+  target: string
+  confirm: boolean
+}
+
+export interface QueueSetRetentionArgs {
+  target: string
+  retentionSeconds: number
 }
 
 // Mirrors `hobby ls`: every project, with every resource's current state.
@@ -196,5 +231,109 @@ export async function rmTool(api: Api, args: RmArgs): Promise<ToolResult> {
     }
     const { resource } = await resolveTarget(api, args.target)
     return await api.deleteResource(resource.id)
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Queue tools. Every one of these wraps the exact same daemon routes
+// packages/cli/src/cli/commands.ts's `hobby queue` verbs already call,
+// through the same resolveQueueTarget this package imports from @hobby.sh/cli
+// rather than reimplementing: an agent and a human resolving "blog/jobs"
+// must always land on the same resource.
+// ---------------------------------------------------------------------------
+
+// Mirrors `hobby queue ls [project]`: with a project, one call; without one,
+// every project that has at least one queue. See cmdQueueLs's own comment
+// (packages/cli/src/cli/commands.ts) for why an empty project is left out of
+// the unscoped listing.
+export async function queueListTool(api: Api, args: QueueLsArgs): Promise<ToolResult> {
+  return run(async () => {
+    const projectNames =
+      args.project !== undefined ? [args.project] : (await api.listProjects()).projects.map((p) => p.name)
+    const results: Array<{ project: string; queues: unknown }> = []
+    for (const name of projectNames) {
+      const { queues } = await api.listQueues(name)
+      if (args.project === undefined && queues.length === 0) {
+        continue
+      }
+      results.push({ project: name, queues })
+    }
+    return { projects: results }
+  })
+}
+
+// Mirrors `hobby queue create <name> --project <p>`.
+export async function queueCreateTool(api: Api, args: QueueCreateArgs): Promise<ToolResult> {
+  return run(async () => {
+    const { resource } = await api.createQueue(args.project, args.name)
+    return { resource }
+  })
+}
+
+// Mirrors `hobby queue peek <target> [--limit n]`: read-only, never leases.
+export async function queuePeekTool(api: Api, args: QueuePeekArgs): Promise<ToolResult> {
+  return run(async () => {
+    const { resource } = await resolveQueueTarget(api, args.target)
+    return await api.peekQueue(resource.id, args.limit)
+  })
+}
+
+// Mirrors `hobby queue send <target> <json>`. `args.body` is already a
+// parsed value (the MCP SDK hands tool arguments through as JSON, never as a
+// string an agent would need to JSON.parse itself), so there is no
+// client-side parse step to fail the way the CLI's own positional does.
+export async function queueSendTool(api: Api, args: QueueSendArgs): Promise<ToolResult> {
+  return run(async () => {
+    const { resource } = await resolveQueueTarget(api, args.target)
+    return await api.sendMessage(resource.id, { body: args.body, delaySeconds: args.delaySeconds })
+  })
+}
+
+// Mirrors `hobby queue purge <target>`, with the same confirm: true
+// requirement as hobby_rm and for the same reason: irreversible, and an
+// agent has no terminal to type a queue name back into. Refuses, and makes
+// no request to the daemon at all, without confirm === true.
+export async function queuePurgeTool(api: Api, args: QueuePurgeArgs): Promise<ToolResult> {
+  return run(async () => {
+    if (args.confirm !== true) {
+      throw new HobbyError(
+        'usage',
+        `hobby_queue_purge refused: confirm must be true to purge "${args.target}"`,
+        'this permanently deletes every message currently in the queue and cannot be undone; ' +
+          'call hobby_queue_purge again with confirm: true only once that is actually intended'
+      )
+    }
+    const { resource } = await resolveQueueTarget(api, args.target)
+    return await api.purgeQueue(resource.id)
+  })
+}
+
+// Mirrors `hobby queue rm <target>`. Same confirm: true gate as hobby_rm and
+// hobby_queue_purge; the underlying route (routes.ts's destroyResourceRoute)
+// is what actually refuses a queue a worker still binds, so this tool adds
+// nothing but resolution and the confirmation gate.
+export async function queueRmTool(api: Api, args: QueueRmArgs): Promise<ToolResult> {
+  return run(async () => {
+    if (args.confirm !== true) {
+      throw new HobbyError(
+        'usage',
+        `hobby_queue_rm refused: confirm must be true to delete "${args.target}"`,
+        'this permanently destroys the queue and every message in it, and cannot be undone; ' +
+          'call hobby_queue_rm again with confirm: true only once that is actually intended'
+      )
+    }
+    const { resource } = await resolveQueueTarget(api, args.target)
+    return await api.deleteResource(resource.id)
+  })
+}
+
+// Mirrors `hobby queue set <target> --retention <seconds>`. Bounds are
+// enforced by the daemon (routes.ts's setRetentionRoute), which returns a
+// HobbyError naming them; formatError above already renders that verbatim,
+// so an agent that guesses outside the range sees exactly why.
+export async function queueSetRetentionTool(api: Api, args: QueueSetRetentionArgs): Promise<ToolResult> {
+  return run(async () => {
+    const { resource } = await resolveQueueTarget(api, args.target)
+    return await api.setRetention(resource.id, args.retentionSeconds)
   })
 }

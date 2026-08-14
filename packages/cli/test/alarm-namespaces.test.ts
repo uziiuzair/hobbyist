@@ -68,6 +68,8 @@ function workerConfig(): WorkerConfig {
     image: 'hobby/api-worker:1',
     containerName: 'hobby-chat-api',
     hostPort: 35433,
+    controlPort: 35434,
+    queueToken: 'test-queue-token',
     containerPort: 8787,
     hostname: 'api.chat.localhost',
     durableObjectUniqueKeyModifier: 'unused-here',
