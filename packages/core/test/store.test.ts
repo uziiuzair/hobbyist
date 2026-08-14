@@ -30,17 +30,19 @@ function sampleWorkerConfig(ports: { hostPort: number; controlPort: number }): W
     queueToken: 'test-queue-token',
     containerPort: 8787,
     hostname: 'api.blog.localhost',
-    source: { path: '/src', manifest: 'wrangler.toml' },
-    compatibilityDate: '2026-08-01',
-    compatibilityFlags: [],
-    vars: {},
-    kvNamespaces: [],
-    r2Buckets: [],
-    d1Databases: [],
-    queues: { producers: [], consumers: [] },
-    durableObjects: [],
     durableObjectUniqueKeyModifier: 'placeholder',
     databaseResourceId: null,
+    manifest: {
+      source: { path: '/src', manifest: 'wrangler.toml' },
+      compatibilityDate: '2026-08-01',
+      compatibilityFlags: [],
+      vars: {},
+      kvNamespaces: [],
+      r2Buckets: [],
+      d1Databases: [],
+      queues: { producers: [], consumers: [] },
+      durableObjects: [],
+    },
   }
 }
 
