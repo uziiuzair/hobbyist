@@ -1165,6 +1165,87 @@ function readFullBacklog(path: string): LeasedMessage[] {
 // fallback peekQueueRoute relies on for the identical reason: a body this
 // queue did not itself write, or one that fails to decode, is written out as
 // the raw stored string rather than aborting the whole export.
+// A queue message decoded through codec.ts can be a Map, a Set, a Date, a
+// BigInt, a RegExp, or `undefined` (codec.ts's own Node union: 'map' | 'set'
+// | 'date' | 'big' | 'regexp' | 'undef'), because that codec exists
+// precisely to carry the types Cloudflare's structured-clone-compatible
+// queue bodies support and plain JSON cannot. Handing a decoded value
+// straight to JSON.stringify is silently wrong for most of that list,
+// checked with `node -e` rather than assumed:
+//
+//   JSON.stringify(new Map([[1, 2]]))  -> '{}'    every entry gone
+//   JSON.stringify(new Set([1, 2]))    -> '{}'    every entry gone
+//   JSON.stringify(/abc/gi)            -> '{}'    pattern and flags gone
+//   JSON.stringify(10n)                -> throws  aborts the whole export
+//   JSON.stringify({ a: undefined })   -> '{}'    the key silently vanishes
+//   JSON.stringify(new Date(0))        -> a bare ISO string, indistinguishable
+//                                          from a real string the sender wrote
+//
+// toJsonSafe runs before JSON.stringify ever sees the value and turns each of
+// those into a small, self-describing, JSON-safe wrapper: $map, $set,
+// $date, $bigint, $regexp, $undefined. Lossless and readable without any of
+// hobby's code: `["map",[[1,2]]]`, the codec's OWN encoding, was already
+// more recoverable by hand than the '{}' this replaces, so the bar this
+// clears is "at least as recoverable as the thing it decoded," not merely
+// "does not crash." The convention is documented once, in the compose
+// comment (renderQueueEjectNotice), not as a header line inside the JSONL
+// files themselves: every line of every JSONL file stays exactly one
+// message object, so the simplest possible consumer
+// (`lines.map(JSON.parse)`) never has to know to skip a non-message first
+// row.
+//
+// A visited-set guards a case codec.ts also supports and none of the above
+// does: a circular or shared reference (codec.ts represents both with its
+// own index-based node array). A plain recursive walk, or a raw
+// JSON.stringify, throws "Converting circular structure to JSON" for a
+// self-referential object, which would fail eject for the WHOLE project
+// over one oddly-shaped message. A repeated ancestor becomes
+// `{ "$circular": true }` instead: lossy for that one reference, but the
+// rest of the backlog, and every other queue, still comes out intact.
+const CIRCULAR_MARKER = { $circular: true }
+
+function toJsonSafe(value: unknown, ancestors: ReadonlySet<unknown> = new Set()): unknown {
+  if (value === undefined) {
+    return { $undefined: true }
+  }
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return value
+  }
+  if (typeof value === 'bigint') {
+    return { $bigint: value.toString() }
+  }
+  if (value instanceof Date) {
+    return { $date: value.toISOString() }
+  }
+  if (value instanceof RegExp) {
+    return { $regexp: { source: value.source, flags: value.flags } }
+  }
+  if (ancestors.has(value)) {
+    return CIRCULAR_MARKER
+  }
+  const seenHere = new Set(ancestors)
+  seenHere.add(value)
+  if (value instanceof Map) {
+    return {
+      $map: Array.from(value.entries()).map(([key, item]) => [toJsonSafe(key, seenHere), toJsonSafe(item, seenHere)]),
+    }
+  }
+  if (value instanceof Set) {
+    return { $set: Array.from(value.values()).map((item) => toJsonSafe(item, seenHere)) }
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => toJsonSafe(item, seenHere))
+  }
+  // Everything else codec.ts can decode is a plain object (its own 'object'
+  // tag, built from Object.entries on the way in), so walking own
+  // enumerable properties here mirrors exactly what encodeBody read.
+  const out: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = toJsonSafe(item, seenHere)
+  }
+  return out
+}
+
 interface QueueBacklogLine {
   id: string
   body: unknown
@@ -1175,7 +1256,7 @@ interface QueueBacklogLine {
 function toBacklogLine(message: LeasedMessage): QueueBacklogLine {
   return {
     id: message.id,
-    body: decodeMessageBody(message),
+    body: toJsonSafe(decodeMessageBody(message)),
     attempts: message.attempts,
     // timestampMs is broker.ts's own alias for the enqueued_at column
     // (readyRows, leaseBatch, peek all select "enqueued_at AS timestamp"),
@@ -1230,6 +1311,18 @@ function renderQueueEjectNotice(backlogs: QueueBacklog[]): string {
     ...backlogs.map(
       (backlog) => `#   ${backlog.name}: queues/${backlog.name}.jsonl (${backlog.count} message${backlog.count === 1 ? '' : 's'})`
     ),
+    '#',
+    '# A body is plain JSON wherever the original value was plain JSON. Where',
+    '# it was not (a JS Map, Set, Date, BigInt, RegExp, or `undefined`), it is a',
+    '# small tagged wrapper instead of being silently emptied:',
+    '#   Map        { "$map": [[key, value], ...] }',
+    '#   Set        { "$set": [value, ...] }',
+    '#   Date       { "$date": "<ISO 8601 string>" }',
+    '#   BigInt     { "$bigint": "<digits>" }',
+    '#   RegExp     { "$regexp": { "source": "...", "flags": "..." } }',
+    '#   undefined  { "$undefined": true }',
+    '# A value that refers back to itself, directly or through a shared',
+    '# reference, reads as { "$circular": true } at the repeat.',
     '#',
     "# Wire your own broker (SQS, a self-hosted NATS, plain Postgres, whatever",
     "# you choose) and replay those files into it by hand; hobby's broker does",
@@ -1303,23 +1396,34 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
   // once something has deployed" or "there is genuinely nothing here yet,"
   // never "hobby lost your data."
   if (postgresResources.length + deployedApps.length + deployedWorkers.length === 0) {
-    // Known, accepted gap: a project holding ONLY a queue (no postgres, app
-    // or worker at all) still refuses here, and the message below does not
-    // name it. Nothing is lost by that: the refusal means nothing is
-    // released, hobby keeps managing the project, and the queue's messages
-    // stay exactly where they are, readable with `hobby queue peek` right
-    // up until this project also has something a compose file can start.
-    // Solving that precisely would mean deciding what a compose file with a
-    // queue and nothing else should even look like, which is a bigger
-    // question than this handover.
+    // Accepted, tracked gap, not closed by this fix round: a project holding
+    // ONLY a queue (no postgres, app or worker at all) still refuses here
+    // rather than emitting a `services:` key with nothing under it, which is
+    // not valid compose (the comment above this block). Nothing is lost by
+    // that refusal: nothing is released, hobby keeps managing the project,
+    // and `hobby queue peek` still reads every message right up until this
+    // project also has something a compose file can be built around.
+    //
+    // What this fix round DOES close: the message must not claim the
+    // project "has no resources yet" when a queue resource plainly exists.
+    // 'queue' moved into EJECTABLE above, so a project holding only queues
+    // now has an empty skippedReasons (queues are no longer reported as
+    // unhandled), which is exactly the condition that used to fall through
+    // to the generic "no resources" message. Named explicitly instead.
+    const queueOnlyMessage =
+      queueResources.length === 0
+        ? `${name} has no resources yet, so there is nothing to eject`
+        : `${name} has ${queueResources.length === 1 ? 'a queue' : `${queueResources.length} queues`} ` +
+          `(${queueResources.map((r) => r.name).join(', ')}) but no database, app or worker yet, so there is no ` +
+          'compose file to build around them'
     throw new HobbyError(
       'usage',
-      skippedReasons.length > 0
-        ? `${name} has nothing to eject yet: ${skippedReasons.join('; ')}`
-        : `${name} has no resources yet, so there is nothing to eject`,
+      skippedReasons.length > 0 ? `${name} has nothing to eject yet: ${skippedReasons.join('; ')}` : queueOnlyMessage,
       skippedReasons.length > 0
         ? 'deploy at least one app or worker, or wait for a resource to finish creating, then eject again'
-        : 'create a resource first (hobby pg create, or deploy an app or worker), then eject again'
+        : queueResources.length === 0
+          ? 'create a resource first (hobby pg create, or deploy an app or worker), then eject again'
+          : 'deploy a database, app or worker first (your queued messages are safe: `hobby queue peek` reads them any time), then eject again'
     )
   }
 
