@@ -650,10 +650,36 @@ that those paths work; none of them was provoked here.
 
 ## What this does not tell us
 
-- **Nothing about Linux, and nothing about a five dollar VPS.** The enqueue
-  listener's Linux bridge-gateway bind (`queueEndpointHosts`,
-  `packages/cli/src/daemon/server.ts:120`) is still reasoned and never run.
-  This is a Mac, like every other measurement in this repo.
+- **Nothing about Linux, and nothing about a five dollar VPS.** This is a Mac,
+  like every other measurement in this repo.
+
+  **Corrected on 2026-08-14, after this document was first filed.** The line
+  above originally said only that the Linux bridge-gateway bind was "reasoned
+  and never run", which understated it. Reading the code rather than running
+  it: the daemon side of the Linux story exists (`queueEndpointHosts`,
+  `packages/cli/src/daemon/server.ts`, binds each project network's gateway),
+  and **the container side does not**. `buildRunnerManifest`
+  (`packages/worker/src/worker.ts`) hands the producer shim
+  `http://host.docker.internal:<queuePort>/enqueue`, and that hostname does not
+  exist inside a container on Docker Engine for Linux unless the container is
+  created with `--add-host=host.docker.internal:host-gateway`.
+  `createContainer` (`packages/core/src/docker.ts`) builds its argument list
+  from `-e`, `-p`, `-v` and `--network` only; `--add-host` appears nowhere in
+  this repo, and `ContainerSpec` has no field that could carry it.
+
+  So the producer leg is not merely untested on Linux, it is **unimplemented**
+  there: `env.MY_QUEUE.send()` should fail to resolve the host rather than
+  reach a listener that is, ironically, correctly bound and waiting. Stated as
+  an inference from code and from this repo's own earlier transport probes
+  (`2026-08-13-miniflare-queues-are-in-memory.md`, which named
+  `--add-host=host.docker.internal:host-gateway` as the mechanism), **not** as
+  something run: no Linux box was touched by this session or any other in this
+  capability.
+
+  It is the same shape as the defects the plan kept finding. The research named
+  the flag, the daemon-side bind was built against it, the container-side flag
+  was assigned to nobody, and every test and every real run happened on macOS
+  or OrbStack, where the hostname resolves for free and the gap is invisible.
 - **Nothing about `queueDeliveryGuard`.** `sleepAfterSeconds` was `null`, so
   the hibernator never ran a sleep decision. Whether it actually refuses to
   sleep a worker holding a lease is still covered only by unit tests.
