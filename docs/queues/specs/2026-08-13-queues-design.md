@@ -1,8 +1,16 @@
 # Queues: a durable broker in the daemon, and a consumer that sleeps
 
-Status: PROPOSED. Nothing in this document is built. Approved in design on
-2026-08-13; implementation has not started.
+Status: BUILT. Approved in design on 2026-08-13 and implemented over
+2026-08-13 and 2026-08-14. Verified end to end against real Docker on
+2026-08-14: `research/2026-08-14-queues-survive-sleep.md`.
 Date:   2026-08-13
+
+**Status line corrected on 2026-08-14.** It previously read "Nothing in this
+document is built ... implementation has not started", which was the first
+line a reader met and was by then false in every particular. The body below is
+left exactly as it was written on 2026-08-13, per the dated-artifact rule; the
+places where the machine disagrees with it are recorded in the addendum at the
+end rather than edited into the text.
 
 Implements `docs/decisions/0013`. The evidence every claim about Miniflare and
 about container networking rests on is in
@@ -377,3 +385,45 @@ that quietly loses messages.
 4. **Two workers binding one queue as consumer.** Cloudflare allows one consumer
    per queue. We should reject the second at deploy with a clear message rather
    than picking one silently. Not yet designed.
+
+## Addendum, 2026-08-14: where the machine disagreed with this document
+
+Appended after the end-to-end verification
+(`research/2026-08-14-queues-survive-sleep.md`) rather than edited into the
+body above, so what was designed on 2026-08-13 stays legible next to what was
+found on the 14th.
+
+**Contradicted, and still open.** "The tick" section says a handler that cares
+about the batching defaults "should set the keys explicitly, and `hobby deploy`
+prints the effective values." It does not. A real deploy prints the image and
+the URL and says nothing about queues at all, and `hobby queue ls` prints
+depth, oldest, consumer and dead letter queue but none of the four tuning
+values. Nothing anywhere shows a user what `max_batch_size`,
+`max_batch_timeout`, `max_retries` or `retry_delay` resolved to. That matters
+more than it looks: the measurement showed `max_batch_timeout` is the single
+largest term in end-to-end latency, so it is the value a user is most likely to
+want to see and least able to find. Not built, not scheduled, recorded here
+rather than quietly dropped.
+
+**Settled: open question 1.** `wrappedBindings` doing an outbound fetch was
+verified on 2026-08-13 (`research/2026-08-13-wrapped-bindings-spike.md`) and
+again on 2026-08-14 against the real production path, this time with a worker
+declaring **two** distinct producer bindings to two different queues, which is
+the case the control channel verification had explicitly left unrun. Both
+worked. The fallback path described in that open question was never needed.
+
+**Settled: open question 4.** Two workers binding one queue as consumer is
+designed and built: `assertQueueBindingsAreLegal`
+(`packages/cli/src/daemon/routes.ts`) refuses the second one *before* the image
+is built, which was itself a bug found in review after a first version refused
+it after the container was already running and serving.
+
+**Confirmed as written**, by the same run, and listed because each was a claim
+rather than an implementation detail: `send()` resolving only once the row is
+committed on the host (measured at 1 ms, steady state); `attempts` incremented
+at lease time, so the first delivery sees `attempts = 1` and the stored row
+reads 0 before it; a queue's state being `running` from creation and never
+changing; the control server published to host loopback only; the codec
+carrying a `Date` intact across a container's death and rebirth; and a queue
+named only in a manifest being created by the deploy with no
+`hobby queue create` step.
