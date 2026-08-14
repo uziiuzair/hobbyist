@@ -746,6 +746,15 @@ export async function deployWorker(
       // Durable Object's storage on every deploy, the sharpest data-loss
       // edge in this kind.
       durableObjectUniqueKeyModifier: resource.config.durableObjectUniqueKeyModifier,
+      // Carried through explicitly for the same reason, with two different
+      // failure modes. Both live ABOVE the manifest split precisely because
+      // this object rebuilds `manifest` wholesale on every deploy: a moved
+      // controlPort sends every queue batch to a port nothing is listening
+      // on, and a rotated queueToken gives every already-running container
+      // 401s from the enqueue listener, which reads as a broker outage
+      // rather than as a token that changed underneath it.
+      controlPort: resource.config.controlPort,
+      queueToken: resource.config.queueToken,
       manifest: {
         source: { path: sourcePath, manifest: found.file },
         compatibilityDate: manifest.compatibilityDate,
