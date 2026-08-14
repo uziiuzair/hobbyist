@@ -128,6 +128,19 @@ Every one of these is from a Mac, like every other measurement in this repo.
 
 ## Follow-ups the verification named
 
+- **The producer path cannot work on Linux, and Linux is the target.** Not a
+  gap in testing, a gap in implementation, and it is the most severe item on
+  this list. `buildRunnerManifest` (`packages/worker/src/worker.ts`) points the
+  container's producer shim at `http://host.docker.internal:<queuePort>/enqueue`.
+  On Docker Engine for Linux that hostname only exists if the container was
+  created with `--add-host=host.docker.internal:host-gateway`, and
+  `createContainer` (`packages/core/src/docker.ts`) never passes it:
+  `--add-host` appears nowhere in this repo and `ContainerSpec` has no field
+  for it. The daemon's own half was built (`queueEndpointHosts` binds each
+  project network's bridge gateway), so the listener is correctly bound and
+  simply unreachable by name. Fix: an `extraHosts` field on `ContainerSpec`,
+  set for the worker kind on Linux. Established by reading the code, not by
+  running it; no Linux box has been touched.
 - **The readiness probe writes a stack trace into every worker's log on every
   start.** `defaultProbeFactory` (`packages/worker/src/worker.ts`) POSTs an
   empty body to the control port, and `CONTROL_SOURCE`
