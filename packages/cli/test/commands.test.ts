@@ -6,8 +6,22 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { HobbyError } from '@hobby.sh/core'
-import { cmdConnect, cmdCreate, cmdDeploy, cmdNew, cmdPg, type Ctx } from '../src/index.js'
-import type { Api } from '../src/cli/client.js'
+import {
+  cmdConnect,
+  cmdCreate,
+  cmdDeploy,
+  cmdNew,
+  cmdPg,
+  cmdQueueCreate,
+  cmdQueueLs,
+  cmdQueuePurge,
+  cmdQueueRm,
+  cmdQueueSend,
+  cmdQueueSet,
+  type Ctx,
+} from '../src/index.js'
+import type { Api, QueueListEntry } from '../src/cli/client.js'
+import type { WireResource } from '../src/daemon/wire.js'
 
 interface Recorded {
   created: string[]
@@ -257,4 +271,348 @@ test('hobby pg create sends the same body cmdCreate would for kind postgres', as
   assert.equal(createCode, 0)
   assert.deepEqual(pgRecorded.resourceBodies[0], createRecorded.resourceBodies[0])
   assert.deepEqual(pgRecorded.resourceBodies[0], { project: 'blog', body: { kind: 'postgres', name: 'analytics' } })
+})
+
+// ---------------------------------------------------------------------------
+// `hobby queue <verb>` against a fake Api. Fixtures below are shaped like the
+// real WireResource union (packages/cli/src/daemon/wire.ts) rather than
+// loosely typed objects, since renderQueueLine/renderQueueConsumer
+// (output.ts) narrow on `kind` and read real fields off `config`.
+// ---------------------------------------------------------------------------
+
+function queueResource(overrides: { name?: string; deadLetterQueue?: string | null } = {}): WireResource {
+  return {
+    id: `${overrides.name ?? 'jobs'}-id`,
+    projectId: 'p1',
+    kind: 'queue',
+    name: overrides.name ?? 'jobs',
+    state: 'running',
+    config: {
+      image: '',
+      containerName: '',
+      hostPort: 0,
+      retentionSeconds: 345600,
+      consumerResourceId: null,
+      maxBatchSize: 5,
+      maxBatchTimeoutSeconds: 1,
+      maxRetries: 2,
+      retryDelaySeconds: 0,
+      deadLetterQueue: overrides.deadLetterQueue ?? null,
+    },
+    sizeBytes: null,
+    connectionCount: 0,
+    lastActiveAt: null,
+    createdAt: new Date('2026-01-01'),
+  }
+}
+
+function workerResource(opts: { name: string; deployed: boolean }): WireResource {
+  return {
+    id: `${opts.name}-id`,
+    projectId: 'p1',
+    kind: 'worker',
+    name: opts.name,
+    state: opts.deployed ? 'sleeping' : 'undeployed',
+    config: {
+      image: opts.deployed ? 'hobby/workerd:1' : null,
+      containerName: `hobby-blog-${opts.name}`,
+      hostPort: 15600,
+      controlPort: 15601,
+      queueToken: '<redacted>',
+      containerPort: 8787,
+      hostname: `${opts.name}.blog.localhost`,
+      durableObjectUniqueKeyModifier: 'stable',
+      databaseResourceId: null,
+      manifest: opts.deployed
+        ? {
+            source: { path: '/src', manifest: 'wrangler.toml' },
+            compatibilityDate: '2026-08-01',
+            compatibilityFlags: [],
+            vars: {},
+            kvNamespaces: [],
+            r2Buckets: [],
+            d1Databases: [],
+            queues: { producers: [], consumers: [{ queue: 'jobs', maxBatchSize: null, maxBatchTimeoutSeconds: null, maxRetries: null, retryDelaySeconds: null, deadLetterQueue: null }] },
+            durableObjects: [],
+          }
+        : null,
+    },
+    sizeBytes: null,
+    connectionCount: 0,
+    lastActiveAt: null,
+    createdAt: new Date('2026-01-01'),
+  }
+}
+
+// `hobby queue ls`: depth and the consumer's name both make it into the
+// human-rendered line, taken verbatim from what listQueues returned rather
+// than re-derived.
+test('hobby queue ls renders depth and a deployed consumer by name', async () => {
+  const out: string[] = []
+  const entry: QueueListEntry = {
+    resource: queueResource(),
+    depth: 3,
+    oldestMessageAgeSeconds: 42,
+    consumer: workerResource({ name: 'api', deployed: true }),
+  }
+  const api = {
+    async listQueues(_project: string) {
+      return { queues: [entry] }
+    },
+  }
+  const ctx = {
+    io: { out: (s: string) => out.push(s), err: () => {}, env: {}, cwd: '/tmp', readLine: async () => '' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  const code = await cmdQueueLs(ctx, ['blog'], {})
+
+  assert.equal(code, 0)
+  assert.ok(out.some((line) => line.includes('jobs') && line.includes('depth 3')))
+  assert.ok(out.some((line) => line.includes('api') && !line.includes('no code yet')))
+})
+
+// The wording this task was told, in writing, to match: `hobby ls` already
+// renders an `undeployed` resource with a "(no code yet)" trailer
+// (packages/cli/src/cli/output.ts's renderResourceLine), and a queue whose
+// consumer has never had code deployed to it (config.manifest === null)
+// must read the same way here, not a second phrasing for the same fact.
+test('hobby queue ls renders an undeployed consumer as "(no code yet)"', async () => {
+  const out: string[] = []
+  const entry: QueueListEntry = {
+    resource: queueResource(),
+    depth: 0,
+    oldestMessageAgeSeconds: null,
+    consumer: workerResource({ name: 'api', deployed: false }),
+  }
+  const api = {
+    async listQueues(_project: string) {
+      return { queues: [entry] }
+    },
+  }
+  const ctx = {
+    io: { out: (s: string) => out.push(s), err: () => {}, env: {}, cwd: '/tmp', readLine: async () => '' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  const code = await cmdQueueLs(ctx, ['blog'], {})
+
+  assert.equal(code, 0)
+  assert.ok(out.some((line) => line.includes('api (no code yet)')))
+})
+
+// `hobby queue create <name> --project <p>`: the same body shape cmdCreate
+// already sends for every other kind, `{ kind, name }` with nothing else.
+test('hobby queue create sends kind queue with no retention or consumer fields', async () => {
+  const calls: Array<{ project: string; name: string }> = []
+  const api = {
+    async createQueue(project: string, name: string) {
+      calls.push({ project, name })
+      return { resource: queueResource({ name }) }
+    },
+  }
+  const ctx = {
+    io: { out: () => {}, err: () => {}, env: {}, cwd: '/tmp', readLine: async () => '' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  const code = await cmdQueueCreate(ctx, ['jobs'], { project: 'blog' })
+
+  assert.equal(code, 0)
+  assert.deepEqual(calls, [{ project: 'blog', name: 'jobs' }])
+})
+
+// `hobby queue send <target> <json>`: the positional is parsed client-side
+// and the PARSED value, not the raw text, is what reaches the Api.
+test('hobby queue send parses the json positional and sends the parsed value', async () => {
+  const calls: Array<{ id: string; input: { body: unknown; delaySeconds?: number } }> = []
+  const api = {
+    async getProject(_name: string) {
+      return { project: { id: 'p1', name: 'blog' }, resources: [queueResource()] }
+    },
+    async sendMessage(id: string, input: { body: unknown; delaySeconds?: number }) {
+      calls.push({ id, input })
+      return { id: 'msg-1' }
+    },
+  }
+  const ctx = {
+    io: { out: () => {}, err: () => {}, env: {}, cwd: '/tmp', readLine: async () => '' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  const code = await cmdQueueSend(ctx, ['blog/jobs', '{"n":1}'], {})
+
+  assert.equal(code, 0)
+  assert.deepEqual(calls, [{ id: 'jobs-id', input: { body: { n: 1 } } }])
+})
+
+test('hobby queue send refuses invalid json before making any Api call', async () => {
+  const api = {
+    async getProject(_name: string) {
+      throw new Error('must not be called: invalid JSON should be rejected first')
+    },
+  }
+  const ctx = {
+    io: { out: () => {}, err: () => {}, env: {}, cwd: '/tmp', readLine: async () => '' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  await assert.rejects(() => cmdQueueSend(ctx, ['blog/jobs', '{not json'], {}), /not valid JSON/)
+})
+
+// The non-negotiable: purge requires the queue's own name typed back,
+// exactly as `wrangler queues purge` does, because it is irreversible and
+// reachable by tab completion. A mismatched confirmation must not call
+// purgeQueue at all.
+test('hobby queue purge refuses without a matching typed confirmation, and issues no purge call', async () => {
+  let purgeCalls = 0
+  const api = {
+    async getProject(_name: string) {
+      return { project: { id: 'p1', name: 'blog' }, resources: [queueResource()] }
+    },
+    async purgeQueue(_id: string) {
+      purgeCalls += 1
+      return { purged: 0 }
+    },
+  }
+  const err: string[] = []
+  const ctx = {
+    io: { out: () => {}, err: (s: string) => err.push(s), env: {}, cwd: '/tmp', readLine: async () => 'not-jobs' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  const code = await cmdQueuePurge(ctx, ['blog/jobs'], {})
+
+  assert.equal(code, 1)
+  assert.equal(purgeCalls, 0)
+  assert.ok(err.some((line) => line.includes('did not match')))
+})
+
+test('hobby queue purge proceeds and reports the count once the queue name is typed back', async () => {
+  const purged: string[] = []
+  const api = {
+    async getProject(_name: string) {
+      return { project: { id: 'p1', name: 'blog' }, resources: [queueResource()] }
+    },
+    async purgeQueue(id: string) {
+      purged.push(id)
+      return { purged: 5 }
+    },
+  }
+  const out: string[] = []
+  const ctx = {
+    io: { out: (s: string) => out.push(s), err: () => {}, env: {}, cwd: '/tmp', readLine: async () => 'jobs' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  const code = await cmdQueuePurge(ctx, ['blog/jobs'], {})
+
+  assert.equal(code, 0)
+  assert.deepEqual(purged, ['jobs-id'])
+  assert.ok(out.some((line) => line.includes('5') && line.includes('jobs')))
+})
+
+// `--yes` skips the prompt entirely, the same escape hatch `hobby rm`
+// already offers, and is what lets this be scripted.
+test('hobby queue purge --yes skips the prompt and purges directly', async () => {
+  let purgeCalls = 0
+  const api = {
+    async getProject(_name: string) {
+      return { project: { id: 'p1', name: 'blog' }, resources: [queueResource()] }
+    },
+    async purgeQueue(_id: string) {
+      purgeCalls += 1
+      return { purged: 0 }
+    },
+  }
+  const ctx = {
+    io: {
+      out: () => {},
+      err: () => {},
+      env: {},
+      cwd: '/tmp',
+      readLine: async () => {
+        throw new Error('must not prompt when --yes is set')
+      },
+    },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  const code = await cmdQueuePurge(ctx, ['blog/jobs'], { yes: true })
+
+  assert.equal(code, 0)
+  assert.equal(purgeCalls, 1)
+})
+
+// `hobby queue rm`: the same typed-confirmation shape as purge, over
+// deleteResource rather than purgeQueue. The binding refusal itself lives in
+// the daemon route (routes.ts's destroyResourceRoute) and is exercised
+// there, not here; this only pins that rm asks before it deletes.
+test('hobby queue rm refuses without a matching typed confirmation, and deletes nothing', async () => {
+  let deleteCalls = 0
+  const api = {
+    async getProject(_name: string) {
+      return { project: { id: 'p1', name: 'blog' }, resources: [queueResource()] }
+    },
+    async deleteResource(_id: string) {
+      deleteCalls += 1
+      return { deleted: true as const }
+    },
+  }
+  const err: string[] = []
+  const ctx = {
+    io: { out: () => {}, err: (s: string) => err.push(s), env: {}, cwd: '/tmp', readLine: async () => 'nope' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  const code = await cmdQueueRm(ctx, ['blog/jobs'], {})
+
+  assert.equal(code, 1)
+  assert.equal(deleteCalls, 0)
+  assert.ok(err.some((line) => line.includes('did not match')))
+})
+
+// `hobby queue set <target> --retention <seconds>`: the number reaches the
+// Api unchanged, and bounds are the daemon's job to enforce (pinned at the
+// route level in routes.test.ts), not re-validated here.
+test('hobby queue set sends the retention value to the resolved queue', async () => {
+  const calls: Array<{ id: string; retentionSeconds: number }> = []
+  const api = {
+    async getProject(_name: string) {
+      return { project: { id: 'p1', name: 'blog' }, resources: [queueResource()] }
+    },
+    async setRetention(id: string, retentionSeconds: number) {
+      calls.push({ id, retentionSeconds })
+      return { resource: queueResource({ }) }
+    },
+  }
+  const ctx = {
+    io: { out: () => {}, err: () => {}, env: {}, cwd: '/tmp', readLine: async () => '' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  const code = await cmdQueueSet(ctx, ['blog/jobs'], { retention: '3600' })
+
+  assert.equal(code, 0)
+  assert.deepEqual(calls, [{ id: 'jobs-id', retentionSeconds: 3600 }])
 })

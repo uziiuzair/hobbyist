@@ -25,6 +25,7 @@ import {
   type WorkerConfig,
 } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
+import { DEFAULT_CONSUMER_OPTIONS, leaseBatch, openQueueDb, queueDbPath } from '@hobby.sh/queue'
 import { createDefaultKindRegistry } from '../src/daemon/context.js'
 import { createApp, createProxyDeps, reconcile, type DaemonContext } from '../src/index.js'
 
@@ -1226,4 +1227,225 @@ test('a project payload with no releasedAt field is not treated as released', as
   assert.equal('releasedAt' in legacy, false)
   assert.equal(legacy.releasedAt != null, false, 'the loose check the CLI uses reads it as not released')
   ctx.store.close()
+})
+
+// ---------------------------------------------------------------------------
+// Queue routes (Task 16). Every test below drives the same fake-runtime,
+// in-memory-store harness the rest of this file uses; a queue holds no
+// container, so none of these ever touch createFakeRuntime's own state.
+// ---------------------------------------------------------------------------
+
+interface QueueResourceBody {
+  id: string
+  kind: string
+  state: string
+  name: string
+  config: {
+    retentionSeconds: number
+    consumerResourceId: string | null
+    deadLetterQueue: string | null
+  }
+}
+
+test('POST /v1/projects/:name/resources with kind queue creates a running queue with default settings', async () => {
+  await withServer(buildContext(), async (baseUrl) => {
+    await call(baseUrl, 'POST', '/v1/projects', { name: 'blog' })
+    const res = await call(baseUrl, 'POST', '/v1/projects/blog/resources', { kind: 'queue', name: 'jobs' })
+    assert.equal(res.status, 201)
+    const body = res.body as { resource: QueueResourceBody }
+    // Running from the moment it exists: a queue has no container to wait
+    // on, and queue-kind.test.ts already pins that this state never changes.
+    assert.equal(body.resource.kind, 'queue')
+    assert.equal(body.resource.state, 'running')
+    assert.equal(body.resource.config.retentionSeconds, 345600)
+    assert.equal(body.resource.config.consumerResourceId, null)
+  })
+})
+
+test('GET /v1/projects/:name/queues lists depth, oldest message age, consumer and dead letter queue', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  // An undeployed worker: manifest is null, the record-before-code resting
+  // state for a row nothing has ever deployed to.
+  const worker = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'consumer',
+    config: sampleUndeployedWorkerConfig(),
+  })
+
+  await withServer(ctx, async (baseUrl) => {
+    const created = await call(baseUrl, 'POST', '/v1/projects/blog/resources', { kind: 'queue', name: 'jobs' })
+    const queueBody = created.body as { resource: QueueResourceBody }
+    const queueId = queueBody.resource.id
+
+    // Bound directly through the store: nothing in this task ever writes
+    // consumerResourceId itself (no task before it does either, see the
+    // task report), only reads it, so this stands in for whatever future
+    // deploy-time wiring sets it.
+    const queueResource = ctx.store.getResource(queueId)
+    assert.ok(queueResource !== null && queueResource.kind === 'queue')
+    ctx.store.updateResourceConfig(queueId, {
+      ...queueResource.config,
+      consumerResourceId: worker.id,
+      deadLetterQueue: 'jobs-dlq',
+    })
+
+    const sent = await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/messages`, { body: { n: 1 } })
+    assert.equal(sent.status, 201)
+
+    const res = await call(baseUrl, 'GET', '/v1/projects/blog/queues')
+    assert.equal(res.status, 200)
+    const body = res.body as {
+      queues: Array<{
+        resource: QueueResourceBody
+        depth: number
+        oldestMessageAgeSeconds: number | null
+        consumer: { name: string; kind: string; config: { manifest: unknown } } | null
+      }>
+    }
+    const entry = body.queues[0]
+    assert.equal(body.queues.length, 1)
+    assert.ok(entry !== undefined)
+    assert.equal(entry.resource.name, 'jobs')
+    assert.equal(entry.depth, 1)
+    assert.equal(typeof entry.oldestMessageAgeSeconds, 'number')
+    assert.equal(entry.resource.config.deadLetterQueue, 'jobs-dlq')
+    assert.ok(entry.consumer !== null)
+    assert.equal(entry.consumer?.name, 'consumer')
+    // The fact `hobby queue ls` renders as "(no code yet)"
+    // (packages/cli/src/cli/output.ts's renderQueueConsumer): this route's
+    // job is only to hand back the fact, manifest === null, honestly.
+    assert.equal(entry.consumer?.config.manifest, null)
+  })
+})
+
+test('GET /v1/resources/:id/queue/messages peeks oldest-first without leasing, so the message is still leasable afterward', async () => {
+  const ctx = buildContext()
+  ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+
+  await withServer(ctx, async (baseUrl) => {
+    const created = await call(baseUrl, 'POST', '/v1/projects/blog/resources', { kind: 'queue', name: 'jobs' })
+    const queueId = (created.body as { resource: QueueResourceBody }).resource.id
+
+    await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/messages`, { body: 'first' })
+    await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/messages`, { body: 'second' })
+
+    const peeked = await call(baseUrl, 'GET', `/v1/resources/${queueId}/queue/messages`)
+    assert.equal(peeked.status, 200)
+    const messages = (peeked.body as { messages: Array<{ id: string; body: unknown; attempts: number }> }).messages
+    assert.equal(messages.length, 2)
+    assert.equal(messages[0]?.body, 'first', 'oldest first')
+    assert.equal(messages[0]?.attempts, 0, 'peek must never claim a lease, so attempts stays at its inserted value')
+
+    // The real proof that peek did not lease anything: open the same sqlite
+    // file the route just read from and ask the broker itself to lease a
+    // batch. leaseBatch's own readyRows query is `WHERE lease_id IS NULL`
+    // (packages/queue/src/broker.ts), so this only returns both messages if
+    // peek left lease_id untouched on both rows.
+    const db = openQueueDb(queueDbPath(ctx.paths, 'blog', 'jobs'))
+    try {
+      const batch = leaseBatch(db, DEFAULT_CONSUMER_OPTIONS, Date.now())
+      assert.ok(batch !== null)
+      assert.equal(batch?.messages.length, 2, 'both messages were still unleased and claimable')
+    } finally {
+      db.close()
+    }
+  })
+})
+
+test('DELETE /v1/resources/:id/queue/messages purges every message and returns the count', async () => {
+  const ctx = buildContext()
+  ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+
+  await withServer(ctx, async (baseUrl) => {
+    const created = await call(baseUrl, 'POST', '/v1/projects/blog/resources', { kind: 'queue', name: 'jobs' })
+    const queueId = (created.body as { resource: QueueResourceBody }).resource.id
+
+    for (const body of ['a', 'b', 'c']) {
+      await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/messages`, { body })
+    }
+
+    const purged = await call(baseUrl, 'DELETE', `/v1/resources/${queueId}/queue/messages`)
+    assert.equal(purged.status, 200)
+    assert.deepEqual(purged.body, { purged: 3 })
+
+    const after = await call(baseUrl, 'GET', `/v1/resources/${queueId}/queue/messages`)
+    assert.deepEqual((after.body as { messages: unknown[] }).messages, [], 'the queue is empty after purge')
+
+    // A second purge against an already-empty queue is not an error and
+    // reports zero, matching broker.ts's own purge() contract.
+    const purgedAgain = await call(baseUrl, 'DELETE', `/v1/resources/${queueId}/queue/messages`)
+    assert.deepEqual(purgedAgain.body, { purged: 0 })
+  })
+})
+
+test('DELETE /v1/resources/:id refuses to delete a queue while a worker binds it as consumer, naming that worker', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const worker = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'api',
+    config: sampleUndeployedWorkerConfig(),
+  })
+
+  await withServer(ctx, async (baseUrl) => {
+    const created = await call(baseUrl, 'POST', '/v1/projects/blog/resources', { kind: 'queue', name: 'jobs' })
+    const queueId = (created.body as { resource: QueueResourceBody }).resource.id
+    const queueResource = ctx.store.getResource(queueId)
+    assert.ok(queueResource !== null && queueResource.kind === 'queue')
+    ctx.store.updateResourceConfig(queueId, { ...queueResource.config, consumerResourceId: worker.id })
+
+    const res = await call(baseUrl, 'DELETE', `/v1/resources/${queueId}`)
+    assert.equal(res.status, 400)
+    const body = res.body as { error: { code: string; message: string } }
+    assert.equal(body.error.code, 'usage')
+    assert.match(body.error.message, /api/, 'the refusal names the binding worker')
+
+    // Nothing was torn down: the resource still exists and is not left in
+    // `destroying`, which is the state it would have been moved to before
+    // the refusal if the check ran after that write instead of before it.
+    const still = await call(baseUrl, 'GET', `/v1/resources/${queueId}`)
+    assert.equal(still.status, 200)
+    assert.equal((still.body as { resource: QueueResourceBody }).resource.state, 'running')
+
+    // Unbinding it (as though the worker were redeployed without the queue,
+    // or deleted) makes the delete succeed.
+    ctx.store.updateResourceConfig(queueId, { ...queueResource.config, consumerResourceId: null })
+    const deleted = await call(baseUrl, 'DELETE', `/v1/resources/${queueId}`)
+    assert.equal(deleted.status, 200)
+  })
+})
+
+test('POST /v1/resources/:id/queue/retention rejects a value outside Cloudflare bounds, and accepts one inside them', async () => {
+  const ctx = buildContext()
+  ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+
+  await withServer(ctx, async (baseUrl) => {
+    const created = await call(baseUrl, 'POST', '/v1/projects/blog/resources', { kind: 'queue', name: 'jobs' })
+    const queueId = (created.body as { resource: QueueResourceBody }).resource.id
+
+    const tooLow = await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/retention`, { retentionSeconds: 59 })
+    assert.equal(tooLow.status, 400)
+    const tooLowBody = tooLow.body as { error: { code: string; message: string } }
+    assert.equal(tooLowBody.error.code, 'usage')
+    assert.match(tooLowBody.error.message, /60/, 'the refusal names the real lower bound')
+
+    const tooHigh = await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/retention`, {
+      retentionSeconds: 1209601,
+    })
+    assert.equal(tooHigh.status, 400)
+    const tooHighBody = tooHigh.body as { error: { code: string; message: string } }
+    assert.match(tooHighBody.error.message, /1209600/, 'the refusal names the real upper bound')
+
+    const ok = await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/retention`, { retentionSeconds: 3600 })
+    assert.equal(ok.status, 200)
+    assert.equal((ok.body as { resource: QueueResourceBody }).resource.config.retentionSeconds, 3600)
+
+    // Nothing was silently clamped by the two rejected calls above: the
+    // resource still carries the value the successful call set.
+    const after = await call(baseUrl, 'GET', `/v1/resources/${queueId}`)
+    assert.equal((after.body as { resource: QueueResourceBody }).resource.config.retentionSeconds, 3600)
+  })
 })

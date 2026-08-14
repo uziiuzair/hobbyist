@@ -28,7 +28,13 @@ import { hasOperatorCredential, setOperatorPassword } from '../daemon/studio/aut
 import type { WireResource } from '../daemon/wire.js'
 import type { Api } from './client.js'
 import { exitCodeForError } from './exit.js'
-import { reflinkWarning, renderPreflight, renderResourceLine } from './output.js'
+import {
+  reflinkWarning,
+  renderPreflight,
+  renderQueueLine,
+  renderQueueMessageLine,
+  renderResourceLine,
+} from './output.js'
 
 // Io is defined in main.ts, which owns run() and is the file the brief
 // names for the exported signature `run(argv, io)`; imported here as a
@@ -110,6 +116,53 @@ export async function resolveTarget(api: Api, target: string): Promise<{ project
     'ambiguous_target',
     `project ${projectName} has more than one resource: ${detail.resources.map((r) => r.name).join(', ')}`,
     `specify project/resource, for example ${projectName}/${detail.resources[0]?.name}`
+  )
+}
+
+// The queue-scoped sibling of resolveTarget above, for `hobby queue peek /
+// send / purge / rm / set`, all of which take a target that must resolve to
+// one queue, never any other kind. A bare project name disambiguates against
+// the project's QUEUES only, not every resource in it: a project holding one
+// postgres and one queue is not ambiguous for these commands, because a
+// postgres was never a candidate answer to "which queue do you mean". A
+// `project/name` target that names something real but not a queue is a
+// distinct error from "no such resource", because the resource is there, it
+// is just the wrong kind for this command.
+export async function resolveQueueTarget(
+  api: Api,
+  target: string
+): Promise<{ project: Project; resource: WireResource }> {
+  const { project: projectName, resource: resourceName } = parseTarget(target)
+  const detail = await api.getProject(projectName)
+
+  if (resourceName !== null) {
+    const resource = detail.resources.find((r) => r.name === resourceName)
+    if (resource === undefined) {
+      throw new HobbyError(
+        'resource_not_found',
+        `no resource named ${resourceName} in project ${projectName}`,
+        detail.resources.length === 0
+          ? `project ${projectName} has no resources`
+          : `known resources: ${detail.resources.map((r) => r.name).join(', ')}`
+      )
+    }
+    if (resource.kind !== 'queue') {
+      throw new HobbyError('usage', `${projectName}/${resourceName} is a ${resource.kind}, not a queue`)
+    }
+    return { project: detail.project, resource }
+  }
+
+  const queues = detail.resources.filter((r) => r.kind === 'queue')
+  if (queues.length === 0) {
+    throw new HobbyError('resource_not_found', `project ${projectName} has no queues`)
+  }
+  if (queues.length === 1) {
+    return { project: detail.project, resource: queues[0] as WireResource }
+  }
+  throw new HobbyError(
+    'ambiguous_target',
+    `project ${projectName} has more than one queue: ${queues.map((r) => r.name).join(', ')}`,
+    `specify project/queue, for example ${projectName}/${queues[0]?.name}`
   )
 }
 
@@ -746,6 +799,262 @@ export async function cmdRm(c: Ctx, positionals: string[], flags: Flags): Promis
     c.io.out(`deleted ${target}`)
   }
   return 0
+}
+
+// ---------------------------------------------------------------------------
+// `hobby queue <verb>`. Every one of these is a thin client of the routes
+// added alongside them in packages/cli/src/daemon/routes.ts: nothing here
+// opens a queue's sqlite database, per root CLAUDE.md's "the daemon API is
+// the only control surface".
+// ---------------------------------------------------------------------------
+
+// `hobby queue ls [project]`: with a project, one call; without one, every
+// project that has at least one queue, mirroring cmdLs's own "everything"
+// shape but narrowed to this kind. A project with zero queues is left out of
+// the unscoped listing rather than printed with an empty body: cmdLs shows
+// "(no resources)" for every project because that view IS the inventory of
+// projects, but `hobby queue ls` with no argument is answering "where are my
+// queues", and a project that has none is not part of that answer.
+export async function cmdQueueLs(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const projectArg = positionals[0]
+  const projectNames =
+    projectArg !== undefined ? [projectArg] : (await c.api.listProjects()).projects.map((p) => p.name)
+
+  const results: Array<{ project: string; queues: Awaited<ReturnType<Api['listQueues']>>['queues'] }> = []
+  for (const name of projectNames) {
+    const { queues } = await c.api.listQueues(name)
+    if (projectArg === undefined && queues.length === 0) {
+      continue
+    }
+    results.push({ project: name, queues })
+  }
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(results))
+    return 0
+  }
+
+  if (results.length === 0) {
+    c.io.out('no queues yet. run `hobby queue create <name> --project <p>` to create one.')
+    return 0
+  }
+
+  for (const { project, queues } of results) {
+    c.io.out(project)
+    for (const entry of queues) {
+      c.io.out(`  ${renderQueueLine(entry)}`)
+    }
+  }
+  return 0
+}
+
+// `hobby queue create <name> --project <p>`: the same shape as `hobby create
+// <kind> <name> --project <p>` (cmdCreate above), not target syntax, because
+// there is nothing yet to disambiguate against. A retention override is
+// deliberately not a flag here: `hobby queue set <target> --retention <n>`
+// is the one place that value is ever written, so there is exactly one code
+// path to check when Cloudflare's bounds change rather than two.
+export async function cmdQueueCreate(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const name = positionals[0]
+  if (typeof name !== 'string' || name.length === 0) {
+    throw new UsageError('usage: hobby queue create <name> --project <project>')
+  }
+  const project = flagString(flags, 'project')
+  if (project === undefined) {
+    throw new UsageError('usage: hobby queue create <name> --project <project>')
+  }
+  const { resource } = await c.api.createQueue(project, name)
+  if (flags.json) {
+    c.io.out(JSON.stringify({ resource }))
+  } else {
+    c.io.out(renderResourceLine(resource))
+  }
+  return 0
+}
+
+// `hobby queue peek <target> [--limit n]`: read-only, ordered oldest first.
+// Never leases, so a message shown here is still exactly as deliverable to a
+// real consumer afterward as it was before this ran (packages/queue/src/broker.ts's
+// peek(), which never touches lease_id).
+export async function cmdQueuePeek(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const target = positionals[0]
+  if (target === undefined) {
+    throw new UsageError('usage: hobby queue peek <target> [--limit n]')
+  }
+  const limitRaw = flagString(flags, 'limit')
+  let limit: number | undefined
+  if (limitRaw !== undefined) {
+    limit = Number(limitRaw)
+    if (!Number.isInteger(limit) || limit <= 0) {
+      throw new UsageError('--limit must be a positive whole number')
+    }
+  }
+
+  const { resource } = await resolveQueueTarget(c.api, target)
+  const { messages } = await c.api.peekQueue(resource.id, limit)
+
+  if (flags.json) {
+    c.io.out(JSON.stringify({ messages }))
+    return 0
+  }
+  if (messages.length === 0) {
+    c.io.out('(empty)')
+    return 0
+  }
+  for (const message of messages) {
+    c.io.out(renderQueueMessageLine(message))
+  }
+  return 0
+}
+
+// `hobby queue send <target> <json>`: one message, parsed client-side so a
+// malformed payload is a UsageError naming the text the user actually typed,
+// rather than a 400 from the daemon that echoes it back through a second
+// layer of JSON escaping.
+export async function cmdQueueSend(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const [target, json] = positionals
+  if (target === undefined || json === undefined) {
+    throw new UsageError('usage: hobby queue send <target> <json>')
+  }
+  let value: unknown
+  try {
+    value = JSON.parse(json)
+  } catch {
+    throw new UsageError(`the message is not valid JSON: ${json}`)
+  }
+
+  const { resource } = await resolveQueueTarget(c.api, target)
+  const result = await c.api.sendMessage(resource.id, { body: value })
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+  } else {
+    c.io.out(`sent ${result.id}`)
+  }
+  return 0
+}
+
+// `hobby queue purge <target>`: irreversible, and reachable by tab
+// completion the same way `wrangler queues purge` is, which is exactly why
+// it borrows that command's own confirmation shape rather than a bespoke
+// one: the queue's own name (not the raw target string, and not the project
+// name a bare target might have been) has to be typed back, because that is
+// the identity actually being destroyed. `--yes` skips it for scripting, the
+// same escape hatch cmdRm already offers for the identical reason.
+export async function cmdQueuePurge(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const target = positionals[0]
+  if (target === undefined) {
+    throw new UsageError('usage: hobby queue purge <target> [--yes]')
+  }
+  const { resource } = await resolveQueueTarget(c.api, target)
+
+  if (!flags.yes) {
+    c.io.out(`type "${resource.name}" to confirm purging it, this cannot be undone:`)
+    const typed = await c.io.readLine()
+    if (typed.trim() !== resource.name) {
+      c.io.err('confirmation did not match, aborted')
+      return 1
+    }
+  }
+
+  const result = await c.api.purgeQueue(resource.id)
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+  } else {
+    c.io.out(`purged ${result.purged} message(s) from ${resource.name}`)
+  }
+  return 0
+}
+
+// `hobby queue rm <target> [--yes]`: the same typed-name confirmation as
+// `hobby rm` (cmdRm above), scoped to a resolved queue, over the exact same
+// DELETE /v1/resources/:id route `hobby rm` itself uses. That route's own
+// binding refusal (routes.ts's destroyResourceRoute) is what actually
+// protects a bound queue; this command adds nothing but the queue-only
+// target resolution and a queue-flavoured confirmation prompt.
+export async function cmdQueueRm(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const target = positionals[0]
+  if (target === undefined) {
+    throw new UsageError('usage: hobby queue rm <target> [--yes]')
+  }
+  const { resource } = await resolveQueueTarget(c.api, target)
+
+  if (!flags.yes) {
+    c.io.out(`type "${resource.name}" to confirm deleting it, this cannot be undone:`)
+    const typed = await c.io.readLine()
+    if (typed.trim() !== resource.name) {
+      c.io.err('confirmation did not match, aborted')
+      return 1
+    }
+  }
+
+  const result = await c.api.deleteResource(resource.id)
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+  } else {
+    c.io.out(`deleted ${resource.name}`)
+  }
+  return 0
+}
+
+// `hobby queue set <target> --retention <seconds>`: the only thing this
+// verb can change today. Bounds are enforced server-side (routes.ts's
+// setRetentionRoute, against packages/queue/src/broker.ts's
+// MIN/MAX_RETENTION_SECONDS) and reported as a HobbyError naming them; this
+// command's own check only rejects a non-integer before making a call that
+// would fail anyway, it never re-clamps or re-validates the range itself, so
+// there is exactly one place the bounds live.
+export async function cmdQueueSet(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const target = positionals[0]
+  if (target === undefined) {
+    throw new UsageError('usage: hobby queue set <target> --retention <seconds>')
+  }
+  const retentionRaw = flagString(flags, 'retention')
+  if (retentionRaw === undefined) {
+    throw new UsageError('usage: hobby queue set <target> --retention <seconds>')
+  }
+  const retentionSeconds = Number(retentionRaw)
+  if (!Number.isInteger(retentionSeconds)) {
+    throw new UsageError('--retention must be a whole number of seconds')
+  }
+
+  const { resource } = await resolveQueueTarget(c.api, target)
+  const result = await c.api.setRetention(resource.id, retentionSeconds)
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+  } else {
+    c.io.out(renderResourceLine(result.resource))
+  }
+  return 0
+}
+
+// `hobby queue <ls|create|peek|send|purge|rm|set> ...`: one dispatcher, the
+// same shape cmdPg already uses for its own `create` subcommand, so main.ts
+// parses this command's flags once (covering every subcommand's flags) and
+// hands positionals[0] off as the verb.
+export async function cmdQueue(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const [sub, ...rest] = positionals
+  switch (sub) {
+    case 'ls':
+      return cmdQueueLs(c, rest, flags)
+    case 'create':
+      return cmdQueueCreate(c, rest, flags)
+    case 'peek':
+      return cmdQueuePeek(c, rest, flags)
+    case 'send':
+      return cmdQueueSend(c, rest, flags)
+    case 'purge':
+      return cmdQueuePurge(c, rest, flags)
+    case 'rm':
+      return cmdQueueRm(c, rest, flags)
+    case 'set':
+      return cmdQueueSet(c, rest, flags)
+    default:
+      throw new UsageError(
+        `usage: hobby queue <ls|create|peek|send|purge|rm|set> ...${sub === undefined ? '' : ` (got: ${sub})`}`
+      )
+  }
 }
 
 // POST /v1/projects/:name/eject is a pure, non-destructive read (see

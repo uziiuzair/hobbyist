@@ -68,6 +68,12 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     getLogs: notWired('getLogs'),
     eject: notWired('eject'),
     adopt: notWired('adopt'),
+    listQueues: notWired('listQueues'),
+    createQueue: notWired('createQueue'),
+    peekQueue: notWired('peekQueue'),
+    sendMessage: notWired('sendMessage'),
+    purgeQueue: notWired('purgeQueue'),
+    setRetention: notWired('setRetention'),
   }
   const api = { ...base } as unknown as Record<string, unknown>
   for (const [key, fn] of Object.entries(overrides)) {
