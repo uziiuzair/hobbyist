@@ -1,6 +1,10 @@
 # `docs/queues/` the broker outside the runtime
 
-**Status:** DESIGNED, not built. The spec is
+**Status:** Built, wired into the daemon, and **verified end to end against real
+Docker** on 2026-08-14: three messages queued before a sleep were still on disk
+with the container stopped and were all delivered on wake, and a sleeping
+consumer was woken by a message with no HTTP request of any kind. See
+`research/2026-08-14-queues-survive-sleep.md`. The spec is
 `specs/2026-08-13-queues-design.md`; the evidence it rests on is
 `research/2026-08-13-miniflare-queues-are-in-memory.md`. See
 `docs/decisions/0013` for why this capability exists at all. **Phase 2.**
@@ -61,12 +65,51 @@ testable against a fake with no Docker and no workerd in the loop.
   workflow orchestration. A queue delivers messages to a consumer. Anything that
   starts describing itself as a workflow engine is somebody else's project.
 
-## The measurement this capability owes
+## The measurement this capability owed, and now has
 
-Two numbers, neither taken yet, both to be filed with hardware stated:
+Both taken on 2026-08-14, ten samples each, on an Apple M5 Pro / macOS 26.3.2 /
+OrbStack (Docker server 29.4.0, linux/arm64) / APFS. Full method, verbatim
+output and the decomposition are in
+`research/2026-08-14-queues-survive-sleep.md`.
 
-- **Enqueue latency**, from `send()` being called inside the container to the
-  row being committed on the host.
-- **Wake to first delivery**, from a message arriving for a sleeping consumer to
-  its `queue()` handler running. This one is judged against the project's single
-  number: 1 second target, 3 second ceiling.
+| Number | p50 | p95 |
+|---|---|---|
+| **Enqueue latency**, `send()` inside the container to the row committed on the host | 1 ms | 12 ms |
+| **Wake to first delivery**, default consumer config, one message | 1569 ms | 1728 ms |
+| **Wake to first delivery**, batch already full so no batching wait | 514 ms | 600 ms |
+
+The p95 on enqueue is entirely the first send through a cold binding; steady
+state is 0 to 1 ms.
+
+**Read the second and third rows together, because the difference between them
+is the whole story.** The wake itself, container cold start and two-port
+readiness probe included, is 514 ms p50, inside the project's 1 second target.
+The extra second in the default case is `max_batch_timeout`, which defaults to
+1 second: `isBatchReady` (`packages/queue/src/broker.ts`) does not consider a
+lone message a ready batch until it has waited that long. So the default
+configuration cannot beat 1 second for a single message by construction, and
+`max_batch_timeout = 0` in a wrangler file is the knob. Neither figure is
+anywhere near the 3 second ceiling.
+
+Every one of these is from a Mac, like every other measurement in this repo.
+
+## Follow-ups the verification named
+
+- **The readiness probe writes a stack trace into every worker's log on every
+  start.** `defaultProbeFactory` (`packages/worker/src/worker.ts`) POSTs an
+  empty body to the control port, and `CONTROL_SOURCE`
+  (`packages/worker/src/runtime-image.ts`) starts with `await request.json()`,
+  which throws on it. Harmless (the probe only needs a status line, and the 500
+  is one) but it means a real control channel failure and a routine startup
+  look identical in `hobby logs`. Smallest fix: read the body as text and
+  answer an empty one as a readiness ping without logging.
+- **Nothing prints a consumer's effective tuning values.** Neither
+  `hobby deploy` nor `hobby queue ls` shows `max_batch_size`,
+  `max_batch_timeout`, `max_retries` or `retry_delay`, and the spec claims the
+  deploy does. Given that `max_batch_timeout` turned out to be the dominant
+  term in delivery latency, it is the value users will most want to see.
+- **Retries, dead letters and lease expiry have never met Docker.** They are
+  covered against a fake clock in `packages/queue/test/` and no real handler
+  has ever thrown, and no real container has ever died mid-batch.
+- **`queueDeliveryGuard` has never run inside a real hibernation tick.** Unit
+  tests only.

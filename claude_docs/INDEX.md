@@ -37,7 +37,7 @@ The routing rule is in `docs/CLAUDE.md`. The project context is in the root
 | `backups/` | Backup, restore, PITR | Phase 1.5 |
 | `compute/` | Stateless workers and apps. `app` and `worker` kinds, built 2026-08-10. Resource creation split from deploy, 2026-08-13 (ADR 0014) | Phase 2 |
 | `durable-objects/` | Durable Objects: alarms across sleep, catalog, storage lifecycle | Phase 2 |
-| `queues/` | Queues: the broker outside the runtime, designed 2026-08-13, not built | Phase 2 |
+| `queues/` | Queues: the broker outside the runtime. Designed 2026-08-13, built and verified against real Docker 2026-08-14 | Phase 2 |
 | `storage/` | S3-compatible buckets, volumes | Phase 3 |
 | `sdk/` | Client libraries, React first | Phase 3 |
 | `decisions/` | Architecture decision records, numbered and immutable | n/a |
@@ -84,10 +84,19 @@ so this is what the project is judged on.
 | Postgres wake | 170ms | 186ms | 2026-08-07, `docs/proxy/research/` |
 | `app` HTTP wake | 121ms | 133ms | 2026-08-10, `docs/compute/research/` |
 | `worker` HTTP wake | 299ms | 321ms | 2026-08-10, `docs/compute/research/` |
+| Queue wake to first delivery, batch ready | 514ms | 600ms | 2026-08-14, `docs/queues/research/` |
+| Queue wake to first delivery, one message, default config | 1569ms | 1728ms | 2026-08-14, `docs/queues/research/` |
+| Queue enqueue, `send()` in container to row on host | 1ms | 12ms | 2026-08-14, `docs/queues/research/` |
+
+The two queue wake rows differ by `max_batch_timeout`, which defaults to 1
+second: a lone message is not a ready batch until it has waited that long, so
+the default configuration cannot beat the 1 second target for a single message
+by construction. The wake itself is the 514ms row. Neither is near the 3 second
+ceiling. Enqueue's p95 is one cold binding; steady state is 0 to 1ms.
 
 Every one of those is from a Mac. **The five dollar VPS half of the matrix has
 never been run**, and it is the machine the project is actually aimed at.
 
 ---
 
-Last Updated: 2026-08-13
+Last Updated: 2026-08-14
