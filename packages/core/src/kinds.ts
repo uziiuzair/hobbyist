@@ -85,6 +85,21 @@ export interface ResourceKindHandler<TResource extends Resource = Resource> {
   // absent guard means 'idle': a kind with nothing to interrupt should not
   // be forced to write a function that always says so.
   guard?(ctx: KindContext, resource: TResource): Promise<ActivityGuardResult>
+
+  // Optional. Answers "should reconcile read a container state for this
+  // resource at all?" An absent predicate means yes, which is the normal
+  // case. It lives on the handler because whether a resource HAS a
+  // container is a fact about its kind, not a fact reconcile should know.
+  //
+  // Two different shapes of "no" exist and both go through this one seam
+  // rather than through separate exemptions in reconcile.ts. `app` and
+  // `worker` answer per-resource: `undeployed` has no container yet, every
+  // other state does. A kind with no container at all, in any state (a
+  // `queue`, for instance) answers unconditionally. Sync, not async: the
+  // whole point is to decide before paying for a Docker round trip
+  // (ctx.runtime.inspect in reconcile.ts), so this cannot itself go ask
+  // the runtime anything.
+  skipReconcile?(resource: TResource): boolean
 }
 
 export type ResourceOfKind<K extends ResourceKind> = Extract<Resource, { kind: K }>

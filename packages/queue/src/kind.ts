@@ -85,4 +85,18 @@ export const queueKindHandler: ResourceKindHandler<QueueResource> = {
       return false
     }
   },
+
+  // Unconditional, unlike the `app` and `worker` handlers' own version,
+  // which answers true only for a resource in state `undeployed`. A queue
+  // has no container in ANY state: it is a sqlite file the daemon owns. So
+  // reconcile's ctx.runtime.inspect would be asked about a containerName
+  // that was never created, read that as `missing`, and correctedState would
+  // relabel a perfectly healthy queue `failed` on every single daemon start.
+  //
+  // Answering here rather than with a `resource.kind === 'queue'` branch in
+  // reconcile.ts is the point of the hook: "has no container" is a fact
+  // about this kind, and it belongs with the kind.
+  skipReconcile(): boolean {
+    return true
+  },
 }

@@ -12,6 +12,20 @@ correct and was removed anyway.
 Registers two resource kinds, `app` and `worker`, against the same
 `ComputeRuntime` interface Postgres already uses.
 
+**Amended 2026-08-13: creating a compute resource and deploying code into it
+are two separate acts, not one.** This file previously described build as
+part of resource creation, matching the daemon's original route, which
+required a build source before it would commit a row at all. That made Studio
+and MCP unable to create an `app` or a `worker`: there was no way to name one
+without also handing the daemon a filesystem path to build from, and neither
+surface has one. `docs/decisions/0014` records the reversal: `POST
+/v1/projects/:name/resources` now produces a row, an id and a hostname on its
+own, in a new resting state, `undeployed`, and `POST /v1/resources/:id/deploy`
+is the separate act that builds and ships code into it. `hobby deploy`
+resolves-or-creates the record and then deploys, so the CLI's one-command path
+is unchanged; giving Studio and MCP the create half is sub-project D1, not
+built by this ADR.
+
 ## Stateless, deliberately
 
 **Phase 2 compute has no persistent local disk.** State lives in Postgres.

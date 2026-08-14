@@ -225,7 +225,7 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
     throw new HobbyError(
       'usage',
       'name is required',
-      'POST /v1/projects/:name/resources expects { "kind": "postgres" | "app", "name": string }'
+      'POST /v1/projects/:name/resources expects { "kind": "postgres" | "app" | "worker", "name": string }'
     )
   }
 
@@ -253,21 +253,19 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
   }
 
   if (kind === 'worker') {
+    // Sourceless is legal now: the row, its id and its hostname are
+    // allocated first, and code arrives later through deploy (see
+    // createWorkerResource, packages/worker/src/worker.ts). readAppSource
+    // already returns null when no source was given, so there is nothing
+    // left to reject here.
     const source = readAppSource(fields)
-    if (source === null) {
-      throw new HobbyError(
-        'usage',
-        'a worker needs a source directory holding its wrangler manifest',
-        'POST /v1/projects/:name/resources expects { "kind": "worker", "name": string, "source": { "path": string } }'
-      )
-    }
     const databaseResourceId =
       typeof fields['databaseResourceId'] === 'string' ? fields['databaseResourceId'] : null
 
     const result = await createWorkerResource(ctx, {
       project,
       name,
-      sourcePath: source.path,
+      sourcePath: source === null ? null : source.path,
       databaseResourceId,
     })
     // Every wrangler key we read and did not act on, reported at the moment
@@ -341,14 +339,51 @@ async function destroyResourceRoute(ctx: DaemonContext, id: string): Promise<Rou
   return { status: 200, body: { deleted: true } }
 }
 
+// Shared refusal for the two lifecycle routes below, checked before either
+// dispatches to the kind registry. An `undeployed` resource has never had a
+// container (that is the whole point of the state, see ADR 0014's
+// "`undeployed` is a state, not a derived condition"), so letting either verb
+// through corrupts it: `stop` (runtime.stop on a container that never
+// existed is a documented no-op) completed and wrote `sleeping` with `image`
+// still null, which is verbatim the failure the state exists to prevent,
+// `hobby ls` claiming a resource can wake when it never can. `start` fell
+// through to containerSpec's internal assertion (packages/app/src/app.ts:98-104,
+// packages/worker/src/worker.ts:183-189) and wrote `failed`, an irreversible
+// state change for what is actually the user's own mistake.
+//
+// `usage`, not `internal`: asking to sleep or wake a resource you just
+// created is a reasonable mistake, not a daemon bug. The message matches the
+// identical refusal in resolve (packages/cli/src/daemon/context.ts:322-329),
+// so the proxy and the CLI say the same thing about how to fix this.
+function refuseUndeployed(ctx: DaemonContext, resource: Resource): void {
+  if (resource.state !== 'undeployed') {
+    return
+  }
+  const project = ctx.store.getProject(resource.projectId)
+  if (project === null) {
+    throw new HobbyError(
+      'internal',
+      `resource ${resource.id} has no owning project (project ${resource.projectId} is gone)`
+    )
+  }
+  const command = `hobby deploy <path> --project ${project.name} --name ${resource.name}`
+  throw new HobbyError(
+    'usage',
+    `${resource.name} has no code deployed yet, run \`${command}\` from the directory holding its code`,
+    `run \`${command}\` from the directory holding its code`
+  )
+}
+
 async function startResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
+  refuseUndeployed(ctx, resource)
   await ctx.kinds.get(resource.kind).start(ctx, resource)
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
 
 async function stopResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
+  refuseUndeployed(ctx, resource)
   await ctx.kinds.get(resource.kind).stop(ctx, resource)
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
@@ -360,7 +395,7 @@ async function stopResourceRoute(ctx: DaemonContext, id: string): Promise<RouteR
 // 127.0.0.1 because M1 only runs on one box the caller is already on;
 // HobbyConfig has no field yet for an externally reachable host, and adding
 // one is out of scope here.
-function connectionRoute(ctx: DaemonContext, id: string): RouteResult {
+async function connectionRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   // Genuinely postgres-only, unlike the lifecycle routes above: there is no
   // such thing as a connection string for an app or a worker, and an app's
   // reachable address is its hostname, served over HTTP. Answered with
@@ -376,16 +411,53 @@ function connectionRoute(ctx: DaemonContext, id: string): RouteResult {
     proxyPort: ctx.config.proxyPort,
     viaProxy: true,
   })
-  return { status: 200, body: { connectionString: value } }
+  // The tailnet variant is the same proxy on the same port, reached over
+  // the box's MagicDNS name: the 0.0.0.0 bind already answers there, this
+  // route only reports the address (docs/proxy/research/
+  // 2026-08-13-postgres-over-tailnet.md). Null when no detector is wired
+  // (tests, and any future caller of createApp that opts out) or when the
+  // box has no running tailscaled.
+  const tailnetHost = ctx.detectTailnet === undefined ? null : await ctx.detectTailnet()
+  const tailnetValue =
+    tailnetHost === null
+      ? null
+      : connectionString(project, resource, {
+          host: tailnetHost,
+          proxyPort: ctx.config.proxyPort,
+          viaProxy: true,
+        })
+  return { status: 200, body: { connectionString: value, tailnetConnectionString: tailnetValue } }
 }
 
 async function logsRoute(ctx: DaemonContext, id: string, url: URL): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
+  // Same refusal as the lifecycle routes: an undeployed resource has no
+  // container, so runtime.logs would otherwise surface a raw runtime error
+  // ("no such container") instead of telling the caller what to actually do.
+  refuseUndeployed(ctx, resource)
   const tailParam = url.searchParams.get('tail')
   const parsedTail = tailParam === null ? Number.NaN : Number(tailParam)
   const tail = Number.isFinite(parsedTail) && parsedTail > 0 ? Math.floor(parsedTail) : DEFAULT_LOG_TAIL
   const logs = await ctx.runtime.logs(resource.config.containerName, { tail })
   return { status: 200, body: { logs } }
+}
+
+// True once a first deploy has produced an image (ResourceConfigBase.image's
+// comment, packages/core/src/types.ts:63: "null until a first deploy has
+// produced one"). Keyed on the config field a deploy actually writes, not on
+// `state`, deliberately: `undeployed` means no code has ever landed here,
+// `failed` means code landed and a later deploy broke it, and a `failed`
+// resource still carries whatever image last worked (deployApp's own
+// wasUndeployed guard, packages/app/src/app.ts:453, only resets state back to
+// `undeployed` when there was never an image to roll back to). Checking
+// `state` here instead would also mis-skip one real edge case: a first
+// deploy that builds an image and then fails before it proves it listens
+// rolls `state` back to `undeployed` (packages/app/src/app.ts:508) while
+// `config.image` is already the freshly built tag. Matches the guard
+// deployApp and deployWorker already use for the identical question
+// (packages/app/src/app.ts:433, packages/worker/src/worker.ts:555).
+function isDeployed(resource: AppResource | WorkerResource): boolean {
+  return resource.config.image !== null
 }
 
 // A plain, literal rendering of what containerSpec (packages/pg/src/postgres.ts)
@@ -395,17 +467,27 @@ async function logsRoute(ctx: DaemonContext, id: string, url: URL): Promise<Rout
 // no side effects, nothing stopped, nothing deleted, no files written to
 // disk. Real `hobby eject` (moving the daemon out of the way entirely) is
 // portability/'s job and is not built here, see the task report.
+//
+// An app or worker with no image is skipped rather than rendered, and named
+// in the returned `skipped` list: a compose service with no image cannot
+// start, and `image: ${cfg.image}` below is a template literal, which
+// stringifies `null` with no compile error, which is why nothing caught it
+// before. Postgres needs no such guard: PostgresConfig.image is narrowed to
+// `string` (packages/core/src/types.ts:80), and comparing a non-nullable
+// string to `null` does not compile (TS2367), so the type system itself
+// proves the postgres loop below can never emit `image: null`.
 function renderCompose(
   ctx: DaemonContext,
   projectName: string,
   resources: PostgresResource[],
   apps: AppResource[] = [],
   workers: WorkerResource[] = []
-): string {
+): { compose: string; skipped: string[] } {
   // Every postgres resource in this project, by id, so an app's
   // databaseResourceId can be rewritten to the compose service name below.
   const byId = new Map(resources.map((resource) => [resource.id, resource]))
   const lines: string[] = ['services:']
+  const skipped: string[] = []
   for (const resource of resources) {
     const cfg = resource.config
     lines.push(`  ${resource.name}:`)
@@ -450,6 +532,16 @@ function renderCompose(
 
   for (const app of apps) {
     const cfg = app.config
+    // No image, no service: see isDeployed's comment above for why this
+    // checks `config.image` rather than `state`. Reported rather than
+    // dropped, reusing the skip-reporting mechanism abe7582 added for a kind
+    // that cannot be ejected at all: silence here would read as "hobby
+    // exported everything" at exactly the moment the user has stopped being
+    // able to ask.
+    if (!isDeployed(app)) {
+      skipped.push(`${app.name}: never deployed, so there is no image to run`)
+      continue
+    }
     lines.push(`  ${app.name}:`)
     lines.push(`    image: ${cfg.image}`)
     // Emitted alongside `image:` rather than instead of it when we built it
@@ -488,6 +580,21 @@ function renderCompose(
 
   for (const worker of workers) {
     const cfg = worker.config
+    // Same guard as the app loop above, and load-bearing here in a second,
+    // sharper way: buildRunnerManifest (packages/worker/src/worker.ts:135)
+    // THROWS when config.manifest is null, and deployWorker always writes
+    // image and manifest together in the same updateResourceConfig call,
+    // never one without the other (packages/worker/src/worker.ts:590-610;
+    // createWorkerResource's no-source path sets both null together too,
+    // packages/worker/src/worker.ts:322-334), so `!isDeployed(worker)` here
+    // guarantees `cfg.manifest !== null` at the call below. Without this
+    // guard, one undeployed worker throws out of renderCompose entirely,
+    // aborting eject for every healthy postgres in the same project, which
+    // is exactly the failure eject exists to prevent.
+    if (!isDeployed(worker)) {
+      skipped.push(`${worker.name}: never deployed, so there is no image to run`)
+      continue
+    }
     lines.push(`  ${worker.name}:`)
     lines.push(`    image: ${cfg.image}`)
     // No `build:` counterpart to the app kind's, deliberately. A worker's
@@ -523,7 +630,7 @@ function renderCompose(
     lines.push(`      - "${ctx.paths.resourcePath(projectName, worker.name, 'do')}:/hobby/do"`)
   }
 
-  return `${lines.join('\n')}\n`
+  return { compose: `${lines.join('\n')}\n`, skipped }
 }
 
 // The Caddy half of eject. ADR 0009 is explicit that emitting the compose
@@ -643,13 +750,13 @@ async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string):
 async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): Promise<RouteResult> {
   const project = getProjectByNameOrThrow(ctx, name)
   const resources = ctx.store.listResources(project.id)
-  // Only postgres resources are rendered today. Emitting compose services for
-  // `app` and `worker` is M8 and M9 respectively (see
-  // docs/compute/specs/2026-08-10-phase-2-compute-design.md), and ADR 0007 is
-  // explicit that a kind which cannot be ejected does not ship. Filtering
-  // rather than throwing keeps eject working for the database half of a mixed
-  // project; the count of skipped resources is reported so nobody reads an
-  // incomplete compose file as a complete one.
+  // All three kinds are rendered: the call to renderCompose below, at :778,
+  // emits a service for postgres, app and worker alike. ADR 0007 is explicit that a
+  // kind which cannot be ejected does not ship, and EJECTABLE just below is
+  // what keeps that true. What is filtered is not the kind but whether a
+  // compute resource has ever been deployed: an app or worker with no image
+  // is skipped and reported rather than rendered, see isDeployed's comment
+  // above renderCompose and the skip-reporting note a few lines down.
   const postgresResources = resources.filter((r) => r.kind === 'postgres')
   const appResources = resources.filter((r) => r.kind === 'app')
   const workerResources = resources.filter((r) => r.kind === 'worker')
@@ -660,18 +767,66 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
   const notEjectable = resources
     .filter((r) => !EJECTABLE.has(r.kind))
     .map((r) => `${r.name} (${r.kind})`)
+  // renderCompose skips (and reports) any app or worker with no image: an
+  // undeployed resource has never produced one, so there is no code to run
+  // (isDeployed's comment above renderCompose). Its skip messages join
+  // `notEjectable` below rather than a second field, reusing the one
+  // skip-reporting mechanism abe7582 added instead of inventing another. When
+  // every resource lands in that list, the refusal a few lines down fires
+  // instead of returning a `services:` header with nothing under it: see that
+  // check for why an empty compose file is not an acceptable 200.
+  const rendered = renderCompose(ctx, project.name, postgresResources, appResources, workerResources)
+  // The same isDeployed predicate renderCompose used, applied here so Caddy
+  // never routes a hostname to a service renderCompose just skipped. ADR 0009
+  // is explicit that "an ejected app that no longer serves is not an ejected
+  // app," and a compose stack with no service behind a hostname is exactly
+  // that, even though `hostname` and `hostPort` are both allocated at
+  // creation (createAppResource, packages/app/src/app.ts; createWorkerResource,
+  // packages/worker/src/worker.ts) and so are never null themselves, unlike
+  // `image`.
+  const deployedApps = appResources.filter(isDeployed)
+  const deployedWorkers = workerResources.filter(isDeployed)
+  const skippedReasons = [...notEjectable, ...rendered.skipped]
+
+  // Nothing renderable: refuse rather than hand back a file that cannot
+  // start. `services:` with nothing under it is not valid compose (verified
+  // against real docker compose: `docker compose -f <file> config` on a bare
+  // `services:` key fails with "services must be a mapping"), so returning
+  // 200 here would hand the departing user a file docker cannot even parse,
+  // at exactly the moment they are trying to leave, which fails CLAUDE.md's
+  // "you can always leave" worse than saying plainly there is nothing here
+  // yet. Two distinct shapes land here now that a project is not guaranteed
+  // a postgres the instant it exists: every resource present was skipped
+  // (Task 4 let a project hold only undeployed compute, and a later task
+  // adds `hobby new --empty`), or the project holds no resources at all. The
+  // message distinguishes the two, reusing skippedReasons so it never says
+  // less than what renderCompose already knows: this is either "come back
+  // once something has deployed" or "there is genuinely nothing here yet,"
+  // never "hobby lost your data."
+  if (postgresResources.length + deployedApps.length + deployedWorkers.length === 0) {
+    throw new HobbyError(
+      'usage',
+      skippedReasons.length > 0
+        ? `${name} has nothing to eject yet: ${skippedReasons.join('; ')}`
+        : `${name} has no resources yet, so there is nothing to eject`,
+      skippedReasons.length > 0
+        ? 'deploy at least one app or worker, or wait for a resource to finish creating, then eject again'
+        : 'create a resource first (hobby pg create, or deploy an app or worker), then eject again'
+    )
+  }
+
   const body = {
-    compose: renderCompose(ctx, project.name, postgresResources, appResources, workerResources),
+    compose: rendered.compose,
     // ADR 0009: without this, an ejected app comes up on a loopback port with
     // nothing routing a hostname to it, which is a running container rather
     // than a working site.
     caddyfile: renderCaddyfile([
-      ...appResources.map((r) => ({ hostname: r.config.hostname, hostPort: r.config.hostPort })),
-      ...workerResources.map((r) => ({ hostname: r.config.hostname, hostPort: r.config.hostPort })),
+      ...deployedApps.map((r) => ({ hostname: r.config.hostname, hostPort: r.config.hostPort })),
+      ...deployedWorkers.map((r) => ({ hostname: r.config.hostname, hostPort: r.config.hostPort })),
     ]),
     dataDirs: postgresResources.map((resource) => resource.config.dataDir),
     released: release,
-    notEjectable,
+    notEjectable: skippedReasons,
   }
 
   if (!release) {

@@ -19,25 +19,36 @@
    FINISH: unreviewed and undocumented is unfinished; this build ends with the
    finish review, the verdict, and DESIGN.md.
 
-   No @font-face, no CDN, no external anything: this runs on a box that may
-   have no internet. */
+   No CDN, no external anything: this runs on a box that may have no
+   internet. The faces below are bundled files in src/fonts, loaded by local
+   @font-face; the offline rule is untouched because no request ever leaves
+   the box. See docs/superpowers/specs/2026-08-14-studio-nocturne-design.md
+   for the amendment that replaced "system fonts only". */
+
+@font-face { font-family: 'Fraunces'; font-weight: 400; font-style: normal; font-display: swap; src: url('./fonts/fraunces-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Fraunces'; font-weight: 600; font-style: normal; font-display: swap; src: url('./fonts/fraunces-latin-600-normal.woff2') format('woff2'); }
+@font-face { font-family: 'IBM Plex Sans'; font-weight: 400; font-style: normal; font-display: swap; src: url('./fonts/ibm-plex-sans-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'IBM Plex Sans'; font-weight: 500; font-style: normal; font-display: swap; src: url('./fonts/ibm-plex-sans-latin-500-normal.woff2') format('woff2'); }
+@font-face { font-family: 'IBM Plex Sans'; font-weight: 600; font-style: normal; font-display: swap; src: url('./fonts/ibm-plex-sans-latin-600-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-weight: 400; font-style: normal; font-display: swap; src: url('./fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); }
 
 :root {
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-serif: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
   /* Dark first. The physical scene is a developer at a desk, often at night,
      with this tab parked beside an editor, driving a machine in a cupboard. */
-  --ground: #0b0c0d;
-  --surface: #121415;
-  --surface-2: #171a1c;
-  --surface-3: #1e2225;
-  --line: #24282b;
-  --line-strong: #32373b;
+  --ground: #131110;
+  --surface: #1a1715;
+  --surface-2: #211d1a;
+  --surface-3: #2a2521;
+  --line: #2f2925;
+  --line-strong: #423a32;
 
-  --ink: #e8eaec;
-  --ink-2: #a2a8ad;
-  --ink-3: #878d93;
+  --ink: #f2eee6;
+  --ink-2: #b9ae9f;
+  --ink-3: #998f80;
 
   /* Green does two jobs and the separation between them is deliberate.
      --accent is action: it only ever appears on things you can press or
@@ -45,25 +56,38 @@
      a meter fill. A large filled surface reads as a control, a 7px dot with a
      halo reads as a status, so the same hue stays unambiguous. Sleeping still
      has no chroma at all, because sleeping is the product working. */
-  --accent: #3ecf8e;
-  --accent-hover: #4fdb9c;
-  --accent-ink: #05231a;
-  --accent-dim: rgba(62, 207, 142, 0.13);
-  --accent-line: rgba(62, 207, 142, 0.34);
+  --accent: #4ed492;
+  --accent-hover: #63e0a2;
+  --accent-ink: #052419;
+  --accent-dim: rgba(78, 212, 146, 0.14);
+  --accent-line: rgba(78, 212, 146, 0.34);
 
   --awake: var(--accent);
-  --awake-dim: rgba(62, 207, 142, 0.18);
-  --awake-ring: rgba(62, 207, 142, 0.36);
-  --waking: #f0c674;
-  --waking-dim: rgba(240, 198, 116, 0.14);
+  --awake-dim: rgba(78, 212, 146, 0.14);
+  --awake-ring: rgba(78, 212, 146, 0.34);
+  --waking: #e9b45c;
+  --waking-dim: rgba(233, 180, 92, 0.13);
 
-  --danger: #f0857a;
-  --danger-dim: rgba(240, 133, 122, 0.12);
+  --danger: #ee8a7c;
+  --danger-dim: rgba(238, 138, 124, 0.12);
+
+  /* The jewel family: decorative only (tiles, kind icons). Never state. */
+  --sage: #97d8b0;
+  --iris: #b6acf5;
+  --honey-t: #e3b878;
+  --rose: #e9a3ab;
+
+  /* Glow lives on state dots, the awake card edge, and primary hover. */
+  --glow-awake: rgba(78, 212, 146, 0.28);
+  --glow-waking: rgba(233, 180, 92, 0.3);
 
   --focus: var(--accent);
 
-  --radius: 8px;
-  --radius-sm: 5px;
+  --radius: 13px;
+  --radius-sm: 9px;
+  /* Modals float above the page and take one softer step than the containers
+     in the flow. Only the modal uses this. */
+  --radius-lg: 16px;
   /* A 4px tall meter cannot take the 5px radius without looking like a
      lozenge, so the bar radius is its own documented step. */
   --radius-bar: 2px;
@@ -75,47 +99,75 @@
   --on-accent-line: color-mix(in srgb, var(--accent-ink) 26%, transparent);
   --on-accent-fill: color-mix(in srgb, var(--accent-ink) 13%, transparent);
   --rail: 248px;
-  --topbar: 40px;
+  --topbar: 44px;
 
-  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.02) inset, 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.4);
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 1px 3px rgba(0, 0, 0, 0.35);
+  /* A hovered card rises one step, not to the pop layer: the pop shadow is
+     reserved for things genuinely above the document (menu, modal). */
+  --shadow-lift: 0 10px 32px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-pop: 0 24px 70px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.35);
 }
 
 /* Someone's OS may be in light mode and this is their own machine, so light
    is a real theme, not an afterthought. Same structure, same one-chroma rule. */
 @media (prefers-color-scheme: light) {
   :root {
-    --ground: #f7f7f6;
+    --ground: #faf9f7;
     --surface: #ffffff;
-    --surface-2: #fbfbfa;
-    --surface-3: #f1f1ef;
-    --line: #e3e3e0;
-    --line-strong: #cfcfcb;
+    --surface-2: #f6f4f1;
+    --surface-3: #edeae4;
+    --line: #e6e2db;
+    --line-strong: #cfc9bf;
 
-    --ink: #16181a;
-    --ink-2: #5c6166;
-    --ink-3: #6b7075;
+    --ink: #1c1917;
+    --ink-2: #5f5a52;
+    --ink-3: #6e685e;
 
-    --accent: #10794f;
-    --accent-hover: #0c6342;
+    --accent: #147a48;
+    --accent-hover: #0f643b;
     --accent-ink: #ffffff;
-    --accent-dim: rgba(16, 121, 79, 0.14);
-    --accent-line: rgba(16, 121, 79, 0.3);
+    --accent-dim: rgba(20, 122, 72, 0.12);
+    --accent-line: rgba(20, 122, 72, 0.32);
 
     --awake: var(--accent);
-    --awake-dim: rgba(16, 121, 79, 0.2);
-    --awake-ring: rgba(16, 121, 79, 0.34);
-    --waking: #9a6410;
-    --waking-dim: rgba(154, 100, 16, 0.16);
+    --awake-dim: rgba(20, 122, 72, 0.16);
+    --awake-ring: rgba(20, 122, 72, 0.3);
+    --waking: #8a5a0e;
+    --waking-dim: rgba(138, 90, 14, 0.12);
 
     --danger: #b3392c;
     --danger-dim: rgba(179, 57, 44, 0.08);
 
     --focus: var(--accent);
 
-    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.05);
-    --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.08);
+    /* Jewels stay deep in the light: ink-dark hues on paper, so the tiles
+       keep their character instead of washing out to pastel candy. */
+    --sage: #1f6b43;
+    --iris: #5a4fb8;
+    --honey-t: #8a5f14;
+    --rose: #a84a55;
+    --glow-awake: rgba(20, 122, 72, 0.16);
+    --glow-waking: rgba(138, 90, 14, 0.18);
+
+    --shadow-card: 0 1px 3px rgba(28, 25, 23, 0.06);
+    --shadow-lift: 0 10px 32px rgba(28, 25, 23, 0.12), 0 1px 3px rgba(28, 25, 23, 0.07);
+    --shadow-pop: 0 24px 70px rgba(28, 25, 23, 0.16), 0 2px 6px rgba(28, 25, 23, 0.08);
   }
+
+  /* Hue-literal rules re-tuned for paper. Tokens cover most of the theme;
+     these are the rgba literals that carry the jewels' borders and glows. */
+  .tile-sage { border-color: rgba(31, 107, 67, 0.32); box-shadow: 0 8px 30px rgba(31, 107, 67, 0.1), 0 1px 3px rgba(28, 25, 23, 0.05); }
+  .tile-iris { border-color: rgba(90, 79, 184, 0.32); box-shadow: 0 8px 30px rgba(90, 79, 184, 0.1), 0 1px 3px rgba(28, 25, 23, 0.05); }
+  .tile-honey { border-color: rgba(138, 95, 20, 0.32); box-shadow: 0 8px 30px rgba(138, 95, 20, 0.1), 0 1px 3px rgba(28, 25, 23, 0.05); }
+  .tile-rose { border-color: rgba(168, 74, 85, 0.32); box-shadow: 0 8px 30px rgba(168, 74, 85, 0.1), 0 1px 3px rgba(28, 25, 23, 0.05); }
+  .card { background: linear-gradient(180deg, rgba(255, 255, 255, 0.5), transparent 42%), var(--surface); }
+  .tile { background: linear-gradient(180deg, rgba(255, 255, 255, 0.5), transparent 45%), var(--surface); }
+  .card.is-awake { border-color: rgba(20, 122, 72, 0.3); box-shadow: inset 0 1px 0 rgba(20, 122, 72, 0.12), 0 0 36px rgba(20, 122, 72, 0.05); }
+  a.card.is-awake:hover { border-color: var(--accent-line); box-shadow: inset 0 1px 0 rgba(20, 122, 72, 0.14), var(--shadow-lift), 0 0 44px rgba(20, 122, 72, 0.08); }
+  .waking-banner::after { background: linear-gradient(90deg, transparent, rgba(138, 90, 14, 0.5), transparent); }
+  .login-wrap { background: radial-gradient(ellipse 640px 420px at 50% 38%, rgba(20, 122, 72, 0.05), transparent), var(--ground); }
+  .login-mark { background: linear-gradient(180deg, rgba(255, 255, 255, 0.6), transparent), var(--surface-2); }
+  .modal { background: linear-gradient(180deg, rgba(255, 255, 255, 0.5), transparent 40%), color-mix(in srgb, var(--surface) 90%, transparent); }
 }
 
 * { box-sizing: border-box; }
@@ -140,6 +192,12 @@ body {
 }
 
 ::selection { background: var(--accent-line); color: var(--ink); }
+
+/* The surfaces the browser draws still carry the design: the caret in every
+   field is the product's green, and scrollbars take the hairline palette
+   instead of the platform chrome. */
+input, textarea { caret-color: var(--accent); }
+* { scrollbar-color: var(--line-strong) transparent; scrollbar-width: thin; }
 
 /* ---------- shell ---------- */
 
@@ -172,7 +230,7 @@ body {
 .rail-mark {
   width: 20px;
   height: 20px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--line-strong);
   background: var(--surface-3);
   display: grid;
@@ -187,7 +245,7 @@ body {
   background: var(--ink-3);
   display: block;
 }
-.rail-mark.is-awake i { background: var(--awake); box-shadow: 0 0 0 3px var(--awake-dim); }
+.rail-mark.is-awake i { background: var(--awake); box-shadow: 0 0 0 3px var(--awake-dim), 0 0 14px 2px var(--glow-awake); }
 
 .rail-group { margin-top: 14px; }
 
@@ -210,20 +268,44 @@ body {
   text-decoration: none;
   font-size: 13.5px;
   border: 1px solid transparent;
+  transition: background 140ms ease, color 140ms ease;
 }
 .rail-link:hover { background: var(--surface-2); color: var(--ink); }
 
-/* Where you are gets a quiet fill and a bar down its leading edge, not a ring.
-   A ring reads as a control you can press, and at two levels of nesting the
-   rings competed with each other instead of ranking the tree. The bar is the
-   one thing that survives being read at a glance from across the room. */
-.rail-link[aria-current="page"] {
-  background: var(--accent-dim);
-  color: var(--ink);
-  box-shadow: inset 2px 0 0 var(--accent);
+/* A resource that exists but has no view yet (apps and workers, pre-D1).
+   Same row anatomy as a link, but it is a fact rather than a destination:
+   no hover invitation, no pointer. */
+.rail-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--ink-2);
+  font-size: 13.5px;
 }
-.rail-link[aria-current="page"] svg { color: var(--accent); opacity: 1; }
+
+/* Where you are is a neutral fact, not an accent moment: a deeper surface
+   step, full ink, a touch more weight, and the green confined to the icon.
+   The tinted pill with an edge bar is banned outright: it is the stock
+   AI-dashboard active state and it spends chroma on something that is not
+   action and not state. */
+.rail-link[aria-current="page"] {
+  background: var(--surface-3);
+  color: var(--ink);
+  font-weight: 600;
+}
 .rail-link svg { flex: none; opacity: 0.75; }
+.rail-link[aria-current="page"] svg { opacity: 1; }
+
+/* Kind identity in the rail: sage databases, iris apps, honey workers, at
+   rest opacity so the tree stays quiet until you read it. The active row's
+   mark is its fill and weight, never a recolored icon: kind hue survives
+   selection. */
+.ic-sage { color: var(--sage); }
+.ic-iris { color: var(--iris); }
+.ic-honey { color: var(--honey-t); }
+.rail-link:hover svg { opacity: 1; }
 .rail-link .count { margin-left: auto; color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
 
 /* A row is a destination and a fold sitting together. The label owns the
@@ -260,6 +342,11 @@ body {
 .rail-link .state { color: inherit; font-size: inherit; min-width: 0; overflow: hidden; }
 .rail-link .state-failed { color: var(--danger); }
 
+/* A resource row is icon, name, dot: the name owns the flexible middle and
+   truncates, the dot keeps its size and sits on the trailing edge. */
+.rail-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-link .rail-dot, .rail-item .rail-dot { margin-left: auto; flex: none; overflow: visible; min-width: auto; }
+
 .rail-foot { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); }
 
 /* project switcher */
@@ -288,7 +375,9 @@ body {
   z-index: 40;
   top: calc(100% + 6px);
   left: 0; right: 0;
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--surface-2) 86%, transparent);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   box-shadow: var(--shadow-pop);
@@ -304,6 +393,7 @@ body {
   font: inherit; font-size: 13.5px; text-align: left;
   border-radius: var(--radius-sm); cursor: pointer;
 }
+.switcher-item { transition: background 140ms ease, color 140ms ease; }
 .switcher-item:hover { background: var(--surface-3); color: var(--ink); }
 .switcher-item[aria-current="true"] { color: var(--ink); }
 
@@ -353,8 +443,19 @@ body {
 
 
 .page { padding-block: 26px 64px; }
-.page-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
-.page-title { margin: 0; font-size: 21px; font-weight: 600; letter-spacing: -0.015em; }
+
+/* The machine strip: mono, quiet, true. The dot cluster is the box's state
+   at a glance: filled-and-lit dots are awake services. */
+.machine { display: flex; align-items: center; gap: 16px; padding: 0 0 16px; font-family: var(--font-mono); font-size: 12px; color: var(--ink-3); }
+.machine-host { color: var(--ink-2); }
+.machine-cluster { display: inline-flex; gap: 5px; align-items: center; }
+.machine-cluster i { width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--ink-3); box-sizing: border-box; }
+.machine-cluster i.on { background: var(--awake); border: 0; box-shadow: 0 0 8px 1px var(--glow-awake); }
+.machine-right { margin-left: auto; }
+.page-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 22px; }
+/* The display voice: one serif title per view, a register the interface
+   itself never uses. */
+.page-title { margin: 0; font-family: var(--font-serif); font-size: 30px; font-weight: 600; letter-spacing: -0.012em; }
 .page-sub { margin: 4px 0 0; color: var(--ink-2); font-size: 13.5px; }
 .page-actions { margin-left: auto; display: flex; gap: 8px; flex: none; }
 
@@ -370,6 +471,7 @@ body {
   font: inherit; font-size: 13px; font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 .btn:hover { background: var(--surface-3); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -409,13 +511,18 @@ body {
 .state { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2); white-space: nowrap; }
 .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 
-.state-awake .dot { background: var(--awake); box-shadow: 0 0 0 3px var(--awake-dim); }
+.state-awake .dot { background: var(--awake); box-shadow: 0 0 0 3px var(--awake-dim), 0 0 12px 2px var(--glow-awake); }
 
 /* Sleeping is a hollow ring in plain neutral. It is not a warning and it is
    not an error: it is the product working. */
 .state-sleeping .dot { background: transparent; border: 1.5px solid var(--ink-3); }
 
-.state-waking .dot { background: var(--waking); box-shadow: 0 0 0 3px var(--waking-dim); animation: pulse 1.1s ease-in-out infinite; }
+/* Undeployed is resting like sleeping, but it is a different fact: the record
+   exists and no code has ever arrived. A dashed ring is the outline of a thing
+   not there yet. Shape carries the difference, not colour: still no chroma. */
+.state-undeployed .dot { width: 8px; height: 8px; background: transparent; border: 1.5px dashed var(--ink-3); box-sizing: border-box; }
+
+.state-waking .dot { background: var(--waking); box-shadow: 0 0 0 3px var(--waking-dim), 0 0 12px 2px var(--glow-waking); animation: pulse 1.1s ease-in-out infinite; }
 
 .state-failed .dot { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-dim); }
 .state-failed { color: var(--danger); }
@@ -424,6 +531,7 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .state-waking .dot { animation: none; }
+  a.card:hover { transform: none; }
 }
 
 /* ---------- cards ---------- */
@@ -431,17 +539,26 @@ body {
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
 
 .card {
-  background: var(--surface);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 42%), var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow-card);
   display: flex;
   flex-direction: column;
   min-width: 0;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease, box-shadow 160ms ease;
 }
 
 a.card { text-decoration: none; color: inherit; }
-a.card:hover { border-color: var(--accent-line); background: var(--surface-2); }
+/* The green edge is the action half of the green rule; the 2px rise is the
+   card answering the cursor. Motion this small still reads as life. */
+a.card:hover { border-color: var(--accent-line); transform: translateY(-2px); box-shadow: var(--shadow-lift); }
+
+/* The night map: an awake card is a machine with its light on. The edge
+   light and ambient glow are state, not action: they never invite a press,
+   and the word next to the dot still does the telling. */
+.card.is-awake { border-color: rgba(78, 212, 146, 0.28); box-shadow: inset 0 1px 0 rgba(78, 212, 146, 0.18), 0 0 36px rgba(78, 212, 146, 0.06); }
+a.card.is-awake:hover { border-color: var(--accent-line); box-shadow: inset 0 1px 0 rgba(78, 212, 146, 0.2), var(--shadow-lift), 0 0 44px rgba(78, 212, 146, 0.1); }
 
 .card-body { padding: 14px 15px; display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
 .card-title { font-size: 14.5px; font-weight: 600; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -488,6 +605,30 @@ a.card:hover { border-color: var(--accent-line); background: var(--surface-2); }
   margin: 14px 0 0; padding-top: 11px; border-top: 1px solid var(--line);
   color: var(--ink-3); font-size: 12px; line-height: 1.5;
 }
+
+/* ---------- jewel tiles ----------
+   One dark slate ground for all five (owner's call): the hue speaks only
+   through the border, the glow and the label. Serif numerals in plain ink.
+   Decorative only: state never lives here, and Connections shows that a
+   tile is allowed to be quiet. */
+
+.tiles { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.tile { border-radius: var(--radius); padding: 15px 17px 13px; border: 1px solid var(--line); background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 45%), var(--surface); min-width: 0; }
+.tile-label { font-size: 10.5px; letter-spacing: 0.09em; text-transform: uppercase; font-weight: 600; display: flex; align-items: center; gap: 7px; color: var(--ink-2); }
+.tile-label i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.tile-value { font-family: var(--font-serif); font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 6px; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile-value .of { font-family: var(--font-sans); font-size: 13px; color: var(--ink-3); font-weight: 400; letter-spacing: 0; margin-left: 6px; }
+.tile-sage { border-color: rgba(151, 216, 176, 0.28); box-shadow: 0 8px 30px rgba(151, 216, 176, 0.1), 0 1px 3px rgba(0, 0, 0, 0.3); }
+.tile-sage .tile-label { color: var(--sage); }
+.tile-iris { border-color: rgba(182, 172, 245, 0.3); box-shadow: 0 8px 30px rgba(182, 172, 245, 0.11), 0 1px 3px rgba(0, 0, 0, 0.3); }
+.tile-iris .tile-label { color: var(--iris); }
+.tile-honey { border-color: rgba(227, 184, 120, 0.28); box-shadow: 0 8px 30px rgba(227, 184, 120, 0.1), 0 1px 3px rgba(0, 0, 0, 0.3); }
+.tile-honey .tile-label { color: var(--honey-t); }
+.tile-rose { border-color: rgba(233, 163, 171, 0.28); box-shadow: 0 8px 30px rgba(233, 163, 171, 0.1), 0 1px 3px rgba(0, 0, 0, 0.3); }
+.tile-rose .tile-label { color: var(--rose); }
+.tile-plain { box-shadow: var(--shadow-card); }
+.tiles-note { margin: 12px 0 16px; color: var(--ink-3); font-size: 12px; line-height: 1.5; }
+@media (max-width: 900px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 /* Chart left, the things you act on right, the way Neon ranks them. */
 .dash { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
@@ -584,7 +725,10 @@ a.card:hover { border-color: var(--accent-line); background: var(--surface-2); }
 }
 .segment:last-child { border-right: 0; }
 .segment:hover { color: var(--ink); }
-.segment[aria-pressed="true"] { background: var(--accent-dim); color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
+.segment { transition: background 140ms ease, color 140ms ease; }
+/* Pressed cannot bold: a segment that gains weight gains width and the whole
+   control jitters. The fill and a hairline do the work instead. */
+.segment[aria-pressed="true"] { background: var(--surface-3); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line-strong); }
 
 /* ---------- tables ---------- */
 
@@ -685,9 +829,12 @@ kbd {
 }
 .connstring code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 
-.empty { border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: 40px 24px; text-align: center; color: var(--ink-2); }
-.empty h3 { margin: 0 0 6px; font-size: 15px; color: var(--ink); font-weight: 600; }
+.empty { border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: 44px 24px; text-align: center; color: var(--ink-2); }
+.empty h3 { margin: 0 0 6px; font-family: var(--font-serif); font-size: 18px; color: var(--ink); font-weight: 600; }
 .empty p { margin: 0 auto; max-width: 42ch; font-size: 13.5px; }
+/* The spot drawing above an empty state's heading: dim ink, never chroma.
+   The drawing carries the warmth so the words can stay plain. */
+.empty-art { color: var(--ink-3); margin-bottom: 14px; }
 
 .notice { border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; color: var(--ink-2); }
 .notice-danger { border-color: var(--danger); background: var(--danger-dim); color: var(--danger); }
@@ -757,9 +904,10 @@ kbd {
   font-family: var(--font-mono); font-size: 12.5px;
   border-radius: var(--radius-sm);
   text-align: left;
+  transition: background 140ms ease, color 140ms ease;
 }
 .wb-table:hover { background: var(--surface-2); color: var(--ink); }
-.wb-table.active { background: var(--accent-dim); color: var(--ink); }
+.wb-table.active { background: var(--surface-3); color: var(--ink); font-weight: 600; }
 .wb-table.active svg { color: var(--accent); }
 .wb-table svg { flex: none; opacity: 0.7; }
 .wb-table.active svg { opacity: 1; }
@@ -838,6 +986,7 @@ kbd {
   border: 1px dashed var(--line);
   border-radius: var(--radius);
 }
+.result-idle > div { text-align: center; }
 
 /* Saved queries and history: the query itself is the label, because a name
    you chose three weeks ago tells you less than the first line of the sql. */
@@ -849,6 +998,7 @@ kbd {
   border-radius: var(--radius-sm); text-align: left; color: var(--ink-2);
   font: inherit;
 }
+.q-open { transition: background 140ms ease, color 140ms ease; }
 .q-open:hover { background: var(--surface-2); color: var(--ink); }
 .q-name { font-size: 13px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .q-sql {
@@ -1002,9 +1152,10 @@ kbd {
   border-bottom: 1px solid var(--line);
 }
 .side-list-item:last-child { border-bottom: 0; }
+.side-list-item { transition: background 140ms ease, color 140ms ease; }
 .side-list-item:hover { background: var(--surface-2); color: var(--ink); }
 .side-list-item[aria-current="page"], .side-list-item.active {
-  background: var(--accent-dim); color: var(--ink); font-weight: 500;
+  background: var(--surface-3); color: var(--ink); font-weight: 600;
 }
 .side-list-item {
   width: 100%; text-align: left; font-family: inherit; font-size: 13px; background: none; cursor: pointer;
@@ -1069,12 +1220,16 @@ kbd {
    transition and not a resting state. */
 
 .waking-banner {
+  position: relative;
+  overflow: hidden;
   display: flex;
   align-items: center;
   gap: 11px;
-  padding: 10px 13px;
+  padding: 11px 14px;
   border: 1px solid var(--waking);
-  background: var(--waking-dim);
+  /* The wash fades left to right: warmest beside the dot doing the talking,
+     quiet by the time it reaches the clock. */
+  background: linear-gradient(90deg, var(--waking-dim), color-mix(in srgb, var(--waking-dim) 40%, transparent));
   border-radius: var(--radius-sm);
   color: var(--ink);
   font-size: 13px;
@@ -1114,8 +1269,23 @@ kbd {
 .waking-banner-failed .waking-dot { background: var(--danger); box-shadow: none; animation: none; }
 .waking-banner-failed .waking-elapsed { color: var(--danger); }
 
+/* The one authored moment: while something wakes, a honey light sweeps the
+   banner's top edge. Gone under reduced motion, and the words and clock
+   carry everything without it. Subtle and failed banners say something
+   different, so they do not sweep. */
+.waking-banner::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; height: 1px; width: 100%;
+  background: linear-gradient(90deg, transparent, rgba(233, 180, 92, 0.7), transparent);
+  animation: wake-sweep 2.4s ease-in-out infinite;
+}
+@keyframes wake-sweep { 0% { transform: translateX(-100%); } 60%, 100% { transform: translateX(100%); } }
+.waking-banner-subtle::after, .waking-banner-failed::after { display: none; }
+
 @media (prefers-reduced-motion: reduce) {
   .waking-dot { animation: none; }
+  .waking-banner::after { display: none; }
 }
 
 /* ---------- modals: every form lives in one ---------- */
@@ -1135,11 +1305,16 @@ kbd {
 .modal {
   width: 100%;
   max-width: 440px;
-  background: var(--surface);
+  /* Glass: only things above the page get it (the modal and the switcher
+     menu). color-mix keeps 88% opacity so a browser without backdrop-filter
+     still renders a legible solid. */
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 40%), color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
   border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-pop);
-  animation: modal-in 120ms ease-out;
+  animation: modal-in 140ms ease-out;
 }
 
 @keyframes modal-in {
@@ -1151,7 +1326,7 @@ kbd {
 }
 
 .modal-head { padding: 16px 18px 0; }
-.modal-title { margin: 0; font-size: 15.5px; font-weight: 600; letter-spacing: -0.01em; }
+.modal-title { margin: 0; font-family: var(--font-serif); font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
 .modal-desc { margin: 5px 0 0; color: var(--ink-2); font-size: 13px; line-height: 1.5; }
 .modal-body { padding: 14px 18px 16px; }
 .modal-foot {
@@ -1161,19 +1336,55 @@ kbd {
   padding: 12px 18px;
   border-top: 1px solid var(--line);
   background: var(--surface-2);
-  border-radius: 0 0 var(--radius) var(--radius);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
 }
 
 @media (max-width: 560px) {
   .modal-scrim { padding: 0; place-items: end stretch; }
-  .modal { max-width: none; border-radius: var(--radius) var(--radius) 0 0; }
+  .modal { max-width: none; border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+  .modal-foot { border-radius: 0; }
 }
 
 /* ---------- login ---------- */
 
-.login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+/* The door: a nocturne composition. A breathing radial of the product's own
+   green behind a single glowing mark; the one place the product gets to be
+   quiet and confident. */
+.login-wrap {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: radial-gradient(ellipse 640px 420px at 50% 38%, rgba(78, 212, 146, 0.05), transparent), var(--ground);
+}
 .login-card { width: 100%; max-width: 340px; }
-.login-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; font-weight: 600; font-size: 15px; }
+.login-brand { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 14px; margin-bottom: 26px; }
+
+/* The rail mark at door size. The dot glows green here on purpose: the door
+   shows the product alive; the rail mark reports the truth once inside. */
+.login-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-strong);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent), var(--surface-2);
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.login-mark i {
+  width: 9px; height: 9px; border-radius: 50%; display: block;
+  background: var(--awake);
+  box-shadow: 0 0 0 4px var(--awake-dim), 0 0 22px 4px var(--glow-awake);
+  animation: mark-breathe 3.2s ease-in-out infinite;
+}
+@keyframes mark-breathe {
+  0%, 100% { box-shadow: 0 0 0 4px var(--awake-dim), 0 0 22px 4px var(--glow-awake); }
+  50% { box-shadow: 0 0 0 4px var(--awake-dim), 0 0 32px 8px var(--glow-awake); }
+}
+@media (prefers-reduced-motion: reduce) { .login-mark i { animation: none; } }
+.login-title { font-family: var(--font-serif); font-weight: 600; font-size: 28px; letter-spacing: -0.01em; }
+.login-sub { color: var(--ink-2); font-size: 13.5px; margin-top: 3px; }
 
 /* ---------- responsive ---------- */
 

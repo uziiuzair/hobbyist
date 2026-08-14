@@ -299,6 +299,94 @@ test('formatBytes renders human units', () => {
   assert.equal(formatBytes(5 * 1024 * 1024), '5.0 MB')
 })
 
+// Ruling F6 (progress.md): the brief changes `hobby ls`'s output (a compute
+// resource now shows its hostname instead of a port, and an `undeployed`
+// resource says so) with nothing asserting it, and output formatting is
+// exactly what regresses unnoticed. Run through the real `run()` -> cmdLs
+// path, the same end-to-end shape as this file's other tests, rather than
+// calling renderResourceLine directly, so this also proves cmdLs actually
+// prints what the daemon sent rather than something reshaped along the way.
+test('hobby ls renders each resource\'s state, and a compute resource\'s hostname', async () => {
+  const home = tempHome()
+  const socketPath = join(home, 'hobby.sock')
+
+  const postgresResource = {
+    id: 'r1',
+    projectId: 'p1',
+    kind: 'postgres',
+    name: 'primary',
+    state: 'sleeping',
+    config: {
+      image: 'postgres:18-alpine',
+      containerName: 'hobby-blog-primary',
+      dataDir: '/x',
+      hostPort: 15432,
+      superuser: 'postgres',
+      database: 'blog',
+    },
+    sizeBytes: null,
+    connectionCount: 0,
+    lastActiveAt: null,
+    createdAt: '2026-01-01T00:00:00.000Z',
+  }
+  // `undeployed`: Task 4's createAppResource with neither a source nor an
+  // image, so `config.image` is null (never printed by renderResourceLine)
+  // and the only things worth showing are the state and the hostname a
+  // deploy will eventually serve.
+  const appResource = {
+    id: 'r2',
+    projectId: 'p1',
+    kind: 'app',
+    name: 'site',
+    state: 'undeployed',
+    config: {
+      image: null,
+      containerName: 'hobby-blog-site',
+      hostPort: 15080,
+      source: null,
+      containerPort: 3000,
+      hostname: 'blog-site.hobby.local',
+      env: {},
+      databaseResourceId: null,
+    },
+    sizeBytes: null,
+    connectionCount: 0,
+    lastActiveAt: null,
+    createdAt: '2026-01-01T00:00:00.000Z',
+  }
+  const project = { id: 'p1', name: 'blog', networkName: 'hobby-blog', sleepAfterSeconds: 300, createdAt: '2026-01-01T00:00:00.000Z' }
+
+  const server = createServer((req, res) => {
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    if (req.method === 'GET' && req.url === '/v1/projects') {
+      res.writeHead(200)
+      res.end(JSON.stringify({ projects: [project] }))
+      return
+    }
+    if (req.method === 'GET' && req.url === '/v1/projects/blog') {
+      res.writeHead(200)
+      res.end(JSON.stringify({ project, resources: [postgresResource, appResource] }))
+      return
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: { code: 'usage', message: `unexpected request: ${req.method} ${req.url}` } }))
+  })
+
+  await listen(server, socketPath)
+  try {
+    const { io, outLines } = makeIo({ HOBBY_HOME: home })
+    const code = await run(['ls'], io)
+    assert.equal(code, 0)
+    assert.ok(outLines.some((l) => l.includes('primary') && l.includes('sleeping') && l.includes('15432')))
+    assert.ok(
+      outLines.some((l) => l.includes('site') && l.includes('undeployed') && l.includes('blog-site.hobby.local'))
+    )
+  } finally {
+    await close(server)
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('renderResourceLine includes name, kind, state and port', () => {
   const line = renderResourceLine({
     id: randomUUID(),

@@ -120,7 +120,19 @@ function redactConfig(kind: Resource['kind'], config: ResourceConfig): WireResou
     // boundary as itself: a secret this function forgets to touch is a
     // secret every `--json` redirect, CI log and agent transcript gets a
     // copy of.
-    return { ...worker, vars: redactValues(worker.vars), queueToken: REDACTED }
+    //
+    // vars lives one level deeper since ADR 0014, inside manifest, and is
+    // null until a first deploy: nothing to redact yet, and nothing to leak
+    // either. The nesting is the sharp edge here. Spreading `worker` and
+    // setting a top-level `vars` still compiles, still type-checks, and
+    // leaks every key the user put in wrangler.toml, because the real
+    // values ride along inside the spread manifest untouched.
+    return {
+      ...worker,
+      queueToken: REDACTED,
+      manifest:
+        worker.manifest === null ? null : { ...worker.manifest, vars: redactValues(worker.manifest.vars) },
+    }
   }
   // Every known kind is handled above. Reaching here means a kind was added
   // to ResourceKind with no branch here, which is exactly the bug a queue

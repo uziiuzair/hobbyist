@@ -38,6 +38,7 @@ import {
   type ProxyDeps,
   type ProxyTarget,
 } from '@hobby.sh/proxy'
+import { createTailnetDetector } from './tailnet.js'
 
 // Every kind this daemon knows how to run. One list, built here, read by
 // every dispatch site (routes, hibernator, reconcile, the wake path). Adding
@@ -64,6 +65,12 @@ export interface DaemonContext {
   // listening. reconcile.ts reads the same field for its own readiness
   // probe. Production never sets it and gets pgProbe, a real connection.
   probeFactory?: (config: PostgresConfig) => () => Promise<boolean>
+  // Same polarity as probeFactory, inverted purpose: production sets it
+  // (createDaemonContext wires the real `tailscale status --json` probe,
+  // see tailnet.ts) and tests either leave it unset, getting a
+  // deterministic null with no binary executed, or set a fake. Returns the
+  // box's MagicDNS name when a tailnet is up, null otherwise.
+  detectTailnet?: () => Promise<string | null>
 }
 
 // A convenience factory for the real, production wiring: opens the real
@@ -83,6 +90,7 @@ export function createDaemonContext(opts: {
     config: opts.config,
     activity: new ActivityTracker(),
     kinds: createDefaultKindRegistry(),
+    detectTailnet: createTailnetDetector(),
   }
 }
 
@@ -292,6 +300,33 @@ export function createHttpProxyDeps(ctx: DaemonContext): HttpProxyDeps {
     // browser to port 5432 would hand it a Postgres wire protocol error.
     if (resource.kind !== 'app' && resource.kind !== 'worker') {
       return null
+    }
+
+    // Same shape as the released-project refusal just above: thrown, not
+    // returned as null. Returning null renders 404 "nothing is deployed at
+    // this hostname" (packages/proxy/src/http.ts:242), which is false here.
+    // Something IS at this hostname: a row exists, it was created
+    // deliberately (Task 4's createAppResource / createWorkerResource), and
+    // it owns the name. Throwing renders 503 with this message
+    // (packages/proxy/src/http.ts:246), and leaves allowHostname's catch
+    // below free to still return true so a certificate can be issued before
+    // any code ships.
+    //
+    // The whole sentence, command included, lives in the message argument
+    // because resolveAndWake reads err.message alone
+    // (packages/proxy/src/http.ts:174); hint is for API callers that read
+    // HobbyError.toWire() (packages/core/src/errors.ts:59-66) rather than a
+    // browser body. The command shape matches deployApp's identical usage
+    // error (packages/app/src/app.ts:434-438) and deployWorker's
+    // (packages/worker/src/worker.ts:545-549), so the proxy and the CLI
+    // never disagree about how to fix this.
+    if (resource.state === 'undeployed') {
+      const command = `hobby deploy <path> --project ${project.name} --name ${resource.name}`
+      throw new HobbyError(
+        'conflict',
+        `${hostname} has no code deployed yet, run \`${command}\` from the directory holding its code`,
+        `run \`${command}\` from the directory holding its code`
+      )
     }
 
     return {
