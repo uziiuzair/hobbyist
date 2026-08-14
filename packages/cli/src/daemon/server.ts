@@ -255,20 +255,32 @@ export async function startDaemon(
     : null
 
   if (caddy !== null) {
-    await caddy.ensureRunning()
-    await caddy.setFallback({
-      upstream: `127.0.0.1:${ctx.config.httpPort}`,
-      askUrl: `http://127.0.0.1:${ctx.config.httpPort}${TLS_ASK_PATH}`,
-    })
-    if (ctx.config.caddyStudioHost !== null && opts.apiPort !== null) {
-      await caddy.addRoute({
-        id: 'hobby-studio',
-        host: ctx.config.caddyStudioHost,
-        upstream: `127.0.0.1:${opts.apiPort}`,
+    // Deliberately not fatal. A box whose Caddy will not start still has
+    // Postgres resources that must wake on connection through the pg proxy,
+    // which has nothing to do with HTTP. Refusing to start the daemon here
+    // would take databases offline to punish a web server, inverting the
+    // priority root CLAUDE.md sets between its three promises. Loud, not
+    // silent, and not fatal.
+    try {
+      await caddy.ensureRunning()
+      await caddy.setFallback({
+        upstream: `127.0.0.1:${ctx.config.httpPort}`,
+        askUrl: `http://127.0.0.1:${ctx.config.httpPort}${TLS_ASK_PATH}`,
       })
-    } else if (ctx.config.caddyStudioHost !== null) {
+      if (ctx.config.caddyStudioHost !== null && opts.apiPort !== null) {
+        await caddy.addRoute({
+          id: 'hobby-studio',
+          host: ctx.config.caddyStudioHost,
+          upstream: `127.0.0.1:${opts.apiPort}`,
+        })
+      } else if (ctx.config.caddyStudioHost !== null) {
+        console.error(
+          'caddy: no studio route published, because the studio listener is not started on this daemon'
+        )
+      }
+    } catch (err) {
       console.error(
-        'caddy: no studio route published, because the studio listener is not started on this daemon'
+        `caddy: the front door did not come up, so apps are reachable only on their loopback ports: ${errorMessage(err)}`
       )
     }
   }
