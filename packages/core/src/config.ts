@@ -138,6 +138,27 @@ function readFileConfig(cwd: string): Partial<HobbyConfig> {
   return JSON.parse(readFileSync(path, 'utf8')) as Partial<HobbyConfig>
 }
 
+// readFileConfig's cast above is unchecked: whatever JSON.parse produced is
+// handed back exactly as written, with no narrowing to HobbyConfig's real
+// types. That is silently harmless for a string, number or null field, but
+// silently wrong for a boolean one: `{"caddyEnabled": "false"}` parses to
+// the STRING "false", not the boolean, and `Boolean('false')` is `true`, so
+// a hobby.json holding the word "false" starts Caddy. readEnvConfig above
+// was hardened against exactly this failure mode for HOBBY_CADDY_ENABLED,
+// with an allow-list that fails closed; this applies the same narrowing at
+// the point every config source merges (resolveConfig below), so a file
+// config can never enable caddyEnabled with anything other than the real
+// boolean `true`. The next boolean field HobbyConfig grows should get this
+// same one-line treatment here, at the boundary, rather than at whichever
+// use site happens to read it first.
+function sanitizeFileConfig(fileConfig: Partial<HobbyConfig>): Partial<HobbyConfig> {
+  if (!('caddyEnabled' in fileConfig)) {
+    return fileConfig
+  }
+  const raw: unknown = fileConfig.caddyEnabled
+  return { ...fileConfig, caddyEnabled: raw === true }
+}
+
 function readEnvConfig(env: NodeJS.ProcessEnv): Partial<HobbyConfig> {
   const config: Partial<HobbyConfig> = {}
   if (env.HOBBY_IMAGE !== undefined) config.image = env.HOBBY_IMAGE
@@ -184,7 +205,7 @@ export function resolveConfig(opts: {
   const cwd = opts.cwd ?? process.cwd()
   return {
     ...DEFAULT_CONFIG,
-    ...readFileConfig(cwd),
+    ...sanitizeFileConfig(readFileConfig(cwd)),
     ...readEnvConfig(env),
     ...opts.flags,
   }

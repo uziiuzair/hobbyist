@@ -160,6 +160,42 @@ test('ensureRunning creates and starts the caddy container with host networking,
   assert.equal(spec?.image, 'caddy:2-alpine')
 })
 
+test('ensureRunning polls the admin API and does not resolve until it answers', async () => {
+  // start() resolving is not Caddy answering: the container was asked to
+  // run, not yet bound to :2019. Fails the first two admin-API calls with
+  // ECONNREFUSED, the exact error push() would turn into a swallowed
+  // HobbyError if ensureRunning fired setFallback's request right away,
+  // then succeeds on the third. ensureRunning resolving at all here proves
+  // it polled through the failures instead of propagating the first one.
+  const runtime = createFakeRuntime()
+  let calls = 0
+  const fetchFn = (async () => {
+    calls += 1
+    if (calls <= 2) {
+      throw new Error('ECONNREFUSED')
+    }
+    return new Response('{}', { status: 200 })
+  }) as typeof fetch
+  const manager = createCaddyManager(runtime, { adminPort: 2019, fetchFn })
+
+  await manager.ensureRunning()
+
+  assert.ok(calls >= 3, `expected at least 3 admin-API attempts, saw ${calls}`)
+})
+
+test('ensureRunning throws a HobbyError if the admin API never becomes reachable', async () => {
+  const runtime = createFakeRuntime()
+  const fetchFn = (async () => {
+    throw new Error('ECONNREFUSED')
+  }) as typeof fetch
+  const manager = createCaddyManager(runtime, { adminPort: 2019, fetchFn })
+
+  await assert.rejects(
+    manager.ensureRunning(),
+    (err: unknown) => err instanceof Error && err.name === 'HobbyError'
+  )
+})
+
 test('addRoute posts the expected admin API payload for a new route', async () => {
   const runtime = createFakeRuntime()
   const { fetchFn, calls } = fakeFetch()
