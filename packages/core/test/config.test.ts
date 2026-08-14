@@ -8,7 +8,7 @@
 // DEFAULT_CONFIG merged with (at most) an env override.
 
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -76,4 +76,26 @@ test('all three caddy env overrides parse together', () => {
   assert.equal(config.caddyEnabled, true)
   assert.equal(config.caddyAdminPort, 2020)
   assert.equal(config.caddyStudioHost, 'studio.example.com')
+})
+
+test('a hobby.json holding the string "false" for caddyEnabled resolves to false, not Boolean("false")', () => {
+  // readFileConfig parses hobby.json with an unchecked cast (JSON.parse(...)
+  // as Partial<HobbyConfig>), so nothing before resolveConfig itself stops
+  // an operator's file from holding the JSON string "false" for a field
+  // HobbyConfig declares as boolean. Boolean('false') is true in
+  // JavaScript, which is exactly the failure this guards: a hobby.json that
+  // reads as "off" must not start Caddy anyway.
+  const fileCwd = mkdtempSync(join(tmpdir(), 'hobby-config-file-test-'))
+  writeFileSync(join(fileCwd, 'hobby.json'), JSON.stringify({ caddyEnabled: 'false' }))
+
+  const config = resolveConfig({ env: {}, cwd: fileCwd })
+  assert.equal(config.caddyEnabled, false)
+})
+
+test('a hobby.json holding the real boolean true for caddyEnabled still turns caddy on', () => {
+  const fileCwd = mkdtempSync(join(tmpdir(), 'hobby-config-file-test-'))
+  writeFileSync(join(fileCwd, 'hobby.json'), JSON.stringify({ caddyEnabled: true }))
+
+  const config = resolveConfig({ env: {}, cwd: fileCwd })
+  assert.equal(config.caddyEnabled, true)
 })

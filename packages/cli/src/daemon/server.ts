@@ -61,6 +61,49 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+// This repo's standing convention, decision hobbyist.bound-every-outbound-
+// call: every call that leaves the process is bounded by a timeout, not a
+// try/catch, because a hang is not a throw. preflight.ts's own withTimeout
+// (packages/cli/src/daemon/preflight.ts:230) is the same convention applied
+// to a probe that must never fail its caller, so it swallows a timeout (and
+// every rejection) into one fallback value. The caddy startup block below
+// needs the opposite: the catch just past it (Task 3's) exists to log the
+// *real* reason caddy did not come up, including ensureRunning's own
+// HobbyError naming exactly what never became reachable (see caddy.ts), so
+// this rejects with the underlying error unless the deadline fires first,
+// rather than discarding it the way preflight's version deliberately does
+// for its own, different, never-fail use.
+function withDeadline<T>(promise: Promise<T>, ms: number, describe: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${describe} did not finish within ${ms}ms`))
+    }, ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err: unknown) => {
+        clearTimeout(timer)
+        reject(err)
+      }
+    )
+  })
+}
+
+// Bounds the whole caddy startup block below. Ordering elsewhere in this
+// file requires it: the block runs before startHibernator, startAlarmMirror
+// and the SIGTERM/SIGINT handlers are registered (see the docstring on
+// performShutdown), so an unbounded hang here, e.g. `docker create` blocked
+// on a first-run pull of caddy:2-alpine, means Ctrl-C during that window
+// gets Node's default behaviour instead of performShutdown, and every
+// running Postgres container is left for the next wake's crash recovery
+// instead of stopped cleanly. 60s is generous for a small alpine-based
+// image pull on an ordinary connection (ensureRunning's own admin-API poll,
+// ADMIN_READY_TIMEOUT_MS in caddy.ts, is a further 1.5s on top of whatever
+// this leaves) while still being an actual bound instead of none at all.
+const CADDY_STARTUP_TIMEOUT_MS = 60_000
+
 // Deleting a live daemon's socket file out from under it would let a second
 // daemon bind the same path and start fighting the first one over the same
 // store and the same containers, which is data-destructive. So the file is
@@ -262,22 +305,28 @@ export async function startDaemon(
     // priority root CLAUDE.md sets between its three promises. Loud, not
     // silent, and not fatal.
     try {
-      await caddy.ensureRunning()
-      await caddy.setFallback({
-        upstream: `127.0.0.1:${ctx.config.httpPort}`,
-        askUrl: `http://127.0.0.1:${ctx.config.httpPort}${TLS_ASK_PATH}`,
-      })
-      if (ctx.config.caddyStudioHost !== null && opts.apiPort !== null) {
-        await caddy.addRoute({
-          id: 'hobby-studio',
-          host: ctx.config.caddyStudioHost,
-          upstream: `127.0.0.1:${opts.apiPort}`,
-        })
-      } else if (ctx.config.caddyStudioHost !== null) {
-        console.error(
-          'caddy: no studio route published, because the studio listener is not started on this daemon'
-        )
-      }
+      await withDeadline(
+        (async () => {
+          await caddy.ensureRunning()
+          await caddy.setFallback({
+            upstream: `127.0.0.1:${ctx.config.httpPort}`,
+            askUrl: `http://127.0.0.1:${ctx.config.httpPort}${TLS_ASK_PATH}`,
+          })
+          if (ctx.config.caddyStudioHost !== null && opts.apiPort !== null) {
+            await caddy.addRoute({
+              id: 'hobby-studio',
+              host: ctx.config.caddyStudioHost,
+              upstream: `127.0.0.1:${opts.apiPort}`,
+            })
+          } else if (ctx.config.caddyStudioHost !== null) {
+            console.error(
+              'caddy: no studio route published, because the studio listener is not started on this daemon'
+            )
+          }
+        })(),
+        CADDY_STARTUP_TIMEOUT_MS,
+        'caddy startup'
+      )
     } catch (err) {
       console.error(
         `caddy: the front door did not come up, so apps are reachable only on their loopback ports: ${errorMessage(err)}`

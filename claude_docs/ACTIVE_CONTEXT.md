@@ -18,7 +18,7 @@ the HTTP wake router. The design is at
 The daemon originally required a build source before it would commit a
 resource row at all, which meant Studio and MCP could not create an `app` or
 `worker`, having no filesystem path to hand the daemon. `docs/decisions/0014`
-(branch `record-before-code`, not yet merged to `main`) splits `POST
+(merged to `main` at `e0d56a2`) splits `POST
 /v1/projects/:name/resources` from `POST /v1/resources/:id/deploy`: a resource
 can now exist as a row with an id and a hostname, holding no code, in a new
 resting state `undeployed`. `hobby deploy` still resolves-or-creates and
@@ -103,7 +103,7 @@ order they were scoped:
 
 | Sub-project | Ships | State |
 |---|---|---|
-| **A** record before code | Resource creation split from deploy; `undeployed` state; ADR 0014 | **built, branch `record-before-code`, not yet merged to `main`** |
+| **A** record before code | Resource creation split from deploy; `undeployed` state; ADR 0014 | **merged to `main` at `e0d56a2`** |
 | **B** wire Caddy | `createCaddyManager` gets a production caller | **built, branch `caddy-wiring`, not yet merged to `main`** |
 | **D1** Studio and MCP for all kinds | Drop the hardcoded `kind: 'postgres'` at `packages/studio/src/api.ts:152` and `packages/mcp/src/tools.ts:116`, once A is merged and gives them something else to send | not started |
 | **D2** Studio API tokens | Not yet designed beyond the label; no spec filed as of this writing | not started |
@@ -111,9 +111,9 @@ order they were scoped:
 
 ## The immediate next steps
 
-1. **Merge `record-before-code` (sub-project A) to `main`.** This is Task 10
-   of that plan, the docs commit, landing now; the code (Tasks 1 through 9b)
-   is already done and reviewed on the branch.
+1. **`record-before-code` (sub-project A) is merged to `main`**, at `e0d56a2`,
+   which is also `caddy-wiring`'s own base. Task 10 of that plan, the docs
+   commit, is the one that landed it.
 2. **D1: give Studio and MCP the ability to create compute**, now that A
    makes it possible.
 3. **D2: Studio API tokens.**

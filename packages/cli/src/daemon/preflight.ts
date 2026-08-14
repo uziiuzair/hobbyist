@@ -156,17 +156,26 @@ function reserveEphemeralPort(host: string): Promise<number> {
 }
 
 // Polls rather than firing one fetch right after start(): start() resolving
-// only means the container was asked to run, not that Caddy inside it has
-// bound its admin port yet. Any response at all, not just a 2xx, is the
+// only means the container was asked to run, not that the process inside it
+// has bound its admin port yet. Any response at all, not just a 2xx, is the
 // signal: nothing would answer on this port over loopback at all unless the
-// throwaway container's network namespace really is the host's.
-async function waitForAdminReachable(port: number, deadlineMs: number): Promise<boolean> {
+// container's network namespace really is the host's.
+//
+// Exported and reused by caddy.ts's CaddyManager.ensureRunning, which polls
+// the production Caddy container's admin API for exactly the reason this
+// probe polls the throwaway one's: one implementation of "wait for an HTTP
+// admin listener to come up," not two copies that can drift. `fetchFn`
+// defaults to the real `fetch` here (this file has no injected one), while
+// caddy.ts passes its own so its tests never make a real network call.
+export async function waitForHttpReachable(
+  url: string,
+  deadlineMs: number,
+  fetchFn: typeof fetch = fetch
+): Promise<boolean> {
   const deadline = Date.now() + deadlineMs
   for (;;) {
     try {
-      const res = await fetch(`http://${PORT_PROBE_HOST}:${port}/config/`, {
-        signal: AbortSignal.timeout(400),
-      })
+      const res = await fetchFn(url, { signal: AbortSignal.timeout(400) })
       await res.body?.cancel()
       return true
     } catch {
@@ -209,7 +218,10 @@ async function probeHostNetworking(ctx: DaemonContext): Promise<boolean> {
       network: 'host',
     })
     await ctx.runtime.start(containerName)
-    return await waitForAdminReachable(adminPort, HOST_NETWORKING_CONNECT_TIMEOUT_MS)
+    return await waitForHttpReachable(
+      `http://${PORT_PROBE_HOST}:${adminPort}/config/`,
+      HOST_NETWORKING_CONNECT_TIMEOUT_MS
+    )
   } finally {
     await ctx.runtime.stop(containerName, { timeoutSec: 1 }).catch(() => {})
     await ctx.runtime.remove(containerName).catch(() => {})
