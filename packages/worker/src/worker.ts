@@ -686,6 +686,34 @@ export interface DeployWorkerResult {
   logs: string
 }
 
+// Falls back to the recorded source path on a redeploy. A worker whose
+// manifest is still null has never been deployed, so there is nothing
+// recorded to fall back to and the caller must say where the code is.
+// Names the actual fixing command rather than the wire shape, matching
+// deployApp's identical guard in packages/app/src/app.ts.
+//
+// Exported so a caller that needs to know what a deploy WOULD build from,
+// before calling deployWorker itself, can resolve the identical path:
+// packages/cli/src/daemon/routes.ts's pre-deploy queue-binding conflict
+// check parses the manifest before any image is built, and it has to parse
+// the same file deployWorker itself is about to parse, not a guess at one.
+// Throws the same usage error deployWorker always threw here, so a caller
+// that reuses this and a caller that lets deployWorker throw it directly
+// see one message rather than two independently-worded ones drifting apart.
+export function resolveWorkerSourcePath(resource: WorkerResource, projectName: string, sourcePath?: string): string {
+  if (sourcePath !== undefined) {
+    return sourcePath
+  }
+  if (resource.config.manifest === null) {
+    throw new HobbyError(
+      'usage',
+      `${resource.name} has never been deployed, so this deploy needs a directory to build from`,
+      `run \`hobby deploy <path> --project ${projectName} --name ${resource.name}\` from the directory holding its wrangler config`
+    )
+  }
+  return resource.config.manifest.source.path
+}
+
 export async function deployWorker(
   deps: WorkerDeps,
   resource: WorkerResource,
@@ -695,22 +723,7 @@ export async function deployWorker(
   if (project === null) {
     throw new HobbyError('internal', `worker ${resource.id} has no owning project`)
   }
-  // Falls back to the recorded source path on a redeploy. A worker whose
-  // manifest is still null has never been deployed, so there is nothing
-  // recorded to fall back to and the caller must say where the code is.
-  // Names the actual fixing command rather than the wire shape, matching
-  // deployApp's identical guard in packages/app/src/app.ts.
-  let sourcePath = opts.sourcePath
-  if (sourcePath === undefined) {
-    if (resource.config.manifest === null) {
-      throw new HobbyError(
-        'usage',
-        `${resource.name} has never been deployed, so this deploy needs a directory to build from`,
-        `run \`hobby deploy <path> --project ${project.name} --name ${resource.name}\` from the directory holding its wrangler config`
-      )
-    }
-    sourcePath = resource.config.manifest.source.path
-  }
+  const sourcePath = resolveWorkerSourcePath(resource, project.name, opts.sourcePath)
 
   // A first deploy that fails must not leave the resource looking broken,
   // because it is not: it is exactly as it was, a record with no code. Only

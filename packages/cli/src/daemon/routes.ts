@@ -21,6 +21,7 @@ import {
   type QueueConfig,
   type QueueResource,
   type SqliteDatabase,
+  type Store,
   type WorkerResource,
   type Project,
   type Resource,
@@ -42,7 +43,14 @@ import {
   type ContentType,
   type LeasedMessage,
 } from '@hobby.sh/queue'
-import { buildRunnerManifest, createWorkerResource, deployWorker, describeIgnored } from '@hobby.sh/worker'
+import {
+  buildRunnerManifest,
+  createWorkerResource,
+  deployWorker,
+  describeIgnored,
+  findWranglerManifest,
+  resolveWorkerSourcePath,
+} from '@hobby.sh/worker'
 import { getOrCreateWake, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
 import { toWireResource, toWireResources, type WireResource } from './wire.js'
@@ -365,6 +373,23 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
     const databaseResourceId =
       typeof fields['databaseResourceId'] === 'string' ? fields['databaseResourceId'] : null
 
+    // A worker created WITH a source builds and deploys in this one call
+    // (createWorkerResource, packages/worker/src/worker.ts), never through
+    // deployResourceRoute: that is the path `hobby deploy` takes for a
+    // brand new worker, and it is a genuinely separate call site from a
+    // redeploy of an existing one. The same pre-build legality check that
+    // guards a redeploy has to guard this path too, or a worker's very
+    // first deploy could still build an image, start a container and prove
+    // it serves, then get refused for a queue binding conflict discoverable
+    // from its manifest alone: the identical bug this fix round exists to
+    // close, reachable through the other door. `workerId: null` because
+    // this resource does not exist yet: it cannot already be any queue's
+    // recorded consumer, so it always loses a conflict against one that is.
+    if (source !== null) {
+      const found = findWranglerManifest(source.path)
+      assertQueueBindingsAreLegal(ctx.store, project, null, name, found.manifest.queues)
+    }
+
     const result = await createWorkerResource(ctx, {
       project,
       name,
@@ -378,6 +403,7 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
     for (const line of describeIgnored(result.ignored)) {
       console.error(`worker ${name}: ignoring ${line}`)
     }
+    await syncWorkerQueueBindings(ctx, project, result.resource)
     return result.resource
   }
 
@@ -392,6 +418,85 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
   )
 }
 
+// The shape both a parsed WranglerManifest and a stored WorkerManifest
+// already satisfy structurally, which is what lets one predicate check both
+// the PRE-deploy manifest (nothing built yet) and the POST-deploy one
+// (defense in depth inside syncWorkerQueueBindings) without a conversion
+// step between them.
+interface QueueBindingsToCheck {
+  producers: Array<{ queue: string }>
+  consumers: Array<{ queue: string; deadLetterQueue: string | null }>
+}
+
+// Two things a manifest's queue bindings can conflict about, and both are
+// knowable from the store alone: no image built, no container started, no
+// readiness probe run. Called BEFORE any build, from createResourceRoute
+// (a worker's first-ever deploy, created with a source in one call) and
+// deployResourceRoute (every deploy after that), so a deploy that cannot
+// legally take its declared bindings never builds an image at all. This
+// was a real bug in the previous fix round: the same check ran only AFTER
+// deployWorker had already built the image, started the container, and
+// proven it served, so a refused deploy still left the user with a running
+// worker whose queue() handler would never receive anything, and an error
+// message on the terminal that contradicted the container in front of them.
+//
+// `workerId: null` means "a worker that does not exist yet" (a brand new
+// resource being created and deployed in the same call): it can never
+// already be the id recorded as some queue's consumer, so it always loses
+// a conflict against an existing binding, which is the correct answer for
+// something that has no history yet.
+//
+// Called again from inside syncWorkerQueueBindings, unconditionally, as
+// defense in depth: that function is exported and callable directly (this
+// file's own tests do exactly that), and a caller that reaches it without
+// going through either pre-check must not be able to steal a binding or
+// squat a name silently just because it skipped a step.
+function assertQueueBindingsAreLegal(
+  store: Store,
+  project: Project,
+  workerId: string | null,
+  workerName: string,
+  queues: QueueBindingsToCheck
+): void {
+  const names = new Set<string>()
+  for (const producer of queues.producers) {
+    names.add(producer.queue)
+  }
+  for (const consumer of queues.consumers) {
+    names.add(consumer.queue)
+    if (consumer.deadLetterQueue !== null) {
+      names.add(consumer.deadLetterQueue)
+    }
+  }
+
+  for (const name of names) {
+    const existing = store.getResourceByName(project.id, name)
+    if (existing !== null && existing.kind !== 'queue') {
+      throw new HobbyError(
+        'usage',
+        `${workerName}'s wrangler config names a queue "${name}", but ${project.name}/${name} is already a ${existing.kind}`,
+        `rename the queue in ${workerName}'s wrangler config, or rename the existing ${existing.kind}`
+      )
+    }
+  }
+
+  for (const consumer of queues.consumers) {
+    const existing = store.getResourceByName(project.id, consumer.queue)
+    if (existing === null || existing.kind !== 'queue') {
+      continue
+    }
+    if (existing.config.consumerResourceId !== null && existing.config.consumerResourceId !== workerId) {
+      const other = store.getResource(existing.config.consumerResourceId)
+      const otherName = other === null ? existing.config.consumerResourceId : other.name
+      throw new HobbyError(
+        'usage',
+        `queue ${existing.name} already has worker ${otherName} as its consumer, and worker ${workerName} also declares itself one`,
+        `a queue can have exactly one consumer; remove the [[queues.consumers]] block naming ${existing.name} from ${workerName} or from ${otherName}`
+      )
+    }
+  }
+}
+
 // The spec's own promise: a queue named in a deployed manifest's producers,
 // consumers, or a consumer's dead letter queue is created if it does not
 // exist yet, the same way Cloudflare itself auto-creates a missing one.
@@ -401,17 +506,16 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
 // create` step required first.
 //
 // Three things happen here, in order:
-//   1. every named queue exists, created via createQueueResource above (the
+//   1. legality: assertQueueBindingsAreLegal, see its own comment. Always
+//      passes here in production, because both callers already ran it
+//      before building anything; kept as a real check rather than an
+//      assertion because this function is directly testable and reachable.
+//   2. every named queue exists, created via createQueueResource above (the
 //      same defaults `hobby queue create` uses) if it did not already.
-//   2. every consumer entry claims its queue: consumerResourceId is set to
+//   3. every consumer entry claims its queue: consumerResourceId is set to
 //      this worker, and its non-null tuning keys are copied onto the row
-//      (QueueConfig's own comment explains why only non-null ones). A queue
-//      already consumed by a DIFFERENT worker refuses the whole call rather
-//      than silently moving the binding: Cloudflare allows exactly one
-//      consumer per queue, and the deploy trying to add a second one is the
-//      one that is wrong. This was an open question the spec never
-//      resolved; refusing loudly is the safer default; see the task report.
-//   3. any queue this worker used to consume that its current manifest no
+//      (QueueConfig's own comment explains why only non-null ones).
+//   4. any queue this worker used to consume that its current manifest no
 //      longer names is released back to consumerResourceId: null. A stale
 //      pointer would leave the tick delivering to a worker with no handler
 //      for it, which is worse than delivering to nobody.
@@ -422,15 +526,17 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
 // deliberately carries no KindRegistry: nothing else in that package ever
 // creates a sibling resource, and giving it one only for this would widen a
 // dependency the rest of that package does not need. By the time this
-// function runs, deployWorker has already parsed and persisted the
-// manifest and started and stopped the container to prove it serves; only
-// the HTTP response, which is what "reported deployed" means to a caller,
-// is still pending.
+// function runs, deployWorker (or createWorkerResource, for a first
+// deploy) has already parsed and persisted the manifest and started and
+// stopped the container to prove it serves; only the HTTP response, which
+// is what "reported deployed" means to a caller, is still pending.
 export async function syncWorkerQueueBindings(ctx: DaemonContext, project: Project, worker: WorkerResource): Promise<void> {
   const manifest = worker.config.manifest
   if (manifest === null) {
     return
   }
+
+  assertQueueBindingsAreLegal(ctx.store, project, worker.id, worker.name, manifest.queues)
 
   // Every name this manifest references at all, producer or consumer or
   // dead letter target, deduplicated: a name in more than one role is only
@@ -453,37 +559,19 @@ export async function syncWorkerQueueBindings(ctx: DaemonContext, project: Proje
       byName.set(name, await createQueueResource(ctx, project, name))
       continue
     }
-    if (existing.kind !== 'queue') {
-      throw new HobbyError(
-        'usage',
-        `${worker.name}'s wrangler config names a queue "${name}", but ${project.name}/${name} is already a ${existing.kind}`,
-        `rename the queue in ${worker.name}'s wrangler config, or rename the existing ${existing.kind}`
-      )
+    // assertQueueBindingsAreLegal above already ruled out a name held by a
+    // different kind; this narrow is for the type checker, not a second
+    // policy decision.
+    if (existing.kind === 'queue') {
+      byName.set(name, existing)
     }
-    byName.set(name, existing)
   }
 
-  // Consumer bindings, claimed one at a time. Checked before anything is
-  // written for THIS consumer entry, so a conflict discovered on the second
-  // of two consumer entries in one manifest cannot leave the first one's
-  // claim written while the call as a whole still throws.
   for (const consumerEntry of manifest.queues.consumers) {
     const queue = byName.get(consumerEntry.queue)
     if (queue === undefined) {
-      // Created (or refused) in the loop above; only reachable here if that
-      // loop already threw, which propagated out of this function first.
       continue
     }
-    if (queue.config.consumerResourceId !== null && queue.config.consumerResourceId !== worker.id) {
-      const other = ctx.store.getResource(queue.config.consumerResourceId)
-      const otherName = other === null ? queue.config.consumerResourceId : other.name
-      throw new HobbyError(
-        'usage',
-        `queue ${queue.name} already has worker ${otherName} as its consumer, and worker ${worker.name} also declares itself one`,
-        `a queue can have exactly one consumer; remove the [[queues.consumers]] block naming ${queue.name} from ${worker.name} or from ${otherName}`
-      )
-    }
-
     const config: QueueConfig = { ...queue.config, consumerResourceId: worker.id }
     if (consumerEntry.maxBatchSize !== null) {
       config.maxBatchSize = consumerEntry.maxBatchSize
@@ -545,21 +633,33 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
   }
 
   if (resource.kind === 'worker') {
+    const project = getOwningProjectOrThrow(ctx, resource)
+    // Refuse BEFORE deployWorker ever builds an image, not after. The
+    // conflict is knowable from the parsed manifest and the store alone, no
+    // build or readiness probe required, and finding out after the fact was
+    // a real bug in the previous round: a refused deploy still left a
+    // genuinely running, serving container behind, with an error message on
+    // the terminal that contradicted it, and a queue() handler that would
+    // silently never receive anything because consumerResourceId still
+    // pointed at the other worker. resolveWorkerSourcePath and
+    // findWranglerManifest are the identical two calls deployWorker is
+    // about to make internally; parsing the manifest twice is the accepted
+    // cost of catching this before committing anything, not a new failure
+    // mode, since any error either call raises here is the exact error
+    // deployWorker would have raised at the same point anyway.
+    const sourcePath = resolveWorkerSourcePath(resource, project.name, source === null ? undefined : source.path)
+    const found = findWranglerManifest(sourcePath)
+    assertQueueBindingsAreLegal(ctx.store, project, resource.id, resource.name, found.manifest.queues)
+
     const result = await deployWorker(ctx, resource, source === null ? {} : { sourcePath: source.path })
     for (const line of describeIgnored(result.ignored)) {
       console.error(`worker ${resource.name}: ignoring ${line}`)
     }
-    // After the manifest is parsed and persisted and the container has
-    // proven it serves (both already true by the time deployWorker
-    // returns), before the caller is ever told this deploy succeeded. A
-    // conflict here (syncWorkerQueueBindings's two-consumers refusal) throws
-    // and this route's response is an error, even though the worker's
-    // image, manifest and container are already committed: there is no
-    // second transaction spanning both, the same way an app or worker whose
-    // build succeeds but whose readiness probe times out still keeps its
-    // built image. The fix is editing the manifest and deploying again, not
-    // retrying blindly.
-    const project = getOwningProjectOrThrow(ctx, result.resource)
+    // By now the manifest is parsed and persisted and the container has
+    // proven it serves; the only thing still pending is the HTTP response,
+    // which is what "reported deployed" means to a caller. The legality
+    // check just above means syncWorkerQueueBindings's own defense-in-depth
+    // copy of it can never actually fire here.
     await syncWorkerQueueBindings(ctx, project, result.resource)
     return {
       status: 200,
