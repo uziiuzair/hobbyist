@@ -379,7 +379,8 @@ that quietly loses messages.
    daemon. One extra hop, slower, still correct.
 2. **The Linux gateway bind is reasoned, not run.** No five dollar VPS has been
    touched. This joins cold start on the list of Linux claims tested only on a
-   Mac.
+   Mac. **See the addendum: this turned out to understate the problem. The
+   container half of the Linux transport was never implemented at all.**
 3. **Ordering across a wake.** Best effort, like Cloudflare. `ORDER BY id`
    gives creation order within a batch, and nothing promises more.
 4. **Two workers binding one queue as consumer.** Cloudflare allows one consumer
@@ -392,6 +393,34 @@ Appended after the end-to-end verification
 (`research/2026-08-14-queues-survive-sleep.md`) rather than edited into the
 body above, so what was designed on 2026-08-13 stays legible next to what was
 found on the 14th.
+
+**Contradicted, and worse than the original wording admitted: THE PRODUCER PATH
+DOES NOT WORK ON LINUX, and not because it is untested.** Open question 2 above
+says "the Linux gateway bind is reasoned, not run", which reads as code that
+exists and has not been exercised. Found by the whole-branch review on
+2026-08-14 and confirmed by grep: the container half was never built.
+
+`packages/worker/src/worker.ts` hands every producer container
+`http://host.docker.internal:<port>/enqueue`. On macOS that name is resolved by
+OrbStack and Docker Desktop, which is why every run in
+`research/2026-08-14-queues-survive-sleep.md` passed. On Linux it resolves only
+if the container was created with `--add-host=host.docker.internal:host-gateway`,
+a fact this project's own research doc records
+(`research/2026-08-13-miniflare-queues-are-in-memory.md`). Nothing passes that
+flag: `buildCreateArgs` in `packages/core/src/docker.ts` never emits
+`--add-host`, and `ContainerSpec` in `packages/core/src/runtime.ts` has no field
+to carry one.
+
+So the daemon correctly binds the project bridge gateway on Linux, and then
+never tells the container the name that would reach it. `env.MY_QUEUE.send()`
+fails DNS resolution on the exact hardware this project is aimed at.
+
+It is invisible from either side alone: the daemon's bind is complete and
+correct in `packages/cli`, the container's URL is complete and correct in
+`packages/worker`, and only a reader holding both sees that they do not meet.
+The fix is small (add extra hosts to `ContainerSpec` and emit the flag, or
+resolve the gateway IP into the URL at start) and is real work, not a
+documentation change. Filed as the first follow-up in `docs/queues/CLAUDE.md`.
 
 **Contradicted, and still open.** "The tick" section says a handler that cares
 about the batching defaults "should set the keys explicitly, and `hobby deploy`

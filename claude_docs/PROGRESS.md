@@ -5,6 +5,67 @@ delete one, even when it turns out to have been wrong. Especially then.
 
 Each entry: what changed, what it cost, and what was learned.
 
+## 2026-08-14: Caddy is wired, and a blocker that was never true cost four days
+
+Branch `caddy-wiring`, sub-project B of five, six commits (`e054c51` through
+this entry). `createCaddyManager` (`packages/cli/src/daemon/caddy.ts:151`)
+had been fully written and fully tested since Phase 1 and had never been
+called. `startDaemon` (`packages/cli/src/daemon/server.ts:253` onward) is
+now that caller: it calls `ensureRunning()`, `setFallback()` at the wake
+router, an optional Studio `addRoute()` when `caddyStudioHost` is configured
+and the Studio listener is up, and `stop()` on shutdown (`:323-329`), all
+gated behind a new `caddyEnabled` flag defaulting to `false`
+(`packages/core/src/config.ts:101-121`), alongside `caddyAdminPort` and
+`caddyStudioHost`. `HOBBY_CADDY_ENABLED` allow-lists `'1'` and `'true'`,
+fails closed on anything else, and warns on an unrecognised value. A Caddy
+failure logs and leaves the daemon running rather than aborting startup: a
+box whose web front door will not start still has Postgres resources that
+must wake through the pg proxy, which has nothing to do with HTTP. `hobby
+init` now probes host networking when Caddy is enabled and warns, never
+fails, when it is absent (`detectHostNetworking` in
+`packages/cli/src/daemon/preflight.ts`, rendered by `hostNetworkingWarning`
+in `packages/cli/src/cli/output.ts:87`). `hobby studio` (`cmdStudio`,
+`packages/cli/src/cli/commands.ts:915`) now prints the public host instead
+of the loopback URL once `caddyEnabled` and `caddyStudioHost` both say so,
+since that is the address that actually works from anywhere. Suite grew from
+a 508-test baseline to 530.
+
+**The lesson worth keeping is not the wiring.** `claude_docs/ACTIVE_CONTEXT.md`
+recorded, as settled fact, that `network: 'host'` "does not exist on Docker
+Desktop for macOS, so it breaks on the author's own machine first," and
+named that as the reason sub-project B had not started. That line entered
+the record on 2026-08-10 and sat there until 2026-08-14, four days, naming
+the reason a whole sub-project had not started. Nobody who read it,
+including the author, ran the two commands that would have disproved it in
+under a minute: `docker info`, which shows the runtime is OrbStack, not
+Docker Desktop, and `docker run --network host` against a real container,
+which shows host networking working in both directions. Both were finally
+run on 2026-08-14 and confirmed the opposite of the recorded claim:
+`caddy.ts`'s existing `network: 'host'` design needed no rescue, only a
+caller. Filed as decision `hobbyist.caddy-host-networking-works` and as this
+sub-project's spec, `docs/proxy/specs/2026-08-14-wiring-caddy-design.md`.
+Docker Desktop for macOS remains a genuine, still-unmeasured case; what was
+false was never the caveat, it was treating an assumption about one specific
+runtime as settled fact about every runtime, with nobody checking which one
+was actually running. The claim entered the record as prose, carrying the
+same confidence as a measured number, and a prose claim about a host
+environment does not fail a build or a test the way a wrong function does,
+so nothing forced it to be checked. Root `CLAUDE.md`'s working agreement to
+"ground claims in code" exists for exactly this failure mode. This is what
+it costs when a claim about infrastructure skips it.
+
+**What is still not real.** Caddy's certificate store is not persisted: the
+container is created with no volume, so replacing it re-issues certificates,
+a real problem against Let's Encrypt rate limits on a busy box. Docker
+Desktop for macOS is detected at `hobby init` and warned about, but has never
+actually been run against, so the warning itself is unverified. Both are
+named in the spec's "Known gaps" section rather than deferred quietly.
+
+**Cost:** six commits, zero production incidents, and four days of a
+five-sub-project sequence blocked on an untested sentence.
+
+---
+
 ## 2026-08-13: Record before code, and three things the plan's own review process found
 
 Branch `record-before-code`, ten tasks, ADR 0014. Resource creation split from

@@ -20,12 +20,23 @@
 // our routes for an operator to find or hand-edit.
 
 import { HobbyError, type ComputeRuntime } from '@hobby.sh/core'
+import { waitForHttpReachable } from './preflight.js'
 
 const CADDY_CONTAINER_NAME = 'hobby-caddy'
 const CADDY_IMAGE = 'caddy:2-alpine'
 const CADDY_SERVER_NAME = 'hobby'
 const FALLBACK_ROUTE_ID = 'hobby-fallback'
 const STOP_TIMEOUT_SEC = 10
+
+// How long ensureRunning waits, after start() returns, for Caddy's admin API
+// to answer before giving up. `docker start` resolving only means the
+// container was asked to run, not that Caddy inside it has bound :2019 yet;
+// without this wait, the very next call (setFallback) fires microseconds
+// later, gets ECONNREFUSED, and the front door never opens. Measured boot
+// time on this box (2026-08-14, OrbStack): about 160ms (see preflight.ts's
+// HOST_NETWORKING_CONNECT_TIMEOUT_MS, which this mirrors); this leaves close
+// to 10x margin for a loaded box or a cold layer cache.
+const ADMIN_READY_TIMEOUT_MS = 1_500
 
 export interface CaddyRoute {
   // A stable identifier for this route, used as Caddy's own `@id` so a
@@ -202,6 +213,18 @@ export function createCaddyManager(runtime: ComputeRuntime, opts: CreateCaddyMan
         network: 'host',
       })
       await runtime.start(CADDY_CONTAINER_NAME)
+      // start() resolving is not Caddy answering, it is Docker saying the
+      // container was asked to run (see ADMIN_READY_TIMEOUT_MS above), so
+      // poll the same way preflight.ts's own throwaway-container probe does
+      // (waitForHttpReachable, shared rather than duplicated) instead of
+      // firing setFallback's POST /load the instant start() returns.
+      const reachable = await waitForHttpReachable(`${adminBase}/config/`, ADMIN_READY_TIMEOUT_MS, fetchFn)
+      if (!reachable) {
+        throw new HobbyError(
+          'runtime_unavailable',
+          `the caddy admin API never became reachable within ${ADMIN_READY_TIMEOUT_MS}ms of starting the container`
+        )
+      }
     },
 
     async addRoute(route: CaddyRoute): Promise<void> {
