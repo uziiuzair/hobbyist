@@ -17,8 +17,9 @@ import { chmod, rm } from 'node:fs/promises'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import net from 'node:net'
 import { startAlarmMirror } from '@hobby.sh/do'
-import { startHttpRouter, startPgProxy } from '@hobby.sh/proxy'
+import { startHttpRouter, startPgProxy, TLS_ASK_PATH } from '@hobby.sh/proxy'
 import { durableObjectNamespaces } from './alarms.js'
+import { createCaddyManager, type CaddyManager } from './caddy.js'
 import { createHttpProxyDeps, createProxyDeps, getOrCreateWake, type DaemonContext } from './context.js'
 import { startHibernator } from './hibernator.js'
 import { handleRequest } from './routes.js'
@@ -59,6 +60,50 @@ const SOCKET_PROBE_TIMEOUT_MS = 500
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
+
+// This repo's standing convention, decision hobbyist.bound-every-outbound-
+// call: every call that leaves the process is bounded by a timeout, not a
+// try/catch, because a hang is not a throw. preflight.ts's own withTimeout
+// (packages/cli/src/daemon/preflight.ts:230) is the same convention applied
+// to a probe that must never fail its caller, so it swallows a timeout (and
+// every rejection) into one fallback value. The caddy startup block below
+// needs the opposite: the catch just past it (Task 3's) exists to log the
+// *real* reason caddy did not come up, including ensureRunning's own
+// HobbyError naming exactly what never became reachable (see caddy.ts), so
+// this rejects with the underlying error unless the deadline fires first,
+// rather than discarding it the way preflight's version deliberately does
+// for its own, different, never-fail use.
+function withDeadline<T>(promise: Promise<T>, ms: number, describe: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${describe} did not finish within ${ms}ms`))
+    }, ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err: unknown) => {
+        clearTimeout(timer)
+        reject(err)
+      }
+    )
+  })
+}
+
+// Bounds the whole caddy startup block below. Ordering elsewhere in this
+// file requires it: the block runs before startHibernator, startAlarmMirror
+// and the SIGTERM/SIGINT handlers are registered (see the docstring on
+// performShutdown), so an unbounded hang here, e.g. `docker create` blocked
+// on a first-run pull of caddy:2-alpine, means Ctrl-C during that window
+// gets Node's default behaviour instead of performShutdown, and every
+// running Postgres container is left for the next wake's crash recovery
+// instead of stopped cleanly. 60s is generous for a small alpine-based
+// image pull on an ordinary connection (ensureRunning's own admin-API poll,
+// ADMIN_READY_TIMEOUT_MS in caddy.ts, spends 1.5s from WITHIN this budget
+// rather than extending it) while still being an actual bound instead of
+// none at all.
+const CADDY_STARTUP_TIMEOUT_MS = 60_000
 
 // Deleting a live daemon's socket file out from under it would let a second
 // daemon bind the same path and start fighting the first one over the same
@@ -117,6 +162,29 @@ function closeServer(server: http.Server): Promise<void> {
   })
 }
 
+// The four spellings resolveConfig (packages/core/src/config.ts) accepts for
+// HOBBY_CADDY_ENABLED, lowercased. That parser fails closed on purpose: a
+// bare Boolean(...) would treat '0' or 'false' as true, which would bind :80
+// and :443 on an operator who explicitly opted out. core has no logger and
+// no I/O (deliberately, see docs/CLAUDE.md), so it cannot warn about a value
+// it silently turned into false; this is that warning's only home.
+const ACCEPTED_CADDY_ENABLED_VALUES = new Set(['1', 'true', '0', 'false'])
+
+// Warn only when the operator set the variable to something this parser does
+// not recognise. A deliberate '0' or 'false' is not a mistake and must stay
+// silent; a typo like 'yes' or 'tru' silently disables the front door with
+// no other signal that anything went wrong.
+function warnOnUnrecognizedCaddyEnabled(): void {
+  const raw = process.env.HOBBY_CADDY_ENABLED
+  if (raw === undefined || ACCEPTED_CADDY_ENABLED_VALUES.has(raw.toLowerCase())) {
+    return
+  }
+  console.error(
+    `caddy: HOBBY_CADDY_ENABLED is set to "${raw}", which is not a value this understands, so the front door ` +
+      'is off. Use 1 or true to enable it, 0 or false to disable it.'
+  )
+}
+
 // createApp is the shared handler both listeners are built from.
 // handleRequest already converts every thrown error, HobbyError or
 // otherwise, into a wire-shaped JSON error response with the right status;
@@ -150,12 +218,18 @@ export interface StartDaemonOptions {
   // blocks forever and this process exits from inside the signal handler
   // below, so a release after startDaemon() would never run.
   onShutdown?: () => void
+  // Same polarity as DaemonContext's detectTailnet (context.ts): production
+  // wires the real createCaddyManager and tests either leave this unset,
+  // getting no Caddy involved at all, or inject a fake that records calls.
+  caddy?: CaddyManager
 }
 
 export async function startDaemon(
   ctx: DaemonContext,
   opts: StartDaemonOptions
 ): Promise<{ close(): Promise<void> }> {
+  warnOnUnrecognizedCaddyEnabled()
+
   await removeStaleSocketIfAny(opts.socketPath)
 
   const app = createApp(ctx)
@@ -210,6 +284,57 @@ export async function startDaemon(
     wakeTimeoutMs: ctx.config.wakeTimeoutMs,
   })
 
+  // Caddy is the front door the httpRouter above never had one before this
+  // task: :80 and :443 on the box, TLS terminated, everything it does not
+  // recognise forwarded to the loopback wake router. One fallback route,
+  // never a route per deploy: the wake router above already has to resolve
+  // the Host header to know what to wake, so a Caddy route per app would be
+  // duplicated state that drifts the first time an admin push fails (see the
+  // CaddyFallback comment in caddy.ts for the full argument). The ask URL is
+  // built from @hobby.sh/proxy's own exported TLS_ASK_PATH, not a literal
+  // string, so the router side and the Caddy side of on-demand TLS cannot
+  // disagree about the path.
+  const caddy = ctx.config.caddyEnabled
+    ? (opts.caddy ?? createCaddyManager(ctx.runtime, { adminPort: ctx.config.caddyAdminPort }))
+    : null
+
+  if (caddy !== null) {
+    // Deliberately not fatal. A box whose Caddy will not start still has
+    // Postgres resources that must wake on connection through the pg proxy,
+    // which has nothing to do with HTTP. Refusing to start the daemon here
+    // would take databases offline to punish a web server, inverting the
+    // priority root CLAUDE.md sets between its three promises. Loud, not
+    // silent, and not fatal.
+    try {
+      await withDeadline(
+        (async () => {
+          await caddy.ensureRunning()
+          await caddy.setFallback({
+            upstream: `127.0.0.1:${ctx.config.httpPort}`,
+            askUrl: `http://127.0.0.1:${ctx.config.httpPort}${TLS_ASK_PATH}`,
+          })
+          if (ctx.config.caddyStudioHost !== null && opts.apiPort !== null) {
+            await caddy.addRoute({
+              id: 'hobby-studio',
+              host: ctx.config.caddyStudioHost,
+              upstream: `127.0.0.1:${opts.apiPort}`,
+            })
+          } else if (ctx.config.caddyStudioHost !== null) {
+            console.error(
+              'caddy: no studio route published, because the studio listener is not started on this daemon'
+            )
+          }
+        })(),
+        CADDY_STARTUP_TIMEOUT_MS,
+        'caddy startup'
+      )
+    } catch (err) {
+      console.error(
+        `caddy: the front door did not come up, so apps are reachable only on their loopback ports: ${errorMessage(err)}`
+      )
+    }
+  }
+
   // The sleep half of the pair the proxy completes. Reads activity off the
   // same ActivityTracker instance the proxy just started using (ctx.activity
   // is one source of truth for both), never polls Postgres on a schedule.
@@ -244,6 +369,14 @@ export async function startDaemon(
       // "stop accepting, finish in-flight requests" from the brief, for
       // free, from node:http itself.
       await Promise.all([closeServer(socketServer), tcpServer ? closeServer(tcpServer) : Promise.resolve()])
+
+      if (caddy !== null) {
+        // Best effort: a Caddy that will not stop must not prevent the
+        // daemon closing its own listeners.
+        await caddy.stop().catch((err: unknown) => {
+          console.error(`caddy: could not stop the front door cleanly: ${errorMessage(err)}`)
+        })
+      }
 
       // The hibernator must stop deciding to sleep things before this
       // function starts explicitly stopping things itself, or the two could

@@ -44,6 +44,9 @@ function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
     // instead of making them either flaky or three-minutes-slow.
     wakeTimeoutMs: 150,
     readinessPollMs: 20,
+    caddyEnabled: false,
+    caddyAdminPort: 2019,
+    caddyStudioHost: null,
     ...overrides,
   }
 }
