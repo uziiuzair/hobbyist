@@ -28,7 +28,7 @@ import { hasOperatorCredential, setOperatorPassword } from '../daemon/studio/aut
 import type { WireResource } from '../daemon/wire.js'
 import type { Api } from './client.js'
 import { exitCodeForError } from './exit.js'
-import { reflinkWarning, renderPreflight, renderResourceLine } from './output.js'
+import { hostNetworkingWarning, reflinkWarning, renderPreflight, renderResourceLine } from './output.js'
 
 // Io is defined in main.ts, which owns run() and is the file the brief
 // names for the exported signature `run(argv, io)`; imported here as a
@@ -149,6 +149,11 @@ export async function cmdInit(io: Io, paths: Paths, config: HobbyConfig, json: b
   const warning = reflinkWarning(report)
   if (warning !== null) {
     io.err(warning)
+  }
+
+  const hostNetworkingIssue = hostNetworkingWarning(report)
+  if (hostNetworkingIssue !== null) {
+    io.err(hostNetworkingIssue)
   }
 
   if (!report.runtimeAvailable) {
