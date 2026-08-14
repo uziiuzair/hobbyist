@@ -205,10 +205,19 @@ export interface WorkerConfig extends ResourceConfigBase {
 export interface QueueConfig extends ResourceConfigBase {
   retentionSeconds: number
   consumerResourceId: ResourceId | null
-  maxBatchSize: number
-  maxBatchTimeoutSeconds: number
-  maxRetries: number
-  retryDelaySeconds: number
+  // Null until a consumer's deployed manifest actually sets one, and null
+  // again whenever that manifest omits the key, mirroring
+  // WorkerManifest.queues.consumers's own comment above verbatim: the broker
+  // owns the defaults (DEFAULT_CONSUMER_OPTIONS, packages/queue/src/broker.ts),
+  // applied where this config is read (packages/cli/src/daemon/queues.ts's
+  // drainableQueues), never stamped into the row. Stamping a default in here
+  // at creation was the actual defect a fix round found: a queue created
+  // before any worker had deployed held concrete numbers nothing had ever
+  // configured, indistinguishable from a value a deploy genuinely set.
+  maxBatchSize: number | null
+  maxBatchTimeoutSeconds: number | null
+  maxRetries: number | null
+  retryDelaySeconds: number | null
   // The NAME of another queue in the same project, not an id: it is what the
   // user wrote in wrangler.toml, and Cloudflare creates it if it is missing,
   // so it can legitimately name a queue that does not exist yet.
