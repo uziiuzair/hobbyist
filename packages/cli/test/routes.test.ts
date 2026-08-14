@@ -7,6 +7,7 @@
 
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -1713,4 +1714,119 @@ test('syncWorkerQueueBindings clears a stale consumer binding once the redeploye
   assert.equal(drainableQueues(ctx).length, 0, 'no longer drainable: nothing consumes it now')
 
   ctx.store.close()
+})
+
+// ---------------------------------------------------------------------------
+// Fix round 2: the two-consumers conflict has to be refused BEFORE anything
+// is built, not after. The tests above call syncWorkerQueueBindings
+// directly and cannot pin this: they never touch the runtime at all. These
+// two go through the real HTTP routes (deployResourceRoute and
+// createResourceRoute), with a real wrangler.toml on disk for
+// findWranglerManifest to read, and assert the runtime's own build call
+// count and the resource's own row, not just the response.
+// ---------------------------------------------------------------------------
+
+function conflictingWranglerToml(queueName: string): string {
+  return `main = "src/index.ts"\ncompatibility_date = "2026-08-01"\n\n[[queues.consumers]]\nqueue = "${queueName}"\n`
+}
+
+test('redeploying a worker onto a queue another worker already consumes is refused before deployWorker builds anything, and the worker is left exactly as it was', async () => {
+  const runtime = createFakeRuntime()
+  const ctx = buildContext(runtime)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+
+  // alpha already consumes "jobs". Set up directly through the store and
+  // syncWorkerQueueBindings, not through a real HTTP deploy: this file's
+  // own header comment explains why a genuinely successful worker deploy
+  // is not drivable through this harness (no seam to fake worker
+  // readiness). The precondition this test needs, "a queue already has a
+  // consumer", does not require one.
+  const alpha = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'alpha',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [consumerEntry('jobs')] } }),
+    }),
+  }) as WorkerResource
+  ctx.store.setResourceState(alpha.id, 'sleeping')
+  await syncWorkerQueueBindings(ctx, project, alpha)
+
+  // beta: already deployed once, to something with no queue binding at
+  // all. This is the worker under test; its own pre-existing image and
+  // state are exactly what the refused redeploy attempt below must leave
+  // untouched.
+  const betaConfig = sampleDeployedWorkerConfig({ image: 'hobby/beta:previous-build' })
+  const beta = ctx.store.createResource({ projectId: project.id, kind: 'worker', name: 'beta', config: betaConfig }) as WorkerResource
+  ctx.store.setResourceState(beta.id, 'sleeping')
+
+  const buildsBefore = runtime._builds.length
+
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-queue-conflict-deploy-'))
+  writeFileSync(join(dir, 'wrangler.toml'), conflictingWranglerToml('jobs'))
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${beta.id}/deploy`, { source: { path: dir } })
+    assert.equal(res.status, 400)
+    const body = res.body as { error: { code: string; message: string } }
+    assert.equal(body.error.code, 'usage')
+    assert.match(body.error.message, /alpha/, 'names the worker that already consumes it')
+    assert.match(body.error.message, /beta/, 'names the worker that was refused')
+    assert.match(body.error.message, /jobs/, 'names the queue')
+
+    // The assertion that pins this fix round: nothing was built for the
+    // refused attempt, and beta's own row is exactly as it was before it.
+    assert.equal(runtime._builds.length, buildsBefore, 'the runtime was never asked to build an image')
+    const after = ctx.store.getResource(beta.id)
+    assert.ok(after !== null && after.kind === 'worker')
+    assert.equal(after.state, 'sleeping', 'state is unchanged from before the refused attempt')
+    assert.equal(after.config.image, betaConfig.image, 'the previous image survives, nothing new was committed')
+
+    // alpha's own binding is untouched too.
+    const jobs = ctx.store.getResourceByName(project.id, 'jobs')
+    assert.ok(jobs !== null && jobs.kind === 'queue')
+    assert.equal(jobs.config.consumerResourceId, alpha.id)
+  })
+})
+
+test('creating a brand new worker whose manifest conflicts with an existing consumer is refused before anything is built, and no row is left behind', async () => {
+  const runtime = createFakeRuntime()
+  const ctx = buildContext(runtime)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+
+  const alpha = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'alpha',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [consumerEntry('jobs')] } }),
+    }),
+  }) as WorkerResource
+  await syncWorkerQueueBindings(ctx, project, alpha)
+
+  const buildsBefore = runtime._builds.length
+
+  // beta does not exist as a resource at all yet: this is the path `hobby
+  // deploy` takes for a worker's very first deploy (createResourceRoute's
+  // worker branch calls createWorkerResource directly, never
+  // deployResourceRoute), which is a genuinely separate call site from the
+  // redeploy test above and had the identical bug before this fix round.
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-queue-conflict-create-'))
+  writeFileSync(join(dir, 'wrangler.toml'), conflictingWranglerToml('jobs'))
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', '/v1/projects/blog/resources', {
+      kind: 'worker',
+      name: 'beta',
+      source: { path: dir },
+    })
+    assert.equal(res.status, 400)
+    const body = res.body as { error: { code: string; message: string } }
+    assert.equal(body.error.code, 'usage')
+    assert.match(body.error.message, /alpha/)
+    assert.match(body.error.message, /beta/)
+
+    assert.equal(runtime._builds.length, buildsBefore, 'the runtime was never asked to build an image')
+    assert.equal(ctx.store.getResourceByName(project.id, 'beta'), null, 'no row was created for the refused worker')
+  })
 })
