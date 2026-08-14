@@ -17,8 +17,9 @@ import { chmod, rm } from 'node:fs/promises'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import net from 'node:net'
 import { startAlarmMirror } from '@hobby.sh/do'
-import { startHttpRouter, startPgProxy } from '@hobby.sh/proxy'
+import { startHttpRouter, startPgProxy, TLS_ASK_PATH } from '@hobby.sh/proxy'
 import { durableObjectNamespaces } from './alarms.js'
+import { createCaddyManager, type CaddyManager } from './caddy.js'
 import { createHttpProxyDeps, createProxyDeps, getOrCreateWake, type DaemonContext } from './context.js'
 import { startHibernator } from './hibernator.js'
 import { handleRequest } from './routes.js'
@@ -150,6 +151,10 @@ export interface StartDaemonOptions {
   // blocks forever and this process exits from inside the signal handler
   // below, so a release after startDaemon() would never run.
   onShutdown?: () => void
+  // Same polarity as DaemonContext's detectTailnet (context.ts): production
+  // wires the real createCaddyManager and tests either leave this unset,
+  // getting no Caddy involved at all, or inject a fake that records calls.
+  caddy?: CaddyManager
 }
 
 export async function startDaemon(
@@ -210,6 +215,39 @@ export async function startDaemon(
     wakeTimeoutMs: ctx.config.wakeTimeoutMs,
   })
 
+  // Caddy is the front door the httpRouter above never had one before this
+  // task: :80 and :443 on the box, TLS terminated, everything it does not
+  // recognise forwarded to the loopback wake router. One fallback route,
+  // never a route per deploy: the wake router above already has to resolve
+  // the Host header to know what to wake, so a Caddy route per app would be
+  // duplicated state that drifts the first time an admin push fails (see the
+  // CaddyFallback comment in caddy.ts for the full argument). The ask URL is
+  // built from @hobby.sh/proxy's own exported TLS_ASK_PATH, not a literal
+  // string, so the router side and the Caddy side of on-demand TLS cannot
+  // disagree about the path.
+  const caddy = ctx.config.caddyEnabled
+    ? (opts.caddy ?? createCaddyManager(ctx.runtime, { adminPort: ctx.config.caddyAdminPort }))
+    : null
+
+  if (caddy !== null) {
+    await caddy.ensureRunning()
+    await caddy.setFallback({
+      upstream: `127.0.0.1:${ctx.config.httpPort}`,
+      askUrl: `http://127.0.0.1:${ctx.config.httpPort}${TLS_ASK_PATH}`,
+    })
+    if (ctx.config.caddyStudioHost !== null && opts.apiPort !== null) {
+      await caddy.addRoute({
+        id: 'hobby-studio',
+        host: ctx.config.caddyStudioHost,
+        upstream: `127.0.0.1:${opts.apiPort}`,
+      })
+    } else if (ctx.config.caddyStudioHost !== null) {
+      console.error(
+        'caddy: no studio route published, because the studio listener is not started on this daemon'
+      )
+    }
+  }
+
   // The sleep half of the pair the proxy completes. Reads activity off the
   // same ActivityTracker instance the proxy just started using (ctx.activity
   // is one source of truth for both), never polls Postgres on a schedule.
@@ -244,6 +282,14 @@ export async function startDaemon(
       // "stop accepting, finish in-flight requests" from the brief, for
       // free, from node:http itself.
       await Promise.all([closeServer(socketServer), tcpServer ? closeServer(tcpServer) : Promise.resolve()])
+
+      if (caddy !== null) {
+        // Best effort: a Caddy that will not stop must not prevent the
+        // daemon closing its own listeners.
+        await caddy.stop().catch((err: unknown) => {
+          console.error(`caddy: could not stop the front door cleanly: ${errorMessage(err)}`)
+        })
+      }
 
       // The hibernator must stop deciding to sleep things before this
       // function starts explicitly stopping things itself, or the two could
