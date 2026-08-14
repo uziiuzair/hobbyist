@@ -1,0 +1,580 @@
+# The daemon's HTTP control surface, as OpenAPI 3.1.
+#
+# Ground truth is packages/cli/src/daemon/routes.ts (dispatch, one manual
+# match per route) and packages/cli/src/daemon/wire.ts (what a resource
+# looks like once it leaves the process). This file is derived from those
+# two files at main dadf477 and must be re-derived when they change; it is
+# documentation, not a schema the daemon enforces.
+#
+# Not documented here: the queue endpoint (branch `queues`, unmerged at the
+# time of writing) and the wake router's proxy ports (5432/HTTP), which
+# speak Postgres wire protocol and plain HTTP respectively, not this API.
+
+openapi: 3.1.0
+info:
+  title: Hobbyist daemon API
+  version: "1.0"
+  description: |
+    The only control surface. CLI, Studio and MCP are three clients of this
+    one API; none of them touches Postgres or Docker directly.
+
+    Listeners: the daemon answers on loopback (`apiPort`, default 7432) with
+    no auth, because local shell access is the root of trust (ADR 0008).
+    The same routes fronted through the Studio listener are gated by the
+    operator session cookie; only `/studio/login`, `/studio/logout`,
+    `/studio/session` and `/v1/health` answer unauthenticated there.
+
+    Every error is the one envelope: `{ "error": { "code", "message",
+    "hint"? } }`. Codes map to statuses as: project_not_found and
+    resource_not_found 404; name_taken and conflict 409; invalid_name and
+    usage 400; unauthorized 401; build_failed 422; runtime_unavailable 503;
+    wake_timeout 504; ambiguous_target, wake_failed, not_ready, unknown_kind
+    and internal 500.
+
+    Request bodies are JSON, capped at 64KB. Secrets never cross this
+    boundary in resource payloads: postgres `config.password` is omitted
+    entirely, app `env` and worker `vars` values read as `<redacted>`. The
+    two deliberate exceptions are GET /v1/resources/{id}/connection (the
+    connection string is the point) and eject's rendered compose file (a
+    compose file that cannot start Postgres would break the leaving
+    promise).
+servers:
+  - url: http://127.0.0.1:7432
+    description: daemon loopback API (default apiPort)
+
+paths:
+  /v1/health:
+    get:
+      summary: Liveness. Always unauthenticated, even studio-fronted.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { status: { const: ok } }
+
+  /v1/preflight:
+    get:
+      summary: Host capability report. Read-only, safe to poll; feeds Studio's capacity panel.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Preflight" }
+
+  /v1/projects:
+    get:
+      summary: List projects.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  projects:
+                    type: array
+                    items: { $ref: "#/components/schemas/Project" }
+    post:
+      summary: Create a project. Name rules from core's validateName.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  pattern: "^[a-z][a-z0-9-]{1,62}$"
+                  description: Lowercase, digits, dashes; reserved names (postgres, template0, template1, hobby) refused.
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{name}:
+    get:
+      summary: One project with its resources (wire-shaped, secrets redacted).
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+                  resources:
+                    type: array
+                    items: { $ref: "#/components/schemas/WireResource" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete the project and destroy every resource in it. Best-effort teardown; the row always goes, cleanup failures come back as `internal` with the row already deleted.
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { deleted: { const: true } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{name}/resources:
+    post:
+      summary: Create a resource. Kind-discriminated body; postgres needs only a name, app needs a source XOR image, worker needs a source directory holding a wrangler manifest.
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [kind, name]
+                  properties:
+                    kind: { const: postgres }
+                    name: { type: string }
+                - type: object
+                  required: [kind, name]
+                  properties:
+                    kind: { const: app }
+                    name: { type: string }
+                    source:
+                      type: object
+                      required: [path]
+                      properties:
+                        path: { type: string }
+                        dockerfile: { type: string, default: Dockerfile }
+                    image: { type: string, description: "Prebuilt image; exactly one of source and image" }
+                    port: { type: integer, default: 3000, description: "Container port, handed to the process as $PORT" }
+                    env: { type: object, additionalProperties: { type: string } }
+                    databaseResourceId: { type: string, description: "Sibling postgres id; expanded to DATABASE_URL at start" }
+                - type: object
+                  required: [kind, name, source]
+                  properties:
+                    kind: { const: worker }
+                    name: { type: string }
+                    source:
+                      type: object
+                      required: [path]
+                      properties: { path: { type: string } }
+                    databaseResourceId: { type: string }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resource: { $ref: "#/components/schemas/WireResource" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{name}/eject:
+    post:
+      summary: Render the leaving papers. Pure read by default; `?release=true` also stops containers and marks the project handed over (rows, credentials and data all kept; `adopt` reverses).
+      parameters:
+        - { $ref: "#/components/parameters/projectName" }
+        - name: release
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  compose: { type: string, description: "docker-compose.yml text; contains the real Postgres password on purpose" }
+                  caddyfile: { type: string, description: "Reverse-proxy routes for app/worker hostnames; empty string when nothing is routed" }
+                  dataDirs: { type: array, items: { type: string } }
+                  released: { type: boolean }
+                  notEjectable: { type: array, items: { type: string } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{name}/adopt:
+    post:
+      summary: Take a released project back. One column changes; conflict if it was never released.
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/resources/{id}:
+    get:
+      summary: One resource, wire-shaped.
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resource: { $ref: "#/components/schemas/WireResource" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Destroy the resource (container, data directory, row). Kind-agnostic.
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { deleted: { const: true } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/resources/{id}/start:
+    post:
+      summary: Wake. Kind-agnostic; the daemon's verb is start, the product's word is wake. Waits for real readiness before answering.
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resource: { $ref: "#/components/schemas/WireResource" }
+        "404": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
+
+  /v1/resources/{id}/stop:
+    post:
+      summary: Sleep. Kind-agnostic.
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resource: { $ref: "#/components/schemas/WireResource" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/resources/{id}/connection:
+    get:
+      summary: Postgres only. The real connection string through the wake proxy, password included (the point of the route). `tailnetConnectionString` is the same proxy over MagicDNS, null without a tailnet.
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connectionString: { type: string }
+                  tailnetConnectionString: { type: [string, "null"] }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/resources/{id}/logs:
+    get:
+      summary: Container logs.
+      parameters:
+        - { $ref: "#/components/parameters/resourceId" }
+        - name: tail
+          in: query
+          schema: { type: integer, default: 200, minimum: 1 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { logs: { type: string } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/resources/{id}/query:
+    post:
+      summary: Postgres only. Parameterized SQL through the daemon; a sleeping database is woken first (same single-flight wake the proxy uses), and the call counts as activity for the hibernator. Studio's Tables, SQL and Schema all rest on this one route.
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sql]
+              properties:
+                sql: { type: string }
+                params: { type: array, description: "Driver-side parameterization; the daemon never touches the SQL string" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueryResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
+
+  /v1/resources/{id}/deploy:
+    post:
+      summary: App or worker only (postgres answers usage; there is nothing to build). Rebuilds, proves the result serves, then replaces the container. Optional body overrides the stored source.
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                source:
+                  type: object
+                  required: [path]
+                  properties:
+                    path: { type: string }
+                    dockerfile: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resource: { $ref: "#/components/schemas/WireResource" }
+                  image: { type: string }
+                  ignored:
+                    type: array
+                    description: Worker only; wrangler keys read and not acted on.
+                  logs: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /studio/login:
+    post:
+      summary: Operator sign-in. Sets the session cookie. Wrong password, unknown password and no-credential-yet all fail with the same generic message; repeated failures are throttled per source.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties: { password: { type: string } }
+      responses:
+        "200": { description: "Session cookie set" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /studio/logout:
+    post:
+      summary: Revoke the session; the cookie stops authenticating immediately.
+      responses:
+        "200": { description: "Revoked" }
+
+  /studio/session:
+    get:
+      summary: Whether the presented cookie authenticates. Unauthenticated by design (it is how the login screen decides to render).
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { authenticated: { type: boolean } }
+
+components:
+  parameters:
+    projectName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string }
+    resourceId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    Error:
+      description: The one envelope every failure wears.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [project_not_found, resource_not_found, name_taken, invalid_name, ambiguous_target, runtime_unavailable, wake_failed, wake_timeout, not_ready, conflict, usage, unauthorized, unknown_kind, build_failed, internal]
+            message: { type: string }
+            hint: { type: string }
+
+    Project:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        networkName: { type: string }
+        sleepAfterSeconds: { type: [integer, "null"], description: "null pins the project awake forever" }
+        createdAt: { type: string, format: date-time }
+        releasedAt: { type: [string, "null"], format: date-time, description: "Set by eject --release; hobby stops acting on the project while set" }
+
+    WireResource:
+      description: |
+        A resource as it crosses the wire (wire.ts). Discriminated on `kind`.
+        Two computed fields ride along on every response: `sizeBytes`
+        (null when unknown; a sleeping database is never woken to answer)
+        and `connectionCount` (live, from the proxy's activity tracker).
+        Redaction by kind: postgres config omits `password` entirely; app
+        `env` and worker `vars` values read as `<redacted>`.
+      oneOf:
+        - $ref: "#/components/schemas/WirePostgresResource"
+        - $ref: "#/components/schemas/WireAppResource"
+        - $ref: "#/components/schemas/WireWorkerResource"
+      discriminator: { propertyName: kind }
+
+    ResourceCommon:
+      type: object
+      properties:
+        id: { type: string }
+        projectId: { type: string }
+        name: { type: string }
+        state:
+          type: string
+          enum: [creating, running, starting, sleeping, stopping, failed, destroying]
+          description: "'undeployed' joins this enum with the record-before-code work; Studio already renders it."
+        lastActiveAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        sizeBytes: { type: [integer, "null"] }
+        connectionCount: { type: integer }
+
+    WirePostgresResource:
+      allOf:
+        - $ref: "#/components/schemas/ResourceCommon"
+        - type: object
+          properties:
+            kind: { const: postgres }
+            config:
+              type: object
+              description: PostgresConfig minus password.
+              properties:
+                image: { type: string }
+                containerName: { type: string }
+                hostPort: { type: integer, description: "Published on loopback only" }
+                dataDir: { type: string }
+                superuser: { type: string }
+                database: { type: string }
+
+    WireAppResource:
+      allOf:
+        - $ref: "#/components/schemas/ResourceCommon"
+        - type: object
+          properties:
+            kind: { const: app }
+            config:
+              type: object
+              properties:
+                image: { type: string, description: "Becomes string|null with record-before-code" }
+                containerName: { type: string }
+                hostPort: { type: integer }
+                source:
+                  type: [object, "null"]
+                  properties:
+                    path: { type: string }
+                    dockerfile: { type: string }
+                containerPort: { type: integer }
+                hostname: { type: string, description: "<resource>.<project>.<domain>" }
+                env: { type: object, additionalProperties: { type: string }, description: "Values are <redacted>" }
+                databaseResourceId: { type: [string, "null"] }
+
+    WireWorkerResource:
+      allOf:
+        - $ref: "#/components/schemas/ResourceCommon"
+        - type: object
+          properties:
+            kind: { const: worker }
+            config:
+              type: object
+              properties:
+                image: { type: string }
+                containerName: { type: string }
+                hostPort: { type: integer }
+                containerPort: { type: integer }
+                hostname: { type: string }
+                source:
+                  type: object
+                  properties:
+                    path: { type: string }
+                    manifest: { type: string }
+                compatibilityDate: { type: string }
+                compatibilityFlags: { type: array, items: { type: string } }
+                vars: { type: object, additionalProperties: { type: string }, description: "Values are <redacted>" }
+                kvNamespaces: { type: array, items: { type: string } }
+                r2Buckets: { type: array, items: { type: string } }
+                d1Databases: { type: array, items: { type: string } }
+                queues:
+                  type: object
+                  properties:
+                    producers: { type: array, items: { type: string } }
+                    consumers: { type: array, items: { type: string } }
+                durableObjects:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      binding: { type: string }
+                      className: { type: string }
+                durableObjectUniqueKeyModifier: { type: string, description: "Derived once from the resource id; never changes, or Durable Object storage is orphaned" }
+
+    QueryResult:
+      type: object
+      properties:
+        columns:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              dataType: { type: string }
+        rows:
+          type: array
+          items: { type: object }
+        rowCount: { type: integer }
+        command: { type: string }
+
+    Preflight:
+      type: object
+      properties:
+        runtimeAvailable: { type: boolean }
+        filesystem:
+          type: object
+          properties:
+            path: { type: string }
+            reflinkSupported: { type: boolean, description: "false means branching degrades to a real copy (ext4)" }
+            freeBytes: { type: integer }
+        ports:
+          type: object
+          properties:
+            proxy:
+              type: object
+              properties: { port: { type: integer }, bound: { type: boolean } }
+            studio:
+              type: object
+              properties: { port: { type: integer }, bound: { type: boolean } }
