@@ -35,6 +35,9 @@ function testConfig(): HobbyConfig {
     sleepAfterSeconds: 300,
     wakeTimeoutMs: 150,
     readinessPollMs: 20,
+    caddyEnabled: false,
+    caddyAdminPort: 2019,
+    caddyStudioHost: null,
   }
 }
 
@@ -162,6 +165,40 @@ test('cmdStudio prints the daemon loopback URL and opens it once a credential ex
   const opened: string[] = []
 
   const code = cmdStudio(io, paths, testConfig(), (url) => opened.push(url))
+
+  assert.equal(code, 0)
+  assert.deepEqual(opened, ['http://127.0.0.1:7432'])
+  assert.ok(outLines.includes('http://127.0.0.1:7432'))
+})
+
+// The two branches added when Caddy started fronting Studio
+// (packages/cli/src/daemon/server.ts's addRoute call): the public host wins
+// only when both caddyEnabled and caddyStudioHost say so, otherwise cmdStudio
+// is unchanged from the loopback behavior pinned above.
+test('cmdStudio prints the public URL when caddy is enabled and fronting studio', async () => {
+  const paths = tmpPaths()
+  await cmdStudioPasswd(fakeIo(['correct horse battery staple', 'correct horse battery staple']).io, paths)
+
+  const { io, outLines } = fakeIo()
+  const opened: string[] = []
+  const config: HobbyConfig = { ...testConfig(), caddyEnabled: true, caddyStudioHost: 'studio.example.com' }
+
+  const code = cmdStudio(io, paths, config, (url) => opened.push(url))
+
+  assert.equal(code, 0)
+  assert.deepEqual(opened, ['https://studio.example.com'])
+  assert.ok(outLines.includes('https://studio.example.com'))
+})
+
+test('cmdStudio prints the loopback URL when caddy is off, even with a studio host configured', async () => {
+  const paths = tmpPaths()
+  await cmdStudioPasswd(fakeIo(['correct horse battery staple', 'correct horse battery staple']).io, paths)
+
+  const { io, outLines } = fakeIo()
+  const opened: string[] = []
+  const config: HobbyConfig = { ...testConfig(), caddyEnabled: false, caddyStudioHost: 'studio.example.com' }
+
+  const code = cmdStudio(io, paths, config, (url) => opened.push(url))
 
   assert.equal(code, 0)
   assert.deepEqual(opened, ['http://127.0.0.1:7432'])
