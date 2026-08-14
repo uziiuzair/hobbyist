@@ -4,9 +4,20 @@
 // asked to send). See the task report for the exact `node --test` output.
 
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
-import { createFakeRuntime } from '@hobby.sh/core'
-import { createCaddyManager } from '../src/index.js'
+import { createFakeRuntime, openStore, resolvePaths, type ComputeRuntime, type HobbyConfig, type Store } from '@hobby.sh/core'
+import { ActivityTracker } from '@hobby.sh/proxy'
+import {
+  createCaddyManager,
+  createDefaultKindRegistry,
+  startDaemon,
+  type CaddyManager,
+  type DaemonContext,
+} from '../src/index.js'
 
 interface RecordedCall {
   url: string
@@ -20,6 +31,62 @@ function fakeFetch(): { fetchFn: typeof fetch; calls: RecordedCall[] } {
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
   }) as typeof fetch
   return { fetchFn, calls }
+}
+
+// Mirrors routes.test.ts's testConfig/buildContext exactly, since that is
+// this repo's one established way to build a DaemonContext for a daemon-
+// level test. caddyEnabled defaults false here (the one config value this
+// test file cares about); every field below still has to be present since
+// HobbyConfig has no optional fields of its own.
+function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
+  return {
+    image: 'postgres:18-alpine',
+    proxyPort: 0,
+    studioPort: 8443,
+    apiPort: 0,
+    httpPort: 0,
+    domain: 'localhost',
+    sleepAfterSeconds: 300,
+    wakeTimeoutMs: 150,
+    readinessPollMs: 20,
+    caddyEnabled: false,
+    caddyAdminPort: 2019,
+    caddyStudioHost: null,
+    ...overrides,
+  }
+}
+
+function buildContext(runtime: ComputeRuntime = createFakeRuntime()): DaemonContext {
+  const store: Store = openStore(':memory:')
+  const paths = resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-cli-test-${randomUUID()}`) })
+  return { store, runtime, paths, config: testConfig(), activity: new ActivityTracker(), kinds: createDefaultKindRegistry() }
+}
+
+// A CaddyManager double that records every call made on it, so the test
+// below can assert on absence: with caddyEnabled false, nothing here should
+// ever be touched, exactly as production's own `opts.caddy ?? ...` gate in
+// server.ts's startDaemon never even evaluates when ctx.config.caddyEnabled
+// is false.
+function recordingCaddyManager(): { manager: CaddyManager; calls: string[] } {
+  const calls: string[] = []
+  const manager: CaddyManager = {
+    async ensureRunning() {
+      calls.push('ensureRunning')
+    },
+    async addRoute() {
+      calls.push('addRoute')
+    },
+    async removeRoute() {
+      calls.push('removeRoute')
+    },
+    async setFallback() {
+      calls.push('setFallback')
+    },
+    async stop() {
+      calls.push('stop')
+    },
+  }
+  return { manager, calls }
 }
 
 test('ensureRunning creates and starts the caddy container with host networking, via the injected runtime', async () => {
@@ -133,4 +200,27 @@ test('a failed admin API response surfaces as a HobbyError instead of throwing a
     manager.addRoute({ id: 'studio', host: 'studio.local', upstream: '127.0.0.1:7432' }),
     (err: unknown) => err instanceof Error && err.name === 'HobbyError'
   )
+})
+
+test('with caddy disabled, the daemon touches neither the runtime nor the admin API', async () => {
+  // The regression nobody running without Caddy would ever notice. A daemon
+  // that quietly starts a container or pushes a config on every boot, for a
+  // feature the operator did not turn on, is a surprising side effect of an
+  // upgrade.
+  const ctx = buildContext()
+  const { manager, calls } = recordingCaddyManager()
+  // Kept short on purpose: a unix socket path is capped well under 104 bytes
+  // on macOS, and tmpdir() itself already eats a large share of that budget.
+  const home = mkdtempSync(join(tmpdir(), 'hobby-caddy-'))
+  const socketPath = join(home, 'd.sock')
+
+  const daemon = await startDaemon(ctx, { socketPath, apiPort: null, caddy: manager })
+  try {
+    assert.deepEqual(calls, [])
+  } finally {
+    await daemon.close()
+    ctx.store.close()
+  }
+
+  assert.deepEqual(calls, [])
 })
