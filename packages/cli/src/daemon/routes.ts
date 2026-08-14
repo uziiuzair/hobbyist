@@ -10,22 +10,43 @@
 // handling for free and none of them can accidentally diverge from it.
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { existsSync } from 'node:fs'
 import {
   DEFAULT_PORT_BIND,
   HobbyError,
+  openDatabaseReadOnly,
   validateName,
   type AppResource,
   type PostgresResource,
+  type QueueConfig,
+  type QueueResource,
+  type SqliteDatabase,
   type WorkerResource,
   type Project,
   type Resource,
 } from '@hobby.sh/core'
 import { createAppResource, deployApp, type AppSource } from '@hobby.sh/app'
 import { connectionString, createPostgres, runQuery } from '@hobby.sh/pg'
+import {
+  DEFAULT_CONSUMER_OPTIONS,
+  DEFAULT_RETENTION_SECONDS,
+  MAX_RETENTION_SECONDS,
+  MIN_RETENTION_SECONDS,
+  decodeBody,
+  depth as queueDepth,
+  encodeBody,
+  enqueue,
+  openQueueDb,
+  peek,
+  purge,
+  queueDbPath,
+  type ContentType,
+  type LeasedMessage,
+} from '@hobby.sh/queue'
 import { buildRunnerManifest, createWorkerResource, deployWorker, describeIgnored } from '@hobby.sh/worker'
 import { getOrCreateWake, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
-import { toWireResource, toWireResources } from './wire.js'
+import { toWireResource, toWireResources, type WireResource } from './wire.js'
 
 interface RouteResult {
   status: number
@@ -117,6 +138,30 @@ function expectPostgres(resource: Resource, what: string): PostgresResource {
     )
   }
   return resource
+}
+
+// The same narrowing gate as expectPostgres, for the handful of routes below
+// that are genuinely queue-only: peeking, sending and purging messages, and
+// setting retention, mean nothing for a postgres, app or worker resource.
+function expectQueue(resource: Resource, what: string): QueueResource {
+  if (resource.kind !== 'queue') {
+    throw new HobbyError(
+      'usage',
+      `resource ${resource.name} is a ${resource.kind}, and ${what} is only meaningful for a queue`
+    )
+  }
+  return resource
+}
+
+function getOwningProjectOrThrow(ctx: DaemonContext, resource: Resource): Project {
+  const project = ctx.store.getProject(resource.projectId)
+  if (project === null) {
+    throw new HobbyError(
+      'internal',
+      `resource ${resource.id} has no owning project (project ${resource.projectId} is gone)`
+    )
+  }
+  return project
 }
 
 async function createProjectRoute(ctx: DaemonContext, req: IncomingMessage): Promise<Project> {
@@ -278,6 +323,42 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
     return result.resource
   }
 
+  if (kind === 'queue') {
+    // No dedicated createQueueResource function exists in @hobby.sh/queue
+    // (unlike createPostgres/createAppResource/createWorkerResource): a
+    // queue's row is just its defaults, so validateName plus store.createResource
+    // is the whole of it, done inline here the same way core/kinds.ts expects
+    // any kind to be reachable from exactly one place.
+    validateName(name)
+    const config: QueueConfig = {
+      // image, containerName and hostPort are unused for this kind (see
+      // QueueConfig's own comment on ResourceConfigBase): every field here
+      // matches the shape kind-dispatch and queue-kind tests already fix as
+      // this kind's zero value, so a resource built by this route and one
+      // built by a test fixture are never distinguishable later.
+      image: '',
+      containerName: '',
+      hostPort: 0,
+      retentionSeconds: DEFAULT_RETENTION_SECONDS,
+      consumerResourceId: null,
+      maxBatchSize: DEFAULT_CONSUMER_OPTIONS.maxBatchSize,
+      maxBatchTimeoutSeconds: DEFAULT_CONSUMER_OPTIONS.maxBatchTimeoutSeconds,
+      maxRetries: DEFAULT_CONSUMER_OPTIONS.maxRetries,
+      retryDelaySeconds: DEFAULT_CONSUMER_OPTIONS.retryDelaySeconds,
+      deadLetterQueue: null,
+    }
+    const resource = ctx.store.createResource({ projectId: project.id, kind: 'queue', name, config })
+    // start() only creates the sqlite file (queueKindHandler.start,
+    // packages/queue/src/kind.ts): synchronous, cheap, and nothing to poll
+    // for readiness the way a container has. A queue is `running` from the
+    // moment it exists and never anything else (queue-kind.test.ts's own
+    // header comment), which is what lets the hibernator and reconcile both
+    // treat every queue row identically forever.
+    await ctx.kinds.get('queue').start(ctx, resource)
+    ctx.store.setResourceState(resource.id, 'running')
+    return getResourceOrThrow(ctx, resource.id)
+  }
+
   throw new HobbyError(
     'usage',
     `unsupported resource kind: ${String(kind)}`,
@@ -332,8 +413,55 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
 // now mean the same thing for a database, an app and a worker, which is what
 // makes the wedge ("everything sleeps, everything wakes on demand") one
 // mechanism rather than three.
+// Every worker in the queue's own project whose DEPLOYED manifest names this
+// queue, either as a consumer or as a producer, plus the stored consumer
+// relationship itself. Two sources rather than one: consumerResourceId is
+// the join drainableQueues (daemon/queues.ts) already trusts for delivery,
+// but nothing before this route has ever required it to be set, so a worker
+// whose manifest declares a binding is checked too, independently, so a
+// producer that would start throwing `env.X.send()` errors the moment this
+// queue vanished is caught even when consumerResourceId was never wired up.
+// Returns the first binder found; there is exactly one refusal message to
+// write regardless of how many exist.
+function findBindingWorker(ctx: DaemonContext, queue: QueueResource): WorkerResource | null {
+  if (queue.config.consumerResourceId !== null) {
+    const consumer = ctx.store.getResource(queue.config.consumerResourceId)
+    if (consumer !== null && consumer.kind === 'worker') {
+      return consumer
+    }
+  }
+  for (const candidate of ctx.store.listResources(queue.projectId)) {
+    if (candidate.kind !== 'worker' || candidate.config.manifest === null) {
+      continue
+    }
+    const { producers, consumers } = candidate.config.manifest.queues
+    if (producers.some((p) => p.queue === queue.name) || consumers.some((c) => c.queue === queue.name)) {
+      return candidate
+    }
+  }
+  return null
+}
+
 async function destroyResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
+  // Refused before anything is torn down, and before state ever moves to
+  // `destroying`: deleting a queue out from under a worker that still binds
+  // it turns a working `env.X.send()`/`queue()` handler into a silent
+  // failure the moment the container is next deployed or restarted, with
+  // nothing in the worker's own logs pointing back at a queue that used to
+  // exist. `hobby rm` and `hobby queue rm` both go through this one route
+  // (root CLAUDE.md: the daemon API is the only control surface), so neither
+  // can diverge from the other on this.
+  if (resource.kind === 'queue') {
+    const binder = findBindingWorker(ctx, resource)
+    if (binder !== null) {
+      throw new HobbyError(
+        'usage',
+        `queue ${resource.name} is still bound to worker ${binder.name}, refusing to delete it`,
+        `remove the queue binding from ${binder.name}'s wrangler config and redeploy, or delete ${binder.name} first`
+      )
+    }
+  }
   ctx.store.setResourceState(resource.id, 'destroying')
   await ctx.kinds.get(resource.kind).destroy(ctx, resource)
   return { status: 200, body: { deleted: true } }
@@ -874,6 +1002,233 @@ function adoptRoute(ctx: DaemonContext, name: string): RouteResult {
   return { status: 200, body: { project: ctx.store.getProject(project.id) } }
 }
 
+// ---------------------------------------------------------------------------
+// Queue routes. This file is the only one that ever opens a queue's sqlite
+// database (root CLAUDE.md: the daemon API is the only control surface, and
+// keeping every open() call in one file is what stops the CLI and MCP from
+// ever diverging on what a queue looks like). Every handler below reads or
+// writes through @hobby.sh/queue's broker functions and nothing else.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_PEEK_LIMIT = 10
+
+// A queue whose sqlite file does not exist yet reads as empty rather than
+// throwing. In normal operation createResourceRoute's queue branch above
+// always creates the file at row-creation time, so this only matters for a
+// row that reached the store some other way (a test fixture, or a future
+// path that skips that step); a listing or a peek must never 500 because one
+// queue's file is not there.
+function withQueueDbReadOnly<T>(path: string, fallback: T, fn: (db: SqliteDatabase) => T): T {
+  if (!existsSync(path)) {
+    return fallback
+  }
+  const db = openDatabaseReadOnly(path)
+  try {
+    return fn(db)
+  } finally {
+    db.close()
+  }
+}
+
+interface QueueStats {
+  depth: number
+  oldestTimestampMs: number | null
+}
+
+function readQueueStats(path: string): QueueStats {
+  return withQueueDbReadOnly<QueueStats>(path, { depth: 0, oldestTimestampMs: null }, (db) => {
+    const n = queueDepth(db)
+    if (n === 0) {
+      return { depth: 0, oldestTimestampMs: null }
+    }
+    // peek() orders by id, which sorts by creation (packages/queue/src/ids.ts),
+    // so the first row of an unfiltered peek(db, 1) is the oldest message
+    // this queue currently holds, delayed or leased ones included. That is
+    // deliberately a different question from "the oldest ready message":
+    // this is a listing, not a delivery decision.
+    const [oldest] = peek(db, 1)
+    return { depth: n, oldestTimestampMs: oldest === undefined ? null : oldest.timestampMs }
+  })
+}
+
+interface QueueListEntry {
+  resource: WireResource
+  depth: number
+  oldestMessageAgeSeconds: number | null
+  consumer: WireResource | null
+}
+
+// GET /v1/projects/:name/queues. Every queue in the project, each enriched
+// with what its own sqlite file and its consumer resource know: depth and
+// oldest-message age come from the queue's own database, `consumer` is the
+// full WireResource of whatever resource.config.consumerResourceId points
+// at (or null), so the caller can read its state and, for a worker, its
+// manifest, exactly the same way `hobby ls` already does for any other
+// resource. That is what lets an undeployed consumer be rendered
+// consistently: this route does not decide the wording, it hands back the
+// fact (`config.manifest === null`) and lets the CLI's existing "(no code
+// yet)" phrasing (packages/cli/src/cli/output.ts) speak for both places at
+// once.
+async function listQueuesRoute(ctx: DaemonContext, projectName: string): Promise<RouteResult> {
+  const project = getProjectByNameOrThrow(ctx, projectName)
+  const resources = ctx.store.listResources(project.id).filter((r): r is QueueResource => r.kind === 'queue')
+  const nowMs = Date.now()
+
+  const entries: QueueListEntry[] = []
+  for (const resource of resources) {
+    const stats = readQueueStats(queueDbPath(ctx.paths, project.name, resource.name))
+    const consumerResource =
+      resource.config.consumerResourceId === null ? null : ctx.store.getResource(resource.config.consumerResourceId)
+    entries.push({
+      resource: await toWireResource(ctx, resource),
+      depth: stats.depth,
+      oldestMessageAgeSeconds:
+        stats.oldestTimestampMs === null ? null : Math.max(0, Math.round((nowMs - stats.oldestTimestampMs) / 1000)),
+      consumer: consumerResource === null ? null : await toWireResource(ctx, consumerResource),
+    })
+  }
+
+  return { status: 200, body: { queues: entries } }
+}
+
+interface QueueMessageWire {
+  id: string
+  timestampMs: number
+  attempts: number
+  contentType: ContentType
+  body: unknown
+}
+
+// Decodes a codec-encoded body back into the value the sender actually gave
+// (every real sender, the runner shim in packages/worker/src/runtime-image.ts
+// and this file's own enqueueRoute below, always writes contentType 'json'
+// through encodeBody). Wrapped rather than left to throw: a body written by
+// something else, or corrupted on disk, must not turn an otherwise-successful
+// peek into a 500, it should just show up as the raw stored text.
+function decodeMessageBody(message: LeasedMessage): unknown {
+  if (message.contentType !== 'json') {
+    return message.body
+  }
+  try {
+    return decodeBody(message.body)
+  } catch {
+    return message.body
+  }
+}
+
+function toWireMessage(message: LeasedMessage): QueueMessageWire {
+  return {
+    id: message.id,
+    timestampMs: message.timestampMs,
+    attempts: message.attempts,
+    contentType: message.contentType,
+    body: decodeMessageBody(message),
+  }
+}
+
+// GET /v1/resources/:id/queue/messages?limit=. Non-destructive: peek() never
+// touches lease_id, so a message read here is still exactly as deliverable
+// afterward as it was before, unlike leaseBatch which is a real claim.
+async function peekQueueRoute(ctx: DaemonContext, id: string, url: URL): Promise<RouteResult> {
+  const resource = expectQueue(getResourceOrThrow(ctx, id), 'peeking messages')
+  const project = getOwningProjectOrThrow(ctx, resource)
+
+  const limitParam = url.searchParams.get('limit')
+  const parsedLimit = limitParam === null ? Number.NaN : Number(limitParam)
+  const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.floor(parsedLimit) : DEFAULT_PEEK_LIMIT
+
+  const path = queueDbPath(ctx.paths, project.name, resource.name)
+  const messages = withQueueDbReadOnly<LeasedMessage[]>(path, [], (db) => peek(db, limit))
+  return { status: 200, body: { messages: messages.map(toWireMessage) } }
+}
+
+// POST /v1/resources/:id/queue/messages. Body: { "body": <any JSON value>,
+// "delaySeconds"?: number }. `body` is the value itself, not a pre-encoded
+// string: encodeBody runs here, once, so neither the CLI nor MCP ever needs
+// to know this queue's wire format, the same reason peek's response above is
+// already decoded rather than handing back an opaque codec string.
+async function enqueueRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
+  const resource = expectQueue(getResourceOrThrow(ctx, id), 'sending a message')
+  const project = getOwningProjectOrThrow(ctx, resource)
+
+  const parsed = await readJsonBody(req)
+  const fields = isRecord(parsed) ? parsed : {}
+  if (!('body' in fields)) {
+    throw new HobbyError(
+      'usage',
+      'body is required',
+      'POST /v1/resources/:id/queue/messages expects { "body": <json value>, "delaySeconds"?: number }'
+    )
+  }
+  const rawDelay = fields['delaySeconds']
+  const delaySeconds = typeof rawDelay === 'number' ? rawDelay : undefined
+
+  const path = queueDbPath(ctx.paths, project.name, resource.name)
+  const db = openQueueDb(path)
+  try {
+    // enqueue() itself throws HobbyError('usage', ...) for every one of
+    // Cloudflare's own limits (message size, batch size, delaySeconds
+    // range), which propagates straight through dispatch's catch: this
+    // route adds no second copy of those checks.
+    const ids = enqueue(db, [{ body: encodeBody(fields['body']), contentType: 'json', delaySeconds }], Date.now())
+    return { status: 201, body: { id: ids[0] } }
+  } finally {
+    db.close()
+  }
+}
+
+// DELETE /v1/resources/:id/queue/messages. Returns the count purged so the
+// caller can report what was actually lost, per broker.ts's own purge()
+// comment: a queue that cannot say how much it dropped is a queue that
+// silently lied about it.
+async function purgeQueueRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
+  const resource = expectQueue(getResourceOrThrow(ctx, id), 'purging messages')
+  const project = getOwningProjectOrThrow(ctx, resource)
+
+  const path = queueDbPath(ctx.paths, project.name, resource.name)
+  if (!existsSync(path)) {
+    return { status: 200, body: { purged: 0 } }
+  }
+  const db = openQueueDb(path)
+  try {
+    const count = purge(db)
+    return { status: 200, body: { purged: count } }
+  } finally {
+    db.close()
+  }
+}
+
+// POST /v1/resources/:id/queue/retention. Body: { "retentionSeconds": number }.
+// Validated against Cloudflare's own bounds (MIN/MAX_RETENTION_SECONDS,
+// packages/queue/src/broker.ts) and rejected outright outside them, never
+// clamped: a silently clamped value is a value the caller thinks they set
+// and did not, which is worse than an error naming the real bounds.
+async function setRetentionRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
+  const resource = expectQueue(getResourceOrThrow(ctx, id), 'setting retention')
+
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const raw = fields['retentionSeconds']
+  if (typeof raw !== 'number' || !Number.isInteger(raw)) {
+    throw new HobbyError(
+      'usage',
+      'retentionSeconds is required and must be a whole number of seconds',
+      'POST /v1/resources/:id/queue/retention expects { "retentionSeconds": number }'
+    )
+  }
+  if (raw < MIN_RETENTION_SECONDS || raw > MAX_RETENTION_SECONDS) {
+    throw new HobbyError(
+      'usage',
+      `retentionSeconds must be between ${MIN_RETENTION_SECONDS} and ${MAX_RETENTION_SECONDS} (Cloudflare's own bounds: 60 seconds to 14 days), got ${raw}`,
+      `pick a value from ${MIN_RETENTION_SECONDS} to ${MAX_RETENTION_SECONDS}`
+    )
+  }
+
+  const config: QueueConfig = { ...resource.config, retentionSeconds: raw }
+  ctx.store.updateResourceConfig(resource.id, config)
+  return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
+}
+
 async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<RouteResult> {
   const method = req.method ?? 'GET'
   const url = new URL(req.url ?? '/', 'http://localhost')
@@ -920,6 +1275,11 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       const name = decodeURIComponent(segments[2] as string)
       return adoptRoute(ctx, name)
     }
+
+    if (segments.length === 4 && method === 'GET' && segments[3] === 'queues') {
+      const name = decodeURIComponent(segments[2] as string)
+      return await listQueuesRoute(ctx, name)
+    }
   }
 
   if (segments[1] === 'resources') {
@@ -940,6 +1300,21 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       if (method === 'GET' && action === 'logs') return logsRoute(ctx, id, url)
       if (method === 'POST' && action === 'query') return queryRoute(ctx, req, id)
       if (method === 'POST' && action === 'deploy') return deployResourceRoute(ctx, req, id)
+    }
+
+    // /v1/resources/:id/queue/messages and /v1/resources/:id/queue/retention.
+    // A resource id, not a project+name pair, addresses a queue the same way
+    // it already addresses every other resource-scoped route above; the CLI
+    // and MCP resolve a `project`/`project/name` target to an id first (see
+    // resolveQueueTarget, packages/cli/src/cli/commands.ts), exactly as they
+    // already do for sleep/wake/logs.
+    if (segments.length === 5 && segments[3] === 'queue') {
+      const id = decodeURIComponent(segments[2] as string)
+      const action = segments[4]
+      if (method === 'GET' && action === 'messages') return peekQueueRoute(ctx, id, url)
+      if (method === 'POST' && action === 'messages') return enqueueRoute(ctx, req, id)
+      if (method === 'DELETE' && action === 'messages') return purgeQueueRoute(ctx, id)
+      if (method === 'POST' && action === 'retention') return setRetentionRoute(ctx, req, id)
     }
   }
 

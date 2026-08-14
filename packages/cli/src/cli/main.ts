@@ -20,6 +20,7 @@ import {
   cmdLs,
   cmdNew,
   cmdPg,
+  cmdQueue,
   cmdRm,
   cmdSleep,
   cmdStudio,
@@ -136,6 +137,13 @@ function printHelp(io: Io): void {
   io.out('  hobby eject <project>                 emit docker-compose.yml plus data')
   io.out('  hobby eject <project> --release       the same, and stop managing it')
   io.out('  hobby adopt <project>                 manage a released project again')
+  io.out('  hobby queue ls [project]              list queues, with depth and consumer')
+  io.out('  hobby queue create <name> --project <p>   a queue with no consumer bound yet')
+  io.out('  hobby queue peek <target> [--limit n]  the oldest messages, without leasing them')
+  io.out('  hobby queue send <target> <json>       enqueue one message')
+  io.out('  hobby queue purge <target>             delete every message, with confirmation')
+  io.out('  hobby queue rm <target> [--yes]        destroy the queue, with confirmation')
+  io.out('  hobby queue set <target> --retention <seconds>   change how long messages are kept')
   io.out('  hobby studio passwd                   set the studio operator password')
   io.out('  hobby studio                          print the studio URL and open it')
   io.out('')
@@ -259,6 +267,18 @@ export async function run(argv: string[], io: Io): Promise<number> {
       case 'adopt': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
         return await cmdAdopt(ctx, positionals, flags)
+      }
+      case 'queue': {
+        // One parseArgs call covering every `hobby queue <verb>` subcommand's
+        // flags, the same shape `pg` already uses for its own `create`
+        // subcommand: cmdQueue (commands.ts) reads positionals[0] as the verb
+        // and dispatches from there, so this file does not need to know the
+        // subcommand list to parse its flags.
+        const { positionals, flags } = parseArgs(rest, {
+          bool: ['json', 'yes'],
+          value: ['project', 'limit', 'retention'],
+        })
+        return await cmdQueue(ctx, positionals, flags)
       }
       case 'eject': {
         // --release is its own gate and there is no confirmation prompt, a
