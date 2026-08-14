@@ -43,6 +43,7 @@ function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
     sleepAfterSeconds: 300,
     wakeTimeoutMs: 150,
     readinessPollMs: 20,
+    queuePort: 0,
     caddyEnabled: false,
     caddyAdminPort: 2019,
     caddyStudioHost: null,

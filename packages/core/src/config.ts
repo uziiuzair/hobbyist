@@ -94,11 +94,13 @@ export interface HobbyConfig {
   // control surface. See docs/queues/specs/2026-08-13-queues-design.md,
   // "Daemon API, two listeners". The listener itself is a later task; this
   // package only needs the number, to build the URL a worker's producer
-  // binding is given. Optional (unlike the ports above) so every existing
-  // hand-built HobbyConfig fixture across the repo, most of them owned by
-  // other work, does not have to be touched to add a field it does not care
-  // about; DEFAULT_CONFIG still supplies it for real use.
-  queuePort?: number
+  // binding is given. Required, like the ports above: packages/cli/src/daemon/server.ts's
+  // queue listener used to fall back to a hardcoded port when this was
+  // omitted, so a test config literal that left it out did not get an
+  // ephemeral port, it got the production one, and collided with a real
+  // daemon on the box. Making it required forces every literal to choose,
+  // the same way proxyPort, apiPort and httpPort already do.
+  queuePort: number
   // The HTTP front door (ADR 0009), opt-in and off by default. Starting it
   // binds :80 and :443 on the operator's box, which is a surprising side
   // effect for a daemon restart, and packages/cli/src/daemon/caddy.ts's own

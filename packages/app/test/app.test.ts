@@ -36,6 +36,7 @@ function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
     // path deliberately.
     wakeTimeoutMs: 100,
     readinessPollMs: 10,
+    queuePort: 0,
     caddyEnabled: false,
     caddyAdminPort: 2019,
     caddyStudioHost: null,
