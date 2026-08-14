@@ -9,6 +9,7 @@
 // isolate start. The sub-5ms isolate figure that makes Workers famous applies
 // only once this container is already up.
 
+import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
@@ -31,6 +32,7 @@ import { assertWorkerConfig } from './assert-config.js'
 import { findWranglerManifest, type WranglerManifest } from './manifest.js'
 import {
   buildWorkerImage,
+  CONTAINER_CONTROL_PORT,
   CONTAINER_DO,
   CONTAINER_STATE,
   renderWorkerDockerfile,
@@ -92,14 +94,33 @@ export function uniqueKeyFor(resourceId: ResourceId, className: string): string 
 // binding is picked up rather than frozen into an image.
 export interface RunnerManifest {
   port: number
+  // The host-side port the daemon posts queue batches to, carried through
+  // for logging/observability inside the runner: the container's own control
+  // server listens on CONTAINER_CONTROL_PORT, a fixed constant, not on this
+  // value, exactly as the main port is fixed and hostPort is a Docker-side
+  // remap of it.
+  controlPort: number
   compatibilityDate: string
   compatibilityFlags: string[]
   vars: Record<string, string>
   kvNamespaces: string[]
   r2Buckets: string[]
   d1Databases: string[]
+  // ALWAYS []. See the comment where these are handed to Miniflare in
+  // runtime-image.ts's RUNNER_SOURCE for why: its in-memory queue broker
+  // must never be constructed. Kept as fields (rather than deleted) so a
+  // caller reading the manifest can see the intent stated rather than
+  // inferred from absence.
   queueProducers: string[]
   queueConsumers: string[]
+  // Where the container's producer shim posts enqueue requests, and the
+  // bearer token it sends. Both null when the worker declares no producer
+  // bindings, since there is then nothing for the shim to reach.
+  queueEndpoint: string | null
+  queueToken: string | null
+  // Every producer binding this worker declares, so the runner can give each
+  // one its own wrappedBindings entry pointing at the shim worker.
+  queueBindings: Array<{ binding: string; queue: string }>
   durableObjects: Record<string, { className: string; useSQLite: true; unsafeUniqueKey: string }>
   hyperdrives?: Record<string, string>
 }
@@ -154,16 +175,56 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
     }
   }
 
+  // Both null when there is nothing for the producer shim to reach: an empty
+  // wrappedBindings target is dead weight, and a minted token nobody can use
+  // is one more thing that could leak for no reason. Also gated on a real
+  // token being present, not just producers being declared: a resource
+  // created before queueToken existed reads back as undefined rather than
+  // "", and this is what stops that from becoming the literal string
+  // "undefined" wherever the runner concatenates it into a header. In
+  // practice startWorker backfills the token before this ever runs, so the
+  // gate is a belt-and-suspenders check, not the primary fix.
+  const hasProducers =
+    config.manifest.queues.producers.length > 0 &&
+    typeof config.queueToken === 'string' &&
+    config.queueToken.length > 0
+
   const runnerManifest: RunnerManifest = {
     port: CONTAINER_PORT,
+    controlPort: config.controlPort,
     compatibilityDate: config.manifest.compatibilityDate,
     compatibilityFlags: config.manifest.compatibilityFlags,
     vars: config.manifest.vars,
     kvNamespaces: config.manifest.kvNamespaces,
     r2Buckets: config.manifest.r2Buckets,
     d1Databases: config.manifest.d1Databases,
-    queueProducers: config.manifest.queues.producers,
-    queueConsumers: config.manifest.queues.consumers,
+    // ALWAYS []. See RunnerManifest's own comment: Miniflare's queue plugin
+    // is never wired up, on purpose (ADR 0013). Never
+    // `config.manifest.queues.*`: handing the real lists through here
+    // constructs Miniflare's own broker, which then accepts every send and
+    // delivers none of them, and no test in this repo would fail, because
+    // the loss happens inside a runtime nothing here asserts on.
+    queueProducers: [],
+    queueConsumers: [],
+    // host.docker.internal reaches the host's loopback from inside the
+    // container (verified against a running Miniflare on 2026-08-13,
+    // docs/queues/research/2026-08-13-wrapped-bindings-spike.md). The
+    // daemon's own enqueue listener is a later task; this is the URL a
+    // future one binds to. queuePort is optional on HobbyConfig (so existing
+    // fixtures elsewhere do not need touching); 7434 matches
+    // DEFAULT_CONFIG.queuePort in packages/core/src/config.ts.
+    queueEndpoint: hasProducers ? `http://host.docker.internal:${deps.config.queuePort ?? 7434}/enqueue` : null,
+    // config.queueToken, never resource.id: the id is returned by every
+    // daemon route that lists or reads a resource (WireResource in
+    // packages/cli/src/daemon/wire.ts is the whole resource), so using it as
+    // a bearer credential would mean the token is published everywhere the
+    // id already is, which defeats the scoping ADR 0013 introduced the token
+    // for. See the comment on WorkerConfig.queueToken.
+    queueToken: hasProducers ? config.queueToken : null,
+    queueBindings: config.manifest.queues.producers.map((producer) => ({
+      binding: producer.binding,
+      queue: producer.queue,
+    })),
     durableObjects,
   }
 
@@ -195,7 +256,14 @@ function containerSpec(deps: WorkerDeps, resource: WorkerResource, project: Proj
     env: {
       HOBBY_WORKER_MANIFEST: JSON.stringify(buildRunnerManifest(deps, resource)),
     },
-    ports: [{ host: config.hostPort, container: CONTAINER_PORT }],
+    ports: [
+      { host: config.hostPort, container: CONTAINER_PORT },
+      // The control channel: a second published port, loopback only (bind
+      // defaults to DEFAULT_PORT_BIND, same as the port above), so the
+      // daemon can deliver queue batches without anything of ours sitting in
+      // front of the worker on its own request path.
+      { host: config.controlPort, container: CONTAINER_CONTROL_PORT },
+    ],
     binds: [
       { host: deps.paths.resourcePath(project.name, resource.name, 'state'), container: CONTAINER_STATE },
       // The directory the daemon's alarm mirror scans read-only to recover
@@ -224,12 +292,14 @@ function notListening(config: WorkerConfig, waitedMs: number): HobbyError {
 // passed a connect-only probe, was recorded `running`, and then refused every
 // request. Same bug reconcile.ts documents for Postgres.
 //
-// Duplicated rather than shared with @hobby.sh/app deliberately. A package
-// that exists to hold one twenty line function is a module pretending to be a
-// package (root CLAUDE.md), and a dependency edge between two sibling kinds
-// is worse than the duplication.
-function defaultProbeFactory(): (config: WorkerConfig) => () => Promise<boolean> {
-  return (config: WorkerConfig) => async (): Promise<boolean> => {
+// Shared between the main port and the control port rather than written
+// twice: both need exactly this, a status line over a real socket, on
+// different ports and routes. Duplicated rather than shared with
+// @hobby.sh/app deliberately, at the file boundary, for the reason recorded
+// where this used to live: a package that exists to hold one twenty line
+// function is a module pretending to be a package (root CLAUDE.md).
+function httpProbe(port: number, request: { method: string; path: string }): () => Promise<boolean> {
+  return async (): Promise<boolean> => {
     const net = await import('node:net')
     return new Promise((resolve) => {
       const socket = new net.Socket()
@@ -242,7 +312,9 @@ function defaultProbeFactory(): (config: WorkerConfig) => () => Promise<boolean>
       }
       socket.setTimeout(500)
       socket.once('connect', () => {
-        socket.write('GET / HTTP/1.1\r\nHost: hobby.probe\r\nConnection: close\r\n\r\n')
+        socket.write(
+          `${request.method} ${request.path} HTTP/1.1\r\nHost: hobby.probe\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`
+        )
       })
       socket.once('data', (chunk: Buffer) => {
         finish(chunk.subarray(0, 5).toString('latin1') === 'HTTP/')
@@ -251,8 +323,48 @@ function defaultProbeFactory(): (config: WorkerConfig) => () => Promise<boolean>
       socket.once('close', () => finish(false))
       socket.once('timeout', () => finish(false))
       socket.once('error', () => finish(false))
-      socket.connect(config.hostPort, '127.0.0.1')
+      socket.connect(port, '127.0.0.1')
     })
+  }
+}
+
+// Whether this worker has any reason to need the control port at all. A
+// producer never receives anything on it: the shim posts straight to the
+// daemon's enqueue listener. A consumer needs it for everything, since a
+// batch is DELIVERED by a POST to this exact port
+// (docs/queues/specs/2026-08-13-queues-design.md, "Delivery over a second
+// port, not a proxy"), so this checks both lists, not only producers, and a
+// worker with neither is never made to wait on a channel it will never use.
+//
+// A null manifest (no code deployed yet, ADR 0014) declares nothing, so it
+// answers false and the readiness probe stays on the main port alone.
+function declaresQueueBindings(config: WorkerConfig): boolean {
+  if (config.manifest === null) return false
+  return config.manifest.queues.producers.length > 0 || config.manifest.queues.consumers.length > 0
+}
+
+// A worker recorded `running` on the main port alone, while its control
+// port never came up, is the exact failure this whole capability exists to
+// prevent, arriving through the readiness probe instead of the broker: the
+// daemon would go on to deliver every batch to a port with nothing behind
+// it, and nothing about the worker would look wrong. So when the worker
+// declares a queue binding, readiness requires BOTH ports to answer, not
+// only the one already covered above.
+//
+// The control probe POSTs to /queue with an empty body on purpose.
+// CONTROL_SOURCE's fetch handler throws on `request.json()` for that, and
+// runtime-image.ts's node:http bridge turns any error, thrown or rejected,
+// into a real HTTP response rather than a hung socket, so this still proves
+// what a probe needs to prove: something on the other end is parsing HTTP.
+// The exact status code does not matter, 4xx and 5xx both count.
+function defaultProbeFactory(): (config: WorkerConfig) => () => Promise<boolean> {
+  return (config: WorkerConfig) => {
+    const mainProbe = httpProbe(config.hostPort, { method: 'GET', path: '/' })
+    if (!declaresQueueBindings(config)) {
+      return mainProbe
+    }
+    const controlProbe = httpProbe(config.controlPort, { method: 'POST', path: '/queue' })
+    return async (): Promise<boolean> => (await mainProbe()) && (await controlProbe())
   }
 }
 
@@ -323,11 +435,20 @@ export async function createWorkerResource(
   // the id the store assigns, but there is no build between them any more.
   if (opts.sourcePath === null) {
     const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
+    // Both allocated here rather than at first deploy, which is the whole
+    // point of them living above the manifest split (WorkerConfig, core's
+    // types.ts): a worker created from Studio has a stable control port and
+    // a stable producer token from the moment the row exists, and a redeploy
+    // never moves either. Excludes hostPort for the same reason the deployed
+    // path below does: the store cannot yet see a port it has not written.
+    const controlPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO, [hostPort])
     const containerName = `hobby-${opts.project.name}-${opts.name}`
     const config: WorkerConfig = {
       image: null,
       containerName,
       hostPort,
+      controlPort,
+      queueToken: randomUUID(),
       containerPort: CONTAINER_PORT,
       hostname: workerHostname(opts.project.name, opts.name, deps.config.domain),
       durableObjectUniqueKeyModifier: '',
@@ -361,6 +482,9 @@ export async function createWorkerResource(
   const manifest = found.manifest
 
   const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
+  // Excludes hostPort: both come from the store before this resource has a
+  // row, so the store cannot yet see hostPort's own answer to skip it.
+  const controlPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO, [hostPort])
   const containerName = `hobby-${opts.project.name}-${opts.name}`
 
   const dockerfilePath = await writeGeneratedDockerfile(deps, opts.project.name, opts.name, manifest)
@@ -377,6 +501,12 @@ export async function createWorkerResource(
     image: tag,
     containerName,
     hostPort,
+    controlPort,
+    // Generated once here, unlike durableObjectUniqueKeyModifier below: it
+    // does not need the resource's own id (the store has not assigned one
+    // yet), so there is no placeholder-then-rewrite step for it to go
+    // through.
+    queueToken: randomUUID(),
     containerPort: CONTAINER_PORT,
     hostname: workerHostname(opts.project.name, opts.name, deps.config.domain),
     // Placeholder until the row exists: the real value is derived from the
@@ -434,6 +564,24 @@ export async function startWorker(deps: WorkerDeps, resource: WorkerResource): P
   const project = deps.store.getProject(resource.projectId)
   if (project === null) {
     throw new HobbyError('internal', `worker ${resource.id} has no owning project`)
+  }
+
+  // A worker created before queueToken existed has none: the stored JSON
+  // simply lacks the key, so it reads back as undefined despite the type
+  // saying string. Backfilled here, once, rather than left broken until a
+  // redeploy: without this, buildRunnerManifest's own guard would treat the
+  // worker as having no usable producer at all, silently disabling a
+  // binding that used to work. Persisted immediately so this only ever runs
+  // once per resource, matching durableObjectUniqueKeyModifier's own
+  // never-regenerate reasoning: a producer holding the old value across a
+  // wake should not find it rotated out from under it later.
+  if (!resource.config.queueToken) {
+    deps.store.updateResourceConfig(resource.id, { ...resource.config, queueToken: randomUUID() })
+    const backfilled = deps.store.getResource(resource.id)
+    if (backfilled === null || backfilled.kind !== 'worker') {
+      throw new HobbyError('internal', `worker ${resource.id} vanished while backfilling its queue token`)
+    }
+    resource = backfilled
   }
 
   deps.store.setResourceState(resource.id, 'starting')
@@ -538,6 +686,34 @@ export interface DeployWorkerResult {
   logs: string
 }
 
+// Falls back to the recorded source path on a redeploy. A worker whose
+// manifest is still null has never been deployed, so there is nothing
+// recorded to fall back to and the caller must say where the code is.
+// Names the actual fixing command rather than the wire shape, matching
+// deployApp's identical guard in packages/app/src/app.ts.
+//
+// Exported so a caller that needs to know what a deploy WOULD build from,
+// before calling deployWorker itself, can resolve the identical path:
+// packages/cli/src/daemon/routes.ts's pre-deploy queue-binding conflict
+// check parses the manifest before any image is built, and it has to parse
+// the same file deployWorker itself is about to parse, not a guess at one.
+// Throws the same usage error deployWorker always threw here, so a caller
+// that reuses this and a caller that lets deployWorker throw it directly
+// see one message rather than two independently-worded ones drifting apart.
+export function resolveWorkerSourcePath(resource: WorkerResource, projectName: string, sourcePath?: string): string {
+  if (sourcePath !== undefined) {
+    return sourcePath
+  }
+  if (resource.config.manifest === null) {
+    throw new HobbyError(
+      'usage',
+      `${resource.name} has never been deployed, so this deploy needs a directory to build from`,
+      `run \`hobby deploy <path> --project ${projectName} --name ${resource.name}\` from the directory holding its wrangler config`
+    )
+  }
+  return resource.config.manifest.source.path
+}
+
 export async function deployWorker(
   deps: WorkerDeps,
   resource: WorkerResource,
@@ -547,22 +723,7 @@ export async function deployWorker(
   if (project === null) {
     throw new HobbyError('internal', `worker ${resource.id} has no owning project`)
   }
-  // Falls back to the recorded source path on a redeploy. A worker whose
-  // manifest is still null has never been deployed, so there is nothing
-  // recorded to fall back to and the caller must say where the code is.
-  // Names the actual fixing command rather than the wire shape, matching
-  // deployApp's identical guard in packages/app/src/app.ts.
-  let sourcePath = opts.sourcePath
-  if (sourcePath === undefined) {
-    if (resource.config.manifest === null) {
-      throw new HobbyError(
-        'usage',
-        `${resource.name} has never been deployed, so this deploy needs a directory to build from`,
-        `run \`hobby deploy <path> --project ${project.name} --name ${resource.name}\` from the directory holding its wrangler config`
-      )
-    }
-    sourcePath = resource.config.manifest.source.path
-  }
+  const sourcePath = resolveWorkerSourcePath(resource, project.name, opts.sourcePath)
 
   // A first deploy that fails must not leave the resource looking broken,
   // because it is not: it is exactly as it was, a record with no code. Only
@@ -598,6 +759,15 @@ export async function deployWorker(
       // Durable Object's storage on every deploy, the sharpest data-loss
       // edge in this kind.
       durableObjectUniqueKeyModifier: resource.config.durableObjectUniqueKeyModifier,
+      // Carried through explicitly for the same reason, with two different
+      // failure modes. Both live ABOVE the manifest split precisely because
+      // this object rebuilds `manifest` wholesale on every deploy: a moved
+      // controlPort sends every queue batch to a port nothing is listening
+      // on, and a rotated queueToken gives every already-running container
+      // 401s from the enqueue listener, which reads as a broker outage
+      // rather than as a token that changed underneath it.
+      controlPort: resource.config.controlPort,
+      queueToken: resource.config.queueToken,
       manifest: {
         source: { path: sourcePath, manifest: found.file },
         compatibilityDate: manifest.compatibilityDate,

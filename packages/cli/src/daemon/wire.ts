@@ -36,6 +36,8 @@ import type {
   AppResource,
   PostgresConfig,
   PostgresResource,
+  QueueConfig,
+  QueueResource,
   Resource,
   ResourceConfig,
   WorkerConfig,
@@ -47,7 +49,8 @@ import { resourceSize } from './size.js'
 export type WirePostgresConfig = Omit<PostgresConfig, 'password'>
 export type WireAppConfig = AppConfig
 export type WireWorkerConfig = WorkerConfig
-export type WireResourceConfig = WirePostgresConfig | WireAppConfig | WireWorkerConfig
+export type WireQueueConfig = QueueConfig
+export type WireResourceConfig = WirePostgresConfig | WireAppConfig | WireWorkerConfig | WireQueueConfig
 
 interface WireExtras {
   sizeBytes: number | null
@@ -60,12 +63,14 @@ interface WireExtras {
 // narrows if the two travel together, and the flattened version silently
 // forced a cast at each print site in the CLI.
 //
-// App and worker configs keep their own types because redaction rewrites
-// values in place and does not change the shape; only postgres loses a field.
+// App, worker and queue configs keep their own types because redaction
+// rewrites values in place and does not change the shape; only postgres
+// loses a field.
 export type WireResource =
   | (Omit<PostgresResource, 'config'> & { config: WirePostgresConfig } & WireExtras)
   | (AppResource & WireExtras)
   | (WorkerResource & WireExtras)
+  | (QueueResource & WireExtras)
 
 // What a redacted value reads as. A visible placeholder rather than a
 // removed key, so a caller can still see that a variable is set without
@@ -95,13 +100,47 @@ function redactConfig(kind: Resource['kind'], config: ResourceConfig): WireResou
     const app = config as AppConfig
     return { ...app, env: redactValues(app.env) }
   }
-  const worker = config as WorkerConfig
-  // vars now lives one level deeper, inside manifest, and null until a first
-  // deploy: nothing to redact yet, and nothing to leak either.
-  return {
-    ...worker,
-    manifest: worker.manifest === null ? null : { ...worker.manifest, vars: redactValues(worker.manifest.vars) },
+  if (kind === 'queue') {
+    // A queue's config holds no user-supplied secret: no password, no env,
+    // no vars, only a retention period, a consumer resource id, the
+    // batching and retry numbers, and a dead letter queue name. Returned
+    // unredacted, deliberately, and handled in its own branch rather than
+    // falling through: the branch below used to be the implicit default
+    // for "anything that is not postgres or app", which is exactly how a
+    // queue config used to reach `worker.vars` and throw. The next kind
+    // added here should get its own branch too, not rely on the fallthrough.
+    return config as QueueConfig
   }
+  if (kind === 'worker') {
+    const worker = config as WorkerConfig
+    // queueToken is the bearer credential a container's producer shim sends
+    // to the daemon's enqueue listener (ADR 0013). resource.id is already
+    // returned unredacted elsewhere on this same payload, which is exactly
+    // why the token must never be resource.id and must never cross this
+    // boundary as itself: a secret this function forgets to touch is a
+    // secret every `--json` redirect, CI log and agent transcript gets a
+    // copy of.
+    //
+    // vars lives one level deeper since ADR 0014, inside manifest, and is
+    // null until a first deploy: nothing to redact yet, and nothing to leak
+    // either. The nesting is the sharp edge here. Spreading `worker` and
+    // setting a top-level `vars` still compiles, still type-checks, and
+    // leaks every key the user put in wrangler.toml, because the real
+    // values ride along inside the spread manifest untouched.
+    return {
+      ...worker,
+      queueToken: REDACTED,
+      manifest:
+        worker.manifest === null ? null : { ...worker.manifest, vars: redactValues(worker.manifest.vars) },
+    }
+  }
+  // Every known kind is handled above. Reaching here means a kind was added
+  // to ResourceKind with no branch here, which is exactly the bug a queue
+  // config hit: an unhandled kind used to fall through into the worker
+  // branch and crash inside redactValues with a TypeError that named
+  // neither the kind nor this function. Throwing here instead turns that
+  // into a message that says precisely what happened.
+  throw new Error(`redactConfig: no case for resource kind ${String(kind)}`)
 }
 
 export async function toWireResource(ctx: DaemonContext, resource: Resource): Promise<WireResource> {

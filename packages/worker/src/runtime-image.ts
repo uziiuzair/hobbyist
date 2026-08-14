@@ -49,6 +49,271 @@ export const CONTAINER_ROOT = '/hobby'
 export const CONTAINER_STATE = `${CONTAINER_ROOT}/state`
 export const CONTAINER_DO = `${CONTAINER_ROOT}/do`
 
+// The control channel's port INSIDE the container. Fixed, like CONTAINER_PORT
+// in worker.ts is for Miniflare's own listener: nothing else in this
+// container needs it, so a constant is one fewer thing to keep in sync
+// between the runner and the port mapping. worker.ts's containerSpec
+// publishes this on the host under the resource's own controlPort, the same
+// way it already does for the main port.
+export const CONTAINER_CONTROL_PORT = 8788
+
+// packages/queue/src/codec.ts, compiled to plain JavaScript so it can run
+// with no build step inside a Miniflare worker, which is otherwise plain
+// JavaScript itself (`node runner.mjs`, no ts-node, no --experimental-strip-
+// types). The logic below is unchanged from that file: only the TypeScript
+// type annotations (the `Node` type alias and the parameter/return types)
+// are gone, because Node's own parser rejects them on a script with no
+// TypeScript loader, which is what this one is. If codec.ts changes, this
+// has to change with it by hand; there is no automated compile step wiring
+// the two together, which is a real risk this comment exists to flag.
+//
+// The daemon never calls this. It stores the string and never parses it: the
+// broker's job is to hold bytes durably, not to understand them. Both ends
+// that DO call it are inside a container: the producer shim below encodes,
+// and the control worker below decodes.
+//
+// The format is a flat array of tagged nodes. Index 0 is the root, and every
+// reference is an index into the same array, which is what makes cycles and
+// shared references work: a graph, not a tree.
+const CODEC_SOURCE_JS = `function encodeBody(value) {
+  const nodes = []
+  const seen = new Map()
+
+  function write(input) {
+    if (input === undefined) {
+      nodes.push(['undef'])
+      return nodes.length - 1
+    }
+    if (input === null || typeof input === 'string' || typeof input === 'number' || typeof input === 'boolean') {
+      nodes.push(['prim', input])
+      return nodes.length - 1
+    }
+    if (typeof input === 'bigint') {
+      nodes.push(['big', input.toString()])
+      return nodes.length - 1
+    }
+
+    const existing = seen.get(input)
+    if (existing !== undefined) {
+      return existing
+    }
+
+    if (input instanceof Date) {
+      nodes.push(['date', input.getTime()])
+      const index = nodes.length - 1
+      seen.set(input, index)
+      return index
+    }
+    if (input instanceof RegExp) {
+      nodes.push(['regexp', input.source, input.flags])
+      const index = nodes.length - 1
+      seen.set(input, index)
+      return index
+    }
+
+    // The slot is reserved BEFORE the children are written, so a child that
+    // refers back to this node finds an index rather than recursing forever.
+    if (Array.isArray(input)) {
+      const node = ['array', []]
+      nodes.push(node)
+      const index = nodes.length - 1
+      seen.set(input, index)
+      for (const item of input) {
+        node[1].push(write(item))
+      }
+      return index
+    }
+    if (input instanceof Map) {
+      const node = ['map', []]
+      nodes.push(node)
+      const index = nodes.length - 1
+      seen.set(input, index)
+      for (const [key, item] of input) {
+        node[1].push([write(key), write(item)])
+      }
+      return index
+    }
+    if (input instanceof Set) {
+      const node = ['set', []]
+      nodes.push(node)
+      const index = nodes.length - 1
+      seen.set(input, index)
+      for (const item of input) {
+        node[1].push(write(item))
+      }
+      return index
+    }
+
+    const node = ['object', []]
+    nodes.push(node)
+    const index = nodes.length - 1
+    seen.set(input, index)
+    for (const [key, item] of Object.entries(input)) {
+      node[1].push([key, write(item)])
+    }
+    return index
+  }
+
+  write(value)
+  return JSON.stringify(nodes)
+}
+
+function decodeBody(text) {
+  const nodes = JSON.parse(text)
+  const built = new Array(nodes.length)
+  const done = new Array(nodes.length).fill(false)
+
+  // Two passes for the same reason encode reserves slots: a container has to
+  // exist before its children can point at it.
+  for (let i = 0; i < nodes.length; i += 1) {
+    const node = nodes[i]
+    if (node === undefined) continue
+    switch (node[0]) {
+      case 'prim':
+        built[i] = node[1]
+        done[i] = true
+        break
+      case 'undef':
+        built[i] = undefined
+        done[i] = true
+        break
+      case 'big':
+        built[i] = BigInt(node[1])
+        done[i] = true
+        break
+      case 'date':
+        built[i] = new Date(node[1])
+        done[i] = true
+        break
+      case 'regexp':
+        built[i] = new RegExp(node[1], node[2])
+        done[i] = true
+        break
+      case 'array':
+        built[i] = []
+        break
+      case 'object':
+        built[i] = {}
+        break
+      case 'map':
+        built[i] = new Map()
+        break
+      case 'set':
+        built[i] = new Set()
+        break
+    }
+  }
+
+  for (let i = 0; i < nodes.length; i += 1) {
+    const node = nodes[i]
+    if (node === undefined || done[i] === true) continue
+    if (node[0] === 'array') {
+      const target = built[i]
+      for (const ref of node[1]) target.push(built[ref])
+    } else if (node[0] === 'object') {
+      const target = built[i]
+      for (const [key, ref] of node[1]) target[key] = built[ref]
+    } else if (node[0] === 'map') {
+      const target = built[i]
+      for (const [keyRef, valueRef] of node[1]) target.set(built[keyRef], built[valueRef])
+    } else if (node[0] === 'set') {
+      const target = built[i]
+      for (const ref of node[1]) target.add(built[ref])
+    }
+  }
+
+  return built[0]
+}`
+
+// The wrapped binding that replaces Cloudflare's queue producer binding.
+// Given to the user worker through Miniflare's wrappedBindings, one entry per
+// producer binding, all pointing at this one worker (see the workers array
+// below). Each wrappedBindings entry carries its own HOBBY_QUEUE_NAME in its
+// own bindings, which is what lets this single module serve every producer a
+// worker declares: makeBinding(env) is called once per entry, with that
+// entry's own bindings as env.
+//
+// No compatibilityDate is set on the worker this module becomes (see the
+// workers array below): Miniflare 4.20260730.0 refuses to start at all with
+// ERR_INVALID_WRAPPED if a wrappedBindings target declares its own, verified
+// against a running Miniflare on 2026-08-13
+// (docs/queues/research/2026-08-13-wrapped-bindings-spike.md). It runs at the
+// compatibility date of the worker holding the binding instead.
+const QUEUE_SHIM_SOURCE = `${CODEC_SOURCE_JS}
+
+export default function makeBinding(env) {
+  async function post(messages) {
+    const res = await fetch(env.HOBBY_QUEUE_URL, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer ' + env.HOBBY_QUEUE_TOKEN,
+      },
+      body: JSON.stringify({ queue: env.HOBBY_QUEUE_NAME, messages }),
+    })
+    if (!res.ok) {
+      throw new Error('enqueue failed: ' + res.status)
+    }
+    return await res.json()
+  }
+
+  function encodeMessage(body, options) {
+    const message = { body: encodeBody(body), contentType: 'json' }
+    if (options && typeof options.delaySeconds === 'number') {
+      message.delaySeconds = options.delaySeconds
+    }
+    return message
+  }
+
+  return {
+    async send(body, options) {
+      return post([encodeMessage(body, options)])
+    },
+    async sendBatch(messages) {
+      return post((messages || []).map(function (entry) {
+        return encodeMessage(entry.body, entry)
+      }))
+    },
+  }
+}`
+
+// The only thing the daemon's control port talks to. A service binding to
+// the user's worker, making the same call Miniflare's own queue broker makes
+// (broker.worker.js's #dispatchBatch): env.USER.queue(queueName, messages,
+// metadata). That call only exists on the service binding because of the
+// service_binding_extra_handlers compatibility flag set on THIS worker in
+// the workers array below; the user's own worker does not need it.
+const CONTROL_SOURCE = `${CODEC_SOURCE_JS}
+
+export default {
+  async fetch(request, env) {
+    if (request.method !== 'POST') {
+      return new Response('method not allowed', { status: 405 })
+    }
+    const payload = await request.json()
+    const messages = (payload.messages || []).map(function (message) {
+      return {
+        id: message.id,
+        // Message.timestamp is a Date on the real Fetcher#queue contract
+        // (confirmed against miniflare's own broker.worker.ts, which passes
+        // the Date straight through); the wire carries milliseconds since
+        // the epoch, same as the rest of this project's timestamps.
+        timestamp: new Date(message.timestamp),
+        // The daemon stores an opaque, codec-encoded body and never parses
+        // it. Decoding happens here, inside the container, the other end of
+        // the same codec the producer shim above encodes with, so a Date or
+        // a Map queued on one side comes back as a Date or a Map on the
+        // other, not a flattened string.
+        body: decodeBody(message.body),
+        attempts: message.attempts,
+      }
+    })
+    const metadata = payload.metadata || { metrics: { backlogCount: 0, backlogBytes: 0, oldestMessageTimestamp: 0 } }
+    const result = await env.USER.queue(payload.queue, messages, metadata)
+    return Response.json(result)
+  },
+}`
+
 // The process inside the container. Reads its whole configuration from one
 // environment variable, so nothing about a specific worker is baked into the
 // image beyond its own bundled code.
@@ -57,6 +322,8 @@ export const CONTAINER_DO = `${CONTAINER_ROOT}/do`
 // embedded in a generated Dockerfile, and a second copy on disk that could
 // drift from this one is worse than a template literal.
 export const RUNNER_SOURCE = `import { Miniflare } from 'miniflare'
+import { writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 
 const raw = process.env.HOBBY_WORKER_MANIFEST
 if (!raw) {
@@ -65,19 +332,77 @@ if (!raw) {
 }
 const manifest = JSON.parse(raw)
 
+// Written once per container start, beside the user's own bundle, so
+// Miniflare can load them from disk exactly like it loads worker.mjs. Their
+// source lives in this file (runtime-image.ts), not on disk in the repo,
+// for the same reason RUNNER_SOURCE itself does: a generated Dockerfile has
+// to carry it as a string, and a second copy on disk that could drift from
+// this one is worse than a template literal.
+writeFileSync('${CONTAINER_ROOT}/queue-shim.mjs', ${JSON.stringify(QUEUE_SHIM_SOURCE)}, 'utf8')
+writeFileSync('${CONTAINER_ROOT}/control.mjs', ${JSON.stringify(CONTROL_SOURCE)}, 'utf8')
+
+// One wrappedBindings entry per producer binding, all pointing at the same
+// shim worker (Miniflare merges an entry's own "bindings" into the env
+// makeBinding(env) receives, which is what lets one shim module serve every
+// producer a worker declares).
+const wrappedBindings = {}
+for (const entry of manifest.queueBindings || []) {
+  wrappedBindings[entry.binding] = {
+    scriptName: 'hobby-queue-shim',
+    bindings: {
+      HOBBY_QUEUE_URL: manifest.queueEndpoint,
+      HOBBY_QUEUE_TOKEN: manifest.queueToken,
+      HOBBY_QUEUE_NAME: entry.queue,
+    },
+  }
+}
+
 const mf = new Miniflare({
-  modules: true,
-  scriptPath: '${CONTAINER_ROOT}/worker.mjs',
-  compatibilityDate: manifest.compatibilityDate,
-  compatibilityFlags: manifest.compatibilityFlags ?? [],
-  bindings: manifest.vars ?? {},
-  kvNamespaces: manifest.kvNamespaces ?? [],
-  r2Buckets: manifest.r2Buckets ?? [],
-  d1Databases: manifest.d1Databases ?? [],
-  queueProducers: manifest.queueProducers ?? [],
-  queueConsumers: manifest.queueConsumers ?? [],
-  durableObjects: manifest.durableObjects ?? {},
-  ...(manifest.hyperdrives ? { hyperdrives: manifest.hyperdrives } : {}),
+  workers: [
+    {
+      name: 'user',
+      modules: true,
+      scriptPath: '${CONTAINER_ROOT}/worker.mjs',
+      compatibilityDate: manifest.compatibilityDate,
+      compatibilityFlags: manifest.compatibilityFlags ?? [],
+      bindings: manifest.vars ?? {},
+      kvNamespaces: manifest.kvNamespaces ?? [],
+      r2Buckets: manifest.r2Buckets ?? [],
+      d1Databases: manifest.d1Databases ?? [],
+      // ALWAYS empty, unconditionally, no matter what the manifest carries.
+      // Miniflare's own queue broker (QueueBrokerObject) keeps its backlog
+      // in memory by its own source comment, so if it is ever constructed
+      // here it will accept sends and never deliver them: the symptom is
+      // messages disappearing sometimes, not a wiring error anyone can find
+      // (ADR 0013). The real producer binding is the wrappedBindings entry
+      // below; the real consumer delivery is the control port, not this.
+      queueProducers: [],
+      queueConsumers: [],
+      durableObjects: manifest.durableObjects ?? {},
+      ...(manifest.hyperdrives ? { hyperdrives: manifest.hyperdrives } : {}),
+      ...(Object.keys(wrappedBindings).length > 0 ? { wrappedBindings } : {}),
+    },
+    {
+      name: 'hobby-queue-shim',
+      modules: true,
+      scriptPath: '${CONTAINER_ROOT}/queue-shim.mjs',
+      // No compatibilityDate. See the comment on QUEUE_SHIM_SOURCE above:
+      // Miniflare rejects one on a wrappedBindings target at startup with
+      // ERR_INVALID_WRAPPED. Setting one here is the natural thing to write
+      // and it makes the whole runner fail to boot.
+    },
+    {
+      name: 'hobby-control',
+      modules: true,
+      scriptPath: '${CONTAINER_ROOT}/control.mjs',
+      compatibilityDate: manifest.compatibilityDate,
+      // What makes Fetcher#queue exist on the USER service binding below.
+      // Miniflare's own broker sets the same flag on itself for the same
+      // reason (broker.worker.js).
+      compatibilityFlags: ['service_binding_extra_handlers'],
+      serviceBindings: { USER: 'user' },
+    },
+  ],
   // Explicit per-plugin paths, never defaultPersistRoot. Verified against a
   // running Miniflare on 2026-08-10: defaultPersistRoot inserts a plugin
   // segment of its own, so durable object storage would land at
@@ -100,11 +425,64 @@ const mf = new Miniflare({
 const url = await mf.ready
 console.log('hobby: worker listening on ' + url.toString())
 
+// The control channel: a second, unrelated HTTP server the daemon posts
+// queue batches to. Kept OUT of Miniflare and out of the request path on
+// purpose: the user's worker stays the entry worker, with nothing in front
+// of it, because fronting it would put our code in the way of every
+// request, including Durable Object WebSocket upgrades and streamed
+// responses, to serve a channel used a few times a second at most.
+const controlServer = createServer((req, res) => {
+  if (req.method !== 'POST' || req.url !== '/queue') {
+    res.writeHead(404, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+    return
+  }
+  const chunks = []
+  req.on('data', (chunk) => chunks.push(chunk))
+  req.on('end', () => {
+    ;(async () => {
+      try {
+        const body = Buffer.concat(chunks).toString('utf8')
+        const worker = await mf.getWorker('hobby-control')
+        const upstream = await worker.fetch('http://hobby-control/queue', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body,
+        })
+        const text = await upstream.text()
+        res.writeHead(upstream.status, { 'content-type': 'application/json' })
+        res.end(text)
+      } catch (err) {
+        console.error('hobby: control channel error: ' + (err instanceof Error ? err.stack : String(err)))
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'control channel failure' }))
+      }
+    })()
+  })
+})
+// Loud and immediate rather than a silent hang: an EventEmitter with no
+// error listener already crashes the process on its own, but a message that
+// says why is the difference between hobby logs pointing straight at the
+// cause and a bare stack trace nobody reading it can place. This is exactly
+// the failure the readiness probe's control-port check exists to catch
+// (worker.ts's defaultProbeFactory): should the two ever race, the probe is
+// the one that decides whether the worker is recorded running, not this.
+controlServer.on('error', (err) => {
+  console.error('hobby: control channel failed to start: ' + (err instanceof Error ? err.stack : String(err)))
+  process.exit(1)
+})
+// 0.0.0.0, for the same reason the worker port above is. Published to the
+// host's loopback only, exactly as the worker port already is.
+controlServer.listen(${CONTAINER_CONTROL_PORT}, '0.0.0.0', () => {
+  console.log('hobby: control channel listening on container port ${CONTAINER_CONTROL_PORT}, published on host port ' + manifest.controlPort)
+})
+
 // A clean shutdown, so a sleep does not look like a crash to whatever the
 // worker was talking to, and so Durable Object storage is flushed rather
 // than recovered on the next wake.
 const shutdown = async () => {
   try {
+    controlServer.close()
     await mf.dispose()
   } finally {
     process.exit(0)

@@ -13,11 +13,30 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { resolvePaths } from '@hobby.sh/core'
 import { createApi, type Api } from '@hobby.sh/cli'
 import { z } from 'zod'
-import { connectionStringTool, listTool, logsTool, newTool, rmTool, sleepTool, wakeTool } from './tools.js'
+import {
+  connectionStringTool,
+  listTool,
+  logsTool,
+  newTool,
+  queueCreateTool,
+  queueListTool,
+  queuePeekTool,
+  queuePurgeTool,
+  queueRmTool,
+  queueSendTool,
+  queueSetRetentionTool,
+  rmTool,
+  sleepTool,
+  wakeTool,
+} from './tools.js'
 
 const TARGET_DESCRIPTION =
   'a project name, or "project/resource" when the project has more than one resource. ' +
   'a bare project name is only valid when that project has exactly one resource.'
+
+const QUEUE_TARGET_DESCRIPTION =
+  'a project name, or "project/queue" when the project has more than one queue. ' +
+  'a bare project name is only valid when that project has exactly one queue.'
 
 // Builds the server and registers every tool against a given Api, so tests
 // can build one against a fake Api without ever binding stdio. The real
@@ -120,6 +139,112 @@ export function createServer(api: Api): McpServer {
       },
     },
     async (args) => rmTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_queue_list',
+    {
+      description:
+        'list queues, with current depth, oldest message age, consumer (and whether it has code deployed ' +
+        'yet) and dead letter queue. mirrors `hobby queue ls [project]`. omit project to list every ' +
+        'project that has at least one queue.',
+      inputSchema: {
+        project: z.string().min(1).optional().describe('limit the listing to one project, by name'),
+      },
+    },
+    async (args) => queueListTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_queue_create',
+    {
+      description: 'create a queue with no consumer bound yet. mirrors `hobby queue create <name> --project <p>`.',
+      inputSchema: {
+        project: z.string().min(1).describe('the project to create the queue in'),
+        name: z.string().min(1).describe('the new queue name'),
+      },
+    },
+    async (args) => queueCreateTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_queue_peek',
+    {
+      description:
+        'read the oldest messages currently in a queue, without leasing them: a peeked message is still ' +
+        'deliverable to a real consumer afterward. mirrors `hobby queue peek <target> [--limit n]`.',
+      inputSchema: {
+        target: z.string().min(1).describe(QUEUE_TARGET_DESCRIPTION),
+        limit: z.number().int().positive().optional().describe('maximum messages to return, defaults to 10'),
+      },
+    },
+    async (args) => queuePeekTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_queue_send',
+    {
+      description: 'enqueue one message onto a queue. mirrors `hobby queue send <target> <json>`.',
+      inputSchema: {
+        target: z.string().min(1).describe(QUEUE_TARGET_DESCRIPTION),
+        body: z.unknown().describe('the message payload, any JSON value'),
+        delaySeconds: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe('seconds to delay visibility, 0 to 86400 (Cloudflare\'s own bound)'),
+      },
+    },
+    async (args) => queueSendTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_queue_purge',
+    {
+      description:
+        'permanently delete every message in a queue. mirrors `hobby queue purge <target>`. DESTRUCTIVE ' +
+        'AND IRREVERSIBLE. requires confirm: true; without it, this tool refuses and makes no request to ' +
+        'the daemon at all.',
+      inputSchema: {
+        target: z.string().min(1).describe(QUEUE_TARGET_DESCRIPTION),
+        confirm: z
+          .boolean()
+          .describe('must be exactly true to proceed; any other value (including omitting it) is refused'),
+      },
+    },
+    async (args) => queuePurgeTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_queue_rm',
+    {
+      description:
+        'permanently destroy a queue and every message in it. mirrors `hobby queue rm <target>`. refuses ' +
+        'while a worker still binds the queue as a producer or a consumer. DESTRUCTIVE AND IRREVERSIBLE. ' +
+        'requires confirm: true; without it, this tool refuses and makes no request to the daemon at all.',
+      inputSchema: {
+        target: z.string().min(1).describe(QUEUE_TARGET_DESCRIPTION),
+        confirm: z
+          .boolean()
+          .describe('must be exactly true to proceed; any other value (including omitting it) is refused'),
+      },
+    },
+    async (args) => queueRmTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_queue_set_retention',
+    {
+      description:
+        'change how long a queue keeps an unconsumed message before dropping it. mirrors `hobby queue ' +
+        'set <target> --retention <seconds>`. Cloudflare\'s own bounds: 60 seconds to 1209600 (14 days).',
+      inputSchema: {
+        target: z.string().min(1).describe(QUEUE_TARGET_DESCRIPTION),
+        retentionSeconds: z.number().int().describe('60 to 1209600 (14 days)'),
+      },
+    },
+    async (args) => queueSetRetentionTool(api, args)
   )
 
   return server

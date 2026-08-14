@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { mkdtempSync, writeFileSync } from 'node:fs'
+import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -19,11 +20,13 @@ import {
   type Project,
   type Store,
   type WorkerConfig,
+  type WorkerManifest,
   type WorkerResource,
 } from '@hobby.sh/core'
 import {
   describeIgnored,
   findWranglerManifest,
+  IGNORED_WITH_REASON,
   parseWranglerManifest,
   stripJsonComments,
 } from '../src/manifest.js'
@@ -32,6 +35,7 @@ import {
   buildRunnerManifest,
   createWorkerResource,
   deployWorker,
+  probeWorker,
   startWorker,
   stopWorker,
   uniqueKeyFor,
@@ -88,6 +92,7 @@ function testConfig(): HobbyConfig {
     sleepAfterSeconds: 300,
     wakeTimeoutMs: 100,
     readinessPollMs: 10,
+    queuePort: 7434,
     caddyEnabled: false,
     caddyAdminPort: 2019,
     caddyStudioHost: null,
@@ -131,7 +136,147 @@ test('a wrangler.toml is read into the subset we honour', () => {
   assert.deepEqual(manifest.r2Buckets, ['MEDIA'])
   assert.deepEqual(manifest.d1Databases, ['ANALYTICS'])
   assert.deepEqual(manifest.durableObjects, [{ binding: 'COUNTER', className: 'Counter' }])
-  assert.deepEqual(manifest.queues, { producers: ['jobs'], consumers: ['jobs'] })
+  assert.deepEqual(manifest.queues, {
+    producers: [{ queue: 'jobs', binding: 'JOBS' }],
+    consumers: [
+      {
+        queue: 'jobs',
+        maxBatchSize: null,
+        maxBatchTimeoutSeconds: null,
+        maxRetries: null,
+        retryDelaySeconds: null,
+        deadLetterQueue: null,
+      },
+    ],
+  })
+})
+
+test('a producer keeps its binding name, which is what the queue binding needs', () => {
+  const manifest = parseWranglerManifest(
+    `
+name = "embedder"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[[queues.producers]]
+queue = "vault-embed"
+binding = "VAULT_EMBED_QUEUE"
+`,
+    'toml'
+  )
+  assert.deepEqual(manifest.queues.producers, [{ queue: 'vault-embed', binding: 'VAULT_EMBED_QUEUE' }])
+})
+
+test('a consumer keeps every tuning key wrangler documents', () => {
+  const manifest = parseWranglerManifest(
+    `
+name = "embedder"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[[queues.consumers]]
+queue = "vault-embed"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+retry_delay = 30
+dead_letter_queue = "vault-embed-dlq"
+`,
+    'toml'
+  )
+  assert.deepEqual(manifest.queues.consumers, [
+    {
+      queue: 'vault-embed',
+      maxBatchSize: 10,
+      maxBatchTimeoutSeconds: 5,
+      maxRetries: 3,
+      retryDelaySeconds: 30,
+      deadLetterQueue: 'vault-embed-dlq',
+    },
+  ])
+})
+
+test('an absent tuning key stays null rather than guessing a default', () => {
+  const manifest = parseWranglerManifest(
+    `
+name = "embedder"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[[queues.consumers]]
+queue = "vault-embed"
+`,
+    'toml'
+  )
+  assert.equal(manifest.queues.consumers[0]?.maxBatchSize, null)
+})
+
+// max_concurrency lives nested inside queues.consumers, so the ordinary
+// top-level ignored-key scan can never see it. Both halves matter: the
+// reason has to exist in the map, and parsing a manifest containing the key
+// has to actually surface it through `ignored`, or the map entry sits next
+// to machinery nothing calls.
+test('max_concurrency is reported as honoured at one, not silently dropped', () => {
+  assert.match(IGNORED_WITH_REASON['queues.consumers.max_concurrency'] ?? '', /one box/)
+
+  const manifest = parseWranglerManifest(
+    `
+name = "embedder"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[[queues.consumers]]
+queue = "vault-embed"
+max_concurrency = 4
+`,
+    'toml'
+  )
+  assert.ok(manifest.ignored.includes('queues.consumers.max_concurrency'))
+})
+
+// A producer with no binding has nothing for env.WHATEVER.send() to call:
+// the TypeError shows up far from the manifest that caused it, so silence
+// here is exactly the "dropped binding means a runtime crash blamed on us"
+// case this file's own top comment warns about.
+test('a producer with no binding is dropped and reported, not silently discarded', () => {
+  assert.match(IGNORED_WITH_REASON['queues.producers.binding'] ?? '', /send\(\)/)
+
+  const manifest = parseWranglerManifest(
+    `
+name = "embedder"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[[queues.producers]]
+queue = "vault-embed"
+`,
+    'toml'
+  )
+  assert.deepEqual(manifest.queues.producers, [])
+  assert.ok(manifest.ignored.includes('queues.producers.binding'))
+})
+
+// A wrong-typed tuning key is the worse silence: an absent key gets the
+// broker's default and the deploy output never has to mention it, but a
+// quoted number here looks like it took effect while the parser quietly
+// dropped it and the same default applied underneath.
+test('a tuning key of the wrong type is dropped and reported, not silently defaulted', () => {
+  assert.match(IGNORED_WITH_REASON['queues.consumers.max_batch_size'] ?? '', /default/)
+
+  const manifest = parseWranglerManifest(
+    `
+name = "embedder"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[[queues.consumers]]
+queue = "vault-embed"
+max_batch_size = "10"
+`,
+    'toml'
+  )
+  assert.equal(manifest.queues.consumers[0]?.maxBatchSize, null)
+  assert.ok(manifest.ignored.includes('queues.consumers.max_batch_size'))
 })
 
 // Silence about a dropped key in a config file the user believes is
@@ -294,6 +439,58 @@ test('a redeploy does not change the durable object unique key', async () => {
 
   assert.equal(after, before)
   assert.notEqual(deployed.image, created.resource.config.image, 'the image should have changed even though the key did not')
+})
+
+// The other two fields that sit above the manifest split, and the reason
+// they sit there. deployWorker rebuilds `manifest` wholesale from the
+// wrangler file on every deploy, so anything inside it is re-derived; these
+// two must not be. A moved controlPort delivers every queue batch to a port
+// nothing is listening on, and a rotated queueToken 401s every container
+// that is already running with the old one, which reads as the broker being
+// down rather than as a credential that changed. Neither failure produces an
+// error at deploy time, which is why it is asserted here rather than trusted
+// to the spread in deployWorker's config literal.
+test('a redeploy changes neither the control port nor the queue token', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(),
+    databaseResourceId: null,
+  })
+  const before = created.resource.config
+
+  deps.now = () => 1_754_870_500_000
+  const deployed = await deployWorker(deps, created.resource)
+
+  assert.equal(deployed.resource.config.controlPort, before.controlPort)
+  assert.equal(deployed.resource.config.queueToken, before.queueToken)
+  assert.notEqual(deployed.image, before.image, 'the image should have changed even though these did not')
+})
+
+// The same guarantee across the other boundary: a worker created from Studio
+// with no code gets both fields at row creation (createWorkerResource's
+// sourceless path), and the FIRST deploy must not mint new ones either. That
+// is the whole reason they are allocated there rather than at deploy time.
+test('a first deploy changes neither the control port nor the queue token', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: null,
+    databaseResourceId: null,
+  })
+  const before = created.resource.config
+  assert.ok(before.controlPort > 0, 'an undeployed worker already has a control port')
+  assert.ok(before.queueToken.length > 0, 'an undeployed worker already has a queue token')
+  assert.notEqual(before.controlPort, before.hostPort, 'the two ports must not collide')
+
+  const deployed = await deployWorker(deps, created.resource, { sourcePath: workerSource() })
+
+  assert.equal(deployed.resource.config.controlPort, before.controlPort)
+  assert.equal(deployed.resource.config.queueToken, before.queueToken)
 })
 
 // Record-before-code's actual acceptance criterion for the worker kind: a
@@ -474,6 +671,288 @@ test('the container mounts state and durable object storage separately', async (
   assert.match(doBind?.host ?? '', /projects\/blog\/api\/do$/)
   assert.equal(spec.ports[0]?.container, 8787)
   assert.equal(spec.ports[0]?.bind, '127.0.0.1')
+})
+
+// The control channel is a second published port, not a proxy in front of
+// the worker's own: see docs/queues/specs/2026-08-13-queues-design.md,
+// "Delivery over a second port, not a proxy".
+test('the container publishes a second port for the control channel', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const result = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(),
+    databaseResourceId: null,
+  })
+
+  const spec = runtime._specs.get(result.resource.config.containerName)
+  assert.ok(spec !== undefined)
+  assert.equal(spec.ports.length, 2)
+  assert.equal(spec.ports[1]?.host, result.resource.config.controlPort)
+  assert.equal(spec.ports[1]?.container, 8788)
+  assert.equal(spec.ports[1]?.bind, '127.0.0.1')
+  // Allocated from the same range as hostPort, and distinct from it: two
+  // sequential allocatePort calls before either is persisted must not
+  // collide (packages/core/test/store.test.ts pins the mechanism this
+  // depends on).
+  assert.notEqual(result.resource.config.controlPort, result.resource.config.hostPort)
+})
+
+// SAMPLE_TOML declares one producer, binding JOBS on queue jobs, which is
+// what makes this manifest worth reading: the shim needs both the binding
+// name and the queue name, and the runner needs the daemon's future enqueue
+// listener URL and a token, none of which existed before this task.
+test('the runner manifest carries the control port and the queue endpoint', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const result = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(),
+    databaseResourceId: null,
+  })
+
+  const manifest = buildRunnerManifest(deps, result.resource)
+  assert.equal(manifest.controlPort, result.resource.config.controlPort)
+  assert.equal(manifest.queueEndpoint, 'http://host.docker.internal:7434/enqueue')
+  // The token comes from config, generated once at creation, NOT from
+  // resource.id: the id is published by every daemon route that lists or
+  // reads a resource (see the wire.ts redaction test), so using it as a
+  // bearer credential would defeat the scoping the token exists to provide.
+  assert.equal(manifest.queueToken, result.resource.config.queueToken)
+  assert.notEqual(manifest.queueToken, result.resource.id)
+  assert.ok(manifest.queueToken !== null && manifest.queueToken.length > 0)
+  assert.deepEqual(manifest.queueBindings, [{ binding: 'JOBS', queue: 'jobs' }])
+})
+
+// A resource created before queueToken existed has none: the stored JSON
+// simply lacks the key. startWorker backfills it once rather than leaving a
+// producer silently disabled until a redeploy.
+test('a worker with no stored queueToken gets one backfilled on start, and never "undefined"', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const result = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(),
+    databaseResourceId: null,
+  })
+
+  // Simulate a resource created before this field existed: strip it from
+  // the stored config directly, bypassing the type.
+  const stale = { ...result.resource.config } as Record<string, unknown>
+  delete stale['queueToken']
+  deps.store.updateResourceConfig(result.resource.id, stale as never)
+  const before = deps.store.getResource(result.resource.id)
+  assert.ok(before !== null && before.kind === 'worker')
+  assert.equal(before.config.queueToken, undefined)
+
+  await startWorker(deps, before)
+
+  const after = deps.store.getResource(result.resource.id)
+  assert.ok(after !== null && after.kind === 'worker')
+  assert.equal(typeof after.config.queueToken, 'string')
+  assert.ok(after.config.queueToken.length > 0)
+
+  const manifest = buildRunnerManifest(deps, after)
+  assert.equal(manifest.queueToken, after.config.queueToken)
+})
+
+// A minimal, hand-built WorkerConfig for the readiness tests below, which
+// need real ports pointing at real local servers rather than anything
+// createWorkerResource's own wrangler.toml flow would build, since the whole
+// point is to exercise defaultProbeFactory itself, not a fake one.
+// Split out from sampleWorkerConfig for the reason the same pair is split in
+// packages/cli/test/kind-dispatch.test.ts: a test that only wants to change
+// `queues` cannot spread a `WorkerManifest | null` field without TypeScript's
+// spread rules widening every property to optional.
+function sampleWorkerManifest(overrides: Partial<WorkerManifest> = {}): WorkerManifest {
+  return {
+    source: { path: '/src/api', manifest: 'wrangler.toml' },
+    compatibilityDate: '2026-08-01',
+    compatibilityFlags: [],
+    vars: {},
+    kvNamespaces: [],
+    r2Buckets: [],
+    d1Databases: [],
+    queues: { producers: [], consumers: [] },
+    durableObjects: [],
+    ...overrides,
+  }
+}
+
+function sampleWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
+  return {
+    image: 'hobby/workerd:1',
+    containerName: 'hobby-blog-api-readiness',
+    hostPort: 0,
+    controlPort: 0,
+    queueToken: 'test-queue-token',
+    containerPort: 8787,
+    hostname: 'api.blog.localhost',
+    durableObjectUniqueKeyModifier: 'stable-modifier',
+    databaseResourceId: null,
+    manifest: sampleWorkerManifest(),
+    ...overrides,
+  }
+}
+
+// A tiny stand-in for "a real HTTP server is listening here", used instead
+// of a bare TCP listener because the whole point of these tests is that a
+// TCP connect is not enough (worker.ts's own httpProbe comment says why).
+function realHttpServer(status: number): Promise<{ server: Server; port: number }> {
+  return new Promise((resolve) => {
+    const server = createServer((_req, res) => {
+      res.writeHead(status, { 'content-type': 'application/json' })
+      res.end('{}')
+    })
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      const port = typeof address === 'object' && address !== null ? address.port : 0
+      resolve({ server, port })
+    })
+  })
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve) => server.close(() => resolve()))
+}
+
+// The regression this task exists to prevent, but arriving through the
+// readiness probe instead of the broker: if the control port's HTTP server
+// never came up (its listen() failed, or the runner crashed moments after
+// the main port started), a worker that only probes the main port would be
+// recorded running anyway, and every batch the daemon later delivers goes to
+// a port with nothing behind it, while the worker looks entirely healthy.
+//
+// Real sockets throughout, no workerProbeFactory override: a mocked probe
+// cannot demonstrate this, since the whole bug is in what the real one does.
+test('readiness requires the control port too, once the worker declares a queue binding', async () => {
+  const deps = buildDeps({ workerProbeFactory: undefined })
+  const project = makeProject(deps.store)
+  const { server: mainServer, port: hostPort } = await realHttpServer(200)
+
+  try {
+    const config = sampleWorkerConfig({
+      hostPort,
+      // Nothing is listening here yet, which is the first assertion below.
+      controlPort: hostPort + 1,
+      manifest: sampleWorkerManifest({
+        queues: {
+          producers: [],
+          consumers: [
+            {
+              queue: 'jobs',
+              maxBatchSize: null,
+              maxBatchTimeoutSeconds: null,
+              maxRetries: null,
+              retryDelaySeconds: null,
+              deadLetterQueue: null,
+            },
+          ],
+        },
+      }),
+    })
+    const created = deps.store.createResource({ projectId: project.id, kind: 'worker', name: 'api', config })
+    const resource = deps.store.getResource(created.id)
+    assert.ok(resource !== null && resource.kind === 'worker')
+
+    assert.equal(
+      await probeWorker(deps, resource),
+      false,
+      'the main port answers but nothing is listening on the control port yet'
+    )
+
+    const { server: controlServer, port: controlPort } = await realHttpServer(400)
+    // Same object, new controlPort: createResource already fixed the config
+    // this resource holds, so the probe (which reads resource.config) needs
+    // a resource that actually points at the server just opened.
+    deps.store.updateResourceConfig(resource.id, { ...resource.config, controlPort })
+    const updated = deps.store.getResource(resource.id)
+    assert.ok(updated !== null && updated.kind === 'worker')
+
+    try {
+      assert.equal(await probeWorker(deps, updated), true, 'both ports answer a real HTTP request now')
+    } finally {
+      await closeServer(controlServer)
+    }
+  } finally {
+    await closeServer(mainServer)
+  }
+})
+
+test('readiness does not wait on the control port for a worker with no queue binding at all', async () => {
+  const deps = buildDeps({ workerProbeFactory: undefined })
+  const project = makeProject(deps.store)
+  const { server: mainServer, port: hostPort } = await realHttpServer(200)
+
+  try {
+    const config = sampleWorkerConfig({
+      hostPort,
+      // Nothing is listening here, and nothing should ever have to be: this
+      // worker declares no producer and no consumer.
+      controlPort: hostPort + 1,
+      manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [] } }),
+    })
+    const created = deps.store.createResource({ projectId: project.id, kind: 'worker', name: 'api', config })
+    const resource = deps.store.getResource(created.id)
+    assert.ok(resource !== null && resource.kind === 'worker')
+
+    assert.equal(
+      await probeWorker(deps, resource),
+      true,
+      'the control port is never checked, because this worker has nothing to deliver through it'
+    )
+  } finally {
+    await closeServer(mainServer)
+  }
+})
+
+// The whole point of ADR 0013: Miniflare's own queue broker keeps its
+// backlog in memory, so if it is ever constructed here it will accept sends
+// and never deliver them. This has to hold even for a worker that DOES
+// declare producers and consumers in its wrangler manifest.
+test('miniflare is never given queueProducers or queueConsumers, so its in-memory broker is not built', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const result = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(),
+    databaseResourceId: null,
+  })
+
+  const manifest = buildRunnerManifest(deps, result.resource)
+  assert.deepEqual(manifest.queueProducers, [])
+  assert.deepEqual(manifest.queueConsumers, [])
+})
+
+// A worker with no producer binding has nothing for the shim to reach: a
+// live URL and a real token with no binding pointed at them would just be
+// an unused credential sitting in the manifest.
+test('a worker with no queue producer gets no queue endpoint or token', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const result = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(
+      `
+name = "api"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+`,
+      'wrangler.toml'
+    ),
+    databaseResourceId: null,
+  })
+
+  const manifest = buildRunnerManifest(deps, result.resource)
+  assert.equal(manifest.queueEndpoint, null)
+  assert.equal(manifest.queueToken, null)
+  assert.deepEqual(manifest.queueBindings, [])
 })
 
 test('a worker is created asleep, having been proven to serve', async () => {
