@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
+import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -78,8 +79,12 @@ function buildContext(
 // the arguments addRoute and setFallback were given. The order/absence tests
 // only need `calls`; the content tests below also need `fallbacks`/`routes`.
 // One double, reused everywhere in this file, rather than a second harness
-// per assertion shape.
-function recordingCaddyManager(): {
+// per assertion shape. `failing` names the methods that should reject
+// instead of succeeding, for the two tests below that need a CaddyManager
+// which behaves normally except for one call throwing.
+type CaddyMethodName = 'ensureRunning' | 'addRoute' | 'removeRoute' | 'setFallback' | 'stop'
+
+function recordingCaddyManager(failing: ReadonlySet<CaddyMethodName> = new Set()): {
   manager: CaddyManager
   calls: string[]
   fallbacks: CaddyFallback[]
@@ -91,9 +96,15 @@ function recordingCaddyManager(): {
   const manager: CaddyManager = {
     async ensureRunning() {
       calls.push('ensureRunning')
+      if (failing.has('ensureRunning')) {
+        throw new Error('caddy container refused to start')
+      }
     },
     async addRoute(route) {
       calls.push('addRoute')
+      if (failing.has('addRoute')) {
+        throw new Error('caddy admin API rejected the route')
+      }
       routes.push(route)
     },
     async removeRoute() {
@@ -101,6 +112,9 @@ function recordingCaddyManager(): {
     },
     async setFallback(fallback) {
       calls.push('setFallback')
+      if (failing.has('setFallback')) {
+        throw new Error('caddy admin API rejected the fallback config')
+      }
       if (fallback !== null) {
         fallbacks.push(fallback)
       }
@@ -110,6 +124,24 @@ function recordingCaddyManager(): {
     },
   }
   return { manager, calls, fallbacks, routes }
+}
+
+// The strongest "the daemon is still functional" check this harness can make
+// cheaply: an actual HTTP request over the actual unix socket the daemon is
+// actually listening on, hitting the one route (`/v1/health`) that needs no
+// auth and touches no resource. Chosen over merely asserting that close()
+// resolves without throwing, because a socket that answers is proof the
+// control plane a CLI or MCP client would use is alive, not just that
+// teardown happens to be well-behaved.
+function getOverSocket(socketPath: string, path: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ socketPath, path, method: 'GET' }, (res) => {
+      res.resume()
+      res.on('end', () => resolve(res.statusCode ?? 0))
+    })
+    req.on('error', reject)
+    req.end()
+  })
 }
 
 test('ensureRunning creates and starts the caddy container with host networking, via the injected runtime', async () => {
@@ -395,6 +427,67 @@ test('an unrecognized HOBBY_CADDY_ENABLED warns, naming the value seen and the a
         (m) => m.includes('HOBBY_CADDY_ENABLED is set to "yes"') && m.includes('1 or true') && m.includes('0 or false')
       )
     )
+  } finally {
+    await daemon.close()
+    ctx.store.close()
+  }
+})
+
+// These two are the load-bearing tests of this whole sub-project: they
+// encode the difference between "the web front door is down" and "the
+// databases are down". A CaddyManager call that rejects must not propagate
+// out of startDaemon and take the rest of the daemon down with it.
+
+test('a caddy that will not start leaves the daemon running and its control socket answering', async () => {
+  const ctx = buildContext(createFakeRuntime(), { caddyEnabled: true })
+  const { manager } = recordingCaddyManager(new Set(['ensureRunning']))
+  const home = mkdtempSync(join(tmpdir(), 'hobby-caddy-'))
+  const socketPath = join(home, 'd.sock')
+
+  const original = console.error
+  const messages: string[] = []
+  console.error = (...args: unknown[]) => {
+    messages.push(args.map(String).join(' '))
+  }
+
+  const daemon = await startDaemon(ctx, { socketPath, apiPort: null, caddy: manager }).finally(() => {
+    console.error = original
+  })
+  try {
+    assert.ok(daemon !== null)
+    assert.ok(messages.some((m) => /caddy/i.test(m)))
+    // The wedge: a box whose Caddy will not start still has databases that
+    // must wake on connection, which has nothing to do with HTTP. Proven
+    // here by hitting the daemon's own control socket, the same surface the
+    // CLI and MCP use, rather than only asserting close() behaves.
+    const status = await getOverSocket(socketPath, '/v1/health')
+    assert.equal(status, 200)
+  } finally {
+    await daemon.close()
+    ctx.store.close()
+  }
+})
+
+test('a failing route push leaves the daemon running and its control socket answering', async () => {
+  const ctx = buildContext(createFakeRuntime(), { caddyEnabled: true })
+  const { manager } = recordingCaddyManager(new Set(['setFallback']))
+  const home = mkdtempSync(join(tmpdir(), 'hobby-caddy-'))
+  const socketPath = join(home, 'd.sock')
+
+  const original = console.error
+  const messages: string[] = []
+  console.error = (...args: unknown[]) => {
+    messages.push(args.map(String).join(' '))
+  }
+
+  const daemon = await startDaemon(ctx, { socketPath, apiPort: null, caddy: manager }).finally(() => {
+    console.error = original
+  })
+  try {
+    assert.ok(daemon !== null)
+    assert.ok(messages.some((m) => /caddy/i.test(m)))
+    const status = await getOverSocket(socketPath, '/v1/health')
+    assert.equal(status, 200)
   } finally {
     await daemon.close()
     ctx.store.close()
