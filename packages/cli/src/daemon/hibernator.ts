@@ -106,6 +106,18 @@ async function tick(
     // This is not an optimisation, it is the difference between the
     // hibernator working and the hibernator calling stop on every queue on
     // the box, every pass, for as long as the daemon runs.
+    //
+    // Deliberately an explicit `kind` check here, while the structurally
+    // identical exemption in reconcile.ts dispatches through
+    // ResourceKindHandler.skipReconcile. The asymmetry is the point, and it
+    // is not an oversight to tidy up: reconcile had TWO kinds needing an
+    // exemption for TWO different reasons (an `undeployed` app or worker,
+    // which is a fact about a state, and a queue, which is a fact about a
+    // kind), and two reasons is the general case that earns a seam. The
+    // hibernator has one kind and one reason, and a hook with a single
+    // implementation is indirection charging rent. The moment a second kind
+    // needs to opt out of hibernation is the moment to promote this to a
+    // predicate on the handler.
     if (resource.kind === 'queue') {
       continue
     }

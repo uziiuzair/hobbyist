@@ -222,6 +222,32 @@ function hostnameOf(resource: WireResource): string {
   return resource.kind === 'app' || resource.kind === 'worker' ? resource.config.hostname : ''
 }
 
+// `AppConfig.image`/`WorkerConfig.image` are `string | null`
+// (packages/core/src/types.ts's `ResourceConfigBase.image`, widened once
+// `undeployed` became a real state nothing has built yet). A template
+// literal stringifies `null` silently, with no compile error, which is
+// exactly what cmdDeploy's create-new branch below used to do at this
+// file's old line 308. Provably unreachable through cmdDeploy alone today
+// (its create-new branch always supplies a real `source`, so
+// createAppResource/createWorkerResource either build a real image or
+// throw before this print is ever reached), but a defensive fix rather than
+// a documented invariant is the right shape for output code: it costs
+// nothing to be correct for a null it does not currently receive, and a
+// future caller of this same branch is not a hypothetical, it is exactly
+// the shape of mistake Task 8 already found two more instances of, in
+// renderCompose's app and worker loops (packages/cli/src/daemon/routes.ts,
+// both now guarded by `isDeployed`). The postgres loop in that same
+// function was never at risk: `PostgresConfig.image` is narrowed to
+// non-nullable `string` (types.ts:80), so comparing it to `null` does not
+// even compile. Task 8 also found a Caddyfile bug in the same review, but a
+// differently shaped one, not a fourth instance of this one: its caller was
+// passing every app and worker resource, deployed or not, into
+// `renderCaddyfile`, whose `hostname`/`hostPort` parameters are never null,
+// so nothing there was a null reaching a template literal.
+function imageLine(image: string | null): string {
+  return image === null ? '(not built yet)' : image
+}
+
 export function detectDeployKind(files: { dockerfile: boolean; wrangler: boolean }): DeployKind {
   if (files.dockerfile && files.wrangler) {
     throw new UsageError(
@@ -239,30 +265,67 @@ export function detectDeployKind(files: { dockerfile: boolean; wrangler: boolean
   )
 }
 
-export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
-  const path = resolvePath(positionals[0] ?? '.')
-  const kindFlag = typeof flags['kind'] === 'string' ? flags['kind'] : undefined
-  if (kindFlag !== undefined && kindFlag !== 'app' && kindFlag !== 'worker') {
-    throw new UsageError(`unknown --kind: ${kindFlag}. Expected app or worker.`)
+export interface DeployTarget {
+  path: string
+  project?: string
+  name?: string
+}
+
+// `hobby deploy [path] --project <p> [--name n]`: ONE positional, the path,
+// defaulting to the current directory. A second optional positional for the
+// resource name cannot be disambiguated from the first (`hobby deploy site`
+// could mean "deploy the directory named site" or "deploy here, calling it
+// site", and nothing in the surrounding argv picks correctly either way),
+// so the name is a flag with a derived default instead: `hobby deploy
+// ./site` targets a resource called `site`, the same ergonomic Fly and
+// Wrangler both use. `--name` overrides it explicitly.
+//
+// Exported and pure (positionals/flags in, a plain object out, no Ctx, no
+// filesystem, no daemon) so this derivation, the one genuinely tricky part
+// of `hobby deploy`'s argument shape, is directly testable; see
+// packages/cli/test/parse.test.ts. When `path` is the default `.`, there is
+// nothing to take a basename of without knowing the caller's own working
+// directory, which this function deliberately never reads (that would make
+// it depend on whatever directory happened to invoke the test, not just its
+// arguments), so `name` comes back `undefined` and cmdDeploy below resolves
+// that one case from `c.io.cwd`, the same testable cwd every other command
+// in this file already goes through.
+export function parseDeploy(positionals: string[], flags: Flags): DeployTarget {
+  const path = positionals[0] ?? '.'
+  const explicit = typeof flags['name'] === 'string' ? flags['name'] : undefined
+  return {
+    path,
+    project: typeof flags['project'] === 'string' ? flags['project'] : undefined,
+    name: explicit ?? (path === '.' ? undefined : basename(resolvePath(path))),
   }
+}
 
-  const kind =
-    kindFlag ??
-    detectDeployKind({
-      dockerfile: existsSync(joinPath(path, 'Dockerfile')),
-      wrangler: existsSync(joinPath(path, 'wrangler.toml')) || existsSync(joinPath(path, 'wrangler.jsonc')),
-    })
+function deployKindConflict(project: string, name: string, existingKind: string): UsageError {
+  return new UsageError(
+    `${project}/${name} is a ${existingKind}, and a deploy would replace it. Pick another name with --name, or remove it first.`
+  )
+}
 
-  const projectName = typeof flags['project'] === 'string' ? flags['project'] : basename(path)
-  const name = typeof flags['name'] === 'string' ? flags['name'] : 'web'
+export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const parsed = parseDeploy(positionals, flags)
+  const path = resolvePath(c.io.cwd, parsed.path)
+  const projectName = parsed.project ?? basename(path)
+  const name = parsed.name ?? basename(path)
+
   const portFlag = typeof flags['port'] === 'string' ? Number(flags['port']) : undefined
   if (portFlag !== undefined && !Number.isInteger(portFlag)) {
     throw new UsageError(`--port must be a whole number, got ${String(flags['port'])}`)
   }
 
-  // A project is created on first deploy rather than required up front. The
-  // alternative, making the user run `hobby new` first, means two commands
-  // for the thing CLAUDE.md promises takes one.
+  // A read, never a write: whether the project exists yet, and whether it
+  // already holds a resource by this name, has to be known before anything
+  // below decides whether to mutate anything. Actually creating a missing
+  // project is deferred past every validation that can still fail (an
+  // unrecognized --kind, a directory with neither a Dockerfile nor a
+  // wrangler manifest), the same property the pre-existing code already
+  // had: a failed `hobby deploy` must never leave an empty project behind
+  // for the same reason cmdNew rolls one back on a failed first resource.
+  let projectExists = true
   let existing: WireResource | undefined
   try {
     const detail = await c.api.getProject(projectName)
@@ -271,6 +334,41 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     if (!(err instanceof HobbyError) || err.code !== 'project_not_found') {
       throw err
     }
+    projectExists = false
+  }
+
+  // Checked before kind detection ever touches the filesystem: whatever is
+  // in the directory, `hobby deploy` can only ever produce an app or a
+  // worker, so a name already held by anything else (a postgres, today the
+  // only other kind) is decidable without looking. This is what lets a
+  // deploy onto a name held by a different kind refuse rather than silently
+  // replacing it, per this task's own rule.
+  if (existing !== undefined && existing.kind !== 'app' && existing.kind !== 'worker') {
+    throw deployKindConflict(projectName, name, existing.kind)
+  }
+
+  const kindFlag = typeof flags['kind'] === 'string' ? flags['kind'] : undefined
+  if (kindFlag !== undefined && kindFlag !== 'app' && kindFlag !== 'worker') {
+    throw new UsageError(`unknown --kind: ${kindFlag}. Expected app or worker.`)
+  }
+  const kind =
+    kindFlag ??
+    detectDeployKind({
+      dockerfile: existsSync(joinPath(path, 'Dockerfile')),
+      wrangler: existsSync(joinPath(path, 'wrangler.toml')) || existsSync(joinPath(path, 'wrangler.jsonc')),
+    })
+
+  // The rarer half of the same rule, now that the deploy's own kind is
+  // known: an app redeployed as though it were a worker, or the reverse,
+  // from a name it does not own.
+  if (existing !== undefined && existing.kind !== kind) {
+    throw deployKindConflict(projectName, name, existing.kind)
+  }
+
+  // A project is created on first deploy rather than required up front. The
+  // alternative, making the user run `hobby new` first, means two commands
+  // for the thing CLAUDE.md promises takes one.
+  if (!projectExists) {
     await c.api.createProject(projectName)
   }
 
@@ -305,7 +403,7 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     return 0
   }
   c.io.out(`deployed ${projectName}/${name}`)
-  c.io.out(`  image     ${resource.config.image}`)
+  c.io.out(`  image     ${imageLine(resource.config.image)}`)
   c.io.out(`  url       https://${hostnameOf(resource)}`)
   c.io.out('')
   c.io.out('It is asleep. The first request wakes it.')
@@ -315,7 +413,28 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
 export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const name = positionals[0]
   if (name === undefined) {
-    throw new UsageError('usage: hobby new <name>')
+    throw new UsageError('usage: hobby new <name> [--empty]')
+  }
+
+  const { project } = await c.api.createProject(name)
+
+  // `--empty`: a project and nothing else. A project is a namespace holding
+  // typed resources (root CLAUDE.md's Scope section), not a database with a
+  // name, and this is the door to that: no postgres is created, so there is
+  // nothing to roll back if this branch fails, because nothing past
+  // createProject was attempted. `hobby new <name>` without the flag stays
+  // exactly what it always was, below: the one-command ergonomic root
+  // CLAUDE.md sells, and there is no reason to spend it.
+  if (flags.empty === true) {
+    if (flags.json) {
+      c.io.out(JSON.stringify({ project }))
+      return 0
+    }
+    c.io.out(`project ${project.name}`)
+    c.io.out('no resources yet. add one with:')
+    c.io.out(`  hobby create postgres primary --project ${project.name}`)
+    c.io.out(`  hobby deploy ./path --project ${project.name}`)
+    return 0
   }
 
   // Three calls, one promise. `hobby new blog` is the command CLAUDE.md's
@@ -334,7 +453,6 @@ export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promi
   // here that deletes someone's existing work. The resource never reached
   // ready, so what this removes is at most an empty cluster initdb made
   // moments ago.
-  const { project } = await c.api.createProject(name)
   let resource
   try {
     ;({ resource } = await c.api.createResource(project.name, { kind: 'postgres', name: 'primary' }))
@@ -353,18 +471,22 @@ export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promi
     }
     throw err
   }
-  const { connectionString } = await c.api.getConnection(resource.id)
+  const { connectionString, tailnetConnectionString } = await c.api.getConnection(resource.id)
 
   if (flags.json) {
     // Not one raw API response (no single route did all of this), but a
     // composite object whose every field is exactly what its own call
     // returned. Human output below reads only connectionString off this
     // same object, never a second source.
-    c.io.out(JSON.stringify({ project, resource, connectionString }))
+    c.io.out(JSON.stringify({ project, resource, connectionString, tailnetConnectionString: tailnetConnectionString ?? null }))
     return 0
   }
 
   c.io.out(connectionString)
+  // Labelled second line, never a bare second string: the first line stays
+  // exactly what it always was so `hobby new blog | pbcopy` keeps grabbing
+  // one usable URI.
+  if (tailnetConnectionString != null) c.io.out(`tailnet: ${tailnetConnectionString}`)
   return 0
 }
 
@@ -409,6 +531,55 @@ export async function cmdLs(c: Ctx, flags: Flags): Promise<number> {
   return 0
 }
 
+export type CreatableKind = 'postgres' | 'app' | 'worker'
+
+// One call to the one route (`POST /v1/projects/:name/resources`, body
+// `{ kind, name }`, nothing else) and the same rendering either caller
+// below would otherwise have had to repeat. Shared, not duplicated, because
+// `hobby create <kind> <name>` and `hobby pg create <name>` reaching the
+// same code with the same body is what keeps the CLI and MCP from silently
+// diverging on this route, per root CLAUDE.md's "the daemon API is the only
+// control surface" seam.
+async function createResourceAndReport(
+  c: Ctx,
+  project: string,
+  kind: CreatableKind,
+  name: string,
+  json: boolean
+): Promise<number> {
+  const { resource } = await c.api.createResource(project, { kind, name })
+  if (json) {
+    c.io.out(JSON.stringify({ resource }))
+  } else {
+    c.io.out(renderResourceLine(resource))
+  }
+  return 0
+}
+
+// `hobby create <postgres|app|worker> <name> --project <p>`: the general
+// form for a resource with no code yet. Deliberately no `--port`: an app's
+// port describes its code (what $PORT the process inside actually listens
+// on), which does not exist until a deploy supplies it, so asking for one
+// here would be asking the user to answer a question about a Dockerfile
+// that has not been written.
+export async function cmdCreate(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const [kind, name] = positionals
+  if (kind !== 'postgres' && kind !== 'app' && kind !== 'worker') {
+    throw new UsageError('usage: hobby create <postgres|app|worker> <name> --project <project>')
+  }
+  if (typeof name !== 'string' || name.length === 0) {
+    throw new UsageError('usage: hobby create <kind> <name> --project <project>')
+  }
+  const project = flagString(flags, 'project')
+  if (project === undefined) {
+    throw new UsageError('usage: hobby create <kind> <name> --project <project>')
+  }
+  return createResourceAndReport(c, project, kind, name, flags.json === true)
+}
+
+// `hobby pg create --project <p> <name>`: kept as the explicit form for
+// anyone who prefers spelling out the kind, an alias for cmdCreate above
+// rather than a second implementation of the same route.
 export async function cmdPg(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const sub = positionals[0]
   if (sub !== 'create') {
@@ -419,14 +590,7 @@ export async function cmdPg(c: Ctx, positionals: string[], flags: Flags): Promis
   if (project === undefined || name === undefined) {
     throw new UsageError('usage: hobby pg create --project <project> <name>')
   }
-
-  const { resource } = await c.api.createResource(project, { kind: 'postgres', name })
-  if (flags.json) {
-    c.io.out(JSON.stringify({ resource }))
-  } else {
-    c.io.out(renderResourceLine(resource))
-  }
-  return 0
+  return createResourceAndReport(c, project, 'postgres', name, flags.json === true)
 }
 
 // Turns a postgres:// connection string into the libpq PG* environment
@@ -470,10 +634,10 @@ export async function cmdConnect(c: Ctx, positionals: string[], flags: Flags): P
     throw new UsageError('usage: hobby connect <target>')
   }
   const { resource } = await resolveTarget(c.api, target)
-  const { connectionString } = await c.api.getConnection(resource.id)
+  const { connectionString, tailnetConnectionString } = await c.api.getConnection(resource.id)
 
   if (flags.json) {
-    c.io.out(JSON.stringify({ connectionString }))
+    c.io.out(JSON.stringify({ connectionString, tailnetConnectionString: tailnetConnectionString ?? null }))
     return 0
   }
 

@@ -36,7 +36,9 @@ export * from './cli/exit.js'
 export * from './cli/client.js'
 export {
   cmdConnect,
+  cmdCreate,
   cmdDaemon,
+  cmdDeploy,
   cmdEject,
   cmdInit,
   cmdLogs,

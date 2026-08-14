@@ -62,4 +62,14 @@ export const workerKindHandler: ResourceKindHandler<WorkerResource> = {
     }
     return 'idle'
   },
+
+  // An undeployed worker has never had a container, by design: deploy is
+  // the transition that creates one (see startWorker in worker.ts). Without
+  // this, reconcile.ts would observe "no container" for a resource that
+  // never asked for one and relabel it `failed` on the daemon's next tick.
+  // See packages/core/src/kinds.ts's skipReconcile for why this lives on
+  // the handler rather than as a state check in reconcile.ts itself.
+  skipReconcile(resource: WorkerResource): boolean {
+    return resource.state === 'undeployed'
+  },
 }

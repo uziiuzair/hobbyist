@@ -38,37 +38,22 @@ const UNREACHABLE_CONSUMER_RESULT: DeliveryResult = {
 }
 
 // Whether a worker's own config records "no code has ever been deployed to
-// it", by either signal this branch might carry.
+// it", by either signal a worker row can carry.
 //
-// `WorkerConfig.manifest` is `WorkerManifest | null` on the branch this task
-// merges with, null before the first deploy (per this task's own brief). On
-// THIS branch the field does not exist at all yet:
-// packages/core/src/types.ts's WorkerConfig has no `manifest` key today, only
-// `source: { path, manifest: string }`, which names the FILE the manifest was
-// read from and is unrelated. So this checks structurally, through an index
-// signature, rather than through the type, which cannot yet name a field that
-// does not exist: `'manifest' in config && config.manifest === null` skips.
+// (a) `WorkerConfig.manifest` is `WorkerManifest | null` (ADR 0014), and null
+//     is exactly the record-before-code resting state: a row exists, no
+//     wrangler manifest has ever been read into it.
 //
-// The second signal is real today and does not depend on that field existing
-// at all: a worker whose `queues.consumers` array is empty declares no
-// consumer binding, which is what a worker created before any
-// `[[queues.consumers]]` block was ever deployed to it looks like on this
-// branch. Either signal alone is enough to skip.
-//
-// MERGE NOTE: `record-before-code` moved `queues` off `WorkerConfig` directly
-// and onto `WorkerConfig.manifest.queues` on `main`. `config.queues.consumers`
-// below will fail to COMPILE once this branch rebases onto that (the safe
-// failure, not a silent misbehavior), and needs rewriting to
-// `config.manifest?.queues.consumers` at that point, read together with
-// signal (a) above rather than as a second independent check: a null
-// `manifest` already covers "no consumers", so this becomes `config.manifest
-// === null || config.manifest.queues.consumers.length === 0`, or equivalent.
+// (b) A manifest that exists but declares no `[[queues.consumers]]` block.
+//     Deployed code, but none of it is bound to this queue, which is
+//     operationally the same thing here: there is nothing to deliver a batch
+//     to. Read after (a) rather than beside it, so the consumers array is
+//     only ever indexed through a manifest already proven non-null.
 function hasNoDeployedCode(config: WorkerConfig): boolean {
-  const record = config as unknown as Record<string, unknown>
-  if ('manifest' in record && record['manifest'] === null) {
+  if (config.manifest === null) {
     return true
   }
-  return config.queues.consumers.length === 0
+  return config.manifest.queues.consumers.length === 0
 }
 
 // Every queue this daemon is responsible for draining right now. Four

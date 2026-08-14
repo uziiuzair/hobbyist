@@ -5,6 +5,107 @@ delete one, even when it turns out to have been wrong. Especially then.
 
 Each entry: what changed, what it cost, and what was learned.
 
+## 2026-08-13: Record before code, and three things the plan's own review process found
+
+Branch `record-before-code`, ten tasks, ADR 0014. Resource creation split from
+deploy: `POST /v1/projects/:name/resources` now produces a row, an id and a
+hostname for an `app` or `worker` with no code behind it, in a new resting
+state `undeployed` (`packages/core/src/types.ts:15-31`), and `POST
+/v1/resources/:id/deploy` is the separate act that builds and ships code into
+it. `hobby deploy` resolves-or-creates and deploys in one call, so nothing
+changes for anyone using the CLI today; what changes is that Studio and MCP
+now have a route that does not require a filesystem path, once a later
+sub-project (D1) teaches them to call it. Suite grew from the 453-test
+baseline this branch started against to 500, tracked task by task in
+`.superpowers/sdd/2026-08-13-record-before-code/progress.md`.
+
+**The compiler was not the safety net the plan assumed.** Commit `abe7582`'s
+"widen the type and follow the compiler" technique worked cleanly for
+`ResourceKind` and leaked on every task that tried to lean on it here:
+
+- `correctedState` (`packages/cli/src/daemon/reconcile.ts:134-139`) is an
+  if/else chain with an unconditional final `return 'failed'`, not an
+  exhaustive switch, so adding `undeployed` to `ResourceState` produced zero
+  compile errors. Any future `ResourceState` member will produce zero again;
+  nothing currently forces a reader to visit this function when the union
+  grows.
+- A pre-existing `image: image as string` cast in `packages/app/src/app.ts`
+  (removed between commits `ef301b1` and `2b03ea8`) kept typechecking straight
+  through `ResourceConfigBase.image` becoming `string | null`, because a cast
+  to `string` is still assignable to the wider type. Found by grep, not by
+  `tsc`.
+- `createResource`'s return value is a pre-write snapshot: the plan's own
+  suggested code for `createAppResource`'s sourceless path
+  (`return { ...created, kind: 'app', config } as AppResource`) would have
+  reported `state: 'creating'` to every caller, because `setResourceState`
+  only writes the store and `created` never sees it. The implementer caught
+  this by re-fetching instead of spreading, on both the app and worker sides,
+  which also removed the `as` cast the plan's version required.
+- Template literals accept `null` with no compile error, and did, at three
+  genuine sites, until each was found by reading rather than by the type
+  checker: `renderCompose`'s app loop and its worker loop
+  (`packages/cli/src/daemon/routes.ts:505` and `:558`, both
+  `` `image: ${cfg.image}` ``), and `hobby deploy`'s own output
+  (`packages/cli/src/cli/commands.ts`, now routed through the guarding
+  `imageLine` at `:239-241` instead). `renderCompose`'s third `image:`
+  interpolation, in its postgres loop (`routes.ts:453`), was never actually
+  at risk: `PostgresConfig.image` is narrowed to non-nullable `string`
+  (`packages/core/src/types.ts:80`), so a `null` could not reach it and the
+  type checker would refuse the comparison outright (TS2367) had anyone
+  tried to guard it anyway. A fourth defect, related but a genuinely
+  different shape, surfaced in the same review pass: eject's Caddyfile step
+  routed a hostname for every app and worker regardless of whether it had
+  ever been deployed. That one was never a null reaching a template literal;
+  `hostname` and `hostPort` are allocated at creation and are never null. It
+  was a filter that was never applied, fixed by reusing the same
+  `isDeployed` predicate (`routes.ts:418-419`) that `renderCompose` now uses,
+  so the two consumers cannot drift apart again. Types find shape errors.
+  They do not find output errors, and three of these four were exactly that.
+
+**`hobby eject` was broken outright by this branch, and repaired within it.**
+Once resource creation and deploy split, a project could legitimately hold an
+app or worker that had never been deployed, and `hobby eject` had never been
+exercised against that shape. `buildRunnerManifest` throws when a worker's
+config carries a null manifest, and `ejectRoute` called into it with no
+try/catch, so a single undeployed worker aborted eject for the entire
+project, including every healthy postgres resource sitting next to it. Root
+`CLAUDE.md` ranks "you can always leave" first of three promises; this was
+that promise, broken, for the length of one task, on this branch, before
+review caught it. The fix skips an undeployed app or worker and names it in
+the response rather than rendering a service with no image. A second problem
+surfaced in the same review: a project with nothing left to eject (every
+resource skipped, or `hobby new --empty` with nothing added yet) previously
+got back a compose file with a bare `services:` key and nothing under it,
+which is not valid compose, confirmed by running
+`docker compose -f <file> config` against exactly that shape and getting
+"services must be a mapping" back. `ejectRoute` now refuses with an
+explanation instead of handing over a file docker itself cannot parse.
+
+**A test plan that names one kind has a hole in it, and the hole lands on the
+same kind every time.** Three consecutive tasks (the ones covering the
+sourceless-creation path, the deploy transition, and the worker config split)
+specced tests against `app` only and left `worker` untested, and `worker` is
+the kind that writes `durableObjectUniqueKeyModifier`
+(`packages/core/src/types.ts:141-147`), the sharpest data-loss edge in the
+codebase: regenerate it and every Durable Object's storage orphans silently.
+All three gaps were caught in review, not in production, but all three were
+the same gap recurring, not three independent misses. This project's whole
+architecture is kinds behind an interface (`ResourceKindHandler`,
+`packages/core/src/kinds.ts`), and more kinds are arriving; a review process
+that has to catch this by hand every time is a process that will eventually
+miss it once.
+
+**Cost:** ten tasks, four fix rounds triggered by reviewer findings (the
+`assertWorkerConfig` non-throwing path, the sourceless worker creation path,
+`deployWorker` coverage, and eject's two defects above), one task that
+stalled on its first dispatch and was re-run clean, one review that stalled
+mid-check and was re-run to completion, and one deliberate scope addition
+mid-branch (`ResourceKindHandler.skipReconcile`, taken on at a parallel
+session's request rather than left for two sessions to each build a
+same-shaped exemption). `main` moved under this branch once, a three-commit
+Tailscale ingress lane (`8fa4846`), merged in cleanly with zero conflicts
+despite touching four of the same files this branch also edits.
+
 ## 2026-08-10: Phase 2 compute, built in one session
 
 Two resource kinds, `app` and `worker`, plus the model fix and the HTTP wake

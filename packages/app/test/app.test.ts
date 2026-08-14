@@ -181,19 +181,66 @@ test('an app that never listens fails with the loopback-bind hint, not a bare ti
   )
 })
 
-test('an app needs exactly one of a build source and a prebuilt image', async () => {
+// Renamed from "an app needs exactly one of a build source and a prebuilt
+// image": neither-supplied used to be rejected here and is now the
+// record-before-code path (see 'an app created without a source or an
+// image...' below), so only the both-supplied case is still ambiguous and
+// still refused.
+test('an app cannot take both a build source and a prebuilt image', async () => {
   const deps = buildDeps()
   const project = makeProject(deps.store)
   const base = { project, name: 'web', containerPort: 3000, env: {}, databaseResourceId: null }
 
   await assert.rejects(
-    () => createAppResource(deps, { ...base, source: null, image: null }),
-    /either a build source or a prebuilt image/
-  )
-  await assert.rejects(
     () => createAppResource(deps, { ...base, source: sourceDir(), image: 'nginx' }),
-    /either a build source or a prebuilt image/
+    /takes either a build source or a prebuilt image, not both/
   )
+})
+
+test('an app created without a source is undeployed, has a hostname, and has no image', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+
+  const app = await createAppResource(deps, {
+    project,
+    name: 'site',
+    source: null,
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+
+  assert.equal(app.kind, 'app')
+  assert.equal(app.state, 'undeployed')
+  assert.equal(app.config.image, null)
+  // The hostname is allocated now, not at deploy, so Studio can show the URL
+  // before there is anything behind it and Caddy can be asked for a
+  // certificate for it.
+  assert.equal(app.config.hostname, 'site.blog.localhost')
+  assert.ok(app.config.hostPort > 0)
+})
+
+test('creating an app without a source builds nothing and starts nothing', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+
+  const app = await createAppResource(deps, {
+    project,
+    name: 'site',
+    source: null,
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+
+  // The fake runtime records every build and every container it was asked to
+  // create. A record is a row, not a container.
+  assert.deepEqual(runtime._builds, [])
+  assert.equal(runtime._specs.has(app.config.containerName), false)
+  assert.equal((await runtime.inspect(app.config.containerName)).exists, false)
 })
 
 // The reason a project has a docker network at all. An app reaches its
@@ -291,6 +338,11 @@ test('deploy rebuilds, replaces the container, and keeps the previous image on d
     databaseResourceId: null,
   })
   const firstImage = app.config.image
+  // Built from a source, so createAppResource must have produced a real
+  // image by the time it returned; narrowed rather than asserted away so a
+  // regression that leaves it null fails this test loudly instead of at the
+  // Set lookup below.
+  assert.ok(firstImage !== null)
 
   // A later clock so the new tag differs from the first.
   deps.now = () => 1_754_870_500_000
@@ -320,6 +372,113 @@ test('deploy refuses an app that was created from a prebuilt image', async () =>
   await assert.rejects(() => deployApp(deps, app), /has no source to rebuild/)
 })
 
+// Record-before-code's actual acceptance criterion: deploy is the transition
+// out of `undeployed`, for the CLI's create-and-deploy-in-one-call door and
+// for Studio/MCP's create-now-deploy-later door alike.
+test('deploying an undeployed app populates its image and leaves it sleeping', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const created = await createAppResource(deps, {
+    project,
+    name: 'site',
+    source: null,
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+  assert.equal(created.state, 'undeployed')
+
+  const result = await deployApp(deps, created, { source: sourceDir() })
+
+  assert.equal(result.resource.state, 'sleeping')
+  assert.notEqual(result.resource.config.image, null)
+  // The identity allocated at creation survives the deploy. A hostname that
+  // changed on first deploy would invalidate anything the user had already
+  // written down or pointed DNS at.
+  assert.equal(result.resource.config.hostname, created.config.hostname)
+  assert.equal(result.resource.config.hostPort, created.config.hostPort)
+})
+
+test('a failed first deploy returns the resource to undeployed, not failed', async () => {
+  // `failed` means "there is code here and it broke". `undeployed` means
+  // "there is no code here". Collapsing the two leaves Studio unable to say
+  // which command fixes it, which is the whole reason the state exists.
+  const runtime = createFakeRuntime()
+  runtime.build = async (): Promise<string> => {
+    throw new HobbyError('build_failed', 'docker build failed', 'step 3 of 7')
+  }
+  const deps = buildDeps({ runtime })
+  const project = makeProject(deps.store)
+  const created = await createAppResource(deps, {
+    project,
+    name: 'site',
+    source: null,
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+
+  await assert.rejects(() => deployApp(deps, created, { source: sourceDir() }), /docker build failed/)
+
+  assert.equal(deps.store.getResource(created.id)?.state, 'undeployed')
+})
+
+// I4: unlike the build-failure test above, this fails AFTER the container was
+// created and started (the build succeeds, replaceContainer and
+// runtime.start both succeed, only the readiness probe fails), which is the
+// shape that used to leak a container nothing would ever stop: rolling
+// `state` back to `undeployed` hides it from reconcile.ts (skipReconcile)
+// and from the hibernator (its `state !== 'running'` gate), so a container
+// left running here would run forever.
+test('a failed first deploy on the readiness probe leaves no running container', async () => {
+  const deps = buildDeps({ appProbeFactory: () => async () => false })
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const created = await createAppResource(deps, {
+    project,
+    name: 'site',
+    source: null,
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+
+  await assert.rejects(() => deployApp(deps, created, { source: sourceDir() }), /did not start listening/)
+
+  assert.equal(deps.store.getResource(created.id)?.state, 'undeployed')
+  const status = await runtime.inspect(created.config.containerName)
+  assert.equal(status.exists, false)
+})
+
+test('a failed redeploy of a working app leaves it failed, because it does have code', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const source = sourceDir()
+
+  const created = await createAppResource(deps, {
+    project,
+    name: 'site',
+    source,
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+  assert.equal(created.state, 'sleeping')
+
+  runtime.build = async (): Promise<string> => {
+    throw new HobbyError('build_failed', 'docker build failed', 'step 3 of 7')
+  }
+
+  await assert.rejects(() => deployApp(deps, created, { source }), /docker build failed/)
+
+  assert.equal(deps.store.getResource(created.id)?.state, 'failed')
+})
+
 test('destroy removes the container and only an image we built', async () => {
   const deps = buildDeps()
   const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
@@ -335,6 +494,9 @@ test('destroy removes the container and only an image we built', async () => {
     databaseResourceId: null,
   })
   const builtImage = built.config.image
+  // Built from a source, so createAppResource must have produced a real
+  // image by the time it returned.
+  assert.ok(builtImage !== null)
   await destroyApp(deps, built)
   assert.equal(runtime._images.has(builtImage), false, 'an image we built goes with the resource')
   assert.equal((await runtime.inspect(built.config.containerName)).exists, false)

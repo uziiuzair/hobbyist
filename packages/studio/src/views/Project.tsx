@@ -204,7 +204,7 @@ export function Project({ projectName, onChanged }: { projectName: string; onCha
         <div className="dash-side">
           <section className="panel">
             <div className="panel-head">
-              <span className="panel-title">Databases</span>
+              <span className="panel-title">Services</span>
               <button type="button" className="btn btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setDialog('new')}>
                 New database
               </button>
@@ -234,12 +234,14 @@ export function Project({ projectName, onChanged }: { projectName: string; onCha
             </div>
 
             <Row label="Sleeps after" value={idleMinutes === null ? 'Never' : `${idleMinutes} min idle`} />
-            {selected !== undefined && <Row label="Postgres" value={selected.config.image} mono />}
             {/* Data directory is a postgres-only fact: an app or a worker has
                 no PGDATA, and since the resource model was widened for Phase 2
                 the config is a union that only carries dataDir on one member. */}
             {selected !== undefined && selected.kind === 'postgres' && (
-              <Row label="Data directory" value={selected.config.dataDir} mono />
+              <>
+                <Row label="Postgres" value={selected.config.image} mono />
+                <Row label="Data directory" value={selected.config.dataDir} mono />
+              </>
             )}
             <Row label="Network" value={project.networkName} mono />
             <Row
@@ -289,30 +291,51 @@ function StatStrip({
   totals: { databases: number; awake: number; bytes: number; connections: number }
   free: { freeBytes: number; reflink: boolean } | null
 }) {
+  const [disk, diskUnit] = splitBytes(totals.bytes)
+  const [freeVal, freeUnit] = free === null ? ['--', undefined] : splitBytes(free.freeBytes)
   return (
-    <div className="stats">
-      <div className="stat-row">
-        <Stat label="Databases" value={String(totals.databases)} />
-        <Stat label="Awake" value={`${totals.awake}`} unit={`of ${totals.databases}`} live={totals.awake > 0} />
-        <Stat label="Data on disk" value={formatBytes(totals.bytes)} />
-        <Stat label="Connections" value={String(totals.connections)} />
-        <Stat label="Disk free" value={free === null ? '--' : formatBytes(free.freeBytes)} />
+    <>
+      <div className="tiles">
+        <Tile hue="sage" label="Services" value={String(totals.databases)} />
+        <Tile hue="iris" label="Awake" value={String(totals.awake)} of={`of ${totals.databases}`} />
+        <Tile hue="honey" label="Data on disk" value={disk} of={diskUnit} />
+        <Tile hue="plain" label="Connections" value={String(totals.connections)} />
+        <Tile hue="rose" label="Disk free" value={freeVal} of={freeUnit} />
       </div>
-      <p className="stats-note">
+      <p className="tiles-note">
         Read from this machine, right now. Size comes from a running database; a sleeping one reports the last
         figure the daemon saw, because waking it to answer would defeat the point.
       </p>
-    </div>
+    </>
   )
 }
 
-function Stat({ label, value, unit, live }: { label: string; value: string; unit?: string; live?: boolean }) {
+// formatBytes renders "132 MB"; the tile sets the figure in the display face
+// and the unit in the quiet one, so the string splits at its only space.
+function splitBytes(bytes: number): [string, string | undefined] {
+  const parts = formatBytes(bytes).split(' ')
+  return [parts[0] ?? '--', parts[1]]
+}
+
+// Written out as whole literals so the class audit can see every one.
+const TILE_CLASS = {
+  sage: 'tile tile-sage',
+  iris: 'tile tile-iris',
+  honey: 'tile tile-honey',
+  rose: 'tile tile-rose',
+  plain: 'tile tile-plain',
+} as const
+
+function Tile({ hue, label, value, of }: { hue: keyof typeof TILE_CLASS; label: string; value: string; of?: string }) {
   return (
-    <div className="stat">
-      <div className="stat-label">{label}</div>
-      <div className={`stat-value${live === true ? ' is-live' : ''}`}>
+    <div className={TILE_CLASS[hue]}>
+      <div className="tile-label">
+        <i aria-hidden="true" />
+        {label}
+      </div>
+      <div className="tile-value">
         {value}
-        {unit !== undefined && <span className="stat-unit">{unit}</span>}
+        {of !== undefined && <span className="of">{of}</span>}
       </div>
     </div>
   )
@@ -373,16 +396,24 @@ function DatabaseRow({
           {stats.connectionCount ?? 0} connection{(stats.connectionCount ?? 0) === 1 ? '' : 's'}
         </span>
         <span>Last active {formatSince(stats.lastActiveAt)}</span>
-        <button
-          type="button"
-          className="btn btn-sm btn-ghost"
-          style={{ marginLeft: 'auto' }}
-          onClick={() => act(resource.state === 'running' ? 'sleep' : 'wake')}
-          disabled={busy !== null}
-        >
-          {busy !== null && <span className="spinner" />}
-          {resource.state === 'running' ? 'Sleep' : 'Wake'}
-        </button>
+        {/* No wake affordance on an undeployed record: there is no code to
+            start, and a button that cannot succeed advertises a capability
+            that does not exist. Compared as string because 'undeployed'
+            joins core's ResourceState with the record-before-code work
+            (docs/superpowers/specs/2026-08-13-record-before-code-design.md);
+            Studio renders it correctly either way. */}
+        {(resource.state as string) !== 'undeployed' && (
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            style={{ marginLeft: 'auto' }}
+            onClick={() => act(resource.state === 'running' ? 'sleep' : 'wake')}
+            disabled={busy !== null}
+          >
+            {busy !== null && <span className="spinner" />}
+            {resource.state === 'running' ? 'Sleep' : 'Wake'}
+          </button>
+        )}
       </div>
 
       {actionError !== null && <div className="notice notice-danger">{actionError}</div>}

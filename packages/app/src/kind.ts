@@ -29,4 +29,14 @@ export const appKindHandler: ResourceKindHandler<AppResource> = {
   // covers the in-flight case (see packages/proxy/src/http.ts, where the
   // activity handle is held for the whole response, streams included). core's
   // guardFor reads an absent guard as 'idle'.
+
+  // An undeployed app has never had a container, by design: deploy is the
+  // transition that creates one (see startApp in app.ts). Without this,
+  // reconcile.ts would observe "no container" for a resource that never
+  // asked for one and relabel it `failed` on the daemon's next tick. See
+  // packages/core/src/kinds.ts's skipReconcile for why this lives on the
+  // handler rather than as a state check in reconcile.ts itself.
+  skipReconcile(resource: AppResource): boolean {
+    return resource.state === 'undeployed'
+  },
 }
