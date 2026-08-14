@@ -23,11 +23,15 @@ import {
   type PostgresConfig,
   type Store,
   type WorkerConfig,
+  type WorkerManifest,
+  type WorkerResource,
 } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
 import { DEFAULT_CONSUMER_OPTIONS, leaseBatch, openQueueDb, queueDbPath } from '@hobby.sh/queue'
 import { createDefaultKindRegistry } from '../src/daemon/context.js'
 import { createApp, createProxyDeps, reconcile, type DaemonContext } from '../src/index.js'
+import { syncWorkerQueueBindings } from '../src/daemon/routes.js'
+import { drainableQueues } from '../src/daemon/queues.js'
 
 function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
   return {
@@ -102,6 +106,61 @@ function sampleUndeployedWorkerConfig(overrides: Partial<WorkerConfig> = {}): Wo
     databaseResourceId: null,
     durableObjectUniqueKeyModifier: 'res-placeholder',
     manifest: null,
+    ...overrides,
+  }
+}
+
+// A deployed worker's manifest: what deployWorker actually persists after a
+// real deploy (packages/worker/src/worker.ts's own config.manifest write).
+// Queues default to empty; tests below fill in producers/consumers as their
+// own scenario needs.
+function sampleWorkerManifest(overrides: Partial<WorkerManifest> = {}): WorkerManifest {
+  return {
+    source: { path: '/src/api', manifest: 'wrangler.toml' },
+    compatibilityDate: '2026-08-01',
+    compatibilityFlags: [],
+    vars: {},
+    kvNamespaces: [],
+    r2Buckets: [],
+    d1Databases: [],
+    queues: { producers: [], consumers: [] },
+    durableObjects: [],
+    ...overrides,
+  }
+}
+
+// A worker that has been deployed at least once: manifest non-null, exactly
+// what syncWorkerQueueBindings (routes.ts) requires to have anything to do.
+function sampleDeployedWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
+  return {
+    image: 'hobby/workerd:1',
+    containerName: `hobby-blog-api-${randomUUID()}`,
+    hostPort: 35600,
+    containerPort: 8787,
+    controlPort: 35601,
+    queueToken: 'res-placeholder-token',
+    hostname: 'api.blog.hobby.local',
+    databaseResourceId: null,
+    durableObjectUniqueKeyModifier: 'res-placeholder',
+    manifest: sampleWorkerManifest(),
+    ...overrides,
+  }
+}
+
+// One [[queues.consumers]] entry naming `queue`, every tuning key null
+// (absent from wrangler.toml), which is the common case these tests start
+// from before overriding the one key a given scenario cares about.
+function consumerEntry(
+  queue: string,
+  overrides: Partial<WorkerManifest['queues']['consumers'][number]> = {}
+): WorkerManifest['queues']['consumers'][number] {
+  return {
+    queue,
+    maxBatchSize: null,
+    maxBatchTimeoutSeconds: null,
+    maxRetries: null,
+    retryDelaySeconds: null,
+    deadLetterQueue: null,
     ...overrides,
   }
 }
@@ -1448,4 +1507,210 @@ test('POST /v1/resources/:id/queue/retention rejects a value outside Cloudflare 
     const after = await call(baseUrl, 'GET', `/v1/resources/${queueId}`)
     assert.equal((after.body as { resource: QueueResourceBody }).resource.config.retentionSeconds, 3600)
   })
+})
+
+// ---------------------------------------------------------------------------
+// syncWorkerQueueBindings (Task 16 fix round 1): the deploy-time wiring that
+// creates a queue a worker's manifest names, binds a consumer, and refuses
+// or clears as the manifest changes. Called directly against a
+// DaemonContext rather than driven through a full HTTP deploy: deployWorker
+// needs a real build and a real readiness probe, and this daemon's test
+// harness has no seam to fake worker readiness the way postgres's
+// probeFactory lets routes.test.ts fake postgres (see buildContext's own
+// comment). deployResourceRoute's own call site (routes.ts) is what actually
+// wires this into production; this file pins what it does once called.
+// ---------------------------------------------------------------------------
+
+test('syncWorkerQueueBindings creates a queue a consumer names, binds it to the worker, and the queue then appears in the drainable list', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const worker = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'api',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [consumerEntry('jobs')] } }),
+    }),
+  }) as WorkerResource
+  ctx.store.setResourceState(worker.id, 'sleeping')
+
+  assert.equal(ctx.store.getResourceByName(project.id, 'jobs'), null, 'the queue does not exist yet')
+
+  await syncWorkerQueueBindings(ctx, project, worker)
+
+  const queue = ctx.store.getResourceByName(project.id, 'jobs')
+  assert.ok(queue !== null && queue.kind === 'queue', 'the queue was created')
+  assert.equal(queue.config.consumerResourceId, worker.id, 'bound to the deploying worker')
+  assert.equal(queue.state, 'running')
+
+  // The assertion that pins the actual gap the fix round found: a field set
+  // on the row is not the same thing as reaching the tick. drainableQueues
+  // is the join the tick actually reads (packages/cli/src/daemon/queues.ts),
+  // and it excludes a queue for four separate reasons (kind, no consumer, no
+  // deployed code, released project); this worker satisfies all four.
+  const drainable = drainableQueues(ctx)
+  assert.equal(drainable.length, 1)
+  assert.equal(drainable[0]?.queueName, 'jobs')
+  assert.equal(drainable[0]?.consumerResourceId, worker.id)
+
+  ctx.store.close()
+})
+
+test('syncWorkerQueueBindings creates a producer-only queue with no consumer bound', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const worker = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'api',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({ queues: { producers: [{ queue: 'events', binding: 'EVENTS' }], consumers: [] } }),
+    }),
+  }) as WorkerResource
+
+  await syncWorkerQueueBindings(ctx, project, worker)
+
+  const queue = ctx.store.getResourceByName(project.id, 'events')
+  assert.ok(queue !== null && queue.kind === 'queue')
+  assert.equal(queue.config.consumerResourceId, null, 'nothing declared itself this queue\'s consumer')
+
+  // Not drainable either: drainableQueues excludes any queue with no
+  // consumer bound, exactly like a Cloudflare queue nothing consumes.
+  assert.equal(drainableQueues(ctx).length, 0)
+
+  ctx.store.close()
+})
+
+test('syncWorkerQueueBindings creates a consumer\'s dead letter queue too', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const worker = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'api',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({
+        queues: { producers: [], consumers: [consumerEntry('jobs', { deadLetterQueue: 'jobs-dlq' })] },
+      }),
+    }),
+  }) as WorkerResource
+
+  await syncWorkerQueueBindings(ctx, project, worker)
+
+  const jobs = ctx.store.getResourceByName(project.id, 'jobs')
+  assert.ok(jobs !== null && jobs.kind === 'queue')
+  assert.equal(jobs.config.deadLetterQueue, 'jobs-dlq')
+
+  const dlq = ctx.store.getResourceByName(project.id, 'jobs-dlq')
+  assert.ok(dlq !== null && dlq.kind === 'queue', 'the dead letter queue itself was created, matching Cloudflare')
+  // Named as a dead letter target, not as a consumer: nothing consumes the
+  // dead letter queue itself just because it was auto-created.
+  assert.equal(dlq.config.consumerResourceId, null)
+
+  ctx.store.close()
+})
+
+test('syncWorkerQueueBindings copies only the tuning keys the manifest actually set, leaving the rest null', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const worker = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'api',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({
+        queues: { producers: [], consumers: [consumerEntry('jobs', { maxBatchSize: 20 })] },
+      }),
+    }),
+  }) as WorkerResource
+
+  await syncWorkerQueueBindings(ctx, project, worker)
+
+  const queue = ctx.store.getResourceByName(project.id, 'jobs')
+  assert.ok(queue !== null && queue.kind === 'queue')
+  assert.equal(queue.config.maxBatchSize, 20, 'the manifest set this explicitly')
+  assert.equal(queue.config.maxBatchTimeoutSeconds, null, 'the manifest left this unset; the row is not stamped with a default')
+  assert.equal(queue.config.maxRetries, null)
+  assert.equal(queue.config.retryDelaySeconds, null)
+
+  ctx.store.close()
+})
+
+test('syncWorkerQueueBindings refuses a second worker consuming an already-consumed queue, naming both workers', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const alpha = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'alpha',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [consumerEntry('jobs')] } }),
+    }),
+  }) as WorkerResource
+  await syncWorkerQueueBindings(ctx, project, alpha)
+
+  const beta = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'beta',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [consumerEntry('jobs')] } }),
+    }),
+  }) as WorkerResource
+
+  await assert.rejects(
+    () => syncWorkerQueueBindings(ctx, project, beta),
+    (err: unknown) =>
+      err instanceof HobbyError &&
+      err.code === 'usage' &&
+      err.message.includes('alpha') &&
+      err.message.includes('beta') &&
+      err.message.includes('jobs')
+  )
+
+  // Refused, not stolen: alpha's binding is exactly as it was.
+  const queue = ctx.store.getResourceByName(project.id, 'jobs')
+  assert.ok(queue !== null && queue.kind === 'queue')
+  assert.equal(queue.config.consumerResourceId, alpha.id)
+
+  ctx.store.close()
+})
+
+test('syncWorkerQueueBindings clears a stale consumer binding once the redeployed manifest no longer names it', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const worker = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'api',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [consumerEntry('jobs')] } }),
+    }),
+  }) as WorkerResource
+  await syncWorkerQueueBindings(ctx, project, worker)
+
+  const bound = ctx.store.getResourceByName(project.id, 'jobs')
+  assert.ok(bound !== null && bound.kind === 'queue')
+  assert.equal(bound.config.consumerResourceId, worker.id)
+
+  // A redeploy whose manifest no longer declares the consumer: the same
+  // worker row, a different manifest, exactly what deployWorker persists
+  // before this function is ever called again.
+  const redeployed = ctx.store.getResource(worker.id)
+  assert.ok(redeployed !== null && redeployed.kind === 'worker')
+  ctx.store.updateResourceConfig(worker.id, {
+    ...redeployed.config,
+    manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [] } }),
+  })
+  const afterRedeploy = ctx.store.getResource(worker.id)
+  assert.ok(afterRedeploy !== null && afterRedeploy.kind === 'worker')
+
+  await syncWorkerQueueBindings(ctx, project, afterRedeploy)
+
+  const releasedQueue = ctx.store.getResourceByName(project.id, 'jobs')
+  assert.ok(releasedQueue !== null && releasedQueue.kind === 'queue')
+  assert.equal(releasedQueue.config.consumerResourceId, null, 'a stale pointer must not survive a redeploy that dropped it')
+  assert.equal(drainableQueues(ctx).length, 0, 'no longer drainable: nothing consumes it now')
+
+  ctx.store.close()
 })

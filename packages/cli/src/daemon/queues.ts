@@ -12,6 +12,7 @@
 import {
   queueDbPath,
   deliverBatch,
+  DEFAULT_CONSUMER_OPTIONS,
   type ConsumerOptions,
   type DeliveryResult,
   type DrainableQueue,
@@ -102,11 +103,15 @@ export function drainableQueues(ctx: DaemonContext): DrainableQueue[] {
       continue
     }
 
+    // A tuning key a deploy never set, or a deploy explicitly omitted, is
+    // null on the row (QueueConfig's own comment, packages/core/src/types.ts):
+    // this is the one place that null is resolved to a real number, at read
+    // time, so DEFAULT_CONSUMER_OPTIONS is never copied into the row itself.
     const options: ConsumerOptions = {
-      maxBatchSize: resource.config.maxBatchSize,
-      maxBatchTimeoutSeconds: resource.config.maxBatchTimeoutSeconds,
-      maxRetries: resource.config.maxRetries,
-      retryDelaySeconds: resource.config.retryDelaySeconds,
+      maxBatchSize: resource.config.maxBatchSize ?? DEFAULT_CONSUMER_OPTIONS.maxBatchSize,
+      maxBatchTimeoutSeconds: resource.config.maxBatchTimeoutSeconds ?? DEFAULT_CONSUMER_OPTIONS.maxBatchTimeoutSeconds,
+      maxRetries: resource.config.maxRetries ?? DEFAULT_CONSUMER_OPTIONS.maxRetries,
+      retryDelaySeconds: resource.config.retryDelaySeconds ?? DEFAULT_CONSUMER_OPTIONS.retryDelaySeconds,
       deadLetterQueue: resource.config.deadLetterQueue,
     }
 

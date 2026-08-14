@@ -28,7 +28,6 @@ import {
 import { createAppResource, deployApp, type AppSource } from '@hobby.sh/app'
 import { connectionString, createPostgres, runQuery } from '@hobby.sh/pg'
 import {
-  DEFAULT_CONSUMER_OPTIONS,
   DEFAULT_RETENTION_SECONDS,
   MAX_RETENTION_SECONDS,
   MIN_RETENTION_SECONDS,
@@ -259,6 +258,65 @@ function readStringMap(value: unknown): Record<string, string> {
   return out
 }
 
+// The one place a queue resource is built: from `hobby queue create` /
+// POST /v1/projects/:name/resources with kind 'queue' (createResourceRoute
+// below), and from syncWorkerQueueBindings (further down) auto-creating one
+// a deployed worker's manifest names but that does not exist yet, matching
+// the spec's own promise that a queue named in a binding is created if
+// missing, the same way Cloudflare itself behaves.
+//
+// No dedicated createQueueResource function exists in @hobby.sh/queue
+// (unlike createPostgres/createAppResource/createWorkerResource): a queue's
+// row is just its defaults, so validateName plus store.createResource is
+// the whole of it.
+//
+// The four tuning fields are seeded null, not DEFAULT_CONSUMER_OPTIONS's
+// concrete numbers: see QueueConfig's own comment (packages/core/src/types.ts)
+// for why a stamped default is a second source of truth that drifts. A
+// producer-only queue, or one auto-created for a not-yet-deployed consumer,
+// genuinely has no tuning configured yet, and null says so honestly.
+//
+// Exported, alongside syncWorkerQueueBindings below, so routes.test.ts can
+// exercise the manifest-to-store wiring directly against a DaemonContext
+// without also having to drive a full worker deploy (a real build and a
+// real readiness probe, which this daemon's test harness has no seam to
+// fake for a worker the way postgres's probeFactory lets it fake postgres).
+// Nothing in production calls either of these except the two routes below.
+export async function createQueueResource(ctx: DaemonContext, project: Project, name: string): Promise<QueueResource> {
+  validateName(name)
+  const config: QueueConfig = {
+    // image, containerName and hostPort are unused for this kind (see
+    // QueueConfig's own comment on ResourceConfigBase): every field here
+    // matches the shape kind-dispatch and queue-kind tests already fix as
+    // this kind's zero value, so a resource built by this route and one
+    // built by a test fixture are never distinguishable later.
+    image: '',
+    containerName: '',
+    hostPort: 0,
+    retentionSeconds: DEFAULT_RETENTION_SECONDS,
+    consumerResourceId: null,
+    maxBatchSize: null,
+    maxBatchTimeoutSeconds: null,
+    maxRetries: null,
+    retryDelaySeconds: null,
+    deadLetterQueue: null,
+  }
+  const resource = ctx.store.createResource({ projectId: project.id, kind: 'queue', name, config })
+  // start() only creates the sqlite file (queueKindHandler.start,
+  // packages/queue/src/kind.ts): synchronous, cheap, and nothing to poll
+  // for readiness the way a container has. A queue is `running` from the
+  // moment it exists and never anything else (queue-kind.test.ts's own
+  // header comment), which is what lets the hibernator and reconcile both
+  // treat every queue row identically forever.
+  await ctx.kinds.get('queue').start(ctx, resource)
+  ctx.store.setResourceState(resource.id, 'running')
+  const created = getResourceOrThrow(ctx, resource.id)
+  if (created.kind !== 'queue') {
+    throw new HobbyError('internal', `queue ${name} was created but reads back as a ${created.kind}`)
+  }
+  return created
+}
+
 async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, projectName: string): Promise<Resource> {
   const project = getProjectByNameOrThrow(ctx, projectName)
   const body = await readJsonBody(req)
@@ -324,39 +382,7 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
   }
 
   if (kind === 'queue') {
-    // No dedicated createQueueResource function exists in @hobby.sh/queue
-    // (unlike createPostgres/createAppResource/createWorkerResource): a
-    // queue's row is just its defaults, so validateName plus store.createResource
-    // is the whole of it, done inline here the same way core/kinds.ts expects
-    // any kind to be reachable from exactly one place.
-    validateName(name)
-    const config: QueueConfig = {
-      // image, containerName and hostPort are unused for this kind (see
-      // QueueConfig's own comment on ResourceConfigBase): every field here
-      // matches the shape kind-dispatch and queue-kind tests already fix as
-      // this kind's zero value, so a resource built by this route and one
-      // built by a test fixture are never distinguishable later.
-      image: '',
-      containerName: '',
-      hostPort: 0,
-      retentionSeconds: DEFAULT_RETENTION_SECONDS,
-      consumerResourceId: null,
-      maxBatchSize: DEFAULT_CONSUMER_OPTIONS.maxBatchSize,
-      maxBatchTimeoutSeconds: DEFAULT_CONSUMER_OPTIONS.maxBatchTimeoutSeconds,
-      maxRetries: DEFAULT_CONSUMER_OPTIONS.maxRetries,
-      retryDelaySeconds: DEFAULT_CONSUMER_OPTIONS.retryDelaySeconds,
-      deadLetterQueue: null,
-    }
-    const resource = ctx.store.createResource({ projectId: project.id, kind: 'queue', name, config })
-    // start() only creates the sqlite file (queueKindHandler.start,
-    // packages/queue/src/kind.ts): synchronous, cheap, and nothing to poll
-    // for readiness the way a container has. A queue is `running` from the
-    // moment it exists and never anything else (queue-kind.test.ts's own
-    // header comment), which is what lets the hibernator and reconcile both
-    // treat every queue row identically forever.
-    await ctx.kinds.get('queue').start(ctx, resource)
-    ctx.store.setResourceState(resource.id, 'running')
-    return getResourceOrThrow(ctx, resource.id)
+    return createQueueResource(ctx, project, name)
   }
 
   throw new HobbyError(
@@ -364,6 +390,138 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
     `unsupported resource kind: ${String(kind)}`,
     `registered kinds: ${ctx.kinds.kinds().join(', ')}`
   )
+}
+
+// The spec's own promise: a queue named in a deployed manifest's producers,
+// consumers, or a consumer's dead letter queue is created if it does not
+// exist yet, the same way Cloudflare itself auto-creates a missing one.
+// Runs on every worker deploy that produces a non-null manifest, which is
+// what lets a queue binding written into wrangler.toml be usable the moment
+// the deploy that declares it succeeds, with no separate `hobby queue
+// create` step required first.
+//
+// Three things happen here, in order:
+//   1. every named queue exists, created via createQueueResource above (the
+//      same defaults `hobby queue create` uses) if it did not already.
+//   2. every consumer entry claims its queue: consumerResourceId is set to
+//      this worker, and its non-null tuning keys are copied onto the row
+//      (QueueConfig's own comment explains why only non-null ones). A queue
+//      already consumed by a DIFFERENT worker refuses the whole call rather
+//      than silently moving the binding: Cloudflare allows exactly one
+//      consumer per queue, and the deploy trying to add a second one is the
+//      one that is wrong. This was an open question the spec never
+//      resolved; refusing loudly is the safer default; see the task report.
+//   3. any queue this worker used to consume that its current manifest no
+//      longer names is released back to consumerResourceId: null. A stale
+//      pointer would leave the tick delivering to a worker with no handler
+//      for it, which is worse than delivering to nobody.
+//
+// Lives beside deployResourceRoute rather than inside deployWorker
+// (packages/worker/src/worker.ts) because this is a join between a
+// manifest and OTHER resources in the same project, and WorkerDeps
+// deliberately carries no KindRegistry: nothing else in that package ever
+// creates a sibling resource, and giving it one only for this would widen a
+// dependency the rest of that package does not need. By the time this
+// function runs, deployWorker has already parsed and persisted the
+// manifest and started and stopped the container to prove it serves; only
+// the HTTP response, which is what "reported deployed" means to a caller,
+// is still pending.
+export async function syncWorkerQueueBindings(ctx: DaemonContext, project: Project, worker: WorkerResource): Promise<void> {
+  const manifest = worker.config.manifest
+  if (manifest === null) {
+    return
+  }
+
+  // Every name this manifest references at all, producer or consumer or
+  // dead letter target, deduplicated: a name in more than one role is only
+  // ever created once.
+  const names = new Set<string>()
+  for (const producer of manifest.queues.producers) {
+    names.add(producer.queue)
+  }
+  for (const consumer of manifest.queues.consumers) {
+    names.add(consumer.queue)
+    if (consumer.deadLetterQueue !== null) {
+      names.add(consumer.deadLetterQueue)
+    }
+  }
+
+  const byName = new Map<string, QueueResource>()
+  for (const name of names) {
+    const existing = ctx.store.getResourceByName(project.id, name)
+    if (existing === null) {
+      byName.set(name, await createQueueResource(ctx, project, name))
+      continue
+    }
+    if (existing.kind !== 'queue') {
+      throw new HobbyError(
+        'usage',
+        `${worker.name}'s wrangler config names a queue "${name}", but ${project.name}/${name} is already a ${existing.kind}`,
+        `rename the queue in ${worker.name}'s wrangler config, or rename the existing ${existing.kind}`
+      )
+    }
+    byName.set(name, existing)
+  }
+
+  // Consumer bindings, claimed one at a time. Checked before anything is
+  // written for THIS consumer entry, so a conflict discovered on the second
+  // of two consumer entries in one manifest cannot leave the first one's
+  // claim written while the call as a whole still throws.
+  for (const consumerEntry of manifest.queues.consumers) {
+    const queue = byName.get(consumerEntry.queue)
+    if (queue === undefined) {
+      // Created (or refused) in the loop above; only reachable here if that
+      // loop already threw, which propagated out of this function first.
+      continue
+    }
+    if (queue.config.consumerResourceId !== null && queue.config.consumerResourceId !== worker.id) {
+      const other = ctx.store.getResource(queue.config.consumerResourceId)
+      const otherName = other === null ? queue.config.consumerResourceId : other.name
+      throw new HobbyError(
+        'usage',
+        `queue ${queue.name} already has worker ${otherName} as its consumer, and worker ${worker.name} also declares itself one`,
+        `a queue can have exactly one consumer; remove the [[queues.consumers]] block naming ${queue.name} from ${worker.name} or from ${otherName}`
+      )
+    }
+
+    const config: QueueConfig = { ...queue.config, consumerResourceId: worker.id }
+    if (consumerEntry.maxBatchSize !== null) {
+      config.maxBatchSize = consumerEntry.maxBatchSize
+    }
+    if (consumerEntry.maxBatchTimeoutSeconds !== null) {
+      config.maxBatchTimeoutSeconds = consumerEntry.maxBatchTimeoutSeconds
+    }
+    if (consumerEntry.maxRetries !== null) {
+      config.maxRetries = consumerEntry.maxRetries
+    }
+    if (consumerEntry.retryDelaySeconds !== null) {
+      config.retryDelaySeconds = consumerEntry.retryDelaySeconds
+    }
+    if (consumerEntry.deadLetterQueue !== null) {
+      config.deadLetterQueue = consumerEntry.deadLetterQueue
+    }
+    ctx.store.updateResourceConfig(queue.id, config)
+    byName.set(queue.name, { ...queue, config })
+  }
+
+  // Release a stale claim: this worker consumed a queue before and its
+  // current manifest no longer names it. Scoped to consumerResourceId ===
+  // worker.id specifically, never to a queue this worker merely produces to
+  // or does not mention at all, so an unrelated queue's binding is never
+  // touched by someone else's deploy.
+  const stillConsumed = new Set(manifest.queues.consumers.map((c) => c.queue))
+  for (const candidate of ctx.store.listResources(project.id)) {
+    if (candidate.kind !== 'queue') {
+      continue
+    }
+    if (candidate.config.consumerResourceId !== worker.id) {
+      continue
+    }
+    if (stillConsumed.has(candidate.name)) {
+      continue
+    }
+    ctx.store.updateResourceConfig(candidate.id, { ...candidate.config, consumerResourceId: null })
+  }
 }
 
 // Rebuild an app from its source and prove the result serves before calling
@@ -391,6 +549,18 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
     for (const line of describeIgnored(result.ignored)) {
       console.error(`worker ${resource.name}: ignoring ${line}`)
     }
+    // After the manifest is parsed and persisted and the container has
+    // proven it serves (both already true by the time deployWorker
+    // returns), before the caller is ever told this deploy succeeded. A
+    // conflict here (syncWorkerQueueBindings's two-consumers refusal) throws
+    // and this route's response is an error, even though the worker's
+    // image, manifest and container are already committed: there is no
+    // second transaction spanning both, the same way an app or worker whose
+    // build succeeds but whose readiness probe times out still keeps its
+    // built image. The fix is editing the manifest and deploying again, not
+    // retrying blindly.
+    const project = getOwningProjectOrThrow(ctx, result.resource)
+    await syncWorkerQueueBindings(ctx, project, result.resource)
     return {
       status: 200,
       body: {
