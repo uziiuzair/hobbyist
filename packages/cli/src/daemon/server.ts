@@ -118,6 +118,29 @@ function closeServer(server: http.Server): Promise<void> {
   })
 }
 
+// The four spellings resolveConfig (packages/core/src/config.ts) accepts for
+// HOBBY_CADDY_ENABLED, lowercased. That parser fails closed on purpose: a
+// bare Boolean(...) would treat '0' or 'false' as true, which would bind :80
+// and :443 on an operator who explicitly opted out. core has no logger and
+// no I/O (deliberately, see docs/CLAUDE.md), so it cannot warn about a value
+// it silently turned into false; this is that warning's only home.
+const ACCEPTED_CADDY_ENABLED_VALUES = new Set(['1', 'true', '0', 'false'])
+
+// Warn only when the operator set the variable to something this parser does
+// not recognise. A deliberate '0' or 'false' is not a mistake and must stay
+// silent; a typo like 'yes' or 'tru' silently disables the front door with
+// no other signal that anything went wrong.
+function warnOnUnrecognizedCaddyEnabled(): void {
+  const raw = process.env.HOBBY_CADDY_ENABLED
+  if (raw === undefined || ACCEPTED_CADDY_ENABLED_VALUES.has(raw.toLowerCase())) {
+    return
+  }
+  console.error(
+    `caddy: HOBBY_CADDY_ENABLED is set to "${raw}", which is not a value this understands, so the front door ` +
+      'is off. Use 1 or true to enable it, 0 or false to disable it.'
+  )
+}
+
 // createApp is the shared handler both listeners are built from.
 // handleRequest already converts every thrown error, HobbyError or
 // otherwise, into a wire-shaped JSON error response with the right status;
@@ -161,6 +184,8 @@ export async function startDaemon(
   ctx: DaemonContext,
   opts: StartDaemonOptions
 ): Promise<{ close(): Promise<void> }> {
+  warnOnUnrecognizedCaddyEnabled()
+
   await removeStaleSocketIfAny(opts.socketPath)
 
   const app = createApp(ctx)

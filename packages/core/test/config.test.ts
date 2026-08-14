@@ -38,6 +38,19 @@ test('HOBBY_CADDY_ENABLED fails closed on anything unrecognized', () => {
   assert.equal(config.caddyEnabled, false)
 })
 
+test('HOBBY_CADDY_ENABLED=false resolves to false, not Boolean("false")', () => {
+  // Boolean('false') is true in JavaScript, which is exactly what the
+  // allow-list in config.ts exists to defeat: an operator who explicitly
+  // opted out must not end up with :80 and :443 bound anyway.
+  const config = resolveConfig({ env: { HOBBY_CADDY_ENABLED: 'false' }, cwd })
+  assert.equal(config.caddyEnabled, false)
+})
+
+test('HOBBY_CADDY_ENABLED=0 resolves to false', () => {
+  const config = resolveConfig({ env: { HOBBY_CADDY_ENABLED: '0' }, cwd })
+  assert.equal(config.caddyEnabled, false)
+})
+
 test('HOBBY_CADDY_ADMIN_PORT overrides the admin port', () => {
   const config = resolveConfig({ env: { HOBBY_CADDY_ADMIN_PORT: '2020' }, cwd })
   assert.equal(config.caddyAdminPort, 2020)
