@@ -1142,6 +1142,103 @@ async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string):
 // only record of it are different operations, and only one of them is what
 // this verb means. Deleting is what `hobby rm` is for, and it asks first.
 //
+// The full backlog of one queue, not a page: peek() takes a limit, and
+// eject's whole point is handing over everything the project holds, so
+// truncating this at some default page size (peekQueueRoute's
+// DEFAULT_PEEK_LIMIT) would silently drop messages at exactly the moment
+// nobody is left to notice. depth() first, then a peek() sized to it: peek's
+// SQL carries no WHERE clause narrower than "every row in this table", so a
+// limit equal to the row count returns the whole table in one call.
+function readFullBacklog(path: string): LeasedMessage[] {
+  return withQueueDbReadOnly<LeasedMessage[]>(path, [], (db) => {
+    const total = queueDepth(db)
+    return total === 0 ? [] : peek(db, total)
+  })
+}
+
+// One line per message, decoded rather than left as codec.ts's encoded
+// string. The reader of this file has, by definition, no hobbyist
+// installation left to decode it with: codec.ts is not exported from
+// @hobby.sh/queue's public surface (see index.ts), so an encoded string
+// handed to a departing user is unreadable unless they go excavate that file
+// out of this repository first. decodeMessageBody already carries the
+// fallback peekQueueRoute relies on for the identical reason: a body this
+// queue did not itself write, or one that fails to decode, is written out as
+// the raw stored string rather than aborting the whole export.
+interface QueueBacklogLine {
+  id: string
+  body: unknown
+  attempts: number
+  enqueuedAt: number
+}
+
+function toBacklogLine(message: LeasedMessage): QueueBacklogLine {
+  return {
+    id: message.id,
+    body: decodeMessageBody(message),
+    attempts: message.attempts,
+    // timestampMs is broker.ts's own alias for the enqueued_at column
+    // (readyRows, leaseBatch, peek all select "enqueued_at AS timestamp"),
+    // not a delivery or visibility time, so this is a direct rename, not a
+    // reinterpretation.
+    enqueuedAt: message.timestampMs,
+  }
+}
+
+// JSON Lines, not a JSON array: a script reading the handover can process one
+// message at a time without holding the whole backlog in memory, the same
+// reason the broker itself never materialises a full result set. An empty
+// queue renders as an empty string (see ejectRoute for why a queue that
+// genuinely holds nothing still gets a file rather than no file at all).
+function renderBacklogJsonl(messages: LeasedMessage[]): string {
+  if (messages.length === 0) {
+    return ''
+  }
+  return `${messages.map((message) => JSON.stringify(toBacklogLine(message))).join('\n')}\n`
+}
+
+interface QueueBacklog {
+  name: string
+  jsonl: string
+  count: number
+}
+
+// Prepended to the compose file, not appended: this is what someone reads
+// first when they open the file to see what they got, which is the only
+// place a claim this important is guaranteed to be seen. A leading `#` line
+// is a comment to docker compose (verified against real docker compose:
+// `docker compose -f <file> config` on a file starting with one parses
+// identically to the same file without it), so this changes nothing about
+// whether the stack starts.
+//
+// ADR 0013 keeps the broker outside the runtime on purpose, which is exactly
+// why there is no queue service to render here the way postgres, apps and
+// workers get one: there is no container to hand over. What crosses instead
+// is the data, written to queues/<name>.jsonl alongside this file, and this
+// comment is what stops a departing user from assuming their queues came
+// with them just because their database and their workers did.
+function renderQueueEjectNotice(backlogs: QueueBacklog[]): string {
+  const lines = [
+    "# hobby's queue broker is not part of this stack. postgres, apps and",
+    '# workers run in containers here; queues never did (ADR 0013), so an',
+    "# ejected worker has nothing behind env.QUEUE.send() or a queue() handler,",
+    '# even though its code is unchanged.',
+    '#',
+    '# Each queue below still had a backlog, and it was written to disk before',
+    '# this file was generated, one JSON object per line (id, body, attempts,',
+    '# enqueuedAt):',
+    ...backlogs.map(
+      (backlog) => `#   ${backlog.name}: queues/${backlog.name}.jsonl (${backlog.count} message${backlog.count === 1 ? '' : 's'})`
+    ),
+    '#',
+    "# Wire your own broker (SQS, a self-hosted NATS, plain Postgres, whatever",
+    "# you choose) and replay those files into it by hand; hobby's broker does",
+    '# not come with you.',
+    '',
+  ]
+  return `${lines.join('\n')}\n`
+}
+
 // The compose file is still rendered before anything else runs, because it is
 // rendered from the store rows, credentials included, and it is the artifact
 // the whole call exists to produce.
@@ -1158,10 +1255,14 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
   const postgresResources = resources.filter((r) => r.kind === 'postgres')
   const appResources = resources.filter((r) => r.kind === 'app')
   const workerResources = resources.filter((r) => r.kind === 'worker')
+  const queueResources = resources.filter((r): r is QueueResource => r.kind === 'queue')
   // Every kind registered today can be ejected, which is what ADR 0007
-  // requires before a kind ships. Kept as a computed list rather than deleted
-  // so the next kind cannot quietly ship without one.
-  const EJECTABLE: ReadonlySet<string> = new Set(['postgres', 'app', 'worker'])
+  // requires before a kind ships. 'queue' earns its place here differently
+  // from the other three: it never becomes a compose service (no container,
+  // no image, ADR 0013), it hands over its backlog as queues/<name>.jsonl
+  // instead, computed a few lines down. Kept as a computed list rather than
+  // deleted so the next kind cannot quietly ship without one.
+  const EJECTABLE: ReadonlySet<string> = new Set(['postgres', 'app', 'worker', 'queue'])
   const notEjectable = resources
     .filter((r) => !EJECTABLE.has(r.kind))
     .map((r) => `${r.name} (${r.kind})`)
@@ -1202,6 +1303,15 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
   // once something has deployed" or "there is genuinely nothing here yet,"
   // never "hobby lost your data."
   if (postgresResources.length + deployedApps.length + deployedWorkers.length === 0) {
+    // Known, accepted gap: a project holding ONLY a queue (no postgres, app
+    // or worker at all) still refuses here, and the message below does not
+    // name it. Nothing is lost by that: the refusal means nothing is
+    // released, hobby keeps managing the project, and the queue's messages
+    // stay exactly where they are, readable with `hobby queue peek` right
+    // up until this project also has something a compose file can start.
+    // Solving that precisely would mean deciding what a compose file with a
+    // queue and nothing else should even look like, which is a bigger
+    // question than this handover.
     throw new HobbyError(
       'usage',
       skippedReasons.length > 0
@@ -1213,8 +1323,25 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
     )
   }
 
+  // Read here, before `body` exists and well before the release branch below
+  // touches anything: CLAUDE.md's first promise is "you can always leave",
+  // and a queue's backlog is user data exactly as much as a postgres data
+  // directory is. Reading it after --release had torn a container down would
+  // be the same mistake `queueKindHandler.stop()` (a no-op today) happens
+  // not to punish yet; computing the backlog in this same data-gathering
+  // phase as `rendered` above means it never depends on that staying true.
+  const queueBacklogs: QueueBacklog[] = queueResources.map((resource) => {
+    const messages = readFullBacklog(queueDbPath(ctx.paths, project.name, resource.name))
+    return { name: resource.name, jsonl: renderBacklogJsonl(messages), count: messages.length }
+  })
+
   const body = {
-    compose: rendered.compose,
+    // The queue notice is prepended, never appended, so it is the first
+    // thing visible when the file is opened. Only rendered when this
+    // project actually holds a queue: a project with none gets the exact
+    // compose file it always did, with no disclaimer about a capability it
+    // never touched.
+    compose: queueBacklogs.length === 0 ? rendered.compose : renderQueueEjectNotice(queueBacklogs) + rendered.compose,
     // ADR 0009: without this, an ejected app comes up on a loopback port with
     // nothing routing a hostname to it, which is a running container rather
     // than a working site.
@@ -1225,6 +1352,11 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
     dataDirs: postgresResources.map((resource) => resource.config.dataDir),
     released: release,
     notEjectable: skippedReasons,
+    // One entry per queue in the project, EVERY queue, including one with
+    // count 0: a missing entry must always mean "this project has no queue
+    // named that," never "hobby forgot to hand it over," and the only way to
+    // keep that distinction real is to always report, never omit on empty.
+    queues: queueBacklogs,
   }
 
   if (!release) {

@@ -229,6 +229,14 @@ export interface EjectResponse {
   // routes.ts's isDeployed). Reported rather than silently dropped either
   // way, so an incomplete compose file is never mistaken for a complete one.
   notEjectable?: string[]
+  // Every queue in the project, backlog included: `jsonl` is the whole
+  // handover for that queue, one JSON object per line (id, body, attempts,
+  // enqueuedAt), decoded rather than left as @hobby.sh/queue's codec-encoded
+  // string (routes.ts's toBacklogLine explains why: this file's reader has
+  // no hobbyist installation left to decode it with). Present with `count: 0`
+  // and `jsonl: ''` for a queue holding nothing, never omitted, so a missing
+  // entry always means "no such queue," never "hobby forgot."
+  queues?: Array<{ name: string; jsonl: string; count: number }>
 }
 
 export interface Api {

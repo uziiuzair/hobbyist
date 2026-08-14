@@ -9,7 +9,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { chmod, mkdir } from 'node:fs/promises'
+import { chmod, mkdir, writeFile } from 'node:fs/promises'
 import { basename, join as joinPath, resolve as resolvePath } from 'node:path'
 import {
   HobbyError,
@@ -1058,12 +1058,17 @@ export async function cmdQueue(c: Ctx, positionals: string[], flags: Flags): Pro
 }
 
 // POST /v1/projects/:name/eject is a pure, non-destructive read (see
-// task-4-report.md): it renders a compose file from real state but writes
-// nothing and does not stop managing the project. This command mirrors that
-// honestly: the compose YAML is the only thing on stdout in human mode, so
-// `hobby eject blog > docker-compose.yml` works, and the data-directory
-// listing plus a note that hobby is still managing this project go to
-// stderr instead of polluting that redirect.
+// task-4-report.md): it renders a compose file from real state and does not
+// stop managing the project. This command mirrors that honestly: the
+// compose YAML is the only thing on stdout in human mode, so
+// `hobby eject blog > docker-compose.yml` still works, and the
+// data-directory listing plus a note that hobby is still managing this
+// project go to stderr instead of polluting that redirect. The one thing
+// that does land on disk unasked is a queue's backlog, written to
+// ./queues/<name>.jsonl: unlike a compose file, there is nowhere else for a
+// departing user to redirect it to, and CLAUDE.md's "you can always leave"
+// does not get an exception for messages just because they are awkward to
+// hand over.
 export async function cmdEject(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const project = positionals[0]
   if (project === undefined) {
@@ -1077,7 +1082,29 @@ export async function cmdEject(c: Ctx, positionals: string[], flags: Flags): Pro
     return 0
   }
 
+  // Written before anything is printed, same reasoning as the daemon side
+  // (routes.ts's ejectRoute comment): a queue's backlog is user data, and
+  // the compose comment above `services:` already promises these files
+  // exist at this exact path once someone has read that far. Every queue in
+  // the project gets a file here, including one with zero messages
+  // (result.queues always carries `count: 0` rather than omitting it), so a
+  // missing file can only ever mean "this project has no queue named that."
+  const queues = result.queues ?? []
+  if (queues.length > 0) {
+    await mkdir(resolvePath(c.io.cwd, 'queues'), { recursive: true })
+    for (const queue of queues) {
+      await writeFile(resolvePath(c.io.cwd, 'queues', `${queue.name}.jsonl`), queue.jsonl, 'utf8')
+    }
+  }
+
   c.io.out(result.compose)
+  if (queues.length > 0) {
+    c.io.err("queue backlogs (hobby's broker is not part of the compose file; see the comment at its top):")
+    for (const queue of queues) {
+      c.io.err(`  queues/${queue.name}.jsonl (${queue.count} message${queue.count === 1 ? '' : 's'})`)
+    }
+    c.io.err('')
+  }
   c.io.err('data directories:')
   for (const dir of result.dataDirs) {
     c.io.err(`  ${dir}`)

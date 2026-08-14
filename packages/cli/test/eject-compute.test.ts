@@ -22,10 +22,12 @@ import {
   type AppConfig,
   type HobbyConfig,
   type PostgresConfig,
+  type QueueConfig,
   type Store,
   type WorkerConfig,
 } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
+import { DEFAULT_RETENTION_SECONDS, encodeBody, enqueue, openQueueDb, queueDbPath } from '@hobby.sh/queue'
 import { createApp, type DaemonContext } from '../src/index.js'
 import { createDefaultKindRegistry } from '../src/daemon/context.js'
 
@@ -122,10 +124,23 @@ function seed(ctx: DaemonContext): { dbName: string; appName: string } {
   return { dbName: 'primary', appName: 'web' }
 }
 
-async function eject(baseUrl: string): Promise<{ compose: string; caddyfile: string; notEjectable: string[] }> {
+interface EjectQueueBacklog {
+  name: string
+  jsonl: string
+  count: number
+}
+
+async function eject(
+  baseUrl: string
+): Promise<{ compose: string; caddyfile: string; notEjectable: string[]; queues?: EjectQueueBacklog[] }> {
   const res = await fetch(`${baseUrl}/v1/projects/blog/eject`, { method: 'POST' })
   assert.equal(res.status, 200)
-  return (await res.json()) as { compose: string; caddyfile: string; notEjectable: string[] }
+  return (await res.json()) as {
+    compose: string
+    caddyfile: string
+    notEjectable: string[]
+    queues?: EjectQueueBacklog[]
+  }
 }
 
 test('eject renders an app service alongside the database', async () => {
@@ -450,5 +465,176 @@ test('a project with nothing to route emits no Caddyfile at all', async () => {
     const { caddyfile, notEjectable } = await eject(baseUrl)
     assert.equal(caddyfile, '')
     assert.deepEqual(notEjectable, [])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Task 17: a queue's backlog is user data exactly as much as a postgres data
+// directory is, and dropping it silently on eject would make CLAUDE.md's
+// "you can always leave" false in a way nobody notices until they need it.
+// Every test below seeds a real postgres alongside the queue: a project
+// eject refuses is a separate, pre-existing concern (see the refusal tests
+// above) and not what these tests are about.
+// ---------------------------------------------------------------------------
+
+// A minimal project that CAN eject (one postgres, so the "nothing renderable"
+// refusal never fires) plus one queue resource, built the same way
+// routes.ts's own createQueueResource does (image/containerName/hostPort are
+// unused by this kind; see QueueConfig's own comment), so a hand-built row
+// here is indistinguishable from one a real `hobby queue create` would leave.
+function seedProjectWithQueue(ctx: DaemonContext, projectName: string, queueName: string): void {
+  const project = ctx.store.createProject({ name: projectName, sleepAfterSeconds: 300 })
+  const pgConfig: PostgresConfig = {
+    image: 'postgres:18-alpine',
+    containerName: `hobby-${projectName}-primary`,
+    hostPort: 15432,
+    dataDir: `/home/user/.hobby/projects/${projectName}/primary/pgdata`,
+    superuser: 'postgres',
+    password: 'the-real-password',
+    database: projectName,
+  }
+  ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: pgConfig })
+
+  const queueConfig: QueueConfig = {
+    image: '',
+    containerName: '',
+    hostPort: 0,
+    retentionSeconds: DEFAULT_RETENTION_SECONDS,
+    consumerResourceId: null,
+    maxBatchSize: null,
+    maxBatchTimeoutSeconds: null,
+    maxRetries: null,
+    retryDelaySeconds: null,
+    deadLetterQueue: null,
+  }
+  ctx.store.createResource({ projectId: project.id, kind: 'queue', name: queueName, config: queueConfig })
+}
+
+// Writes straight through the broker's own enqueue(), the same function the
+// real POST /v1/resources/:id/queue/messages route calls, batched at 100 per
+// call because that is enqueue()'s own MAX_BATCH_COUNT. Bodies are encoded
+// exactly as the real route encodes them (encodeBody, contentType 'json'),
+// so decoding them back out in the eject route is exercising the real path,
+// not a shortcut the test invented.
+function seedQueueMessages(ctx: DaemonContext, projectName: string, queueName: string, bodies: unknown[]): void {
+  const db = openQueueDb(queueDbPath(ctx.paths, projectName, queueName))
+  try {
+    for (let i = 0; i < bodies.length; i += 100) {
+      const batch = bodies
+        .slice(i, i + 100)
+        .map((body) => ({ body: encodeBody(body), contentType: 'json' as const }))
+      enqueue(db, batch, Date.now())
+    }
+  } finally {
+    db.close()
+  }
+}
+
+test('ejecting a project with a non-empty queue writes one JSONL line per message, with the right fields', async () => {
+  const ctx = buildContext()
+  seedProjectWithQueue(ctx, 'blog', 'jobs')
+  seedQueueMessages(ctx, 'blog', 'jobs', ['first', 'second', 'third'])
+  await withServer(ctx, async (baseUrl) => {
+    const { queues } = await eject(baseUrl)
+    const jobs = queues?.find((q) => q.name === 'jobs')
+    assert.ok(jobs !== undefined, 'the jobs queue must appear in the eject response')
+    const lines = jobs.jsonl.split('\n').filter((line) => line.length > 0)
+    assert.equal(lines.length, 3)
+    assert.equal(jobs.count, 3)
+    for (const line of lines) {
+      const parsed = JSON.parse(line) as Record<string, unknown>
+      assert.deepEqual(Object.keys(parsed).sort(), ['attempts', 'body', 'enqueuedAt', 'id'])
+      assert.equal(typeof parsed.id, 'string')
+      // Never leased (eject's own peek is non-destructive, same as
+      // peekQueueRoute's), so every message reads as never attempted.
+      assert.equal(parsed.attempts, 0)
+      assert.equal(typeof parsed.enqueuedAt, 'number')
+    }
+  })
+})
+
+test("the ejected compose file states plainly that hobby's queue broker is not part of the stack, and points at the JSONL files", async () => {
+  const ctx = buildContext()
+  seedProjectWithQueue(ctx, 'blog', 'jobs')
+  seedQueueMessages(ctx, 'blog', 'jobs', ['only message'])
+  await withServer(ctx, async (baseUrl) => {
+    const { compose } = await eject(baseUrl)
+    assert.match(compose, /queue broker/i)
+    assert.match(compose, /not part of this stack/i)
+    assert.match(compose, /queues\/jobs\.jsonl/)
+    // A comment, not a service: real docker compose parses a leading `#`
+    // line identically to a file without one (renderQueueEjectNotice's own
+    // comment records the exact command this was checked against).
+    assert.match(compose, /^# /m)
+  })
+})
+
+test("a message body survives eject intact, decoded rather than left as codec.ts's encoded string", async () => {
+  const ctx = buildContext()
+  seedProjectWithQueue(ctx, 'blog', 'jobs')
+  const original = { user: 'uzair', tags: ['a', 'b'], count: 3, nested: { ok: true }, when: null }
+  seedQueueMessages(ctx, 'blog', 'jobs', [original])
+  await withServer(ctx, async (baseUrl) => {
+    const { queues } = await eject(baseUrl)
+    const jobs = queues?.find((q) => q.name === 'jobs')
+    assert.ok(jobs !== undefined)
+    const [line] = jobs.jsonl.split('\n').filter((l) => l.length > 0)
+    assert.ok(line !== undefined)
+    const parsed = JSON.parse(line) as { body: unknown }
+    // Deep equal, not a substring match: a codec bug that reordered keys or
+    // dropped a nested field would still contain the right substrings.
+    assert.deepEqual(parsed.body, original)
+  })
+})
+
+test('a queue with far more messages than one peek page still has its entire backlog written, none dropped', async () => {
+  const ctx = buildContext()
+  seedProjectWithQueue(ctx, 'blog', 'jobs')
+  const total = 137
+  seedQueueMessages(
+    ctx,
+    'blog',
+    'jobs',
+    Array.from({ length: total }, (_, i) => ({ n: i }))
+  )
+  await withServer(ctx, async (baseUrl) => {
+    const { queues } = await eject(baseUrl)
+    const jobs = queues?.find((q) => q.name === 'jobs')
+    assert.ok(jobs !== undefined)
+    assert.equal(jobs.count, total)
+    const lines = jobs.jsonl.split('\n').filter((l) => l.length > 0)
+    assert.equal(lines.length, total)
+    // Distinct ids across every line: proves this is the whole backlog laid
+    // end to end, not one page repeated or truncated part way through.
+    const ids = new Set(lines.map((l) => (JSON.parse(l) as { id: string }).id))
+    assert.equal(ids.size, total)
+  })
+})
+
+test('an empty queue still gets a JSONL entry rather than being silently omitted', async () => {
+  const ctx = buildContext()
+  seedProjectWithQueue(ctx, 'blog', 'jobs')
+  // No messages enqueued: the queue exists, holds nothing, and eject must
+  // say so rather than leave the reader unable to tell "empty" from
+  // "forgotten."
+  await withServer(ctx, async (baseUrl) => {
+    const { queues } = await eject(baseUrl)
+    const jobs = queues?.find((q) => q.name === 'jobs')
+    assert.ok(jobs !== undefined, 'an empty queue must still be reported, not dropped from the response')
+    assert.equal(jobs.count, 0)
+    assert.equal(jobs.jsonl, '')
+  })
+})
+
+test('a queue no longer appears in notEjectable: it is handed over as data, not refused', async () => {
+  const ctx = buildContext()
+  seedProjectWithQueue(ctx, 'blog', 'jobs')
+  await withServer(ctx, async (baseUrl) => {
+    const { notEjectable } = await eject(baseUrl)
+    assert.equal(
+      notEjectable.some((entry) => entry.includes('(queue)')),
+      false,
+      'a queue is now ejectable (as a backlog handover), so it must not be reported alongside kinds eject cannot handle at all'
+    )
   })
 })
