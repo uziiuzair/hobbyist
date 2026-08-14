@@ -20,6 +20,7 @@ import {
   type Project,
   type Store,
   type WorkerConfig,
+  type WorkerManifest,
   type WorkerResource,
 } from '@hobby.sh/core'
 import {
@@ -708,15 +709,12 @@ test('a worker with no stored queueToken gets one backfilled on start, and never
 // need real ports pointing at real local servers rather than anything
 // createWorkerResource's own wrangler.toml flow would build, since the whole
 // point is to exercise defaultProbeFactory itself, not a fake one.
-function sampleWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
+// Split out from sampleWorkerConfig for the reason the same pair is split in
+// packages/cli/test/kind-dispatch.test.ts: a test that only wants to change
+// `queues` cannot spread a `WorkerManifest | null` field without TypeScript's
+// spread rules widening every property to optional.
+function sampleWorkerManifest(overrides: Partial<WorkerManifest> = {}): WorkerManifest {
   return {
-    image: 'hobby/workerd:1',
-    containerName: 'hobby-blog-api-readiness',
-    hostPort: 0,
-    controlPort: 0,
-    queueToken: 'test-queue-token',
-    containerPort: 8787,
-    hostname: 'api.blog.localhost',
     source: { path: '/src/api', manifest: 'wrangler.toml' },
     compatibilityDate: '2026-08-01',
     compatibilityFlags: [],
@@ -726,8 +724,22 @@ function sampleWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig
     d1Databases: [],
     queues: { producers: [], consumers: [] },
     durableObjects: [],
+    ...overrides,
+  }
+}
+
+function sampleWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
+  return {
+    image: 'hobby/workerd:1',
+    containerName: 'hobby-blog-api-readiness',
+    hostPort: 0,
+    controlPort: 0,
+    queueToken: 'test-queue-token',
+    containerPort: 8787,
+    hostname: 'api.blog.localhost',
     durableObjectUniqueKeyModifier: 'stable-modifier',
     databaseResourceId: null,
+    manifest: sampleWorkerManifest(),
     ...overrides,
   }
 }
@@ -772,7 +784,21 @@ test('readiness requires the control port too, once the worker declares a queue 
       hostPort,
       // Nothing is listening here yet, which is the first assertion below.
       controlPort: hostPort + 1,
-      queues: { producers: [], consumers: [{ queue: 'jobs', maxBatchSize: null, maxBatchTimeoutSeconds: null, maxRetries: null, retryDelaySeconds: null, deadLetterQueue: null }] },
+      manifest: sampleWorkerManifest({
+        queues: {
+          producers: [],
+          consumers: [
+            {
+              queue: 'jobs',
+              maxBatchSize: null,
+              maxBatchTimeoutSeconds: null,
+              maxRetries: null,
+              retryDelaySeconds: null,
+              deadLetterQueue: null,
+            },
+          ],
+        },
+      }),
     })
     const created = deps.store.createResource({ projectId: project.id, kind: 'worker', name: 'api', config })
     const resource = deps.store.getResource(created.id)
@@ -813,7 +839,7 @@ test('readiness does not wait on the control port for a worker with no queue bin
       // Nothing is listening here, and nothing should ever have to be: this
       // worker declares no producer and no consumer.
       controlPort: hostPort + 1,
-      queues: { producers: [], consumers: [] },
+      manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [] } }),
     })
     const created = deps.store.createResource({ projectId: project.id, kind: 'worker', name: 'api', config })
     const resource = deps.store.getResource(created.id)

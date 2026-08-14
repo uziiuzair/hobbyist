@@ -93,6 +93,10 @@ function sampleUndeployedWorkerConfig(overrides: Partial<WorkerConfig> = {}): Wo
     containerName: `hobby-blog-cron-${randomUUID()}`,
     hostPort: 35500,
     containerPort: 8787,
+    // Both allocated at row creation, above the manifest split, so an
+    // undeployed worker carries them exactly like a deployed one does.
+    controlPort: 35501,
+    queueToken: 'res-placeholder-token',
     hostname: 'cron.blog.hobby.local',
     databaseResourceId: null,
     durableObjectUniqueKeyModifier: 'res-placeholder',

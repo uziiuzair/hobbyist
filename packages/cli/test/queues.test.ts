@@ -21,6 +21,7 @@ import {
   type QueueConfig,
   type Store,
   type WorkerConfig,
+  type WorkerManifest,
 } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
 import { drainableQueues, queueDeliverFn, queueStateOf } from '../src/daemon/queues.js'
@@ -61,6 +62,36 @@ function buildContext(): DaemonContext {
   }
 }
 
+// Split from workerConfig so a test that only wants to change `queues` does
+// not have to spread a `WorkerManifest | null` field, which TypeScript widens
+// to all-optional and which would then no longer satisfy WorkerManifest.
+function workerManifest(overrides: Partial<WorkerManifest> = {}): WorkerManifest {
+  return {
+    source: { path: '/code/api', manifest: 'wrangler.toml' },
+    compatibilityDate: '2026-08-01',
+    compatibilityFlags: [],
+    vars: {},
+    kvNamespaces: [],
+    r2Buckets: [],
+    d1Databases: [],
+    queues: {
+      producers: [],
+      consumers: [
+        {
+          queue: 'jobs',
+          maxBatchSize: null,
+          maxBatchTimeoutSeconds: null,
+          maxRetries: null,
+          retryDelaySeconds: null,
+          deadLetterQueue: null,
+        },
+      ],
+    },
+    durableObjects: [],
+    ...overrides,
+  }
+}
+
 function workerConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
   return {
     image: 'hobby/api-worker:1',
@@ -70,17 +101,9 @@ function workerConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
     queueToken: 'test-queue-token',
     containerPort: 8787,
     hostname: 'api.chat.localhost',
-    source: { path: '/code/api', manifest: 'wrangler.toml' },
-    compatibilityDate: '2026-08-01',
-    compatibilityFlags: [],
-    vars: {},
-    kvNamespaces: [],
-    r2Buckets: [],
-    d1Databases: [],
-    queues: { producers: [], consumers: [{ queue: 'jobs', maxBatchSize: null, maxBatchTimeoutSeconds: null, maxRetries: null, retryDelaySeconds: null, deadLetterQueue: null }] },
-    durableObjects: [],
     durableObjectUniqueKeyModifier: 'unused-here',
     databaseResourceId: null,
+    manifest: workerManifest(),
     ...overrides,
   }
 }
@@ -147,9 +170,9 @@ test('a queue with no consumer configured is excluded: it still accepts sends, b
 // Constraint 2 of this task's brief: a consumer whose worker has no deployed
 // code must be skipped, not woken, because waking a worker with no code
 // starts a container that immediately exits and the daemon records that as a
-// crash loop. Keyed on WorkerConfig.queues.consumers being empty: on this
-// branch that is what a worker looks like before any `[[queues.consumers]]`
-// block has ever been deployed to it.
+// crash loop. Keyed on WorkerConfig.manifest.queues.consumers being empty:
+// deployed code that binds no consumer. hasNoDeployedCode (queues.ts) reads
+// the other signal, manifest === null, in the same breath.
 test('a worker with no queue consumer bindings at all is excluded, its queue kept but not drained', () => {
   const ctx = buildContext()
   try {
@@ -158,7 +181,7 @@ test('a worker with no queue consumer bindings at all is excluded, its queue kep
       projectId: project.id,
       kind: 'worker',
       name: 'api',
-      config: workerConfig({ queues: { producers: [], consumers: [] } }),
+      config: workerConfig({ manifest: workerManifest({ queues: { producers: [], consumers: [] } }) }),
     })
     ctx.store.createResource({
       projectId: project.id,
