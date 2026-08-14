@@ -105,7 +105,7 @@ order they were scoped:
 |---|---|---|
 | **A** record before code | Resource creation split from deploy; `undeployed` state; ADR 0014 | **merged to `main` at `e0d56a2`** |
 | **B** wire Caddy | `createCaddyManager` gets a production caller | **built, branch `caddy-wiring`, not yet merged to `main`** |
-| **D1** Studio and MCP for all kinds | Drop the hardcoded `kind: 'postgres'` at `packages/studio/src/api.ts:152` and `packages/mcp/src/tools.ts:116`, once A is merged and gives them something else to send | not started |
+| **D1** Studio and MCP for all kinds | Drop the hardcoded `kind: 'postgres'` at `packages/studio/src/api.ts:152` and `packages/mcp/src/tools.ts:116`. A has merged, so there is now something else to send | not started |
 | **D2** Studio API tokens | Not yet designed beyond the label; no spec filed as of this writing | not started |
 | **C** remote deploy | Laptop to VPS. Needs its own ADR: the CLI talks to a unix socket (`packages/cli/src/cli/client.ts`), so today it must run on the daemon's own box | not started |
 

@@ -100,8 +100,9 @@ function withDeadline<T>(promise: Promise<T>, ms: number, describe: string): Pro
 // running Postgres container is left for the next wake's crash recovery
 // instead of stopped cleanly. 60s is generous for a small alpine-based
 // image pull on an ordinary connection (ensureRunning's own admin-API poll,
-// ADMIN_READY_TIMEOUT_MS in caddy.ts, is a further 1.5s on top of whatever
-// this leaves) while still being an actual bound instead of none at all.
+// ADMIN_READY_TIMEOUT_MS in caddy.ts, spends 1.5s from WITHIN this budget
+// rather than extending it) while still being an actual bound instead of
+// none at all.
 const CADDY_STARTUP_TIMEOUT_MS = 60_000
 
 // Deleting a live daemon's socket file out from under it would let a second
