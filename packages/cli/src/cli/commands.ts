@@ -904,15 +904,19 @@ function defaultOpenBrowser(url: string): void {
   }
 }
 
-// `hobby studio`: prints the URL to open and opens it when it can. Points
-// straight at the daemon's own loopback listener (config.apiPort), not at a
-// Caddy front door: Caddy is out of scope for this task (see the task
-// report), and the daemon serves both the API and Studio's built bundle on
-// that same port now (packages/cli/src/daemon/studio/routes.ts's
-// createStudioApp). If Caddy is fronting this with TLS later, that changes
-// the URL and is Caddy's task to update, not this one's.
+// `hobby studio`: prints the URL to open and opens it when it can. When
+// Caddy is fronting Studio (config.caddyEnabled, plus a configured
+// config.caddyStudioHost, see startDaemon's addRoute call in
+// packages/cli/src/daemon/server.ts), that public host is the address that
+// actually works from anywhere, so it wins. Otherwise this points straight
+// at the daemon's own loopback listener (config.apiPort): the daemon serves
+// both the API and Studio's built bundle on that same port
+// (packages/cli/src/daemon/studio/routes.ts's createStudioApp).
 export function cmdStudio(io: Io, paths: Paths, config: HobbyConfig, openBrowser: BrowserOpener = defaultOpenBrowser): number {
-  const url = `http://127.0.0.1:${config.apiPort}`
+  const url =
+    config.caddyEnabled && config.caddyStudioHost !== null
+      ? `https://${config.caddyStudioHost}`
+      : `http://127.0.0.1:${config.apiPort}`
 
   if (!hasOperatorCredential(paths)) {
     // Deliberately not the login page: a login attempt against a fresh
