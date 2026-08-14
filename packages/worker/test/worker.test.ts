@@ -438,6 +438,58 @@ test('a redeploy does not change the durable object unique key', async () => {
   assert.notEqual(deployed.image, created.resource.config.image, 'the image should have changed even though the key did not')
 })
 
+// The other two fields that sit above the manifest split, and the reason
+// they sit there. deployWorker rebuilds `manifest` wholesale from the
+// wrangler file on every deploy, so anything inside it is re-derived; these
+// two must not be. A moved controlPort delivers every queue batch to a port
+// nothing is listening on, and a rotated queueToken 401s every container
+// that is already running with the old one, which reads as the broker being
+// down rather than as a credential that changed. Neither failure produces an
+// error at deploy time, which is why it is asserted here rather than trusted
+// to the spread in deployWorker's config literal.
+test('a redeploy changes neither the control port nor the queue token', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(),
+    databaseResourceId: null,
+  })
+  const before = created.resource.config
+
+  deps.now = () => 1_754_870_500_000
+  const deployed = await deployWorker(deps, created.resource)
+
+  assert.equal(deployed.resource.config.controlPort, before.controlPort)
+  assert.equal(deployed.resource.config.queueToken, before.queueToken)
+  assert.notEqual(deployed.image, before.image, 'the image should have changed even though these did not')
+})
+
+// The same guarantee across the other boundary: a worker created from Studio
+// with no code gets both fields at row creation (createWorkerResource's
+// sourceless path), and the FIRST deploy must not mint new ones either. That
+// is the whole reason they are allocated there rather than at deploy time.
+test('a first deploy changes neither the control port nor the queue token', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: null,
+    databaseResourceId: null,
+  })
+  const before = created.resource.config
+  assert.ok(before.controlPort > 0, 'an undeployed worker already has a control port')
+  assert.ok(before.queueToken.length > 0, 'an undeployed worker already has a queue token')
+  assert.notEqual(before.controlPort, before.hostPort, 'the two ports must not collide')
+
+  const deployed = await deployWorker(deps, created.resource, { sourcePath: workerSource() })
+
+  assert.equal(deployed.resource.config.controlPort, before.controlPort)
+  assert.equal(deployed.resource.config.queueToken, before.queueToken)
+})
+
 // Record-before-code's actual acceptance criterion for the worker kind: a
 // worker created with sourcePath: null (see the sourceless test above) is
 // deployed into, not recreated. This is the sharper of the two mirrored

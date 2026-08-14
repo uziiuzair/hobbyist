@@ -238,6 +238,17 @@ succeeded followed by a readiness probe that did not.
   that a new state gets handled everywhere it needs to be; this was found and
   is recorded rather than fixed, because fixing it is a refactor of
   `correctedState`'s shape and out of scope for this change.
+
+  This is not an isolated gap.
+  `docs/queues/research/2026-08-14-a-probe-that-creates-what-it-observes.md`
+  counts five distinct ways this codebase declined to warn its authors in a
+  single day across two concurrent branches, of which the non-exhaustive
+  `ResourceState` above is one, and gives the worst case: a `probe` whose
+  cheapest implementation created the file it was asked to observe, so it
+  did not merely fail to check, it reported the opposite of the truth. Read
+  it beside this bullet. The conclusion both records reach is the same:
+  where the compiler cannot be the safety net, the test has to be, and the
+  test has to be written against the thing not existing yet.
 - **Studio and MCP still cannot create compute** after this ADR alone.
   `packages/studio/src/api.ts:152` and `packages/mcp/src/tools.ts:116` are
   untouched by sub-project A; the daemon route they would call now supports an

@@ -115,3 +115,13 @@ across two concurrent branches.
 
 Four of those five are absences of checking. This one is a check that actively
 reports the opposite of the truth, which is why it is worth its own note.
+
+## See also
+
+ADR 0014 (`docs/decisions/0014-resource-records-exist-before-code.md`) reached
+the same conclusion from the other branch, on the same day, and its
+"Consequences accepted" section names one of the five directly: adding
+`undeployed` to `ResourceState` produced zero compile errors, because
+`correctedState` is an if/else chain ending in an unconditional
+`return 'failed'`, so a future member will produce zero again. That record and
+this one are two halves of one finding, and 0014's bullet points back here.
