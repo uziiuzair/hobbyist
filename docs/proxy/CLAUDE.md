@@ -104,3 +104,31 @@ whether to fork one or start clean.
   couples two components that are otherwise independent.
 - Connection pooling, or an honest decision to delegate it to a pooler behind us.
   Not needed to prove the keystone, so it does not block M2.
+
+## Amendment, 2026-08-14: Caddy is now wired in front of the HTTP half
+
+`createCaddyManager` (`packages/cli/src/daemon/caddy.ts:151`, ADR 0009) had
+been written and tested since Phase 1 with no production caller. Sub-project
+B (branch `caddy-wiring`) gives it one: `startDaemon`
+(`packages/cli/src/daemon/server.ts:253` onward) calls `ensureRunning()`,
+`setFallback()` pointing at the HTTP wake router this file documents, an
+optional Studio `addRoute()`, and `stop()` on shutdown, all behind a new
+`caddyEnabled` config flag that defaults to `false`
+(`packages/core/src/config.ts:101-121`). A Caddy failure logs and leaves the
+daemon running rather than aborting startup, so the pg proxy this file
+documents keeps waking connections even when the HTTP front door does not
+come up. `hobby init` now probes host networking when Caddy is enabled and
+warns, never fails, when it is absent. Full design at
+`docs/proxy/specs/2026-08-14-wiring-caddy-design.md`; the host-networking
+measurement behind it is filed as decision
+`hobbyist.caddy-host-networking-works`.
+
+This does not resolve the TLS certificate question above. Caddy now actually
+runs and holds an ACME store for the HTTP hostnames it fronts, but that
+store is not shared with the Postgres wire proxy's own TLS termination, and
+sharing it remains exactly as undecided as it was before this amendment. Two
+things this sub-project deliberately left undone: Caddy's certificate store
+is not persisted (the container has no volume, so replacing it re-issues
+certificates, a real problem against Let's Encrypt rate limits on a busy
+box), and Docker Desktop for macOS is detected at `hobby init` and warned
+about but has never actually been run against.
