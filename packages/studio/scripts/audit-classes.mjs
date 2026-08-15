@@ -10,7 +10,7 @@
 //
 // Run: npm run audit:classes -w @hobby.sh/studio
 
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -30,6 +30,26 @@ function walk(dir) {
 const css = readFileSync(cssPath, 'utf8')
 const defined = new Set()
 for (const match of css.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)) defined.add(match[1])
+
+// Tailwind generates utilities into the built stylesheet only when a source
+// file uses them, so the emitted CSS is the ground truth for which utility
+// classes exist. Reading it keeps this audit honest in both directions: a
+// hand-written class dropped from theme.css still fails, and a typo'd
+// utility (`flx`, `p-x4`) fails too, because Tailwind never emitted it.
+// Requires the build to have run first; package.json orders vite before this
+// script. Selectors in the emitted file escape special characters
+// (.md\:flex, .p-1\.5), while JSX candidates are raw, so unescape before
+// comparing.
+const distAssets = join(root, 'dist/assets')
+if (existsSync(distAssets)) {
+  for (const entry of readdirSync(distAssets)) {
+    if (!entry.endsWith('.css')) continue
+    const built = readFileSync(join(distAssets, entry), 'utf8')
+    for (const match of built.matchAll(/\.((?:[\w-]|\\.)+)/g)) {
+      defined.add(match[1].replace(/\\(.)/g, '$1'))
+    }
+  }
+}
 
 // A className can be a plain string, a template literal, or a ternary inside
 // one. Take every quoted or backticked run, then strip the interpolations
@@ -57,7 +77,7 @@ for (const file of walk(join(root, 'src'))) {
 }
 
 if (problems.length > 0) {
-  console.error(`${problems.length} class(es) used but not defined in src/theme.css:\n`)
+  console.error(`${problems.length} class(es) used but defined neither in src/theme.css nor in the built stylesheet (a Tailwind utility that never generated is a typo):\n`)
   for (const problem of [...new Set(problems)].sort()) console.error(`  ${problem}`)
   process.exit(1)
 }
