@@ -1,3 +1,13 @@
+/* Tailwind v4, utilities only. Preflight is deliberately NOT imported:
+   Nocturne's own rules assume browser defaults, and a reset landing under
+   them would silently reshape shipped views. Everything Tailwind emits is
+   generated at build time into the static bundle: no runtime, no network.
+   The @theme bridge further down maps Nocturne's tokens into utility names
+   (bg-surface, text-ink-2, rounded-card), so utility-styled UI and
+   theme.css-styled UI share one palette and follow light/dark together. */
+@import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/utilities.css' layer(utilities);
+
 /* Hobbyist Studio.
 
    THESIS: a status panel for a machine you own, not a console for a service
@@ -32,10 +42,47 @@
 @font-face { font-family: 'IBM Plex Sans'; font-weight: 600; font-style: normal; font-display: swap; src: url('./fonts/ibm-plex-sans-latin-600-normal.woff2') format('woff2'); }
 @font-face { font-family: 'JetBrains Mono'; font-weight: 400; font-style: normal; font-display: swap; src: url('./fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); }
 
-:root {
-  --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+/* The three faces live in @theme rather than :root so Tailwind's font-sans,
+   font-serif and font-mono utilities resolve to the same stacks var(--font-*)
+   consumers read: @theme emits these onto :root itself, one source for both
+   worlds. */
+@theme {
+  --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   --font-serif: 'Fraunces', Georgia, 'Times New Roman', serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+}
+
+/* The Nocturne palette as utility names. `inline` makes each utility carry
+   var(--token) rather than a frozen value, so bg-surface and text-ink-2
+   follow the light-theme override exactly like hand-written rules do. The
+   radius names are semantic (rounded-card, not rounded-md) because the
+   numeric scale here is Nocturne's, not Tailwind's. */
+@theme inline {
+  --color-ground: var(--ground);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-ink: var(--accent-ink);
+  --color-awake: var(--awake);
+  --color-waking: var(--waking);
+  --color-danger: var(--danger);
+  --color-sage: var(--sage);
+  --color-iris: var(--iris);
+  --color-honey: var(--honey-t);
+  --color-rose: var(--rose);
+  --radius-control: var(--radius-sm);
+  --radius-card: var(--radius);
+  --radius-modal: var(--radius-lg);
+}
+
+:root {
 
   /* Dark first. The physical scene is a developer at a desk, often at night,
      with this tab parked beside an editor, driving a machine in a cupboard. */
