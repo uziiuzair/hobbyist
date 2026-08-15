@@ -1,0 +1,11 @@
+columns:
+- id: backlog
+  name: Backlog
+- id: todo
+  name: Todo
+- id: in_progress
+  name: In Progress
+- id: review
+  name: Review
+- id: done
+  name: Done
