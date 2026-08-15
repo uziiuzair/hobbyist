@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/audit-classes.mjs && node scripts/audit-contrast.mjs && tsc --noEmit -p tsconfig.json && vite build",
+    "build": "node scripts/audit-contrast.mjs && tsc --noEmit -p tsconfig.json && vite build && node scripts/audit-classes.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "preview": "vite preview",
     "audit:classes": "node scripts/audit-classes.mjs"
@@ -16,9 +16,11 @@
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.5",
+    "tailwindcss": "^4.3.3",
     "typescript": "^5.9.3",
     "vite": "^8.0.5"
   }
