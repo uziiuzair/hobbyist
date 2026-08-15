@@ -2,7 +2,20 @@
 
 What is true right now. Overwrite freely, this file is not history.
 
-## State: Phase 1 and Phase 2 compute both on `main`. Five sub-projects close the gap to Studio and MCP.
+## State: four resource kinds on `main`. Queues and Caddy both landed 2026-08-14.
+
+**Queues merged at `2cfad10`**, 40 commits, 18 tasks, 699 tests. The fourth
+resource kind, `queue`, and the first thing here where stored state rather than
+an inbound connection starts a container: a message arriving for a sleeping
+consumer wakes it. Verified against real Docker, both halves, with no HTTP
+request involved. See `docs/queues/CLAUDE.md` for the numbers and, more
+importantly, for three follow-ups that are real gaps rather than polish. The
+first of them: **the producer path does not work on Linux**, because the
+container is handed `host.docker.internal` and nothing passes `--add-host`.
+Unimplemented, not untested.
+
+**Caddy wired the same day**, sub-project B, after a recorded blocker that had
+never been tested turned out not to exist on this machine.
 
 Phase 1 is merged and has been exercised against real Docker: eject end to end
 on 2026-08-08, cancel routing against a live Postgres on 2026-08-10.

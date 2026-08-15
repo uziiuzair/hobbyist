@@ -434,6 +434,19 @@ largest term in end-to-end latency, so it is the value a user is most likely to
 want to see and least able to find. Not built, not scheduled, recorded here
 rather than quietly dropped.
 
+**Contradicted, and the most severe item found.** "Daemon API, two listeners"
+says that on Linux the endpoint "binds additionally on the project network's
+bridge gateway, because a loopback bind is not reachable from a container
+there." That was built and is correct as far as it goes, and it is only half of
+what Linux needs. The container also has to be able to RESOLVE
+`host.docker.internal`, which on Docker Engine for Linux requires
+`--add-host=host.docker.internal:host-gateway` at container creation. Nothing
+in this repo passes it. So on the project's own target platform the producer
+binding cannot reach a listener that is otherwise correctly bound and waiting.
+Open question 2 below called the Linux bind "reasoned, not run", which framed
+this as a testing gap; it is an implementation gap. Established by reading the
+code, not by running Linux.
+
 **Settled: open question 1.** `wrappedBindings` doing an outbound fetch was
 verified on 2026-08-13 (`research/2026-08-13-wrapped-bindings-spike.md`) and
 again on 2026-08-14 against the real production path, this time with a worker
