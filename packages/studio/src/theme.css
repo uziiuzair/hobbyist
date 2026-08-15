@@ -2795,7 +2795,6 @@ table.data th {
   min-height: 100vh;
   display: grid;
   place-items: center;
-  padding: 24px;
   background:
     radial-gradient(
       ellipse 640px 420px at 50% 38%,
