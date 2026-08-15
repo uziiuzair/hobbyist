@@ -90,6 +90,7 @@
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
   --color-accent-ink: var(--accent-ink);
+  --color-accent-line: var(--accent-line);
   --color-awake: var(--awake);
   --color-waking: var(--waking);
   --color-danger: var(--danger);
@@ -290,10 +291,18 @@
   }
 }
 
+/* Restored after being dropped: preflight is not imported, so nothing else
+   sets border-box, and without it every padded or bordered element grows by
+   its own chrome and the fixed-width layout drifts. Do not remove unless
+   preflight ever lands. */
+* {
+  @apply box-border;
+}
+
 html,
 body,
 #root {
-  height: 100%;
+  @apply h-full;
 }
 
 body {
@@ -304,22 +313,20 @@ body {
 }
 
 :focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-  border-radius: 3px;
+  @apply outline-2 outline-accent outline-offset-2 rounded-[3px];
 }
 
 ::selection {
-  background: var(--accent-line);
-  color: var(--ink);
+  @apply bg-accent-line text-ink;
 }
 
 /* The surfaces the browser draws still carry the design: the caret in every
    field is the product's green, and scrollbars take the hairline palette
-   instead of the platform chrome. */
+   instead of the platform chrome. Scrollbar color has no core utility, so it
+   stays plain CSS. */
 input,
 textarea {
-  caret-color: var(--accent);
+  @apply caret-accent;
 }
 
 * {
@@ -1553,39 +1560,22 @@ a.card.is-awake:hover {
   background: var(--surface);
 }
 table.data {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
+  @apply w-full border-collapse text-[13px];
 }
 table.data th {
-  text-align: left;
-  font-weight: 600;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--ink-3);
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface-2);
-  position: sticky;
-  top: 0;
-  white-space: nowrap;
+  @apply text-left font-semibold text-[11px] uppercase tracking-[0.06em] text-ink-3 px-3 py-[9px] border-b border-line bg-surface-2 sticky top-0 whitespace-nowrap;
 }
 table.data td {
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--line);
-  vertical-align: top;
+  @apply px-3 py-[9px] border-b border-line align-top;
 }
 table.data tr:last-child td {
-  border-bottom: 0;
+  @apply border-b-0;
 }
 table.data tbody tr:hover {
-  background: var(--surface-2);
+  @apply bg-surface-2;
 }
 table.data td.num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  font-family: var(--font-mono);
+  @apply text-right tabular-nums font-mono;
 }
 .null {
   color: var(--ink-3);
@@ -1659,14 +1649,7 @@ table.data td.num {
 }
 
 kbd {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  border: 1px solid var(--line-strong);
-  border-radius: 3px;
-  padding: 0 4px;
-  margin-left: 4px;
-  color: var(--ink-3);
-  background: var(--surface-3);
+  @apply font-mono text-[10.5px] border border-line-strong rounded-[3px] px-1 py-0 ml-1 text-ink-3 bg-surface-3;
 }
 .btn-primary kbd {
   border-color: var(--on-accent-line);
@@ -2217,23 +2200,17 @@ kbd {
    grew past 1500px and the rest were pushed out of reach. The full value stays
    available through the cell's title. */
 .cell-value {
-  display: block;
-  max-width: 320px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  @apply block max-w-80 overflow-hidden text-ellipsis whitespace-nowrap;
 }
 .data-table td,
 table.data td {
-  max-width: 320px;
+  @apply max-w-80;
 }
 
 /* Long identifiers should not push the header row wider than the body. */
 .data-table th,
 table.data th {
-  max-width: 320px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  @apply max-w-80 overflow-hidden text-ellipsis;
 }
 .error-text {
   color: var(--danger);
