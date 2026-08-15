@@ -4,6 +4,7 @@
 // output works with no internet access.
 
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'vite'
 
 // Matches HobbyConfig's default apiPort (packages/core/src/config.ts), the
@@ -15,7 +16,9 @@ const DEFAULT_API_PORT = 7432
 const apiOrigin = `http://127.0.0.1:${process.env['HOBBY_API_PORT'] ?? DEFAULT_API_PORT}`
 
 export default defineConfig({
-  plugins: [react()],
+  // Tailwind v4 runs entirely at build time: utilities are generated into
+  // the static bundle, so the no-network constraint is untouched.
+  plugins: [react(), tailwindcss()],
   build: {
     outDir: 'dist',
   },
