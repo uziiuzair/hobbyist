@@ -5,6 +5,82 @@ delete one, even when it turns out to have been wrong. Especially then.
 
 Each entry: what changed, what it cost, and what was learned.
 
+## 2026-08-14: Queues, and five bugs that lived between two correct components
+
+Branch `queues`, 40 commits, merged to `main` at `2cfad10`. 18 tasks over about
+20 hours across two sessions, 699 tests, ADR 0013, a new package
+`@hobby.sh/queue`, and the fourth resource kind.
+
+**Why it had to exist, and it was not a feature request.** A worker with a queue
+already deployed and already lost every unprocessed message when it slept.
+Miniflare's queue broker keeps its backlog in a plain in-memory array and says so
+itself:
+
+    // Miniflare's Queue broker is in-memory only at the moment
+    durableObjectStorage: { inMemory: kVoid },
+
+There is no `queuesPersist` option to set, the way there is for KV, R2, D1 and
+Durable Objects. Persistence is not switched off by configuration, it is not
+implemented. So the choice was not "should we build queues", it was "what do we
+do about a silent data-loss path that already shipped". The answer is the alarm
+mirror's shape a second time: a stopped container has no timer, so the daemon
+holds the schedule; a stopped container has no queue, so the daemon holds the
+messages. The broker never starts anything, it calls `wake(resourceId)`.
+
+**Verified by running it.** Three messages queued, container confirmed gone four
+ways, three rows still in `messages.sqlite` on the host, all three delivered on
+wake. Then the one that matters: consumer sleeping, no HTTP request of any kind,
+one message sent, and the container started itself and processed it. 65 messages,
+24 stop/wake cycles, nothing lost.
+`docs/queues/research/2026-08-14-queues-survive-sleep.md` has every command and
+its verbatim output.
+
+**The numbers.** Enqueue 1ms p50. Wake to first delivery 1569ms p50 with the
+default config, 514ms with a full batch. The gap is entirely
+`max_batch_timeout`, which defaults to 1 second, so `isBatchReady` will not call
+a lone message ready sooner. The wake itself is inside the project's 1 second
+target; the default configuration cannot beat it by construction. Both figures
+filed and labelled rather than one of them quietly chosen. Apple M5 Pro, and the
+five dollar VPS remains unmeasured like every other number here.
+
+**What it cost, and the lesson worth keeping.** Five of the worst defects found
+in this work were not inside any component. Every one was a gap BETWEEN two
+components that were each individually complete, correct and tested:
+
+- Nothing ever wrote `consumerResourceId`, and the tick skips any queue without
+  one, so the entire feature was inert end to end while every unit test passed.
+  Task 12 parsed the manifest, Task 15 consumed the wiring, Task 16 built the
+  CLI, and "deploy connects the two" was assigned to nobody.
+- `deployWorker` rebuilds `manifest` wholesale, and `controlPort` and
+  `queueToken` survived only via an object spread. One edit stood between the
+  code and silently rotating a running container's port and bearer token on
+  every redeploy. Found only because two branches merged.
+- The producer path does not work on Linux. Not untested: unimplemented. The
+  container is handed `host.docker.internal` and nothing ever passes
+  `--add-host`. The daemon's half is correct, the container's half is correct,
+  and they do not meet. Every end-to-end run passed because every one ran on
+  macOS.
+- `sweepRetention` has one caller, behind a filter that excludes every queue
+  with no consumer, and every dead letter queue is created with none. Dead
+  letters are kept forever.
+- A first-ever deploy and a redeploy are separate call sites, and only one was
+  wired. Every task in the plan said "the deploy path" as though it were one
+  thing.
+
+The first two were found by an implementer reporting an observation nobody asked
+for, and by a merge. The third and fourth by a whole-branch review. None was
+findable from inside a single task's diff, and none was caught by the compiler
+or by 699 tests. **A per-task review cannot see a contract that neither side
+states.**
+
+**Also learned, and it is now decision `hobbyist.bound-every-outbound-call`:** a
+`try/catch` around an unbounded `await` is not a bound. `deliver.ts` had a
+`fetch` with no timeout, and because the tick is sequential, one user's hung
+`queue()` handler would have stopped queue delivery for the whole box. The
+per-queue try/catch did not help, because it catches throws and a hang is not a
+throw. Three other files in this repo already bounded their calls and none of
+them said so anywhere.
+
 ## 2026-08-14: Caddy is wired, and a blocker that was never true cost four days
 
 Branch `caddy-wiring`, sub-project B of five, six commits (`e054c51` through

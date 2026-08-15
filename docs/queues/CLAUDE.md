@@ -106,8 +106,11 @@ Every one of these is from a Mac, like every other measurement in this repo.
   halves live in different packages and never meet. `env.MY_QUEUE.send()` fails
   DNS on the five dollar VPS this project is aimed at. Fix: add extra hosts to
   `ContainerSpec` and emit the flag, or resolve the gateway IP into the URL at
-  container start. Found by whole-branch review 2026-08-14, after every
-  end-to-end run passed on macOS.
+  container start. The daemon's own half WAS built: `queueEndpointHosts` binds
+  each project network's bridge gateway, so the listener is correctly bound and
+  simply unreachable by name. Found by whole-branch review 2026-08-14, after
+  every end-to-end run passed on macOS. **Established by reading the code, not
+  by running it: no Linux box has been touched.**
 
 - **Retention never sweeps a queue with no drainable consumer, which includes
   every dead letter queue.** `sweepRetention` has exactly one caller,
@@ -125,8 +128,6 @@ Every one of these is from a Mac, like every other measurement in this repo.
   a wrangler file and redeploying leaves the old value in force forever.
   `QueueConfig`'s own comment states the opposite. Undiscoverable, because
   nothing prints effective tuning values, so fix these two together.
-
-## Follow-ups the verification named
 
 - **The readiness probe writes a stack trace into every worker's log on every
   start.** `defaultProbeFactory` (`packages/worker/src/worker.ts`) POSTs an
