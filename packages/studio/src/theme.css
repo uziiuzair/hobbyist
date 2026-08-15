@@ -150,17 +150,9 @@
 
   --radius: 13px;
   --radius-sm: 9px;
-  /* Modals float above the page and take one softer step than the containers
-     in the flow. Only the modal uses this. */
   --radius-lg: 16px;
-  /* A 4px tall meter cannot take the 5px radius without looking like a
-     lozenge, so the bar radius is its own documented step. */
   --radius-bar: 2px;
-  /* The scrim is not a palette colour: it is an absence, and it must stay
-     black in both themes or a light-mode modal floats on nothing. */
   --scrim: rgba(0, 0, 0, 0.55);
-  /* A key cap sitting on the accent surface: derived from the accent's own ink
-     so it works in both themes rather than assuming a dark button. */
   --on-accent-line: color-mix(in srgb, var(--accent-ink) 26%, transparent);
   --on-accent-fill: color-mix(in srgb, var(--accent-ink) 13%, transparent);
   --rail: 248px;
@@ -168,8 +160,6 @@
 
   --shadow-card:
     0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 1px 3px rgba(0, 0, 0, 0.35);
-  /* A hovered card rises one step, not to the pop layer: the pop shadow is
-     reserved for things genuinely above the document (menu, modal). */
   --shadow-lift: 0 10px 32px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
   --shadow-pop: 0 24px 70px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.35);
 }
@@ -300,10 +290,6 @@
   }
 }
 
-* {
-  box-sizing: border-box;
-}
-
 html,
 body,
 #root {
@@ -311,12 +297,8 @@ body,
 }
 
 body {
-  margin: 0;
-  background: var(--ground);
-  color: var(--ink);
-  font-family: var(--font-sans);
-  font-size: 14px;
-  line-height: 1.5;
+  @apply m-0 bg-ground *:text-ink font-sans text-sm leading-6;
+
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -339,6 +321,7 @@ input,
 textarea {
   caret-color: var(--accent);
 }
+
 * {
   scrollbar-color: var(--line-strong) transparent;
   scrollbar-width: thin;
