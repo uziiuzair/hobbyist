@@ -1597,8 +1597,10 @@ git commit -m "feat(daemon): restore a snapshot into a new project, rewriting wh
 
 In place keeps the original resource ids, so no DO rename and no config rewrite
 happens at all: the config in the manifest is already correct for this project.
-It is destructive, so it quiesces first and refuses if anything is still running
-afterwards.
+It is destructive, and it **refuses** while anything in the project is running
+rather than quiescing on the caller's behalf. Stopping a user's project as a side
+effect of a destructive command is a surprise; the spec's wording is "refuses to
+run against a project that is not fully stopped", and that is what the code does.
 
 - [ ] **Step 1: Write the failing tests**
 
