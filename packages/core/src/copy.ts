@@ -3,13 +3,26 @@
 // one level down. Two copiers would mean two ext4 fallbacks, and the second one
 // would eventually be wrong.
 //
-// Pure node:fs on purpose: core must never import Docker, Postgres or HTTP
-// (packages/core/src/types.ts:3), and a file copier has no business knowing
-// what it is copying.
+// core must never import Docker, Postgres or HTTP (packages/core/src/types.ts,
+// header comment). node:child_process does not violate that: the rule is
+// about what this package talks to, not which node builtins it uses, and a
+// subprocess that runs `cp` is none of Docker, Postgres or HTTP. It is used
+// here, on darwin only, because Node's own COPYFILE_FICLONE_FORCE is ENOSYS
+// on darwin (measured on this machine, node v24.19.0: it fails in
+// os.tmpdir(), ~/.hobby and the repo worktree alike) while APFS cloning
+// through `cp -c`/`cp -Rc` works fine, matching the platform split
+// packages/cli/src/daemon/preflight.ts's detectReflinkSupport already uses
+// and documents for the same reason: `cp -c` is APFS's clonefile path, `cp
+// --reflink=always` is the Linux equivalent, and detection and execution
+// must use the same mechanism or the product lies about itself.
 
 import { constants } from 'node:fs'
 import { copyFile, lstat, mkdir, readdir, readlink, rm, symlink } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
 
 export type CloneMechanism = 'reflink' | 'copy'
 
@@ -27,7 +40,9 @@ interface Tally {
 // COPYFILE_FICLONE_FORCE rather than COPYFILE_FICLONE: the plain flag falls
 // back to a full copy silently, which would make `mechanism` a claim we cannot
 // support. Reflink support is a property of the filesystem, so this either
-// throws on the first regular file or does not throw at all.
+// throws on the first regular file or does not throw at all. Used for the
+// non-darwin reflink attempt (a real Linux ioctl) and, with mode 0, for the
+// plain-copy fallback shared by both platforms.
 async function copyEntry(src: string, dst: string, mode: number, tally: Tally): Promise<void> {
   const stat = await lstat(src)
 
@@ -57,9 +72,53 @@ async function copyEntry(src: string, dst: string, mode: number, tally: Tally): 
   tally.bytes += stat.size
 }
 
-export async function cloneTree(src: string, dst: string): Promise<CloneResult> {
+// Counts what `cp -Rc` already produced at dst. No copying happens here: the
+// subprocess did that in one shot for the whole tree, so this is a stat-only
+// walk applying the same counting rules copyEntry uses (a file adds one and
+// its size, a symlink adds one and nothing, anything else is skipped).
+async function tallyTree(path: string, tally: Tally): Promise<void> {
+  const stat = await lstat(path)
+
+  if (stat.isSymbolicLink()) {
+    tally.files += 1
+    return
+  }
+
+  if (stat.isDirectory()) {
+    for (const entry of await readdir(path)) {
+      await tallyTree(join(path, entry), tally)
+    }
+    return
+  }
+
+  if (!stat.isFile()) {
+    return
+  }
+
+  tally.files += 1
+  tally.bytes += stat.size
+}
+
+// The darwin reflink attempt: one subprocess clones the whole tree, rather
+// than the per-file walk copyEntry does for the Linux ioctl, because darwin
+// has no per-file Node API for this (COPYFILE_FICLONE_FORCE is ENOSYS
+// there). BSD cp -R copies symlinks as symlinks rather than following them
+// (see packages/core/test/copy.test.ts's symlink test, which exercises this
+// path and pins that claim rather than trusting it), which preserves the
+// guarantee copyEntry gives on every other platform.
+async function cloneTreeDarwin(src: string, dst: string): Promise<CloneResult> {
+  await execFileAsync('cp', ['-Rc', src, dst])
   const tally: Tally = { files: 0, bytes: 0 }
+  await tallyTree(dst, tally)
+  return { mechanism: 'reflink', files: tally.files, bytes: tally.bytes }
+}
+
+export async function cloneTree(src: string, dst: string): Promise<CloneResult> {
   try {
+    if (process.platform === 'darwin') {
+      return await cloneTreeDarwin(src, dst)
+    }
+    const tally: Tally = { files: 0, bytes: 0 }
     await copyEntry(src, dst, constants.COPYFILE_FICLONE_FORCE, tally)
     return { mechanism: 'reflink', files: tally.files, bytes: tally.bytes }
   } catch {
