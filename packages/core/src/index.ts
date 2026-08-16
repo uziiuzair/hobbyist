@@ -8,6 +8,7 @@ export * from './names.js'
 export * from './config.js'
 export * from './runtime.js'
 export * from './store.js'
+export * from './copy.js'
 export * from './docker.js'
 // Exported because @hobby.sh/do opens sqlite databases that are not the store:
 // a Durable Object namespace's alarm table, written by workerd. The two-runtime
