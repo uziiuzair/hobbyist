@@ -1,7 +1,30 @@
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
-import { resolvePaths, validateName } from '@hobby.sh/core'
-import { projectSnapshotsDir, snapshotDir, snapshotId, verifyProjectName } from '../src/daemon/snapshots.js'
+import { randomUUID } from 'node:crypto'
+import { rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { after, test } from 'node:test'
+import {
+  createFakeRuntime,
+  openStore,
+  resolvePaths,
+  validateName,
+  type ActivityGuardResult,
+  type HobbyConfig,
+  type PostgresConfig,
+  type Resource,
+  type Store,
+} from '@hobby.sh/core'
+import { ActivityTracker } from '@hobby.sh/proxy'
+import { createDefaultKindRegistry, type DaemonContext } from '../src/daemon/context.js'
+import {
+  projectSnapshotsDir,
+  quiesce,
+  resume,
+  snapshotDir,
+  snapshotId,
+  verifyProjectName,
+} from '../src/daemon/snapshots.js'
 
 test('snapshotId is lowercase, sortable, and safe inside a project name', () => {
   const id = snapshotId(Date.UTC(2026, 7, 16, 14, 30, 0), 'a1b2c3')
@@ -27,4 +50,151 @@ test('snapshot paths hang off the hobby home, not the project directory', () => 
   const paths = resolvePaths({ HOBBY_HOME: '/tmp/hobby-test-home' })
   assert.equal(projectSnapshotsDir(paths, 'blog'), '/tmp/hobby-test-home/snapshots/blog')
   assert.equal(snapshotDir(paths, 'blog', '20260816t143000z-a1b2c3'), '/tmp/hobby-test-home/snapshots/blog/20260816t143000z-a1b2c3')
+})
+
+const homes: string[] = []
+after(() => {
+  for (const home of homes) {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+function testConfig(): HobbyConfig {
+  return {
+    image: 'postgres:18-alpine',
+    proxyPort: 5432,
+    studioPort: 8443,
+    apiPort: 7432,
+    httpPort: 7433,
+    domain: 'localhost',
+    sleepAfterSeconds: 300,
+    wakeTimeoutMs: 150,
+    readinessPollMs: 20,
+    caddyEnabled: false,
+    caddyAdminPort: 2019,
+    caddyStudioHost: null,
+  }
+}
+
+function buildContext(): DaemonContext {
+  const home = join(tmpdir(), `hobby-snapshots-${randomUUID()}`)
+  homes.push(home)
+  const store: Store = openStore(':memory:')
+  return {
+    store,
+    runtime: createFakeRuntime(),
+    paths: resolvePaths({ HOBBY_HOME: home }),
+    config: testConfig(),
+    activity: new ActivityTracker(),
+    kinds: createDefaultKindRegistry(),
+  }
+}
+
+function postgresConfig(name: string): PostgresConfig {
+  return {
+    image: 'postgres:18-alpine',
+    containerName: `hobby-test-${name}`,
+    hostPort: 15432,
+    dataDir: `/tmp/hobby-test/${name}/pgdata`,
+    superuser: 'postgres',
+    password: 'secret',
+    database: 'app',
+  }
+}
+
+test('quiesce stops running resources and reports them', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const running = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: postgresConfig('primary'),
+  })
+  ctx.store.setResourceState(running.id, 'running')
+
+  const stopped = await quiesce(ctx, project, { guard: async () => 'idle' })
+
+  assert.deepEqual(stopped, [running.id])
+})
+
+test('quiesce leaves an already sleeping resource alone', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const asleep = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: postgresConfig('primary'),
+  })
+  ctx.store.setResourceState(asleep.id, 'sleeping')
+
+  const stopped = await quiesce(ctx, project, { guard: async () => 'idle' })
+
+  assert.deepEqual(stopped, [])
+  assert.equal(ctx.store.getResource(asleep.id)?.state, 'sleeping')
+})
+
+test('quiesce refuses when the guard cannot answer', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const running = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: postgresConfig('primary'),
+  })
+  ctx.store.setResourceState(running.id, 'running')
+
+  await assert.rejects(
+    quiesce(ctx, project, { guard: async () => 'unreachable' }),
+    /could not confirm/
+  )
+  // And it must not have stopped anything on its way to failing.
+  assert.equal(ctx.store.getResource(running.id)?.state, 'running')
+})
+
+test('quiesce retries an active resource, then fails rather than snapshotting it', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const running = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: postgresConfig('primary'),
+  })
+  ctx.store.setResourceState(running.id, 'running')
+
+  let calls = 0
+  const guard = async (): Promise<ActivityGuardResult> => {
+    calls += 1
+    return 'active'
+  }
+
+  await assert.rejects(
+    quiesce(ctx, project, { guard, attempts: 3, waitMs: 1, sleepFor: async () => {} }),
+    /still active/
+  )
+  assert.equal(calls, 3)
+})
+
+test('quiesce proceeds when a retry finds the resource gone idle', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const running = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: postgresConfig('primary'),
+  })
+  ctx.store.setResourceState(running.id, 'running')
+
+  let calls = 0
+  const guard = async (): Promise<ActivityGuardResult> => {
+    calls += 1
+    return calls === 1 ? 'active' : 'idle'
+  }
+
+  const stopped = await quiesce(ctx, project, { guard, attempts: 3, waitMs: 1, sleepFor: async () => {} })
+  assert.deepEqual(stopped, [running.id])
 })
