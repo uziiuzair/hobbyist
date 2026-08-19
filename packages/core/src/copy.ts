@@ -19,7 +19,7 @@
 import { constants } from 'node:fs'
 import { copyFile, lstat, mkdir, readdir, readlink, rm, symlink } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
@@ -106,14 +106,52 @@ async function tallyTree(path: string, tally: Tally): Promise<void> {
 // (see packages/core/test/copy.test.ts's symlink test, which exercises this
 // path and pins that claim rather than trusting it), which preserves the
 // guarantee copyEntry gives on every other platform.
+//
+// `cp -Rc src dst` fails outright when dst's parent does not exist yet
+// (verified by hand: exits 1 with "No such file or directory"), unlike
+// copyEntry's `mkdir(dst, { recursive: true })`, which creates every
+// missing ancestor. Without creating it here first, that failure would fall
+// into cloneTree's catch below and get reported as a plain copy on a
+// filesystem that can reflink fine, which is the exact detection/execution
+// mismatch this file exists to prevent. cloneTree's own guard against a
+// pre-existing dst runs before this function is ever called, so dst itself
+// is never created ahead of time here, only its parent.
+//
+// macOS cp -c falls back to a full copyfile(2) copy, without erroring, when
+// the target filesystem does not support clonefile(2) (see cp(1)), so a
+// successful cp -Rc here does not by itself prove a reflink happened on a
+// non-APFS darwin mount. packages/cli/src/daemon/preflight.ts's
+// detectReflinkSupport carries the same imprecision on darwin, for the same
+// reason.
 async function cloneTreeDarwin(src: string, dst: string): Promise<CloneResult> {
+  await mkdir(dirname(dst), { recursive: true })
   await execFileAsync('cp', ['-Rc', src, dst])
   const tally: Tally = { files: 0, bytes: 0 }
   await tallyTree(dst, tally)
   return { mechanism: 'reflink', files: tally.files, bytes: tally.bytes }
 }
 
+// cloneTree's contract is "make dst a mirror of src," which only holds if
+// dst starts out absent. Verified by hand: against a pre-existing empty
+// dst, `cp -Rc src dst` exits 0 but nests src's contents one level deeper
+// (dst/src/a.txt, not dst/a.txt) instead of mirroring into it, and on every
+// other platform copyEntry would silently merge into whatever dst already
+// held rather than reproduce src exactly. Checked once here, before either
+// platform's path runs and outside the try below, so a violation is a loud
+// rejection that leaves dst untouched, not a wrong tree shape, and not
+// something the copy fallback quietly papers over by deleting dst first.
+async function assertDestinationAbsent(dst: string): Promise<void> {
+  try {
+    await lstat(dst)
+  } catch {
+    return
+  }
+  throw new Error(`cloneTree: destination already exists: ${dst}`)
+}
+
 export async function cloneTree(src: string, dst: string): Promise<CloneResult> {
+  await assertDestinationAbsent(dst)
+
   try {
     if (process.platform === 'darwin') {
       return await cloneTreeDarwin(src, dst)

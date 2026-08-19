@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises'
 import { lstat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -115,4 +115,50 @@ test('cloneTree on a nested tree agrees with the platform clone tool', async () 
   const result = await cloneTree(src, dst)
 
   assert.equal(result.mechanism, expected)
+})
+
+// Every test above puts dst under a root that mkdtemp already created, so
+// dst's own parent always exists. A real caller does not get that for free:
+// packages/cli/src/daemon/snapshots.ts's takeSnapshot clones into
+// join(partialDir, 'data'), and only partialDir, not partialDir/data, is
+// created before cloneTree runs. Verified by hand: `cp -Rc src
+// no-such-parent/dst` exits 1 with "No such file or directory" when
+// no-such-parent does not exist. Before this fix that failure fell into
+// cloneTree's catch and reported mechanism: 'copy' purely because the
+// parent had not been created yet, on a filesystem that can reflink fine.
+test('cloneTree creates the destination parent when it does not exist yet', async () => {
+  const root = await scratch()
+  const src = join(root, 'src')
+  const dst = join(root, 'no-such-parent', 'dst')
+  await mkdir(src, { recursive: true })
+  await writeFile(join(src, 'a.txt'), 'a', 'utf8')
+
+  const expected = (await reflinkWorksIn(root)) ? 'reflink' : 'copy'
+  const result = await cloneTree(src, dst)
+
+  assert.equal(result.mechanism, expected)
+  assert.equal(await readFile(join(dst, 'a.txt'), 'utf8'), 'a')
+})
+
+// Verified by hand: against a pre-existing empty dst, `cp -Rc src dst`
+// exits 0 but nests src's contents one level deeper, producing
+// dst/src/a.txt rather than dst/a.txt. copyEntry, used on every other
+// platform and in the copy fallback, always mirrors src's contents
+// directly into dst instead. cloneTree's contract is "make dst a mirror of
+// src," which only holds if dst starts out absent, so a pre-existing dst
+// must be a loud rejection rather than a silently wrong tree shape (or,
+// worse, a copy fallback that first deletes whatever was already at dst).
+// Nothing is created or removed at dst before the throw.
+test('cloneTree rejects rather than silently nesting into an existing destination', async () => {
+  const root = await scratch()
+  const src = join(root, 'src')
+  const dst = join(root, 'dst')
+  await mkdir(src, { recursive: true })
+  await writeFile(join(src, 'a.txt'), 'a', 'utf8')
+  await mkdir(dst, { recursive: true })
+  await writeFile(join(dst, 'sentinel.txt'), 'untouched', 'utf8')
+
+  await assert.rejects(() => cloneTree(src, dst))
+
+  assert.deepEqual(await readdir(dst), ['sentinel.txt'])
 })
