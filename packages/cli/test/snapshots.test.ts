@@ -20,6 +20,9 @@ import {
 import { ActivityTracker } from '@hobby.sh/proxy'
 import { createDefaultKindRegistry, type DaemonContext } from '../src/daemon/context.js'
 import {
+  deleteSnapshot,
+  findSnapshot,
+  listSnapshots,
   projectSnapshotsDir,
   quiesce,
   resume,
@@ -323,4 +326,51 @@ test('takeSnapshot leaves nothing listable when the clone fails', async () => {
   )
 
   await assert.rejects(stat(snapshotDir(ctx.paths, 'blog', '20260816t143000z-a1b2c3')))
+})
+
+async function seedProject(ctx: DaemonContext, name: string): Promise<void> {
+  ctx.store.createProject({ name, sleepAfterSeconds: null })
+  await mkdir(ctx.paths.resourcePath(name, 'primary', 'pgdata'), { recursive: true })
+}
+
+test('listSnapshots returns newest first and skips partials', async () => {
+  const ctx = buildContext()
+  await seedProject(ctx, 'blog')
+
+  await takeSnapshot(ctx, 'blog', { now: () => Date.UTC(2026, 7, 16, 9, 0, 0), suffix: () => 'aaaaaa' })
+  await takeSnapshot(ctx, 'blog', { now: () => Date.UTC(2026, 7, 16, 14, 0, 0), suffix: () => 'bbbbbb' })
+  await mkdir(join(projectSnapshotsDir(ctx.paths, 'blog'), '20260816t150000z-cccccc.partial'), { recursive: true })
+
+  const listed = await listSnapshots(ctx, 'blog')
+
+  assert.deepEqual(
+    listed.map((manifest) => manifest.snapshotId),
+    ['20260816t140000z-bbbbbb', '20260816t090000z-aaaaaa']
+  )
+})
+
+test('findSnapshot resolves an id without being told the project', async () => {
+  const ctx = buildContext()
+  await seedProject(ctx, 'blog')
+  const taken = await takeSnapshot(ctx, 'blog', { now: () => Date.UTC(2026, 7, 16, 9, 0, 0), suffix: () => 'aaaaaa' })
+
+  const found = await findSnapshot(ctx, taken.snapshotId)
+
+  assert.equal(found?.project, 'blog')
+  assert.equal(found?.manifest.snapshotId, taken.snapshotId)
+})
+
+test('findSnapshot returns null for an id that does not exist', async () => {
+  const ctx = buildContext()
+  assert.equal(await findSnapshot(ctx, '20260816t090000z-zzzzzz'), null)
+})
+
+test('deleteSnapshot removes the directory', async () => {
+  const ctx = buildContext()
+  await seedProject(ctx, 'blog')
+  const taken = await takeSnapshot(ctx, 'blog', { now: () => Date.UTC(2026, 7, 16, 9, 0, 0), suffix: () => 'aaaaaa' })
+
+  await deleteSnapshot(ctx, taken.snapshotId)
+
+  assert.equal(await findSnapshot(ctx, taken.snapshotId), null)
 })
