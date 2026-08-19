@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 import {
   createFakeRuntime,
+  HobbyError,
   openStore,
   resolvePaths,
   validateName,
@@ -260,6 +261,56 @@ test('takeSnapshot restarts what it stopped', async () => {
   })
 
   assert.equal(ctx.store.getResource(resource.id)?.state, 'running')
+})
+
+test('takeSnapshot restarts a resource quiesce already stopped, even when a later stop throws', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const a = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: postgresConfig('primary'),
+  })
+  const b = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'replica',
+    config: postgresConfig('replica'),
+  })
+  ctx.store.setResourceState(a.id, 'running')
+  ctx.store.setResourceState(b.id, 'running')
+  await mkdir(ctx.paths.resourcePath('blog', 'primary', 'pgdata'), { recursive: true })
+  await mkdir(ctx.paths.resourcePath('blog', 'replica', 'pgdata'), { recursive: true })
+  ctx.probeFactory = () => async (): Promise<boolean> => true
+
+  // quiesce stops resources in the store's own listing order (its `running`
+  // array, packages/cli/src/daemon/snapshots.ts:133), so read that order
+  // here rather than assume it, and fail the second one to stop, whichever
+  // resource that turns out to be.
+  const [first, second] = ctx.store.listResources(project.id)
+  assert.ok(first !== undefined && second !== undefined)
+
+  const realStop = ctx.runtime.stop
+  ctx.runtime.stop = async (name: string, opts: { timeoutSec: number }): Promise<void> => {
+    if (name === second.config.containerName) {
+      throw new HobbyError('runtime_unavailable', 'docker stop timed out')
+    }
+    return realStop(name, opts)
+  }
+
+  await assert.rejects(
+    takeSnapshot(ctx, 'blog', {
+      now: () => Date.UTC(2026, 7, 16, 14, 30, 0),
+      suffix: () => 'a1b2c3',
+      quiesce: { guard: async () => 'idle' },
+    })
+  )
+
+  // The first resource's stop genuinely succeeded before the second one
+  // threw. It must come back up anyway: a failed snapshot that leaves it
+  // stopped is worse than the failed snapshot itself.
+  assert.equal(ctx.store.getResource(first.id)?.state, 'running')
 })
 
 test('takeSnapshot leaves nothing listable when the clone fails', async () => {
