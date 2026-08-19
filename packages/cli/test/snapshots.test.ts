@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { rmSync } from 'node:fs'
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
@@ -23,6 +24,7 @@ import {
   resume,
   snapshotDir,
   snapshotId,
+  takeSnapshot,
   verifyProjectName,
 } from '../src/daemon/snapshots.js'
 
@@ -197,4 +199,77 @@ test('quiesce proceeds when a retry finds the resource gone idle', async () => {
 
   const stopped = await quiesce(ctx, project, { guard, attempts: 3, waitMs: 1, sleepFor: async () => {} })
   assert.deepEqual(stopped, [running.id])
+})
+
+test('takeSnapshot clones the project directory and writes a manifest', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 900 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: postgresConfig('primary'),
+  })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+
+  // A stand-in for a PGDATA: what matters here is that the bytes travel.
+  await mkdir(ctx.paths.resourcePath('blog', 'primary', 'pgdata'), { recursive: true })
+  await writeFile(join(ctx.paths.resourcePath('blog', 'primary', 'pgdata'), 'PG_VERSION'), '18\n', 'utf8')
+
+  const manifest = await takeSnapshot(ctx, 'blog', {
+    now: () => Date.UTC(2026, 7, 16, 14, 30, 0),
+    suffix: () => 'a1b2c3',
+  })
+
+  assert.equal(manifest.snapshotId, '20260816t143000z-a1b2c3')
+  assert.equal(manifest.project.name, 'blog')
+  assert.equal(manifest.project.sleepAfterSeconds, 900)
+  assert.equal(manifest.resources.length, 1)
+  assert.equal(manifest.resources[0]?.name, 'primary')
+  assert.equal(manifest.resources[0]?.stateAtSnapshot, 'sleeping')
+  assert.equal(manifest.verification.status, 'unverified')
+
+  const dir = snapshotDir(ctx.paths, 'blog', manifest.snapshotId)
+  assert.equal(await readFile(join(dir, 'data', 'primary', 'pgdata', 'PG_VERSION'), 'utf8'), '18\n')
+  const written: unknown = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8'))
+  assert.deepEqual(written, manifest)
+})
+
+test('takeSnapshot restarts what it stopped', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: postgresConfig('primary'),
+  })
+  ctx.store.setResourceState(resource.id, 'running')
+  await mkdir(ctx.paths.resourcePath('blog', 'primary', 'pgdata'), { recursive: true })
+  // Against the fake runtime nothing is actually listening, so the real
+  // readiness probe would time out and land the resource on `failed`. The
+  // seam this daemon already ships for exactly that case is
+  // DaemonContext.probeFactory (packages/cli/src/daemon/context.ts:67),
+  // used the same way by hibernator.test.ts:558 and routes.test.ts:989.
+  ctx.probeFactory = () => async (): Promise<boolean> => true
+
+  await takeSnapshot(ctx, 'blog', {
+    now: () => Date.UTC(2026, 7, 16, 14, 30, 0),
+    suffix: () => 'a1b2c3',
+    quiesce: { guard: async () => 'idle' },
+  })
+
+  assert.equal(ctx.store.getResource(resource.id)?.state, 'running')
+})
+
+test('takeSnapshot leaves nothing listable when the clone fails', async () => {
+  const ctx = buildContext()
+  ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  // No project directory on disk at all, so the clone throws.
+
+  await assert.rejects(
+    takeSnapshot(ctx, 'blog', { now: () => Date.UTC(2026, 7, 16, 14, 30, 0), suffix: () => 'a1b2c3' })
+  )
+
+  await assert.rejects(stat(snapshotDir(ctx.paths, 'blog', '20260816t143000z-a1b2c3')))
 })

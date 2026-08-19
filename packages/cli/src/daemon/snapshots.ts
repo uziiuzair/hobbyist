@@ -6,8 +6,23 @@
 // produces a copy that is internally inconsistent in a way nobody notices until
 // they restore it.
 
+import { randomUUID } from 'node:crypto'
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { guardFor, HobbyError, type ActivityGuardResult, type Paths, type Project, type Resource, type ResourceId } from '@hobby.sh/core'
+import {
+  cloneTree,
+  guardFor,
+  HobbyError,
+  type ActivityGuardResult,
+  type CloneMechanism,
+  type Paths,
+  type Project,
+  type Resource,
+  type ResourceConfig,
+  type ResourceId,
+  type ResourceKind,
+  type ResourceState,
+} from '@hobby.sh/core'
 import type { DaemonContext } from './context.js'
 
 // Sortable, and lowercase because restore builds project names out of this and
@@ -141,4 +156,109 @@ export async function resume(ctx: DaemonContext, ids: ResourceId[]): Promise<str
     }
   }
   return failures
+}
+
+export interface SnapshotResourceEntry {
+  id: string
+  kind: ResourceKind
+  name: string
+  stateAtSnapshot: ResourceState
+  config: ResourceConfig
+  durableObjectClasses: string[]
+}
+
+export interface SnapshotVerification {
+  status: 'unverified' | 'verified' | 'failed'
+  at: string | null
+  detail: string | null
+}
+
+export interface SnapshotManifest {
+  version: 1
+  snapshotId: string
+  createdAt: string
+  clone: CloneMechanism
+  project: { name: string; sleepAfterSeconds: number | null }
+  resources: SnapshotResourceEntry[]
+  verification: SnapshotVerification
+}
+
+export interface TakeSnapshotOptions {
+  now?: () => number
+  suffix?: () => string
+  quiesce?: QuiesceOptions
+}
+
+// Only a worker has Durable Object classes, and only once it has deployed. The
+// names exist in the manifest for exactly one consumer: restore, which needs
+// them to compute the OLD storage keys it is renaming away from.
+function durableObjectClassesOf(config: ResourceConfig): string[] {
+  if (!('manifest' in config)) {
+    return []
+  }
+  const manifest = config.manifest
+  if (manifest === null) {
+    return []
+  }
+  return manifest.durableObjects.map((entry) => entry.className)
+}
+
+function projectOrThrow(ctx: DaemonContext, name: string): Project {
+  const project = ctx.store.getProjectByName(name)
+  if (project === null) {
+    throw new HobbyError('project_not_found', `no project named ${name}`, 'run `hobby ls` to see what exists')
+  }
+  return project
+}
+
+export async function takeSnapshot(
+  ctx: DaemonContext,
+  projectName: string,
+  opts: TakeSnapshotOptions = {}
+): Promise<SnapshotManifest> {
+  const nowMs = (opts.now ?? Date.now)()
+  const suffix = (opts.suffix ?? (() => randomUUID().slice(0, 6)))()
+  const project = projectOrThrow(ctx, projectName)
+
+  const id = snapshotId(nowMs, suffix)
+  const finalDir = snapshotDir(ctx.paths, project.name, id)
+  // Built under .partial and renamed only once the manifest is on disk, so a
+  // crash mid-clone leaves nothing that list will ever offer on the worst day.
+  const partialDir = `${finalDir}.partial`
+
+  const stopped = await quiesce(ctx, project, opts.quiesce)
+  try {
+    await mkdir(partialDir, { recursive: true })
+    const result = await cloneTree(join(ctx.paths.projectsDir, project.name), join(partialDir, 'data'))
+    const clone = result.mechanism
+
+    const manifest: SnapshotManifest = {
+      version: 1,
+      snapshotId: id,
+      createdAt: new Date(nowMs).toISOString(),
+      clone,
+      project: { name: project.name, sleepAfterSeconds: project.sleepAfterSeconds },
+      resources: ctx.store.listResources(project.id).map((resource) => ({
+        id: resource.id,
+        kind: resource.kind,
+        name: resource.name,
+        stateAtSnapshot: resource.state,
+        config: resource.config,
+        durableObjectClasses: durableObjectClassesOf(resource.config),
+      })),
+      verification: { status: 'unverified', at: null, detail: null },
+    }
+    await writeFile(join(partialDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+    await rename(partialDir, finalDir)
+
+    return manifest
+  } catch (err: unknown) {
+    await rm(partialDir, { recursive: true, force: true })
+    throw err
+  } finally {
+    const failures = await resume(ctx, stopped)
+    for (const failure of failures) {
+      console.error(`snapshot: ${failure}`)
+    }
+  }
 }
