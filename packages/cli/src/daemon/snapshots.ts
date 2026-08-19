@@ -7,7 +7,7 @@
 // they restore it.
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   cloneTree,
@@ -285,4 +285,92 @@ export async function takeSnapshot(
       console.error(`snapshot: ${failure}`)
     }
   }
+}
+
+export interface FoundSnapshot {
+  manifest: SnapshotManifest
+  dir: string
+  project: string
+}
+
+async function readManifest(dir: string): Promise<SnapshotManifest | null> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8'))
+    if (!isSnapshotManifest(parsed)) {
+      return null
+    }
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+// Narrowing rather than casting, per the repo's global constraint. A manifest
+// written by a future version with a higher `version` is refused here rather
+// than half-read, because a restore driven by a partly understood manifest is
+// the one failure this whole feature exists to prevent.
+function isSnapshotManifest(value: unknown): value is SnapshotManifest {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const record: Record<string, unknown> = { ...value }
+  return (
+    record.version === 1 &&
+    typeof record.snapshotId === 'string' &&
+    typeof record.createdAt === 'string' &&
+    Array.isArray(record.resources)
+  )
+}
+
+async function readdirOrEmpty(dir: string): Promise<string[]> {
+  try {
+    return await readdir(dir)
+  } catch {
+    return []
+  }
+}
+
+// Directories ending .partial are a takeSnapshot in progress or one that
+// crashed mid-clone (the try/catch in takeSnapshot above). Either way they
+// are not a snapshot yet, and offering one here is exactly what the
+// rename-into-place in takeSnapshot exists to prevent.
+export async function listSnapshots(ctx: DaemonContext, projectName: string): Promise<SnapshotManifest[]> {
+  const dir = projectSnapshotsDir(ctx.paths, projectName)
+  const entries = (await readdirOrEmpty(dir)).filter((entry) => !entry.endsWith('.partial'))
+  const manifests: SnapshotManifest[] = []
+  for (const entry of entries.sort().reverse()) {
+    const manifest = await readManifest(join(dir, entry))
+    if (manifest !== null) {
+      manifests.push(manifest)
+    }
+  }
+  return manifests
+}
+
+// Ids are unique across the install, not per project (snapshotId above mints
+// them from a timestamp and a random suffix), so resolving one means scanning
+// every project's snapshot directory rather than requiring the caller to
+// already know which project it lives under.
+export async function findSnapshot(ctx: DaemonContext, id: string): Promise<FoundSnapshot | null> {
+  for (const project of await readdirOrEmpty(snapshotsRoot(ctx.paths))) {
+    const dir = snapshotDir(ctx.paths, project, id)
+    const manifest = await readManifest(dir)
+    if (manifest !== null) {
+      return { manifest, dir, project }
+    }
+  }
+  return null
+}
+
+export async function deleteSnapshot(ctx: DaemonContext, id: string): Promise<void> {
+  const found = await findSnapshot(ctx, id)
+  if (found === null) {
+    throw new HobbyError('resource_not_found', `no snapshot ${id}`, 'run `hobby snapshot list <project>`')
+  }
+  await rm(found.dir, { recursive: true, force: true })
+}
+
+export async function writeVerification(found: FoundSnapshot, verification: SnapshotVerification): Promise<void> {
+  const updated: SnapshotManifest = { ...found.manifest, verification }
+  await writeFile(join(found.dir, 'manifest.json'), `${JSON.stringify(updated, null, 2)}\n`, 'utf8')
 }
