@@ -13,6 +13,7 @@ import {
   cloneTree,
   guardFor,
   HobbyError,
+  validateName,
   type ActivityGuardResult,
   type CloneMechanism,
   type Paths,
@@ -373,4 +374,146 @@ export async function deleteSnapshot(ctx: DaemonContext, id: string): Promise<vo
 export async function writeVerification(found: FoundSnapshot, verification: SnapshotVerification): Promise<void> {
   const updated: SnapshotManifest = { ...found.manifest, verification }
   await writeFile(join(found.dir, 'manifest.json'), `${JSON.stringify(updated, null, 2)}\n`, 'utf8')
+}
+
+export interface RestoreOptions {
+  as?: string
+  inPlace?: boolean
+}
+
+export interface RestoreResult {
+  project: Project
+  resources: Resource[]
+}
+
+// Ports the daemon hands out, so a restored copy must never inherit them: the
+// original may still be holding both. The range mirrors what createResource
+// paths already use; see store.allocatePort.
+const PORT_FROM = 15000
+const PORT_TO = 19999
+
+// Every field below either names the old project, embeds the old resource id,
+// or is unique per machine. Each one is a SILENT failure if missed: the restore
+// succeeds and the copy quietly shares something with the original. The
+// sharpest is dataDir, where the copy would write into the original's PGDATA.
+function rewriteConfig(
+  ctx: DaemonContext,
+  config: ResourceConfig,
+  projectName: string,
+  resourceName: string,
+  newId: string
+): ResourceConfig {
+  const base = {
+    ...config,
+    containerName: `hobby-${projectName}-${resourceName}`,
+    hostPort: ctx.store.allocatePort(PORT_FROM, PORT_TO),
+  }
+
+  if ('dataDir' in base) {
+    return { ...base, dataDir: ctx.paths.resourcePath(projectName, resourceName, 'pgdata') }
+  }
+
+  if ('queueToken' in base) {
+    return {
+      ...base,
+      controlPort: ctx.store.allocatePort(PORT_FROM, PORT_TO, [base.hostPort]),
+      queueToken: randomUUID(),
+      hostname: `${resourceName}.${projectName}.${ctx.config.domain}`,
+      durableObjectUniqueKeyModifier: newId,
+    }
+  }
+
+  if ('hostname' in base) {
+    return { ...base, hostname: `${resourceName}.${projectName}.${ctx.config.domain}` }
+  }
+
+  return base
+}
+
+// worker.ts:174 builds a Durable Object's storage key from the RESOURCE ID
+// (uniqueKeyFor, worker.ts:88), and the key is the directory name under
+// .../<worker>/do/. A restored worker has a new id, so without this rename
+// every object comes up empty rather than erroring: the state is on disk under
+// a key nothing will ever ask for again. The sharpest silent failure in the
+// whole feature.
+async function renameDurableObjectDirs(
+  ctx: DaemonContext,
+  projectName: string,
+  entry: SnapshotResourceEntry,
+  newId: string
+): Promise<void> {
+  const doDir = ctx.paths.resourcePath(projectName, entry.name, 'do')
+  for (const className of entry.durableObjectClasses) {
+    const from = join(doDir, `${entry.id}-${className}`)
+    const to = join(doDir, `${newId}-${className}`)
+    try {
+      await rename(from, to)
+    } catch {
+      // A worker that has deployed but whose object has never been addressed
+      // has no directory yet. That is not an error, and inventing an empty one
+      // would be worse than leaving it absent.
+    }
+  }
+}
+
+// Replaced in full by Task 7, which restores over an existing project rather
+// than into a new one. Landed as a throwing stub here so restoreSnapshot's
+// `inPlace` branch has somewhere to go without pretending in-place restore
+// works before it does.
+async function restoreInPlace(ctx: DaemonContext, found: FoundSnapshot): Promise<RestoreResult> {
+  throw new HobbyError('usage', 'in-place restore is not implemented yet', 'restore into a new project with --as')
+}
+
+export async function restoreSnapshot(
+  ctx: DaemonContext,
+  id: string,
+  opts: RestoreOptions
+): Promise<RestoreResult> {
+  const found = await findSnapshot(ctx, id)
+  if (found === null) {
+    throw new HobbyError('resource_not_found', `no snapshot ${id}`, 'run `hobby snapshot list <project>`')
+  }
+  if (opts.inPlace === true) {
+    return restoreInPlace(ctx, found)
+  }
+
+  const target = opts.as ?? `${found.manifest.project.name}-restored`
+  validateName(target)
+  if (ctx.store.getProjectByName(target) !== null) {
+    throw new HobbyError('name_taken', `a project named ${target} already exists`, 'pass a different --as name')
+  }
+
+  await cloneTree(join(found.dir, 'data'), join(ctx.paths.projectsDir, target))
+
+  const project = ctx.store.createProject({
+    name: target,
+    sleepAfterSeconds: found.manifest.project.sleepAfterSeconds,
+  })
+
+  const resources: Resource[] = []
+  for (const entry of found.manifest.resources) {
+    // Created with the old config first so the row (and its id) exists before
+    // the rewrite needs it: durableObjectUniqueKeyModifier is derived from the
+    // new id, and the DO directory rename needs it too.
+    const created = ctx.store.createResource({
+      projectId: project.id,
+      kind: entry.kind,
+      name: entry.name,
+      config: entry.config,
+    })
+    const rewritten = rewriteConfig(ctx, entry.config, target, entry.name, created.id)
+    ctx.store.updateResourceConfig(created.id, rewritten)
+    await renameDurableObjectDirs(ctx, target, entry, created.id)
+
+    // Never `running`: nothing has been started, and a row claiming otherwise
+    // is exactly the lie reconcile.ts exists to catch.
+    ctx.store.setResourceState(created.id, entry.kind === 'queue' ? entry.stateAtSnapshot : 'sleeping')
+
+    const reloaded = ctx.store.getResource(created.id)
+    if (reloaded !== null) {
+      resources.push(reloaded)
+    }
+  }
+
+  return { project, resources }
 }
