@@ -64,6 +64,13 @@ export interface QuiesceOptions {
   waitMs?: number
   sleepFor?: (ms: number) => Promise<void>
   guard?: (resource: Resource) => Promise<ActivityGuardResult>
+  // Called right after each successful stop, in stop order, the same moment
+  // the local `stopped` array below is pushed to. quiesce's own return value
+  // is only reached if every stop in the project succeeds; a caller that
+  // must resume whatever DID stop even when a later one throws (takeSnapshot)
+  // has no other way to learn that partial progress, since the throw
+  // discards quiesce's local array along with the rest of its stack frame.
+  onStopped?: (id: ResourceId) => void
 }
 
 function errorMessage(err: unknown): string {
@@ -133,6 +140,7 @@ export async function quiesce(ctx: DaemonContext, project: Project, opts: Quiesc
   for (const resource of running) {
     await ctx.kinds.get(resource.kind).stop(ctx, resource)
     stopped.push(resource.id)
+    opts.onStopped?.(resource.id)
   }
   return stopped
 }
@@ -226,8 +234,20 @@ export async function takeSnapshot(
   // crash mid-clone leaves nothing that list will ever offer on the worst day.
   const partialDir = `${finalDir}.partial`
 
-  const stopped = await quiesce(ctx, project, opts.quiesce)
+  // Declared before the try, and filled in by quiesce's onStopped as it
+  // goes, because quiesce itself can throw partway through a multi-resource
+  // project: one kind handler's stop can succeed while the next one throws
+  // (postgresKindHandler.stop forwards to stopPostgres,
+  // packages/pg/src/postgres.ts's stopPostgres, which marks the resource
+  // failed and rethrows on a real Docker error). quiesce's own return value
+  // is unreachable in that case, so onStopped is the only way this array
+  // ends up holding the resources that genuinely did stop. quiesce now runs
+  // inside the try below so that partial progress is resumed in finally
+  // exactly like a clean quiesce's would be.
+  const stopped: ResourceId[] = []
   try {
+    await quiesce(ctx, project, { ...opts.quiesce, onStopped: (resourceId) => stopped.push(resourceId) })
+
     await mkdir(partialDir, { recursive: true })
     const result = await cloneTree(join(ctx.paths.projectsDir, project.name), join(partialDir, 'data'))
     const clone = result.mechanism
@@ -256,6 +276,10 @@ export async function takeSnapshot(
     await rm(partialDir, { recursive: true, force: true })
     throw err
   } finally {
+    // Safe to await unguarded only because resume (above) already catches
+    // every start() failure itself and returns failure strings rather than
+    // throwing. If that contract ever changed, a throw here would replace
+    // whatever error the try/catch above was already carrying.
     const failures = await resume(ctx, stopped)
     for (const failure of failures) {
       console.error(`snapshot: ${failure}`)
