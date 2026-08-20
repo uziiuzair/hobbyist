@@ -31,13 +31,18 @@ function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
-test('login posts to /studio/login with the password body', async () => {
+test('login posts to /studio/login with the credential body', async () => {
   const calls = installFakeFetch(() => jsonResponse(200, {}))
-  await api.login('hunter2')
+  await api.login('operator', 'hunter2')
   assert.equal(calls.length, 1)
   assert.equal(calls[0]?.url, '/studio/login')
   assert.equal(calls[0]?.method, 'POST')
-  assert.deepEqual(calls[0]?.body, { password: 'hunter2' })
+  // The username is sent and the daemon does not read it: its login handler
+  // (packages/cli/src/daemon/studio/routes.ts) destructures `password` alone,
+  // because Studio has one operator credential and no user table. The field
+  // is asserted here so that the day a second reader appears, this test says
+  // what the wire already carried rather than looking like a new addition.
+  assert.deepEqual(calls[0]?.body, { username: 'operator', password: 'hunter2' })
 })
 
 test('logout posts to /studio/logout', async () => {

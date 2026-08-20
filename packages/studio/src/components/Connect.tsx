@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
-import type { Resource } from '@hobby.sh/core'
-import * as api from '../api.js'
-import { Modal } from './Modal.js'
+import { useEffect, useState } from "react";
+import type { Resource } from "@hobby.sh/core";
+import * as api from "../api.js";
+import { Modal } from "./Modal.js";
+import { Button } from "./reusable/button.js";
 
 // Connect, export and import all need the same one secret and all answer the
 // same question: what do I type. They share a file because they share that
@@ -14,13 +15,21 @@ import { Modal } from './Modal.js'
 // also the more useful answer: the data directory is a plain PGDATA and
 // pg_dump has always worked against it.
 
-function CopyRow({ label, value, hint }: { label: string; value: string; hint?: string }) {
-  const [copied, setCopied] = useState(false)
+function CopyRow({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  const [copied, setCopied] = useState(false);
 
   async function copy(): Promise<void> {
-    await navigator.clipboard.writeText(value)
-    setCopied(true)
-    window.setTimeout(() => setCopied(false), 1600)
+    await navigator.clipboard.writeText(value);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
   }
 
   return (
@@ -28,38 +37,46 @@ function CopyRow({ label, value, hint }: { label: string; value: string; hint?: 
       <label>{label}</label>
       <div className="connstring">
         <code>{value}</code>
-        <button type="button" className="btn btn-sm btn-ghost" onClick={copy}>
-          {copied ? 'Copied' : 'Copy'}
-        </button>
+        <Button type="button" variant="ghost" onClick={copy}>
+          {copied ? "Copied" : "Copy"}
+        </Button>
       </div>
       {hint !== undefined && <p className="field-hint">{hint}</p>}
     </div>
-  )
+  );
 }
 
 // One fetch, one place. The connection string carries the real password (it is
 // the one route that deliberately returns it, see packages/cli/src/daemon/wire.ts),
 // so it is requested when a modal opens and never held on the page behind it.
-function useConnectionString(resourceId: string): { value: string | null; error: string | null } {
-  const [value, setValue] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
+function useConnectionString(resourceId: string): {
+  value: string | null;
+  error: string | null;
+} {
+  const [value, setValue] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let live = true
+    let live = true;
     api
       .connectionString(resourceId)
       .then((result) => {
-        if (live) setValue(result.connectionString)
+        if (live) setValue(result.connectionString);
       })
       .catch((err: unknown) => {
-        if (live) setError(err instanceof api.ApiError ? err.message : 'Could not read the connection string')
-      })
+        if (live)
+          setError(
+            err instanceof api.ApiError
+              ? err.message
+              : "Could not read the connection string",
+          );
+      });
     return () => {
-      live = false
-    }
-  }, [resourceId])
+      live = false;
+    };
+  }, [resourceId]);
 
-  return { value, error }
+  return { value, error };
 }
 
 function Body({
@@ -67,25 +84,32 @@ function Body({
   error,
   children,
 }: {
-  value: string | null
-  error: string | null
-  children: (conn: string) => React.ReactNode
+  value: string | null;
+  error: string | null;
+  children: (conn: string) => React.ReactNode;
 }) {
-  if (error !== null) return <div className="notice notice-danger">{error}</div>
-  if (value === null) return <span className="dim">Loading</span>
-  return <>{children(value)}</>
+  if (error !== null)
+    return <div className="notice notice-danger">{error}</div>;
+  if (value === null) return <span className="dim">Loading</span>;
+  return <>{children(value)}</>;
 }
 
 function CloseFooter({ onClose }: { onClose: () => void }) {
   return (
-    <button type="button" className="btn" onClick={onClose}>
+    <Button type="button" onClick={onClose}>
       Close
-    </button>
-  )
+    </Button>
+  );
 }
 
-export function ConnectModal({ resource, onClose }: { resource: Resource; onClose: () => void }) {
-  const { value, error } = useConnectionString(resource.id)
+export function ConnectModal({
+  resource,
+  onClose,
+}: {
+  resource: Resource;
+  onClose: () => void;
+}) {
+  const { value, error } = useConnectionString(resource.id);
 
   return (
     <Modal
@@ -103,12 +127,15 @@ export function ConnectModal({ resource, onClose }: { resource: Resource; onClos
               value={`psql "${conn}"`}
               hint="Waking takes about a second from cold, so the first connection is a little slower than the rest."
             />
-            <CopyRow label="Environment variable" value={`DATABASE_URL="${conn}"`} />
+            <CopyRow
+              label="Environment variable"
+              value={`DATABASE_URL="${conn}"`}
+            />
           </>
         )}
       </Body>
     </Modal>
-  )
+  );
 }
 
 export function ExportModal({
@@ -116,11 +143,11 @@ export function ExportModal({
   projectName,
   onClose,
 }: {
-  resource: Resource
-  projectName: string
-  onClose: () => void
+  resource: Resource;
+  projectName: string;
+  onClose: () => void;
 }) {
-  const { value, error } = useConnectionString(resource.id)
+  const { value, error } = useConnectionString(resource.id);
 
   return (
     <Modal
@@ -151,11 +178,17 @@ export function ExportModal({
         )}
       </Body>
     </Modal>
-  )
+  );
 }
 
-export function ImportModal({ resource, onClose }: { resource: Resource; onClose: () => void }) {
-  const { value, error } = useConnectionString(resource.id)
+export function ImportModal({
+  resource,
+  onClose,
+}: {
+  resource: Resource;
+  onClose: () => void;
+}) {
+  const { value, error } = useConnectionString(resource.id);
 
   return (
     <Modal
@@ -185,5 +218,5 @@ export function ImportModal({ resource, onClose }: { resource: Resource; onClose
         )}
       </Body>
     </Modal>
-  )
+  );
 }
