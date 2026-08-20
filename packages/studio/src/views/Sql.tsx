@@ -1,14 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
-import type { KeyboardEvent } from 'react'
-import * as api from '../api.js'
-import { formatSince } from '../lib/format.js'
-import { useResource } from '../lib/useResource.js'
-import { useWakeAwareRun } from '../lib/useWaking.js'
-import { WakingBanner } from '../components/WakingBanner.js'
-import { Modal } from '../components/Modal.js'
-import { Workbench } from '../components/Workbench.js'
-import { State } from '../components/State.js'
-import { SpotTerminal } from '../components/Spot.js'
+import { useEffect, useRef, useState } from "react";
+import type { KeyboardEvent } from "react";
+import * as api from "../api.js";
+import { formatSince } from "../lib/format.js";
+import { useResource } from "../lib/useResource.js";
+import { useWakeAwareRun } from "../lib/useWaking.js";
+import { WakingBanner } from "../components/WakingBanner.js";
+import { Modal } from "../components/Modal.js";
+import { Workbench } from "../components/Workbench.js";
+import { State } from "../components/State.js";
+import { SpotTerminal } from "../components/Spot.js";
 import {
   loadHistory,
   loadSnippets,
@@ -17,49 +17,73 @@ import {
   deleteSnippet,
   type HistoryEntry,
   type Snippet,
-} from '../lib/sqlStorage.js'
+} from "../lib/sqlStorage.js";
+import { Button } from "../components/reusable/button.js";
 
 function randomId(): string {
-  return typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`
+  return typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random()}`;
 }
 
-export function Sql({ projectName, resourceName, onChanged }: { projectName: string; resourceName: string; onChanged?: () => void }) {
-  const { resource, error: resourceError, refresh } = useResource(projectName, resourceName)
+export function Sql({
+  projectName,
+  resourceName,
+  onChanged,
+}: {
+  projectName: string;
+  resourceName: string;
+  onChanged?: () => void;
+}) {
+  const {
+    resource,
+    error: resourceError,
+    refresh,
+  } = useResource(projectName, resourceName);
   const { snapshot, run } = useWakeAwareRun(() => {
-    refresh()
-    onChanged?.()
-  })
+    refresh();
+    onChanged?.();
+  });
 
-  const [sql, setSql] = useState('')
-  const [result, setResult] = useState<api.QueryResult | null>(null)
-  const [queryError, setQueryError] = useState<string | null>(null)
-  const [history, setHistory] = useState<HistoryEntry[]>([])
-  const [snippets, setSnippets] = useState<Snippet[]>([])
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
-  const [namingSnippet, setNamingSnippet] = useState(false)
-  const [pane, setPane] = useState<'saved' | 'history'>('history')
-  const [ranMs, setRanMs] = useState<number | null>(null)
+  const [sql, setSql] = useState("");
+  const [result, setResult] = useState<api.QueryResult | null>(null);
+  const [queryError, setQueryError] = useState<string | null>(null);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [snippets, setSnippets] = useState<Snippet[]>([]);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [namingSnippet, setNamingSnippet] = useState(false);
+  const [pane, setPane] = useState<"saved" | "history">("history");
+  const [ranMs, setRanMs] = useState<number | null>(null);
 
   useEffect(() => {
-    if (resource === null) return
-    setHistory(loadHistory(window.localStorage, resource.id))
-    setSnippets(loadSnippets(window.localStorage))
-  }, [resource?.id])
+    if (resource === null) return;
+    setHistory(loadHistory(window.localStorage, resource.id));
+    setSnippets(loadSnippets(window.localStorage));
+  }, [resource?.id]);
 
   async function handleRun(): Promise<void> {
-    const startedAt = Date.now()
-    if (resource === null || sql.trim().length === 0) return
-    setQueryError(null)
+    const startedAt = Date.now();
+    if (resource === null || sql.trim().length === 0) return;
+    setQueryError(null);
     try {
-      const queryResult = await run(resource.id, resource.state, () => api.runQuery(resource.id, sql))
-      setResult(queryResult)
-      setRanMs(Date.now() - startedAt)
-      const entry: HistoryEntry = { id: randomId(), resourceId: resource.id, sql, ranAt: new Date().toISOString(), ok: true }
-      setHistory(pushHistory(window.localStorage, entry))
+      const queryResult = await run(resource.id, resource.state, () =>
+        api.runQuery(resource.id, sql),
+      );
+      setResult(queryResult);
+      setRanMs(Date.now() - startedAt);
+      const entry: HistoryEntry = {
+        id: randomId(),
+        resourceId: resource.id,
+        sql,
+        ranAt: new Date().toISOString(),
+        ok: true,
+      };
+      setHistory(pushHistory(window.localStorage, entry));
     } catch (err) {
-      const message = err instanceof api.ApiError ? err.message : 'query failed'
-      setQueryError(message)
-      setResult(null)
+      const message =
+        err instanceof api.ApiError ? err.message : "query failed";
+      setQueryError(message);
+      setResult(null);
       const entry: HistoryEntry = {
         id: randomId(),
         resourceId: resource.id,
@@ -67,38 +91,43 @@ export function Sql({ projectName, resourceName, onChanged }: { projectName: str
         ranAt: new Date().toISOString(),
         ok: false,
         errorMessage: message,
-      }
-      setHistory(pushHistory(window.localStorage, entry))
+      };
+      setHistory(pushHistory(window.localStorage, entry));
     }
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
-    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-      event.preventDefault()
-      void handleRun()
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      void handleRun();
     }
   }
 
   // PRODUCT.md: every form lives in a modal. window.prompt is a form with no
   // styling, no validation and no escape from the browser's own chrome.
   function handleSaveSnippet(): void {
-    if (sql.trim().length === 0) return
-    setNamingSnippet(true)
+    if (sql.trim().length === 0) return;
+    setNamingSnippet(true);
   }
 
   function commitSnippet(name: string): void {
-    const snippet: Snippet = { id: randomId(), name: name.trim(), sql, savedAt: new Date().toISOString() }
-    setSnippets(saveSnippet(window.localStorage, snippet))
-    setNamingSnippet(false)
+    const snippet: Snippet = {
+      id: randomId(),
+      name: name.trim(),
+      sql,
+      savedAt: new Date().toISOString(),
+    };
+    setSnippets(saveSnippet(window.localStorage, snippet));
+    setNamingSnippet(false);
   }
 
   function handleDeleteSnippet(id: string): void {
-    setSnippets(deleteSnippet(window.localStorage, id))
+    setSnippets(deleteSnippet(window.localStorage, id));
   }
 
   function loadIntoEditor(text: string): void {
-    setSql(text)
-    textareaRef.current?.focus()
+    setSql(text);
+    textareaRef.current?.focus();
   }
 
   if (resourceError !== null) {
@@ -106,14 +135,14 @@ export function Sql({ projectName, resourceName, onChanged }: { projectName: str
       <div className="page measure">
         <div className="notice notice-danger">{resourceError}</div>
       </div>
-    )
+    );
   }
   if (resource === null) {
     return (
       <div className="page measure">
         <span className="hint-text">Loading {resourceName}</span>
       </div>
-    )
+    );
   }
 
   return (
@@ -124,36 +153,73 @@ export function Sql({ projectName, resourceName, onChanged }: { projectName: str
             <span className="wb-side-title">SQL</span>
           </div>
           <div className="wb-side-search">
-            <div className="segmented" role="group" aria-label="Show saved or history">
-              <button type="button" className="segment" aria-pressed={pane === 'saved'} onClick={() => setPane('saved')}>
+            <div
+              className="segmented"
+              role="group"
+              aria-label="Show saved or history"
+            >
+              <Button
+                type="button"
+                variant="ghost"
+                size="small"
+                aria-pressed={pane === "saved"}
+                onClick={() => setPane("saved")}
+              >
                 Saved
-              </button>
-              <button type="button" className="segment" aria-pressed={pane === 'history'} onClick={() => setPane('history')}>
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="small"
+                aria-pressed={pane === "history"}
+                onClick={() => setPane("history")}
+              >
                 History
-              </button>
+              </Button>
             </div>
           </div>
           <div className="wb-side-list">
-            {pane === 'saved' ? (
+            {pane === "saved" ? (
               snippets.length === 0 ? (
                 <div className="side-list-empty">Nothing saved yet</div>
               ) : (
                 snippets.map((snippet) => (
-                  <div key={snippet.id} className="q-item">
-                    <button type="button" className="q-open" onClick={() => loadIntoEditor(snippet.sql)}>
-                      <span className="q-name">{snippet.name}</span>
-                      <span className="q-sql">{snippet.sql.replace(/\s+/g, ' ').slice(0, 52)}</span>
-                    </button>
-                    <button
+                  <div key={snippet.id} className="flex w-full">
+                    <Button
                       type="button"
-                      className="side-list-remove"
+                      variant="ghost"
+                      className="grow flex items-center justify-between flex-row gap-12 max-w-50"
+                      onClick={() => loadIntoEditor(snippet.sql)}
+                    >
+                      <span className="q-name shrink-0">{snippet.name}</span>
+                      <span className="q-sql">
+                        {snippet.sql.replace(/\s+/g, " ").slice(0, 52)}
+                      </span>
+                    </Button>
+
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="small"
+                      className="side-list-remove shrink-0"
                       aria-label={`Delete snippet ${snippet.name}`}
                       onClick={() => handleDeleteSnippet(snippet.id)}
                     >
-                      <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true">
-                        <path d="M2 2l7 7M9 2l-7 7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                      <svg
+                        width="11"
+                        height="11"
+                        viewBox="0 0 11 11"
+                        fill="none"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M2 2l7 7M9 2l-7 7"
+                          stroke="currentColor"
+                          strokeWidth="1.4"
+                          strokeLinecap="round"
+                        />
                       </svg>
-                    </button>
+                    </Button>
                   </div>
                 ))
               )
@@ -161,26 +227,34 @@ export function Sql({ projectName, resourceName, onChanged }: { projectName: str
               <div className="side-list-empty">No queries run yet</div>
             ) : (
               history.map((entry) => (
-                <button
+                <Button
                   type="button"
+                  variant="ghost"
                   key={entry.id}
-                  className="q-open"
+                  className="w-full flex items-center justify-between flex-row"
                   onClick={() => loadIntoEditor(entry.sql)}
                   title={entry.sql}
                 >
-                  <span className="q-sql q-sql-lead">
-                    {!entry.ok && <span className="dot-failed" aria-label="Failed" />}
-                    {entry.sql.replace(/\s+/g, ' ').slice(0, 52)}
+                  <span className="q-sql q-sql-lead truncate w-36">
+                    {!entry.ok && (
+                      <span className="dot-failed" aria-label="Failed" />
+                    )}
+                    {entry.sql.replace(/\s+/g, " ").slice(0, 52)}
                   </span>
                   <span className="q-time">{formatSince(entry.ranAt)}</span>
-                </button>
+                </Button>
               ))
             )}
           </div>
         </>
       }
     >
-      {namingSnippet && <SnippetNameModal onClose={() => setNamingSnippet(false)} onSave={commitSnippet} />}
+      {namingSnippet && (
+        <SnippetNameModal
+          onClose={() => setNamingSnippet(false)}
+          onSave={commitSnippet}
+        />
+      )}
       <WakingBanner resourceName={resourceName} snapshot={snapshot} />
 
       <div className="editor-pane">
@@ -199,38 +273,52 @@ export function Sql({ projectName, resourceName, onChanged }: { projectName: str
           know: whether this database is awake, and that running will wake it. */}
       <div className="editor-bar">
         <State state={resource.state} />
-        {resource.state !== 'running' && <span className="dim">Running a query will wake it</span>}
-        <div className="row" style={{ marginLeft: 'auto', gap: 8 }}>
+        {resource.state !== "running" && (
+          <span className="dim">Running a query will wake it</span>
+        )}
+        <div className="row" style={{ marginLeft: "auto", gap: 8 }}>
           {ranMs !== null && <span className="grid-timing">{ranMs}ms</span>}
-          <button type="button" className="btn btn-sm" disabled={sql.trim().length === 0} onClick={handleSaveSnippet}>
-            Save snippet
-          </button>
-          <button
+          <Button
             type="button"
-            className="btn btn-sm btn-primary"
+            size="small"
+            disabled={sql.trim().length === 0}
+            onClick={handleSaveSnippet}
+          >
+            Save snippet
+          </Button>
+          <Button
+            type="button"
+            variant="primary"
+            size="small"
             disabled={sql.trim().length === 0}
             onClick={() => void handleRun()}
           >
-            Run <kbd>{navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}</kbd>
-            <kbd>{'\u21B5'}</kbd>
-          </button>
+            Run{" "}
+            <kbd>{navigator.platform.includes("Mac") ? "\u2318" : "Ctrl"}</kbd>
+            <kbd>{"\u21B5"}</kbd>
+          </Button>
         </div>
       </div>
 
       <div className="result-pane">
-        {queryError !== null && <div className="notice notice-danger">{queryError}</div>}
+        {queryError !== null && (
+          <div className="notice notice-danger">{queryError}</div>
+        )}
         {queryError === null && result === null && (
           <div className="result-idle">
             <div>
               <SpotTerminal />
-              <p style={{ margin: 0 }}>Results appear here once you run something.</p>
+              <p style={{ margin: 0 }}>
+                Results appear here once you run something.
+              </p>
             </div>
           </div>
         )}
         {result !== null && (
           <>
             <div className="result-summary">
-              {result.command} · {result.rowCount} row{result.rowCount === 1 ? '' : 's'}
+              {result.command} · {result.rowCount} row
+              {result.rowCount === 1 ? "" : "s"}
             </div>
             {result.rows.length > 0 && (
               <div className="table-scroll">
@@ -253,7 +341,10 @@ export function Sql({ projectName, resourceName, onChanged }: { projectName: str
                             {row[col.name] === null ? (
                               <span className="cell-null">NULL</span>
                             ) : (
-                              <span className="cell-value" title={String(row[col.name])}>
+                              <span
+                                className="cell-value"
+                                title={String(row[col.name])}
+                              >
                                 {String(row[col.name])}
                               </span>
                             )}
@@ -269,11 +360,17 @@ export function Sql({ projectName, resourceName, onChanged }: { projectName: str
         )}
       </div>
     </Workbench>
-  )
+  );
 }
 
-function SnippetNameModal({ onClose, onSave }: { onClose: () => void; onSave: (name: string) => void }) {
-  const [name, setName] = useState('')
+function SnippetNameModal({
+  onClose,
+  onSave,
+}: {
+  onClose: () => void;
+  onSave: (name: string) => void;
+}) {
+  const [name, setName] = useState("");
   return (
     <Modal
       title="Save snippet"
@@ -281,25 +378,25 @@ function SnippetNameModal({ onClose, onSave }: { onClose: () => void; onSave: (n
       onClose={onClose}
       footer={
         <>
-          <button type="button" className="btn btn-ghost" onClick={onClose}>
+          <Button type="button" variant="ghost" onClick={onClose}>
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
             type="submit"
             form="snippet-name-form"
-            className="btn btn-primary"
+            variant="primary"
             disabled={name.trim().length === 0}
           >
             Save snippet
-          </button>
+          </Button>
         </>
       }
     >
       <form
         id="snippet-name-form"
         onSubmit={(event) => {
-          event.preventDefault()
-          if (name.trim().length > 0) onSave(name)
+          event.preventDefault();
+          if (name.trim().length > 0) onSave(name);
         }}
       >
         <div className="field">
@@ -314,5 +411,5 @@ function SnippetNameModal({ onClose, onSave }: { onClose: () => void; onSave: (n
         </div>
       </form>
     </Modal>
-  )
+  );
 }

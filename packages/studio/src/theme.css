@@ -18,6 +18,7 @@
   font-display: swap;
   src: url("./fonts/fraunces-latin-400-normal.woff2") format("woff2");
 }
+
 @font-face {
   font-family: "Fraunces";
   font-weight: 600;
@@ -25,6 +26,7 @@
   font-display: swap;
   src: url("./fonts/fraunces-latin-600-normal.woff2") format("woff2");
 }
+
 @font-face {
   font-family: "IBM Plex Sans";
   font-weight: 400;
@@ -32,6 +34,7 @@
   font-display: swap;
   src: url("./fonts/ibm-plex-sans-latin-400-normal.woff2") format("woff2");
 }
+
 @font-face {
   font-family: "IBM Plex Sans";
   font-weight: 500;
@@ -39,6 +42,7 @@
   font-display: swap;
   src: url("./fonts/ibm-plex-sans-latin-500-normal.woff2") format("woff2");
 }
+
 @font-face {
   font-family: "IBM Plex Sans";
   font-weight: 600;
@@ -46,6 +50,7 @@
   font-display: swap;
   src: url("./fonts/ibm-plex-sans-latin-600-normal.woff2") format("woff2");
 }
+
 @font-face {
   font-family: "JetBrains Mono";
   font-weight: 400;
@@ -157,7 +162,7 @@
   --on-accent-line: color-mix(in srgb, var(--accent-ink) 26%, transparent);
   --on-accent-fill: color-mix(in srgb, var(--accent-ink) 13%, transparent);
   --rail: 248px;
-  --topbar: 44px;
+  --topbar: 58px;
 
   --shadow-card:
     0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 1px 3px rgba(0, 0, 0, 0.35);
@@ -221,40 +226,47 @@
       0 8px 30px rgba(31, 107, 67, 0.1),
       0 1px 3px rgba(28, 25, 23, 0.05);
   }
+
   .tile-iris {
     border-color: rgba(90, 79, 184, 0.32);
     box-shadow:
       0 8px 30px rgba(90, 79, 184, 0.1),
       0 1px 3px rgba(28, 25, 23, 0.05);
   }
+
   .tile-honey {
     border-color: rgba(138, 95, 20, 0.32);
     box-shadow:
       0 8px 30px rgba(138, 95, 20, 0.1),
       0 1px 3px rgba(28, 25, 23, 0.05);
   }
+
   .tile-rose {
     border-color: rgba(168, 74, 85, 0.32);
     box-shadow:
       0 8px 30px rgba(168, 74, 85, 0.1),
       0 1px 3px rgba(28, 25, 23, 0.05);
   }
+
   .card {
     background:
       linear-gradient(180deg, rgba(255, 255, 255, 0.5), transparent 42%),
       var(--surface);
   }
+
   .tile {
     background:
       linear-gradient(180deg, rgba(255, 255, 255, 0.5), transparent 45%),
       var(--surface);
   }
+
   .card.is-awake {
     border-color: rgba(20, 122, 72, 0.3);
     box-shadow:
       inset 0 1px 0 rgba(20, 122, 72, 0.12),
       0 0 36px rgba(20, 122, 72, 0.05);
   }
+
   a.card.is-awake:hover {
     border-color: var(--accent-line);
     box-shadow:
@@ -262,6 +274,7 @@
       var(--shadow-lift),
       0 0 44px rgba(20, 122, 72, 0.08);
   }
+
   .waking-banner::after {
     background: linear-gradient(
       90deg,
@@ -270,6 +283,7 @@
       transparent
     );
   }
+
   .login-wrap {
     background:
       radial-gradient(
@@ -279,11 +293,13 @@
       ),
       var(--ground);
   }
+
   .login-mark {
     background:
       linear-gradient(180deg, rgba(255, 255, 255, 0.6), transparent),
       var(--surface-2);
   }
+
   .modal {
     background:
       linear-gradient(180deg, rgba(255, 255, 255, 0.5), transparent 40%),
@@ -327,6 +343,15 @@ body {
 input,
 textarea {
   @apply caret-accent;
+}
+
+a {
+  text-decoration: none;
+}
+
+p {
+  margin: 0;
+  padding: 0;
 }
 
 * {
@@ -386,6 +411,7 @@ textarea {
   background: var(--ink-3);
   display: block;
 }
+
 .rail-mark.is-awake i {
   background: var(--awake);
   box-shadow:
@@ -420,6 +446,7 @@ textarea {
     background 140ms ease,
     color 140ms ease;
 }
+
 .rail-link:hover {
   background: var(--surface-2);
   color: var(--ink);
@@ -448,10 +475,12 @@ textarea {
   color: var(--ink);
   font-weight: 600;
 }
+
 .rail-link svg {
   flex: none;
   opacity: 0.75;
 }
+
 .rail-link[aria-current="page"] svg {
   opacity: 1;
 }
@@ -463,15 +492,19 @@ textarea {
 .ic-sage {
   color: var(--sage);
 }
+
 .ic-iris {
   color: var(--iris);
 }
+
 .ic-honey {
   color: var(--honey-t);
 }
+
 .rail-link:hover svg {
   opacity: 1;
 }
+
 .rail-link .count {
   margin-left: auto;
   color: var(--ink-3);
@@ -486,6 +519,7 @@ textarea {
   align-items: center;
   gap: 2px;
 }
+
 .rail-row .rail-link {
   flex: 1;
   min-width: 0;
@@ -504,13 +538,16 @@ textarea {
   cursor: pointer;
   padding: 0;
 }
+
 .rail-toggle:hover {
   background: var(--surface-2);
   color: var(--ink);
 }
+
 .rail-toggle .caret {
   transition: transform 120ms ease;
 }
+
 .rail-toggle.is-open .caret {
   transform: rotate(90deg);
 }
@@ -525,10 +562,12 @@ textarea {
   flex-direction: column;
   gap: 1px;
 }
+
 .rail-node {
   display: flex;
   flex-direction: column;
 }
+
 .rail-link-sub {
   padding: 5px 8px;
   font-size: 13px;
@@ -539,12 +578,14 @@ textarea {
 .rail-link.is-trail {
   color: var(--ink);
 }
+
 .rail-link .state {
   color: inherit;
   font-size: inherit;
   min-width: 0;
   overflow: hidden;
 }
+
 .rail-link .state-failed {
   color: var(--danger);
 }
@@ -558,6 +599,7 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .rail-link .rail-dot,
 .rail-item .rail-dot {
   margin-left: auto;
@@ -576,6 +618,7 @@ textarea {
 .switcher {
   position: relative;
 }
+
 .switcher-btn {
   width: 100%;
   display: flex;
@@ -591,15 +634,18 @@ textarea {
   cursor: pointer;
   text-align: left;
 }
+
 .switcher-btn:hover {
   border-color: var(--line-strong);
 }
+
 .switcher-btn .name {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .switcher-btn .chev {
   color: var(--ink-3);
   flex: none;
@@ -621,6 +667,7 @@ textarea {
   max-height: 340px;
   overflow-y: auto;
 }
+
 .switcher-item {
   display: flex;
   align-items: center;
@@ -636,15 +683,18 @@ textarea {
   border-radius: var(--radius-sm);
   cursor: pointer;
 }
+
 .switcher-item {
   transition:
     background 140ms ease,
     color 140ms ease;
 }
+
 .switcher-item:hover {
   background: var(--surface-3);
   color: var(--ink);
 }
+
 .switcher-item[aria-current="true"] {
   color: var(--ink);
 }
@@ -660,6 +710,7 @@ textarea {
   flex-direction: column;
   overflow-x: clip;
 }
+
 .main > * {
   min-height: 0;
 }
@@ -714,13 +765,16 @@ textarea {
   color: var(--ink-3);
   min-width: 0;
 }
+
 .crumbs a {
   color: var(--ink-2);
   text-decoration: none;
 }
+
 .crumbs a:hover {
   color: var(--accent);
 }
+
 .crumbs .here {
   color: var(--ink);
 }
@@ -740,14 +794,17 @@ textarea {
   font-size: 12px;
   color: var(--ink-3);
 }
+
 .machine-host {
   color: var(--ink-2);
 }
+
 .machine-cluster {
   display: inline-flex;
   gap: 5px;
   align-items: center;
 }
+
 .machine-cluster i {
   width: 6px;
   height: 6px;
@@ -755,20 +812,24 @@ textarea {
   border: 1px solid var(--ink-3);
   box-sizing: border-box;
 }
+
 .machine-cluster i.on {
   background: var(--awake);
   border: 0;
   box-shadow: 0 0 8px 1px var(--glow-awake);
 }
+
 .machine-right {
   margin-left: auto;
 }
+
 .page-head {
   display: flex;
   align-items: flex-start;
   gap: 16px;
   margin-bottom: 22px;
 }
+
 /* The display voice: one serif title per view, a register the interface
    itself never uses. */
 .page-title {
@@ -778,11 +839,13 @@ textarea {
   font-weight: 600;
   letter-spacing: -0.012em;
 }
+
 .page-sub {
   margin: 4px 0 0;
   color: var(--ink-2);
   font-size: 13.5px;
 }
+
 .page-actions {
   margin-left: auto;
   display: flex;
@@ -791,71 +854,6 @@ textarea {
 }
 
 /* ---------- controls ---------- */
-
-.btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--line-strong);
-  background: var(--surface-2);
-  color: var(--ink);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  white-space: nowrap;
-  transition:
-    background 140ms ease,
-    border-color 140ms ease,
-    color 140ms ease;
-}
-.btn:hover {
-  background: var(--surface-3);
-}
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* The primary action is the one place a large filled green surface appears,
-   which is what keeps it readable against the small green status dots. */
-.btn-primary {
-  background: var(--accent);
-  color: var(--accent-ink);
-  border-color: var(--accent);
-  font-weight: 600;
-}
-.btn-primary:hover {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
-}
-.btn-primary:disabled {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-.btn-danger {
-  color: var(--danger);
-  border-color: var(--line-strong);
-}
-.btn-danger:hover {
-  background: var(--danger-dim);
-}
-.btn-ghost {
-  background: transparent;
-  border-color: transparent;
-  color: var(--ink-2);
-}
-.btn-ghost:hover {
-  background: var(--surface-2);
-  color: var(--ink);
-}
-.btn-sm {
-  padding: 4px 8px;
-  font-size: 12.5px;
-}
-
 .input,
 .select,
 .textarea {
@@ -868,9 +866,11 @@ textarea {
   font: inherit;
   font-size: 13.5px;
 }
+
 .input::placeholder {
   color: var(--ink-3);
 }
+
 .input:focus,
 .select:focus,
 .textarea:focus {
@@ -882,6 +882,7 @@ textarea {
   flex-direction: column;
   gap: 6px;
 }
+
 .field label {
   font-size: 12.5px;
   color: var(--ink-2);
@@ -892,12 +893,14 @@ textarea {
   display: flex;
   align-items: center;
 }
+
 .search svg {
   position: absolute;
   left: 9px;
   color: var(--ink-3);
   pointer-events: none;
 }
+
 .search .input {
   padding-left: 30px;
 }
@@ -912,6 +915,7 @@ textarea {
   color: var(--ink-2);
   white-space: nowrap;
 }
+
 .dot {
   width: 7px;
   height: 7px;
@@ -956,6 +960,7 @@ textarea {
   background: var(--danger);
   box-shadow: 0 0 0 3px var(--danger-dim);
 }
+
 .state-failed {
   color: var(--danger);
 }
@@ -965,6 +970,7 @@ textarea {
   100% {
     opacity: 1;
   }
+
   50% {
     opacity: 0.35;
   }
@@ -974,18 +980,13 @@ textarea {
   .state-waking .dot {
     animation: none;
   }
+
   a.card:hover {
     transform: none;
   }
 }
 
 /* ---------- cards ---------- */
-
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 12px;
-}
 
 .card {
   background:
@@ -1008,6 +1009,7 @@ a.card {
   text-decoration: none;
   color: inherit;
 }
+
 /* The green edge is the action half of the green rule; the 2px rise is the
    card answering the cursor. Motion this small still reads as life. */
 a.card:hover {
@@ -1025,6 +1027,7 @@ a.card:hover {
     inset 0 1px 0 rgba(78, 212, 146, 0.18),
     0 0 36px rgba(78, 212, 146, 0.06);
 }
+
 a.card.is-awake:hover {
   border-color: var(--accent-line);
   box-shadow:
@@ -1041,6 +1044,7 @@ a.card.is-awake:hover {
   flex: 1;
   min-width: 0;
 }
+
 .card-title {
   font-size: 14.5px;
   font-weight: 600;
@@ -1049,11 +1053,13 @@ a.card.is-awake:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .card-meta {
   color: var(--ink-3);
   font-size: 12.5px;
   font-variant-numeric: tabular-nums;
 }
+
 .card-foot {
   border-top: 1px solid var(--line);
   padding: 9px 15px;
@@ -1084,14 +1090,17 @@ a.card.is-awake:hover {
   padding: 15px 16px 13px;
   margin-bottom: 16px;
 }
+
 .stat-row {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 16px;
 }
+
 .stat {
   min-width: 0;
 }
+
 .stat-label {
   font-size: 10.5px;
   text-transform: uppercase;
@@ -1100,6 +1109,7 @@ a.card.is-awake:hover {
   font-weight: 600;
   margin-bottom: 5px;
 }
+
 /* The display step, the same size as the page title. A figure row is a
    different register from a heading, not a louder one, and the system's type
    range tops out here on purpose. */
@@ -1112,17 +1122,20 @@ a.card.is-awake:hover {
   align-items: baseline;
   gap: 6px;
 }
+
 /* Awake is the only figure that is green, and only when it is not zero. A
    dashboard where every number is coloured has no way left to say "this one". */
 .stat-value.is-live {
   color: var(--accent);
 }
+
 .stat-unit {
   font-size: 12.5px;
   font-weight: 400;
   color: var(--ink-3);
   letter-spacing: 0;
 }
+
 .stats-note {
   margin: 14px 0 0;
   padding-top: 11px;
@@ -1143,6 +1156,7 @@ a.card.is-awake:hover {
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
 }
+
 .tile {
   border-radius: var(--radius);
   padding: 15px 17px 13px;
@@ -1152,6 +1166,7 @@ a.card.is-awake:hover {
     var(--surface);
   min-width: 0;
 }
+
 .tile-label {
   font-size: 10.5px;
   letter-spacing: 0.09em;
@@ -1162,6 +1177,7 @@ a.card.is-awake:hover {
   gap: 7px;
   color: var(--ink-2);
 }
+
 .tile-label i {
   width: 6px;
   height: 6px;
@@ -1169,6 +1185,7 @@ a.card.is-awake:hover {
   background: currentColor;
   flex: none;
 }
+
 .tile-value {
   font-family: var(--font-serif);
   font-size: 28px;
@@ -1180,6 +1197,7 @@ a.card.is-awake:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .tile-value .of {
   font-family: var(--font-sans);
   font-size: 13px;
@@ -1188,51 +1206,62 @@ a.card.is-awake:hover {
   letter-spacing: 0;
   margin-left: 6px;
 }
+
 .tile-sage {
   border-color: rgba(151, 216, 176, 0.28);
   box-shadow:
     0 8px 30px rgba(151, 216, 176, 0.1),
     0 1px 3px rgba(0, 0, 0, 0.3);
 }
+
 .tile-sage .tile-label {
   color: var(--sage);
 }
+
 .tile-iris {
   border-color: rgba(182, 172, 245, 0.3);
   box-shadow:
     0 8px 30px rgba(182, 172, 245, 0.11),
     0 1px 3px rgba(0, 0, 0, 0.3);
 }
+
 .tile-iris .tile-label {
   color: var(--iris);
 }
+
 .tile-honey {
   border-color: rgba(227, 184, 120, 0.28);
   box-shadow:
     0 8px 30px rgba(227, 184, 120, 0.1),
     0 1px 3px rgba(0, 0, 0, 0.3);
 }
+
 .tile-honey .tile-label {
   color: var(--honey-t);
 }
+
 .tile-rose {
   border-color: rgba(233, 163, 171, 0.28);
   box-shadow:
     0 8px 30px rgba(233, 163, 171, 0.1),
     0 1px 3px rgba(0, 0, 0, 0.3);
 }
+
 .tile-rose .tile-label {
   color: var(--rose);
 }
+
 .tile-plain {
   box-shadow: var(--shadow-card);
 }
+
 .tiles-note {
   margin: 12px 0 16px;
   color: var(--ink-3);
   font-size: 12px;
   line-height: 1.5;
 }
+
 @media (max-width: 900px) {
   .tiles {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1246,6 +1275,7 @@ a.card.is-awake:hover {
   gap: 16px;
   align-items: start;
 }
+
 .dash-side {
   display: flex;
   flex-direction: column;
@@ -1263,16 +1293,19 @@ a.card.is-awake:hover {
 .chart {
   width: 100%;
 }
+
 .chart-axis {
   fill: var(--ink-3);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
+
 .chart-legend {
   display: flex;
   gap: 16px;
   margin-top: 4px;
 }
+
 .legend-item {
   display: inline-flex;
   align-items: center;
@@ -1282,6 +1315,7 @@ a.card.is-awake:hover {
   letter-spacing: 0.06em;
   color: var(--ink-3);
 }
+
 .legend-hatch {
   width: 14px;
   height: 9px;
@@ -1293,6 +1327,7 @@ a.card.is-awake:hover {
     transparent 1.5px 5px
   );
 }
+
 .legend-line {
   width: 14px;
   height: 2px;
@@ -1304,6 +1339,7 @@ a.card.is-awake:hover {
   display: flex;
   flex-direction: column;
 }
+
 .db-row {
   padding: 11px 0;
   border-bottom: 1px solid var(--line);
@@ -1311,19 +1347,23 @@ a.card.is-awake:hover {
   flex-direction: column;
   gap: 6px;
 }
+
 .db-row:first-child {
   padding-top: 0;
 }
+
 .db-row:last-child {
   border-bottom: 0;
   padding-bottom: 0;
 }
+
 .db-row-main {
   display: flex;
   align-items: center;
   gap: 10px;
   min-width: 0;
 }
+
 .db-name {
   font-size: 13.5px;
   font-weight: 600;
@@ -1334,13 +1374,16 @@ a.card.is-awake:hover {
   white-space: nowrap;
   min-width: 0;
 }
+
 .db-name:hover {
   color: var(--accent);
 }
+
 .db-row-main > .state {
   margin-left: auto;
   flex: none;
 }
+
 .db-row-meta {
   display: flex;
   align-items: center;
@@ -1359,10 +1402,12 @@ a.card.is-awake:hover {
   border-bottom: 1px solid var(--line);
   font-size: 12.5px;
 }
+
 .kv-label {
   color: var(--ink-2);
   flex: none;
 }
+
 .kv-value {
   margin-left: auto;
   color: var(--ink);
@@ -1381,16 +1426,19 @@ a.card.is-awake:hover {
   padding-top: 14px;
   border-top: 1px solid var(--line);
 }
+
 .danger-title {
   font-size: 12.5px;
   font-weight: 600;
 }
+
 .danger-note {
   margin: 3px 0 0;
   color: var(--ink-3);
   font-size: 12px;
   line-height: 1.45;
 }
+
 .panel-danger > :last-child {
   margin-left: auto;
   flex: none;
@@ -1401,12 +1449,14 @@ a.card.is-awake:hover {
   padding: 3px 7px;
   font-size: 12px;
 }
+
 .field-hint {
   margin: 0;
   color: var(--ink-3);
   font-size: 12px;
   line-height: 1.45;
 }
+
 .modal-body .field + .field {
   margin-top: 14px;
 }
@@ -1416,6 +1466,7 @@ a.card.is-awake:hover {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
 @media (max-width: 720px) {
   .stat-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1430,16 +1481,19 @@ a.card.is-awake:hover {
   border-radius: var(--radius);
   padding: 15px;
 }
+
 .panel-head {
   display: flex;
   align-items: baseline;
   gap: 8px;
   margin-bottom: 12px;
 }
+
 .panel-title {
   font-size: 13px;
   font-weight: 600;
 }
+
 .panel-note {
   color: var(--ink-3);
   font-size: 12px;
@@ -1450,16 +1504,19 @@ a.card.is-awake:hover {
   padding: 9px 0;
   border-bottom: 1px solid var(--line);
 }
+
 .meter-row:last-child {
   border-bottom: 0;
   padding-bottom: 0;
 }
+
 .meter-head {
   display: flex;
   align-items: baseline;
   gap: 8px;
   font-size: 12.5px;
 }
+
 .meter-label {
   color: var(--ink-2);
   text-transform: uppercase;
@@ -1467,11 +1524,13 @@ a.card.is-awake:hover {
   font-size: 10.5px;
   font-weight: 600;
 }
+
 .meter-value {
   margin-left: auto;
   font-variant-numeric: tabular-nums;
   color: var(--ink);
 }
+
 .meter-value .of {
   color: var(--ink-3);
 }
@@ -1483,11 +1542,13 @@ a.card.is-awake:hover {
   margin-top: 7px;
   overflow: hidden;
 }
+
 .meter-fill {
   height: 100%;
   background: var(--ink-3);
   border-radius: var(--radius-bar);
 }
+
 .meter-fill.is-awake {
   background: var(--awake);
 }
@@ -1500,6 +1561,7 @@ a.card.is-awake:hover {
   gap: 16px;
   align-items: start;
 }
+
 .capacity {
   position: sticky;
   top: calc(var(--topbar) + 20px);
@@ -1509,6 +1571,7 @@ a.card.is-awake:hover {
   .projects-layout {
     grid-template-columns: minmax(0, 1fr);
   }
+
   .capacity {
     position: static;
     order: -1;
@@ -1522,6 +1585,7 @@ a.card.is-awake:hover {
   overflow: hidden;
   flex: none;
 }
+
 .segment {
   padding: 6px 11px;
   font: inherit;
@@ -1532,17 +1596,21 @@ a.card.is-awake:hover {
   border-right: 1px solid var(--line);
   cursor: pointer;
 }
+
 .segment:last-child {
   border-right: 0;
 }
+
 .segment:hover {
   color: var(--ink);
 }
+
 .segment {
   transition:
     background 140ms ease,
     color 140ms ease;
 }
+
 /* Pressed cannot bold: a segment that gains weight gains width and the whole
    control jitters. The fill and a hairline do the work instead. */
 .segment[aria-pressed="true"] {
@@ -1559,24 +1627,31 @@ a.card.is-awake:hover {
   overflow: auto;
   background: var(--surface);
 }
+
 table.data {
   @apply w-full border-collapse text-[13px];
 }
+
 table.data th {
   @apply text-left font-semibold text-[11px] uppercase tracking-[0.06em] text-ink-3 px-3 py-[9px] border-b border-line bg-surface-2 sticky top-0 whitespace-nowrap;
 }
+
 table.data td {
   @apply px-3 py-[9px] border-b border-line align-top;
 }
+
 table.data tr:last-child td {
   @apply border-b-0;
 }
+
 table.data tbody tr:hover {
   @apply bg-surface-2;
 }
+
 table.data td.num {
   @apply text-right tabular-nums font-mono;
 }
+
 .null {
   color: var(--ink-3);
   font-style: italic;
@@ -1587,6 +1662,7 @@ table.data td.num {
   cursor: text;
   position: relative;
 }
+
 .editable:hover {
   box-shadow: inset 0 0 0 1px var(--line-strong);
   background: var(--surface-2);
@@ -1622,6 +1698,7 @@ table.data td.num {
   display: flex;
   flex-direction: column;
 }
+
 .cell-popout-area {
   width: 100%;
   min-height: 168px;
@@ -1635,9 +1712,11 @@ table.data td.num {
   padding: 10px 12px;
   white-space: pre-wrap;
 }
+
 .cell-popout-area:focus {
   outline: none;
 }
+
 .cell-popout-foot {
   display: flex;
   align-items: center;
@@ -1651,6 +1730,7 @@ table.data td.num {
 kbd {
   @apply font-mono text-[10.5px] border border-line-strong rounded-[3px] px-1 py-0 ml-1 text-ink-3 bg-surface-3;
 }
+
 .btn-primary kbd {
   border-color: var(--on-accent-line);
   color: var(--accent-ink);
@@ -1684,6 +1764,7 @@ kbd {
   color: var(--ink-2);
   min-width: 0;
 }
+
 .connstring code {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1698,6 +1779,7 @@ kbd {
   text-align: center;
   color: var(--ink-2);
 }
+
 .empty h3 {
   margin: 0 0 6px;
   font-family: var(--font-serif);
@@ -1705,11 +1787,13 @@ kbd {
   color: var(--ink);
   font-weight: 600;
 }
+
 .empty p {
   margin: 0 auto;
   max-width: 42ch;
   font-size: 13.5px;
 }
+
 /* The spot drawing above an empty state's heading: dim ink, never chroma.
    The drawing carries the warmth so the words can stay plain. */
 .empty-art {
@@ -1724,11 +1808,13 @@ kbd {
   font-size: 13px;
   color: var(--ink-2);
 }
+
 .notice-danger {
   border-color: var(--danger);
   background: var(--danger-dim);
   color: var(--danger);
 }
+
 .notice-waking {
   border-color: var(--waking);
   background: var(--waking-dim);
@@ -1744,11 +1830,13 @@ kbd {
   animation: spin 0.7s linear infinite;
   flex: none;
 }
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
   }
 }
+
 @media (prefers-reduced-motion: reduce) {
   .spinner {
     animation-duration: 2.4s;
@@ -1760,14 +1848,17 @@ kbd {
   align-items: center;
   gap: 10px;
 }
+
 .stack {
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
+
 .dim {
   color: var(--ink-3);
 }
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -1805,6 +1896,7 @@ kbd {
   min-height: 0;
   overflow: hidden;
 }
+
 .workbench-body {
   flex: 1;
   display: grid;
@@ -1820,26 +1912,31 @@ kbd {
   flex-direction: column;
   min-height: 0;
 }
+
 .wb-side-head {
   display: flex;
   align-items: baseline;
   gap: 8px;
   padding: 14px 14px 10px;
 }
+
 .wb-side-title {
   font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
+
 .wb-side-count {
   margin-left: auto;
   color: var(--ink-3);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
+
 .wb-side-search {
   padding: 0 12px 10px;
 }
+
 .wb-side-list {
   flex: 1;
   overflow-y: auto;
@@ -1864,30 +1961,37 @@ kbd {
     background 140ms ease,
     color 140ms ease;
 }
+
 .wb-table:hover {
   background: var(--surface-2);
   color: var(--ink);
 }
+
 .wb-table.active {
   background: var(--surface-3);
   color: var(--ink);
   font-weight: 600;
 }
+
 .wb-table.active svg {
   color: var(--accent);
 }
+
 .wb-table svg {
   flex: none;
   opacity: 0.7;
 }
+
 .wb-table.active svg {
   opacity: 1;
 }
+
 .wb-table-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .wb-table-note {
   margin-left: auto;
   font-size: 10.5px;
@@ -1913,11 +2017,13 @@ kbd {
   overflow: auto;
   border-radius: var(--radius);
 }
+
 .wb-main .grid-table thead th {
   position: sticky;
   top: 0;
   z-index: 2;
 }
+
 .wb-main .grid-bar {
   flex: none;
   padding-bottom: 12px;
@@ -1927,6 +2033,7 @@ kbd {
   .workbench-body {
     grid-template-columns: minmax(0, 1fr);
   }
+
   .wb-side {
     border-right: 0;
     border-bottom: 1px solid var(--line);
@@ -1941,11 +2048,13 @@ kbd {
   gap: 8px;
   flex: none;
 }
+
 .grid-filter {
   max-width: 340px;
   font-family: var(--font-mono);
   font-size: 12.5px;
 }
+
 .grid-toolbar-right {
   margin-left: auto;
   display: flex;
@@ -1964,6 +2073,7 @@ kbd {
   min-height: 150px;
   display: flex;
 }
+
 .sql-editor {
   width: 100%;
   resize: none;
@@ -1977,6 +2087,7 @@ kbd {
   padding: 12px 14px;
   tab-size: 2;
 }
+
 .sql-editor:focus {
   outline: none;
   border-color: var(--accent-line);
@@ -1997,18 +2108,21 @@ kbd {
   flex-direction: column;
   gap: 8px;
 }
+
 .result-pane .table-scroll {
   flex: 1;
   min-height: 0;
   max-height: none;
   overflow: auto;
 }
+
 .result-summary {
   font-size: 12.5px;
   color: var(--ink-2);
   font-family: var(--font-mono);
   flex: none;
 }
+
 .result-idle {
   flex: 1;
   display: grid;
@@ -2018,6 +2132,7 @@ kbd {
   border: 1px dashed var(--line);
   border-radius: var(--radius);
 }
+
 .result-idle > div {
   text-align: center;
 }
@@ -2028,6 +2143,7 @@ kbd {
   display: flex;
   align-items: stretch;
 }
+
 .q-open {
   flex: 1;
   min-width: 0;
@@ -2043,15 +2159,18 @@ kbd {
   color: var(--ink-2);
   font: inherit;
 }
+
 .q-open {
   transition:
     background 140ms ease,
     color 140ms ease;
 }
+
 .q-open:hover {
   background: var(--surface-2);
   color: var(--ink);
 }
+
 .q-name {
   font-size: 13px;
   color: var(--ink);
@@ -2059,6 +2178,7 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .q-sql {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -2067,6 +2187,7 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .q-sql-lead {
   display: flex;
   align-items: center;
@@ -2074,6 +2195,7 @@ kbd {
   color: var(--ink-2);
   font-size: 12px;
 }
+
 .q-time {
   font-size: 11px;
   color: var(--ink-3);
@@ -2097,14 +2219,17 @@ kbd {
   font-size: 12.5px;
   color: var(--ink-2);
 }
+
 .grid-range {
   font-variant-numeric: tabular-nums;
 }
+
 .grid-timing {
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--ink-3);
 }
+
 .grid-nav {
   margin-left: auto;
   display: flex;
@@ -2120,20 +2245,24 @@ kbd {
   width: max-content;
   min-width: 100%;
 }
+
 .grid-table th,
 .grid-table td {
   border-right: 1px solid var(--line);
 }
+
 .grid-table th:last-child,
 .grid-table td:last-child {
   border-right: 0;
 }
+
 .grid-table th {
   text-transform: none;
   letter-spacing: 0;
   font-size: 12px;
   padding: 7px 10px;
 }
+
 .grid-table td {
   padding: 6px 10px;
 }
@@ -2142,6 +2271,7 @@ kbd {
   color: var(--ink-2);
   font-weight: 600;
 }
+
 /* The type is reference, not a label: same line, dimmer, never competing with
    the name it qualifies. */
 .col-type {
@@ -2156,6 +2286,7 @@ kbd {
   border-collapse: collapse;
   font-size: 13px;
 }
+
 .data-table th {
   text-align: left;
   font-weight: 600;
@@ -2170,17 +2301,21 @@ kbd {
   top: 0;
   white-space: nowrap;
 }
+
 .data-table td {
   padding: 9px 12px;
   border-bottom: 1px solid var(--line);
   vertical-align: top;
 }
+
 .data-table tr:last-child td {
   border-bottom: 0;
 }
+
 .data-table tbody tr:hover {
   background: var(--surface-2);
 }
+
 .table-scroll {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -2202,6 +2337,7 @@ kbd {
 .cell-value {
   @apply block max-w-80 overflow-hidden text-ellipsis whitespace-nowrap;
 }
+
 .data-table td,
 table.data td {
   @apply max-w-80;
@@ -2212,10 +2348,12 @@ table.data td {
 table.data th {
   @apply max-w-80 overflow-hidden text-ellipsis;
 }
+
 .error-text {
   color: var(--danger);
   font-size: 13px;
 }
+
 .hint-text {
   color: var(--ink-3);
   font-size: 13px;
@@ -2250,6 +2388,7 @@ table.data th {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
 .sql-editor {
   width: 100%;
   min-height: 190px;
@@ -2264,6 +2403,7 @@ table.data th {
   padding: 12px;
   tab-size: 2;
 }
+
 .sql-editor:focus {
   border-color: var(--accent-line);
 }
@@ -2275,6 +2415,7 @@ table.data th {
   flex-direction: column;
   gap: 12px;
 }
+
 @media (max-width: 860px) {
   .side-index {
     position: static;
@@ -2287,12 +2428,14 @@ table.data th {
   background: var(--surface);
   overflow: hidden auto;
 }
+
 /* Bounded together rather than each, so two lists cannot exceed the viewport
    and strand the bottom of the second one out of reach. */
 .side-index {
   max-height: calc(100vh - var(--topbar) - 48px);
   overflow-y: auto;
 }
+
 .side-list-title {
   font-size: 10.5px;
   text-transform: uppercase;
@@ -2306,6 +2449,7 @@ table.data th {
   background: var(--surface-2);
   z-index: 1;
 }
+
 .side-list-empty {
   padding: 12px;
   color: var(--ink-3);
@@ -2320,14 +2464,17 @@ table.data th {
   align-items: stretch;
   border-bottom: 1px solid var(--line);
 }
+
 .side-list-row:last-child {
   border-bottom: 0;
 }
+
 .side-list-row .side-list-item {
   border-bottom: 0;
   flex: 1;
   min-width: 0;
 }
+
 .side-list-remove {
   flex: none;
   padding: 0 10px;
@@ -2338,6 +2485,7 @@ table.data th {
   display: grid;
   place-items: center;
 }
+
 .side-list-remove:hover {
   color: var(--danger);
   background: var(--danger-dim);
@@ -2361,16 +2509,19 @@ table.data th {
   color: var(--ink-2);
   padding: 2px 0 8px;
 }
+
 .result-count {
   font-variant-numeric: tabular-nums;
   color: var(--ink);
 }
+
 .result-timing {
   margin-left: auto;
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--ink-3);
 }
+
 .side-list-item {
   display: block;
   padding: 7px 12px;
@@ -2379,24 +2530,29 @@ table.data th {
   font-size: 13px;
   border-bottom: 1px solid var(--line);
 }
+
 .side-list-item:last-child {
   border-bottom: 0;
 }
+
 .side-list-item {
   transition:
     background 140ms ease,
     color 140ms ease;
 }
+
 .side-list-item:hover {
   background: var(--surface-2);
   color: var(--ink);
 }
+
 .side-list-item[aria-current="page"],
 .side-list-item.active {
   background: var(--surface-3);
   color: var(--ink);
   font-weight: 600;
 }
+
 .side-list-item {
   width: 100%;
   text-align: left;
@@ -2408,15 +2564,18 @@ table.data th {
   align-items: center;
   gap: 8px;
 }
+
 .side-list-item.mono {
   font-family: var(--font-mono);
   font-size: 12.5px;
 }
+
 .side-list-item > span:first-child {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .side-list-item .hint-text {
   margin-left: auto;
   flex: none;
@@ -2437,12 +2596,14 @@ table.data th {
   flex: none;
   font-size: 12.5px;
 }
+
 .schema-name {
   font-family: var(--font-mono);
   font-size: 13px;
   font-weight: 600;
   color: var(--ink);
 }
+
 .schema-tag {
   font-size: 10.5px;
   text-transform: uppercase;
@@ -2453,6 +2614,7 @@ table.data th {
   border-radius: var(--radius-bar);
   padding: 1px 5px;
 }
+
 .schema-bar-right {
   margin-left: auto;
   display: flex;
@@ -2469,12 +2631,14 @@ table.data th {
 .ddl-section + .ddl-section {
   margin-top: 18px;
 }
+
 .ddl-head {
   display: flex;
   align-items: baseline;
   gap: 8px;
   margin-bottom: 7px;
 }
+
 .ddl-title {
   font-size: 10.5px;
   text-transform: uppercase;
@@ -2482,6 +2646,7 @@ table.data th {
   color: var(--ink-3);
   font-weight: 600;
 }
+
 .ddl-count {
   color: var(--ink-3);
   font-size: 11px;
@@ -2509,9 +2674,11 @@ table.data th {
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
+
 .ddl-line:last-child {
   border-bottom: 0;
 }
+
 .ddl-line:hover {
   background: var(--surface-2);
 }
@@ -2520,15 +2687,19 @@ table.data th {
   color: var(--ink);
   font-weight: 600;
 }
+
 .ddl-type {
   color: var(--ink-2);
 }
+
 .ddl-mod {
   color: var(--ink-3);
 }
+
 .ddl-kw {
   color: var(--ink-3);
 }
+
 .ddl-line .key-tag,
 .ddl-line .fk-tag {
   margin-left: auto;
@@ -2586,9 +2757,11 @@ table.data th {
   gap: 1px;
   min-width: 0;
 }
+
 .waking-text strong {
   font-weight: 600;
 }
+
 .waking-detail {
   color: var(--ink-2);
   font-size: 12.5px;
@@ -2610,10 +2783,12 @@ table.data th {
   border-color: var(--line-strong);
   background: var(--surface-2);
 }
+
 .waking-banner-subtle .waking-dot {
   background: var(--ink-3);
   box-shadow: none;
 }
+
 .waking-banner-subtle .waking-elapsed {
   color: var(--ink-2);
 }
@@ -2622,11 +2797,13 @@ table.data th {
   border-color: var(--danger);
   background: var(--danger-dim);
 }
+
 .waking-banner-failed .waking-dot {
   background: var(--danger);
   box-shadow: none;
   animation: none;
 }
+
 .waking-banner-failed .waking-elapsed {
   color: var(--danger);
 }
@@ -2650,15 +2827,18 @@ table.data th {
   );
   animation: wake-sweep 2.4s ease-in-out infinite;
 }
+
 @keyframes wake-sweep {
   0% {
     transform: translateX(-100%);
   }
+
   60%,
   100% {
     transform: translateX(100%);
   }
 }
+
 .waking-banner-subtle::after,
 .waking-banner-failed::after {
   display: none;
@@ -2668,6 +2848,7 @@ table.data th {
   .waking-dot {
     animation: none;
   }
+
   .waking-banner::after {
     display: none;
   }
@@ -2709,11 +2890,13 @@ table.data th {
     opacity: 0;
     transform: translateY(-4px);
   }
+
   to {
     opacity: 1;
     transform: none;
   }
 }
+
 @media (prefers-reduced-motion: reduce) {
   .modal {
     animation: none;
@@ -2723,6 +2906,7 @@ table.data th {
 .modal-head {
   padding: 16px 18px 0;
 }
+
 .modal-title {
   margin: 0;
   font-family: var(--font-serif);
@@ -2730,15 +2914,18 @@ table.data th {
   font-weight: 600;
   letter-spacing: -0.01em;
 }
+
 .modal-desc {
   margin: 5px 0 0;
   color: var(--ink-2);
   font-size: 13px;
   line-height: 1.5;
 }
+
 .modal-body {
   padding: 14px 18px 16px;
 }
+
 .modal-foot {
   display: flex;
   justify-content: flex-end;
@@ -2754,10 +2941,12 @@ table.data th {
     padding: 0;
     place-items: end stretch;
   }
+
   .modal {
     max-width: none;
     border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   }
+
   .modal-foot {
     border-radius: 0;
   }
@@ -2780,10 +2969,12 @@ table.data th {
     ),
     var(--ground);
 }
+
 .login-card {
   width: 100%;
   max-width: 340px;
 }
+
 .login-brand {
   display: flex;
   flex-direction: column;
@@ -2807,6 +2998,7 @@ table.data th {
   place-items: center;
   flex: none;
 }
+
 .login-mark i {
   width: 9px;
   height: 9px;
@@ -2818,6 +3010,7 @@ table.data th {
     0 0 22px 4px var(--glow-awake);
   animation: mark-breathe 3.2s ease-in-out infinite;
 }
+
 @keyframes mark-breathe {
   0%,
   100% {
@@ -2825,23 +3018,27 @@ table.data th {
       0 0 0 4px var(--awake-dim),
       0 0 22px 4px var(--glow-awake);
   }
+
   50% {
     box-shadow:
       0 0 0 4px var(--awake-dim),
       0 0 32px 8px var(--glow-awake);
   }
 }
+
 @media (prefers-reduced-motion: reduce) {
   .login-mark i {
     animation: none;
   }
 }
+
 .login-title {
   font-family: var(--font-serif);
   font-weight: 600;
   font-size: 28px;
   letter-spacing: -0.01em;
 }
+
 .login-sub {
   color: var(--ink-2);
   font-size: 13.5px;
@@ -2854,6 +3051,7 @@ table.data th {
   .shell {
     grid-template-columns: 1fr;
   }
+
   .rail {
     position: static;
     height: auto;
@@ -2864,6 +3062,7 @@ table.data th {
     border-bottom: 1px solid var(--line);
     gap: 6px;
   }
+
   .rail-group,
   .rail-foot {
     margin: 0;
@@ -2873,9 +3072,11 @@ table.data th {
     align-items: center;
     gap: 6px;
   }
+
   .rail-label {
     display: none;
   }
+
   /* The tree lies down: the same nodes, chained left to right, since a
      vertical tree inside a horizontal strip has nowhere to grow. */
   .rail-sub {
@@ -2886,17 +3087,21 @@ table.data th {
     align-items: center;
     gap: 4px;
   }
+
   .rail-node {
     flex-direction: row;
     align-items: center;
     gap: 4px;
   }
+
   .rail-link {
     white-space: nowrap;
   }
+
   .switcher {
     min-width: 180px;
   }
+
   .page {
     padding: 18px 14px 48px;
   }
