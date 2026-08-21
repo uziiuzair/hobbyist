@@ -193,9 +193,14 @@ h3 {
   margin: 0;
 }
 
+/* Capped at 3.5rem, and the fluid term tuned to 5.2vw, so the hero headline
+   holds on exactly two lines across the whole range where the hero is two
+   columns. Measured, not guessed: in a 635px column the widest of the two
+   lines needs 727px at 65.6px, so anything above about 57px wraps to four.
+   Below 61rem the hero stacks and the headline gets the full width back. */
 .h-display {
-  font-size: clamp(2.4rem, 6.2vw, 4.1rem);
-  line-height: 1.04;
+  font-size: clamp(2.4rem, 5.2vw, 3.5rem);
+  line-height: 1.06;
 }
 .h-section {
   font-size: clamp(1.75rem, 3.6vw, 2.5rem);
@@ -409,7 +414,7 @@ h3 {
 }
 @media (min-width: 61rem) {
   .hero__grid {
-    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
     gap: clamp(2rem, 4vw, 3.5rem);
   }
 }
@@ -430,6 +435,9 @@ h3 {
 }
 .hero__lede {
   margin-top: 1.5rem;
+  /* The column is two thirds of the container, and this is meant to fill it.
+     The generic .lede measure of 40rem would cap it short of that. */
+  max-width: none;
 }
 .hero__cta {
   margin-top: 2rem;
@@ -484,7 +492,10 @@ h3 {
   font-family: var(--font-mono);
   font-size: 0.78125rem;
   line-height: 1.85;
-  min-height: 13.5rem;
+  /* Reserves the height the finished log needs, so pressing Connect does not
+     shove the rest of the page down. Measured at the narrowest width the panel
+     is ever shown at, where the lines wrap most and the log is tallest. */
+  min-height: 17rem;
   display: flex;
   flex-direction: column;
 }
@@ -515,8 +526,16 @@ h3 {
 .machine__hint {
   font-family: var(--font-mono);
   font-size: 0.6875rem;
+  line-height: 1.5;
   color: var(--ink-3);
   margin: 0;
+  /* Two lines are reserved because the text after a run is longer than the
+     text before it, and in the narrow column it wraps. Without this the panel
+     grows when you press the button and nudges the page, which is a poor
+     advertisement for a demo about things happening smoothly. */
+  min-height: 2.1rem;
+  display: flex;
+  align-items: center;
 }
 .machine__meter {
   height: 2px;
