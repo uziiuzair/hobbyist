@@ -325,6 +325,8 @@ That last row is the one that matters right now.
 
 - [Getting started](https://hobbyist.sh/docs/) and
   [your first project](https://hobbyist.sh/docs/first-project/)
+- [Roadmap](https://hobbyist.sh/roadmap/), every phase with what is actually
+  built, what is half built, and what is deliberately never coming
 - [Sleep and wake](https://hobbyist.sh/docs/concepts/sleep-and-wake/), the wedge
   explained
 - [CLI reference](https://hobbyist.sh/docs/reference/cli/) and the

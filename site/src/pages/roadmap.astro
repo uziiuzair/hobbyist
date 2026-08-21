@@ -1,0 +1,254 @@
+---
+import Base from '../layouts/Base.astro'
+
+// Three states only, and every "done" carries the evidence that it is done.
+// A roadmap that cannot distinguish "written" from "you can type it" is how a
+// reader ends up executing an aspiration, which is the one thing the project's
+// own working agreements forbid.
+//
+//   done     you can use it today
+//   partial  some of it works, and the gap is named
+//   planned  not built. Designed or not, it does not exist
+const phases = [
+  {
+    id: 'Phase 1',
+    title: 'Databases, a dashboard, and a way out',
+    state: 'done',
+    summary:
+      'The core. A project holding a Postgres database, the command line tool, the dashboard, tools for AI agents, and the command that hands you your data back.',
+    items: [
+      { state: 'done', what: 'Postgres databases that switch off and on by themselves', note: 'Measured at 170ms to start, and the part used daily' },
+      { state: 'done', what: 'The hobby command line tool', note: 'Sixteen commands' },
+      { state: 'done', what: 'Taking your data out', note: 'Verified end to end against real Docker' },
+      { state: 'partial', what: 'The dashboard', note: 'Browsing, SQL and schema all work. It cannot create a website or function yet' },
+      { state: 'partial', what: 'Tools for AI agents', note: 'Fourteen of them. Databases only so far' },
+    ],
+  },
+  {
+    id: 'Phase 2',
+    title: 'Running your code, not just your data',
+    state: 'done',
+    summary:
+      'Websites, APIs, serverless functions and job queues, all switching off and on the same way a database does. Merged, and newer than Phase 1.',
+    items: [
+      { state: 'done', what: 'Websites and APIs from a Dockerfile', note: 'Starts in about an eighth of a second' },
+      { state: 'done', what: 'Cloudflare-style serverless functions', note: 'Your existing wrangler.toml works unchanged' },
+      { state: 'done', what: 'Stored state that survives being switched off', note: 'Including timers that fire while the thing is stopped, which is the hard part' },
+      { state: 'done', what: 'HTTPS and custom domains', note: 'Off by default. Certificates are not saved between restarts yet' },
+      { state: 'done', what: 'Private access over Tailscale', note: 'How the author actually runs it' },
+      { state: 'partial', what: 'Job queues', note: 'Reading jobs works. Sending one from inside a container is broken on Linux' },
+    ],
+  },
+  {
+    id: 'Not phased',
+    title: 'Backups, because losing data is the one unacceptable failure',
+    state: 'partial',
+    summary:
+      'Deliberately outside the phase order. Five kinds of thing now hold data nobody would accept losing, and the backup command is the piece still missing.',
+    items: [
+      { state: 'done', what: 'pg_dump works, and always will', note: 'This is the backup story today' },
+      { state: 'done', what: 'Taking a whole project out as files', note: 'Runs anywhere with Docker' },
+      { state: 'partial', what: 'Project snapshots', note: 'Written and tested inside the daemon, and connected to no command you can type. Genuinely unusable until that changes' },
+      { state: 'planned', what: 'Point in time recovery', note: 'Cut on purpose rather than postponed. It needs write-ahead log archiving and a restore path that deserves its own testing discipline' },
+    ],
+  },
+  {
+    id: 'Phase 1.5',
+    title: 'Copying a project instantly',
+    state: 'planned',
+    summary:
+      'Clone a whole project, data and all, in about the time it takes to press enter, so you can try something against real data without risking it. Numbered 1.5 because it was scoped before Phase 2 and built after.',
+    items: [
+      { state: 'done', what: 'The file copying underneath it', note: 'Already written, because snapshots needed the same thing' },
+      { state: 'planned', what: 'Branching a project', note: 'Nearly free on XFS, ZFS or a Mac. A real copy on ext4, which is what many cheap servers use' },
+    ],
+  },
+  {
+    id: 'Phase 3',
+    title: 'Files, disks and a client library',
+    state: 'planned',
+    summary:
+      'The last planned phase. Somewhere to keep uploads, disks that outlive a restart, and a library so a React app can talk to all of it without you writing the plumbing.',
+    items: [
+      { state: 'planned', what: 'S3-style file storage', note: 'For images, uploads, anything that is not a row in a table' },
+      { state: 'planned', what: 'Disks for websites and functions', note: 'They are deliberately stateless until this exists' },
+      { state: 'planned', what: 'A React library', note: 'Only if it earns its place' },
+    ],
+  },
+]
+
+const nearTerm = [
+  {
+    what: 'Measure it on a cheap five dollar server',
+    why: 'Every speed number this project publishes came from a laptop, and the cheap server is the machine it is actually for. This is the single most useful thing anybody could contribute.',
+  },
+  {
+    what: 'Fix sending jobs to a queue on Linux',
+    why: 'A networking flag that never got passed. The problem is fully understood and written down.',
+  },
+  {
+    what: 'A command for taking backups',
+    why: 'The hard part is already written and tested. It needs a command and an API route so a person can actually reach it.',
+  },
+  {
+    what: 'Let the dashboard create websites and functions',
+    why: 'It can only make databases right now. The groundwork that makes the rest possible has already landed.',
+  },
+]
+
+const never = [
+  ['Kubernetes, clusters, more than one machine', 'One box is the whole point. A feature needing a cluster is out of scope by definition.'],
+  ['Hosting other people’s workloads', 'Everything here assumes every project belongs to the same person. Keeping strangers safely apart is a different and much larger job.'],
+  ['A paid tier, billing, usage metering', 'There is no business here and there is not going to be one.'],
+  ['Login and accounts for your users', 'Supabase does this well. This will not compete.'],
+  ['Live updates, edge hosting, DNS management, secrets management', 'All reasonable. All individually a month of work, and collectively the thing that kills projects like this.'],
+]
+
+const label = { done: 'done', partial: 'partly done', planned: 'planned' }
+---
+
+<Base
+  title="Roadmap: what Hobbyist does today, and what is planned"
+  description="Every phase with its real state. What works today, what is half finished with the gap named, and what is deliberately never going to be built."
+>
+  <section class="section" style="border-top:0">
+    <div class="wrap stack">
+      <div class="section__head">
+        <span class="state">roadmap</span>
+        <h1 class="h-display" style="font-size:clamp(2.1rem,4.6vw,3.1rem)">
+          What exists, and what does not
+        </h1>
+        <p class="lede">
+          Two of the four phases are built and in daily use. This page says which is
+          which, at the level of individual features, so you can tell what you would
+          actually be installing.
+        </p>
+      </div>
+
+      <div class="assume">
+        <h3>How to read this</h3>
+        <ul>
+          <li>
+            <strong>Done</strong> means you can use it today, and the note says how it
+            was checked.
+          </li>
+          <li>
+            <strong>Partly done</strong> means some of it works and the missing piece is
+            named rather than glossed over.
+          </li>
+          <li>
+            <strong>Planned</strong> means it does not exist. Designed or not, do not
+            build anything on top of it.
+          </li>
+          <li>
+            <strong>There are no dates anywhere on this page</strong>, and there will not
+            be. One person writes this in their spare time, and a date would be a
+            promise rather than information.
+          </li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  {
+    phases.map((phase) => (
+      <section class="section section--tight">
+        <div class="wrap stack">
+          <div class="section__head">
+            <span class={`state state--${phase.state === 'done' ? 'running' : phase.state === 'partial' ? 'starting' : 'undeployed'}`}>
+              {phase.id} · {label[phase.state]}
+            </span>
+            <h2 class="h-section">{phase.title}</h2>
+            <p class="lede">{phase.summary}</p>
+          </div>
+          <ul class="status status--wide">
+            {phase.items.map((item) => (
+              <li data-state={item.state === 'done' ? 'running' : item.state === 'partial' ? 'starting' : 'undeployed'}>
+                <span class="status__what">
+                  <span class={`tick tick--${item.state}`} aria-hidden="true">
+                    {item.state === 'done' ? '✓' : item.state === 'partial' ? '–' : '·'}
+                  </span>
+                  <span class="sr-only">{label[item.state]}: </span>
+                  {item.what}
+                </span>
+                <span class="status__note">{item.note}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </section>
+    ))
+  }
+
+  <section class="section">
+    <div class="wrap stack">
+      <div class="section__head">
+        <span class="state state--starting">next</span>
+        <h2 class="h-section">What is actually being worked on</h2>
+        <p class="lede">
+          Not a phase, just the four things most worth doing next. Every one of them is
+          something a contributor could pick up.
+        </p>
+      </div>
+      <ul class="status status--wide">
+        {
+          nearTerm.map((row) => (
+            <li data-state="starting">
+              <span class="status__what">{row.what}</span>
+              <span class="status__note">{row.why}</span>
+            </li>
+          ))
+        }
+      </ul>
+      <p class="checked">
+        <a href="https://github.com/uziiuzair/hobbyist/blob/main/CONTRIBUTING.md">
+          How to contribute
+        </a>, including the two rules that will get a patch sent back.
+      </p>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap stack">
+      <div class="section__head">
+        <span class="state state--failed">never</span>
+        <h2 class="h-section">Things that are deliberately not coming</h2>
+        <p class="lede">
+          This list matters more than the one above. The way a project like this dies is
+          not competition and not running out of money, since there is none. It is being
+          abandoned half finished because it tried to do everything. Each of these is a
+          perfectly good idea, and that is exactly the danger.
+        </p>
+      </div>
+      <div class="tablewrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th scope="col">Not coming</th>
+              <th scope="col">Why</th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              never.map(([what, why]) => (
+                <tr>
+                  <th scope="row">{what}</th>
+                  <td class="dim">{why}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
+      <div class="prose">
+        <p>
+          None of these is a locked door. Each one can be argued for by writing the case
+          down as a decision record and opening it for discussion before any code gets
+          written. <a href="/docs/decisions/">The existing decisions</a> show what that
+          looks like, and a good number of them are records of something being turned
+          down.
+        </p>
+      </div>
+    </div>
+  </section>
+</Base>
