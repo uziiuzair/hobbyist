@@ -176,9 +176,9 @@ export const PROJECT_NAV: NavGroup[] = [
         label: "Backups",
         status: "soon",
         blurb:
-          "Scheduled dumps and point in time restore, wrapping pgBackRest rather than reimplementing it.",
+          "Whole project snapshots, taken with every resource quiesced, and restored into a new project.",
         today:
-          "Nothing. Export on the project page runs a `pg_dump` you drive yourself, and that keeps working whatever happens here.",
+          "The engine is built and tested (packages/cli/src/daemon/snapshots.ts, plus 28 tests) and ADR 0016 settles its shape, including that there is deliberately no point in time recovery. Nothing calls it: no daemon route, no CLI command, so it cannot be run from here or from the terminal yet. Export on the project page runs a `pg_dump` you drive yourself, and that keeps working whatever happens here.",
         phase: "Not phased",
       },
     ],
