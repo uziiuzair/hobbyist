@@ -55,10 +55,10 @@ const steps = [
 const measurements = [
   {
     path: 'A database, on a $5 VPS',
-    p50: '710ms',
-    p95: '859ms',
-    plain: 'about three quarters of a second',
-    box: '1 vCPU, 512MB, ext4',
+    p50: '691ms',
+    p95: '845ms',
+    plain: 'about two thirds of a second',
+    box: '1 vCPU, 512MB and 1GB, ext4',
   },
   {
     path: 'A database, on a laptop',
@@ -321,16 +321,17 @@ const unbuilt = [
       <div class="assume">
         <h3>Measured on the cheapest machine it is meant for</h3>
         <p style="margin:0 0 0.75rem">
-          The top row is a five dollar DigitalOcean box: one shared CPU, 512MB of memory,
-          the slow default filesystem. Thirty consecutive wakes from a genuinely stopped
-          database, and <strong>none of them took a second</strong>.
+          The top row is a five dollar DigitalOcean box: one shared CPU, the slow default
+          filesystem. Sixty consecutive wakes from a genuinely stopped database, across a
+          512MB machine and a 1GB one. <strong>Fifty nine of the sixty were under a
+          second.</strong> The slowest was 1.34 seconds.
         </p>
         <p style="margin:0">
-          Two honest caveats. The very first wake was the slowest at 968ms, because
-          nothing was cached yet, and that is the one a real person meets. And that box
-          was doing nothing else; a busy one will be slower. The number that matters is
-          the three second ceiling, where database libraries start giving up, and there
-          is a lot of room before that.
+          That one slow wake is worth understanding, because it is not about Hobbyist.
+          These are shared CPUs, and when a neighbour takes it your wake waits. Doubling
+          the memory made the typical wake faster and the worst one worse. The number
+          that actually matters is the three second ceiling, where database libraries
+          start giving up, and nothing came within half of it.
         </p>
       </div>
     </div>
