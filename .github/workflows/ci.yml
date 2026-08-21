@@ -1,0 +1,74 @@
+# The checks a contributor is asked to run before opening a pull request, run
+# again here so that asking is not the only enforcement.
+#
+# This exists because the README now says contributions are welcome. On a
+# project whose stated failure mode is the author's attention running out,
+# reviewing every contribution by hand is the thing that runs it out.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'site/**'
+      - '**/*.md'
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workspace:
+    name: typecheck and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Tests run against compiled output in dist/ rather than sources, so this
+      # builds first. Docker is deliberately not exercised here: the lifecycle
+      # tests run against a fake ComputeRuntime, which is the point of that
+      # seam. Anything that genuinely needs Docker is verified by hand and said
+      # so in the pull request.
+      - name: Test
+        run: npm test
+
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the install path
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck --severity=warning bootstrap.sh install.sh scripts/*.sh
+
+  site:
+    name: site builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - working-directory: site
+        run: |
+          npm ci
+          npm run check:adrs
+          npm run check:cli
+          npm run build
+          node scripts/check-links.mjs
