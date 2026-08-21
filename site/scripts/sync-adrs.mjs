@@ -6,11 +6,17 @@
  * by hand would mean the published copy drifts from the committed one the
  * first time someone amends an ADR, and the amendments are the interesting
  * part: several of these files exist to record that a previous decision was
- * wrong. So the site generates them, and CI runs this script with --check and
- * fails if the result differs from what is committed. There is one source.
+ * wrong.
+ *
+ * So the site generates them at every build, from prebuild, and the generated
+ * files are gitignored. There is one source and the copies cannot disagree,
+ * which is why CI does not run a drift check: with nothing committed to drift
+ * from, the check would compare the output against an empty directory and fail
+ * every time. --check is kept for anyone who later prefers committing the
+ * output instead.
  *
  *   node scripts/sync-adrs.mjs           write
- *   node scripts/sync-adrs.mjs --check   exit 1 if writing would change anything
+ *   node scripts/sync-adrs.mjs --check   exit 1 if the committed copy differs
  */
 
 import { readdir, readFile, writeFile, mkdir, rm } from 'node:fs/promises'
