@@ -20,7 +20,15 @@ databases for one person over [Tailscale](/docs/guides/tailscale-and-tunnels/)
 never needs a public front door, and shipping one that is on by default would
 mean every install opens ports it was never asked to open.
 
-Turn it on in `~/.hobby/hobby.json`:
+Turn it on in a `hobby.json`, in the directory you start the daemon from:
+
+:::caution
+Config is read by walking up from the **current working directory**, not from
+`~/.hobby/`. A `hobby.json` in `~/.hobby/` is not read by anything, so putting
+these settings there turns nothing on and reports no error. Start the daemon
+from the directory holding the file.
+:::
+
 
 ```json
 {

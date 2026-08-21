@@ -19,6 +19,20 @@ Config values come from, in decreasing priority:
 Paths are separate and simpler: they always come from `$HOBBY_HOME`, or
 `~/.hobby` if that is unset.
 
+:::caution[`~/.hobby/hobby.json` is not read]
+`resolvePaths` constructs a `configPath` at `$HOBBY_HOME/hobby.json`
+(`packages/core/src/config.ts:47`) and **nothing reads it**. Config comes only
+from the cwd walk in step 3 above.
+
+Two consequences worth knowing. Settings written to `~/.hobby/hobby.json` do
+nothing and report no error, including `sleepAfterSeconds`. And because the walk
+is relative to the working directory, the daemon's configuration depends on
+which directory it was started from, and `hobby ls` run from two different
+directories can resolve two different configs.
+
+Start the daemon from the directory holding your `hobby.json`.
+:::
+
 ## Settings
 
 | Key | Env | Default | What |
@@ -53,7 +67,7 @@ A minimal `hobby.json`:
 ~/.hobby/
   state.db                       the daemon's record of everything
   hobby.sock                     the unix socket for the CLI and MCP
-  hobby.json                     config
+  hobby.json                     NOT read. See the note below
   projects/
     <project>/
       <resource>/

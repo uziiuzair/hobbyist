@@ -75,7 +75,7 @@ Everything is under `~/.hobby`, or `$HOBBY_HOME` if you set it.
 ~/.hobby/
   state.db                       the daemon's own record
   hobby.sock                     the unix socket the CLI and MCP talk to
-  hobby.json                     config
+  hobby.json                     not read by anything, see configuration
   projects/
     blog/
       primary/
