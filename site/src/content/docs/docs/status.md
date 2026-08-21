@@ -95,9 +95,10 @@ snapshot code as a backup story.
 
 ## Unmeasured
 
-~~**The five dollar VPS.**~~ Closed 2026-08-22. Measured on a DigitalOcean
-`1vcpu-512mb` droplet on ext4: 30 consecutive wakes, p50 710ms, p95 859ms, max
-968ms, none over the 1 second target.
+~~**The five dollar VPS.**~~ Closed 2026-08-22. Measured on DigitalOcean ext4
+droplets, 512MB with swap and 1GB without, 60 wakes total: p50 691ms, p95
+845ms, max 1336ms. 59 of 60 under the 1 second target, none over the 3 second
+ceiling. More memory improved the median and not the tail.
 [The write-up and its caveats](https://github.com/uziiuzair/hobbyist/blob/main/docs/proxy/research/2026-08-22-cold-start-on-a-five-dollar-vps.md).
 
 **App and worker wake on cheap hardware.** Only the database path has been

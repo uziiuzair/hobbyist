@@ -92,19 +92,29 @@ above it is a release blocker rather than a slow path.
 
 | Path | p50 | p95 | Measured on | When |
 |---|---|---|---|---|
-| Postgres, on a $5 VPS | **710ms** | **859ms** | 1 vCPU, 512MB, ext4 | 2026-08-22 |
+| Postgres, on a $5 VPS | **691ms** | **845ms** | 1 vCPU, 512MB and 1GB, ext4 | 2026-08-22 |
 | Postgres, wire protocol | 170ms | 186ms | Apple silicon laptop | 2026-08-07 |
 | HTTP app | 121ms | 133ms | Apple M5 Pro | 2026-08-10 |
 | Worker (workerd) | 299ms | 321ms | Apple M5 Pro | 2026-08-10 |
 
-**The five dollar VPS is measured.** Thirty consecutive wakes on a DigitalOcean
-`1vcpu-512mb` droplet on ext4, through the shipped proxy and daemon with a real
-`psql` client: **none exceeded the 1 second target**, and the slowest was 968ms.
+**The five dollar VPS is measured.** Sixty consecutive wakes on DigitalOcean
+droplets on ext4, through the shipped proxy and daemon with a real `psql`
+client: thirty on a 512MB box with swap, thirty on a 1GB box without.
+**59 of the 60 came in under the 1 second target**, the slowest was 1336ms, and
+**none came within half of the 3 second ceiling**, which is the number that
+matters because that is where clients give up.
 
-Three caveats, because a number without them is worth less than no number. The
-first wake was the slowest at 968ms, on a cold page cache, and that is the case
-a real user meets. The box was otherwise idle, and a busy one will be slower.
-And 512MB needs swap to build at all, so this describes 512MB *with* swap.
+The more useful finding is the comparison. Doubling the memory improved the
+median wake by about 12 percent and did nothing at all for the tail: p95 wake
+work went from 757ms to 751ms, while the worst case got worse and the spread
+between median and maximum nearly tripled. **Memory sets the median; the shared
+vCPU sets the tail.** A wake that stalls because a neighbour took the CPU is not
+something more RAM fixes. If tail latency matters to you more than the median,
+buy a dedicated CPU rather than more memory.
+
+Caveats that travel with these numbers: the first wakes of a run are the slowest
+because nothing is cached, both boxes were otherwise idle, and 512MB cannot
+build at all without swap.
 
 The two Postgres rows are not the same metric: the VPS figure is end to end as a
 client sees it, including `psql` startup, and the laptop figure is the proxy's

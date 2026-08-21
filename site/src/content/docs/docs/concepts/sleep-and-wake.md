@@ -68,14 +68,21 @@ a release blocker rather than a slow path.
 
 | Path | p50 | p95 | Measured on | When |
 |---|---|---|---|---|
-| Postgres, wire protocol | **710ms** | **859ms** | **$5 VPS: 1 vCPU, 512MB, ext4** | 2026-08-22 |
+| Postgres, wire protocol | **691ms** | **845ms** | **$5 VPS: 1 vCPU, 512MB and 1GB, ext4** | 2026-08-22 |
 | Postgres, wire protocol | 170ms | 186ms | Apple silicon laptop | 2026-08-07 |
 | HTTP app | 121ms | 133ms | Apple M5 Pro | 2026-08-10 |
 | Worker, workerd | 299ms | 321ms | Apple M5 Pro | 2026-08-10 |
 
 The first row is the one that matters, because the budget was written for that
-machine. Thirty consecutive wakes on a DigitalOcean `1vcpu-512mb` droplet on
-ext4: **none exceeded the 1 second target**, and the slowest was 968ms.
+machine. Sixty consecutive wakes on DigitalOcean droplets on ext4, thirty on a
+512MB box with swap and thirty on a 1GB box without: **59 of 60 came in under
+the 1 second target**, the slowest was 1336ms, and none came within half of the
+3 second ceiling.
+
+Doubling the memory improved the median by about 12 percent and left the tail
+alone: p95 wake work went 757ms to 751ms while the worst case got worse. Memory
+sets the median, the shared vCPU sets the tail. A wake stalled by a noisy
+neighbour is not something more RAM fixes.
 
 Those two rows are not measured the same way. The VPS figure is end to end as a
 client sees it, including `psql` startup, and the laptop figure is the proxy's
