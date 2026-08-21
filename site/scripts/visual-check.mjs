@@ -29,6 +29,7 @@ const VIEWPORTS = [
 const PAGES = [
   { name: 'landing', path: '/' },
   { name: 'compare', path: '/compare/' },
+  { name: 'roadmap', path: '/roadmap/' },
   { name: 'docs-status', path: '/docs/status/' },
 ]
 

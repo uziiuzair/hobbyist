@@ -536,6 +536,86 @@ h3 {
   background: var(--accent);
 }
 
+/* --- The demo, and its caption ----------------------------------------- */
+
+.demo {
+  display: grid;
+  gap: 0.85rem;
+  min-width: 0;
+}
+.demo__caption {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--ink-3);
+  line-height: 1.55;
+  max-width: 30rem;
+}
+
+/* --- Numbered steps ---------------------------------------------------- */
+
+/* Numbered because this genuinely is a sequence: step two only makes sense
+   after step one has happened. Numbering that encodes nothing is decoration,
+   and this is the one place on the page where the order carries the meaning. */
+.steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 1rem;
+  counter-reset: step;
+}
+@media (min-width: 62rem) {
+  .steps {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1.25rem;
+  }
+}
+.steps__item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0 0.9rem;
+  align-items: start;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.2rem 1.3rem;
+  box-shadow: var(--shadow-card);
+  min-width: 0;
+}
+@media (min-width: 62rem) {
+  .steps__item {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+}
+.steps__n {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--accent);
+  border: 1px solid var(--accent-line);
+  background: var(--accent-dim);
+  border-radius: 50%;
+  width: 1.65rem;
+  height: 1.65rem;
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.steps__title {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  font-size: 1.0625rem;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+  margin: 0 0 0.45rem;
+}
+.steps__body {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+}
+
 /* --- Cards and grids --------------------------------------------------- */
 
 .grid {
@@ -700,6 +780,70 @@ table.data th[scope='row'] {
 }
 .status li[data-state='running'] .status__what {
   color: var(--accent);
+}
+
+/* --- Roadmap ticks ----------------------------------------------------- */
+
+/* The glyph is decorative and hidden from assistive technology, because the
+   state is already carried by the .sr-only text next to it. A screen reader
+   announcing "check" tells you less than one announcing "done". */
+.tick {
+  display: inline-block;
+  width: 1.1em;
+  font-family: var(--font-mono);
+}
+.tick--done {
+  color: var(--accent);
+}
+.tick--partial {
+  color: var(--waking);
+}
+.tick--planned {
+  color: var(--ink-3);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Roadmap lists name features in prose, not identifiers, so the mono face and
+   the narrow column that suit a status list of `postgres` and `queue` are
+   wrong here: a sentence set in mono at 13px wraps to three lines and reads
+   like configuration. Wider column, body face. */
+.status--wide li {
+  grid-template-columns: 1fr;
+}
+@media (min-width: 44rem) {
+  .status--wide li {
+    grid-template-columns: minmax(0, 19rem) minmax(0, 1fr);
+    gap: 0.15rem 1.5rem;
+  }
+}
+.status--wide .status__what {
+  font-family: var(--font-sans);
+  font-size: 0.9375rem;
+  font-weight: 500;
+  line-height: 1.45;
+  display: flex;
+  gap: 0.15rem;
+  align-items: baseline;
+}
+
+/* A phase is a section, but five of them at full section rhythm makes a page
+   nobody scrolls to the end of. */
+.section--tight {
+  padding-block: clamp(2rem, 4vw, 3rem);
+}
+.section--tight .section__head {
+  margin-bottom: 1.25rem;
 }
 
 /* --- Quote ------------------------------------------------------------- */

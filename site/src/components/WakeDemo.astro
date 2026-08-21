@@ -33,7 +33,7 @@
   <div class="machine__foot">
     <button class="btn btn--quiet" type="button" data-wake-run>Connect</button>
     <p class="machine__hint" data-wake-hint>
-      Replay of a measured cold start, at real speed
+      Not a live server. Real recorded timings
     </p>
   </div>
 </div>
@@ -48,11 +48,11 @@
   // the proxy answers immediately, the engine takes the bulk of it, and the
   // handshake completes just after the database starts accepting queries.
   const FRAMES: Array<[number, string, string]> = [
-    [0, 'proxy   connection received, blog/primary is sleeping', 'dim'],
-    [4, 'proxy   wake requested, holding the client', 'warm'],
-    [31, 'engine  container started', 'dim'],
-    [142, 'engine  accepting queries', 'dim'],
-    [174, 'proxy   handshake completed, 174ms', 'ok'],
+    [0, 'proxy   someone connected. the database is switched off', 'dim'],
+    [4, 'proxy   holding their connection open, starting it now', 'warm'],
+    [31, 'engine  database process started', 'dim'],
+    [142, 'engine  ready, accepting queries', 'dim'],
+    [174, 'proxy   awake and connected, 174ms', 'ok'],
     [174, '', 'dim'],
     [174, 'psql (18.0)', 'dim'],
     [174, 'blog=#', 'ok'],
@@ -92,14 +92,14 @@
       fill.style.width = '0%'
       setState('sleeping')
       button.textContent = 'Connect'
-      hint.textContent = 'Replay of a measured cold start, at real speed'
+      hint.textContent = 'Not a live server. Real recorded timings'
     }
 
     function finish(): void {
       setState('running')
       fill.style.width = '100%'
       button.textContent = 'Replay'
-      hint.textContent = 'Measured p50 170ms, p95 186ms, on an Apple silicon laptop'
+      hint.textContent = 'That was 174ms. Typically 170ms, worst of twenty 186ms'
     }
 
     function run(): void {

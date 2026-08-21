@@ -57,6 +57,7 @@ export default defineConfig({
           collapsed: true,
           items: [{ autogenerate: { directory: 'docs/decisions' } }],
         },
+        { label: 'Roadmap', link: '/roadmap/' },
         { label: 'Comparison and pricing', link: '/compare/' },
         { label: 'Contributing', slug: 'docs/contributing' },
       ],
