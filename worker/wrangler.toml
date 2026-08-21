@@ -1,0 +1,32 @@
+# The hobby.sh worker: it serves one file and redirects everything else.
+#
+# hobbyist.sh is on GitHub Pages, which binds one custom domain per repository,
+# so hobby.sh needs its own answer. A worker rather than a redirect rule
+# because `curl -fsSL https://hobby.sh/install | bash` should not bounce a
+# reader's shell to a third party host: the script is served from here, as
+# text, in one hop.
+
+name = "hobby-install"
+main = "src/index.ts"
+compatibility_date = "2026-08-21"
+workers_dev = false
+
+# The script is bundled at deploy time from the repository's own bootstrap.sh
+# rather than copied into this directory. One script, not two, so it cannot
+# drift from the one a manual `git clone && ./install.sh` reader sees.
+# fallthrough keeps wrangler's own default rules (.txt, .html, .sql) alive
+# alongside this one, rather than silently replacing them.
+rules = [
+  { type = "Text", globs = ["**/*.sh"], fallthrough = true }
+]
+
+[observability]
+enabled = true
+
+[[routes]]
+pattern = "hobby.sh/*"
+zone_name = "hobby.sh"
+
+[[routes]]
+pattern = "www.hobby.sh/*"
+zone_name = "hobby.sh"
