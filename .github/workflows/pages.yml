@@ -14,6 +14,11 @@ on:
       - 'site/**'
       - 'docs/decisions/**'
       - 'packages/cli/src/cli/main.ts'
+      # The site serves the installer at /install, generated from this file by
+      # prebuild. Without it here, fixing the installer leaves the mirror
+      # serving the old bytes, which is the drift the mirror exists to avoid.
+      # That happened once already, with a broken script.
+      - 'scripts/web-install.sh'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
