@@ -23,14 +23,38 @@ also mirrored at `https://hobbyist.sh/install`.
 | Docker | Required, not optional. Every resource is a container |
 | Bun 1.1+ | Installed for you under `~/.bun` if missing. Needs no root |
 | git | Needed to fetch the checkout |
+| unzip | Needed by Bun's installer. **Absent from a fresh Ubuntu cloud image**, and the usual reason an install fails on a cheap VPS |
+| Memory | About 640MB of RAM and swap together, to build. See below |
 | Filesystem | Anything works. XFS with reflinks, ZFS or APFS additionally get cheap copies. [Details](/docs/reference/filesystems/) |
 
-On a fresh Debian or Ubuntu box, Docker first:
+On a fresh Debian or Ubuntu box, the prerequisites first:
 
 ```sh
+sudo apt-get update && sudo apt-get install -y git unzip
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker "$USER"    # then log out and back in
 ```
+
+`unzip` matters more than it looks. Bun's installer needs it to unpack the
+release, and Ubuntu's cloud images do not ship it, so without it the install
+stops at the Bun step.
+
+## If you are on a 512MB box
+
+Add swap before installing. The TypeScript build is the memory-hungry step, and
+below roughly 640MB the kernel kills it, which produces no error of its own.
+
+```sh
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+Measured on one core with no swap: killed at 512MB, completed at 640MB, and at
+320MB it does not fail so much as thrash for over ten minutes. 512MB with swap
+completes. A 1GB droplet is fine without swap.
 
 On macOS, [OrbStack](https://orbstack.dev) is what the measurements were taken
 on. Docker Desktop is expected to work for everything except Caddy, whose host

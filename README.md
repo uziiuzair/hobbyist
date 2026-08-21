@@ -226,6 +226,13 @@ surface here. Put it behind Tailscale or a Cloudflare Tunnel.
   no Windows path.
 - **Docker.** Every resource is a container, so this is not optional. OrbStack
   works on macOS and is what the measurements were taken on.
+- **`git` and `unzip`.** `unzip` is needed by Bun's own installer and is absent
+  from a fresh Ubuntu cloud image, which is how a five dollar VPS fails at the
+  Bun step. `sudo apt-get install -y git unzip`.
+- **About 640MB of memory and swap together, to build.** Measured on one core
+  with no swap: the TypeScript build was killed by the kernel at 512MB, and
+  completed at 640MB. 512MB is marginal and went both ways across runs. On a
+  512MB droplet, add swap before installing.
 - **Bun 1.1 or newer.** `install.sh` installs it under `~/.bun` if it is
   missing, and needs no root to do it.
 - **A reflink-capable filesystem** if you want cheap copies: XFS with reflinks,
