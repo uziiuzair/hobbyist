@@ -46,14 +46,45 @@ jobs:
         run: npm test
 
   shell:
-    name: shellcheck
+    name: install script
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check the install path
+
+      - name: Shellcheck
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
           shellcheck --severity=warning install.sh scripts/*.sh
+
+      # This exists because of a bug that shipped to hobby.sh/install. A guard
+      # that redirected stdin to /dev/tty truncated the script at that line for
+      # anyone piping it into bash from a terminal: bash reads the script from
+      # stdin, so replacing fd 0 mid-script sends it looking for the rest of
+      # the script on the keyboard. The user got a hang or a silent exit 0 with
+      # nothing installed.
+      #
+      # It passed testing at the time because a plain `cat script | bash` in CI
+      # has no controlling terminal, which is exactly the case where the guard
+      # does nothing. So this test allocates a real PTY, which is the only
+      # condition that reproduces it. Do not "simplify" it by dropping script.
+      - name: Survives being piped into bash from a real terminal
+        run: |
+          set -eu
+          mkdir -p /tmp/fakerepo && cd /tmp/fakerepo
+          git init -q -b main .
+          printf '#!/usr/bin/env bash\necho INSTALL_REACHED\n' > install.sh
+          chmod +x install.sh
+          git add -A
+          git -c user.email=ci@example.com -c user.name=ci commit -q -m fixture
+          cd "$GITHUB_WORKSPACE"
+          script -qec "cat scripts/web-install.sh | HOBBY_REPO_URL=/tmp/fakerepo HOBBY_SRC_DIR=/tmp/target HOBBY_BIN_DIR=/tmp/bin bash" /dev/null < /dev/null > /tmp/pty.log 2>&1
+          echo "--- output under a PTY ---"
+          cat /tmp/pty.log
+          grep -q INSTALL_REACHED /tmp/pty.log \
+            || { echo "FAIL: install.sh was never reached. The script was truncated."; exit 1; }
+          test -d /tmp/target \
+            || { echo "FAIL: no checkout was created."; exit 1; }
+          echo "ok: the whole script ran under a terminal"
 
   site:
     name: site builds
