@@ -52,15 +52,28 @@ command -v git >/dev/null 2>&1 || die "git is not installed." \
   Fedora/RHEL:    sudo dnf install git
   macOS:          xcode-select --install"
 
-# Piping into bash makes stdin the script, so anything install.sh later wants
-# to read from a human would read the rest of this file instead. The open is
-# probed in a subshell first rather than guarded with [ -e /dev/tty ]: the path
-# exists even in a process with no controlling terminal (a container build, a
-# CI step, ssh with no tty), where opening it fails, and a failed redirection
-# on `exec` exits a non-interactive shell outright. `|| true` does not save it.
-if [ ! -t 0 ] && ( : < /dev/tty ) 2>/dev/null; then
-  exec < /dev/tty
-fi
+# Do not redirect stdin here. It is tempting, because piping into bash means
+# stdin is the pipe rather than the terminal, so a later prompt would read
+# script text instead of a human's answer. Redirecting is the wrong cure:
+# bash reads THIS SCRIPT from stdin, one chunk at a time, because a pipe
+# cannot be seeked. Replacing fd 0 mid-script means bash looks for the next
+# line of the script on the terminal, so every line below is never read and
+# never runs. The user sees nothing at all, and gets either a hang or a
+# silent exit 0 with nothing installed, depending on the terminal's state.
+#
+# That bug shipped here and was live on hobby.sh/install. It was not caught
+# because the test that "proved" it worked ran with no controlling terminal,
+# which is the one case where the guard correctly does nothing. Reproducing
+# it needs a real PTY: script -q /dev/null bash -c 'curl ... | bash'
+#
+# Nothing in the install path reads stdin. install.sh contains no `read` and
+# no /dev/tty, and the only prompts in the CLI are hobby rm, hobby queue
+# purge, hobby queue rm and hobby studio passwd, none of which the installer
+# runs; it runs hobby init, which never prompts.
+#
+# If a prompt is ever genuinely needed here, use a separate descriptor
+# (exec 3</dev/tty, then read -u 3), or do it in install.sh, which bash
+# executes from a file and where fd 0 is free.
 
 if [ -d "$SRC_DIR/.git" ]; then
   # Already installed: this is an upgrade. Fetch and hard-reset rather than
