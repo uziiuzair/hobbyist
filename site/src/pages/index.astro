@@ -54,7 +54,14 @@ const steps = [
 
 const measurements = [
   {
-    path: 'A database',
+    path: 'A database, on a $5 VPS',
+    p50: '710ms',
+    p95: '859ms',
+    plain: 'about three quarters of a second',
+    box: '1 vCPU, 512MB, ext4',
+  },
+  {
+    path: 'A database, on a laptop',
     p50: '170ms',
     p95: '186ms',
     plain: 'about a sixth of a second',
@@ -279,7 +286,8 @@ const unbuilt = [
         <p class="lede">
           Fast enough that nothing gives up waiting. The target is under a second, and
           three seconds is the point where database libraries start reporting a timeout,
-          so anything slower than that counts as broken rather than slow.
+          so anything slower than that counts as broken rather than slow. Both ends of
+          the hardware range are inside the target.
         </p>
       </div>
 
@@ -311,13 +319,18 @@ const unbuilt = [
       </div>
 
       <div class="assume">
-        <h3>The number that is missing</h3>
+        <h3>Measured on the cheapest machine it is meant for</h3>
+        <p style="margin:0 0 0.75rem">
+          The top row is a five dollar DigitalOcean box: one shared CPU, 512MB of memory,
+          the slow default filesystem. Thirty consecutive wakes from a genuinely stopped
+          database, and <strong>none of them took a second</strong>.
+        </p>
         <p style="margin:0">
-          Every measurement above came from a laptop, which is the easy case.
-          <strong>Nobody has ever run this on a cheap five dollar server</strong>, which
-          is exactly the machine it is meant for. So treat these as proof that the idea
-          works, not as a promise about your hardware. If you try it on one, sending the
-          numbers back is the most useful thing you could do for this project.
+          Two honest caveats. The very first wake was the slowest at 968ms, because
+          nothing was cached yet, and that is the one a real person meets. And that box
+          was doing nothing else; a busy one will be slower. The number that matters is
+          the three second ceiling, where database libraries start giving up, and there
+          is a lot of room before that.
         </p>
       </div>
     </div>

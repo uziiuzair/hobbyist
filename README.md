@@ -92,15 +92,27 @@ above it is a release blocker rather than a slow path.
 
 | Path | p50 | p95 | Measured on | When |
 |---|---|---|---|---|
+| Postgres, on a $5 VPS | **710ms** | **859ms** | 1 vCPU, 512MB, ext4 | 2026-08-22 |
 | Postgres, wire protocol | 170ms | 186ms | Apple silicon laptop | 2026-08-07 |
 | HTTP app | 121ms | 133ms | Apple M5 Pro | 2026-08-10 |
 | Worker (workerd) | 299ms | 321ms | Apple M5 Pro | 2026-08-10 |
 
-**The five dollar VPS has never been measured**, and it is the machine this
-project is aimed at. Every number above came from a laptop, which is the easy
-end of the matrix. Treat the table as an existence proof that the approach
-works, not as a promise about your hardware. Filing a measurement from a cheap
-VPS is the single most useful contribution available right now.
+**The five dollar VPS is measured.** Thirty consecutive wakes on a DigitalOcean
+`1vcpu-512mb` droplet on ext4, through the shipped proxy and daemon with a real
+`psql` client: **none exceeded the 1 second target**, and the slowest was 968ms.
+
+Three caveats, because a number without them is worth less than no number. The
+first wake was the slowest at 968ms, on a cold page cache, and that is the case
+a real user meets. The box was otherwise idle, and a busy one will be slower.
+And 512MB needs swap to build at all, so this describes 512MB *with* swap.
+
+The two Postgres rows are not the same metric: the VPS figure is end to end as a
+client sees it, including `psql` startup, and the laptop figure is the proxy's
+own internal span. Net of the client's own cost the VPS does about 608ms of wake
+work, roughly 3.6 times an M5 Pro. Same order, both inside budget.
+
+Still unmeasured: app and worker wake on cheap hardware, and any provider that
+is not DigitalOcean. Reproduce with `scripts/measure-cold-start.sh`.
 
 Raw data: [`docs/proxy/research/`](docs/proxy/research/) and
 [`docs/compute/research/`](docs/compute/research/).
@@ -348,8 +360,11 @@ is likely to be accepted, what needs an ADR before any code, and the two
 working agreements that will get a patch sent back (no em-dashes, and ground
 claims in code).
 
-The most useful contributions right now, in order: a cold start measurement on
-a cheap VPS, the Linux queue producer fix, and a CLI verb for snapshots.
+The most useful contributions right now, in order: the Linux queue producer
+fix, a CLI verb for snapshots, and a cold start measurement on hardware nobody
+has tried (Hetzner, a Pi, anything not DigitalOcean).
+`scripts/measure-cold-start.sh` runs it and prints the hardware with the
+numbers.
 
 ## Licence
 

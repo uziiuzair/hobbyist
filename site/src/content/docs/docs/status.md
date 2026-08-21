@@ -95,10 +95,16 @@ snapshot code as a backup story.
 
 ## Unmeasured
 
-**The five dollar VPS.** Every cold start number this project publishes came
-from an Apple silicon laptop. The budget of 1 second target and 3 seconds hard
-ceiling is written against a cheap VPS, and that machine has never been
-measured. This is the single most useful contribution available.
+~~**The five dollar VPS.**~~ Closed 2026-08-22. Measured on a DigitalOcean
+`1vcpu-512mb` droplet on ext4: 30 consecutive wakes, p50 710ms, p95 859ms, max
+968ms, none over the 1 second target.
+[The write-up and its caveats](https://github.com/uziiuzair/hobbyist/blob/main/docs/proxy/research/2026-08-22-cold-start-on-a-five-dollar-vps.md).
+
+**App and worker wake on cheap hardware.** Only the database path has been
+measured there. The published app and worker figures are still from a laptop.
+
+**Other providers.** One box, one provider, one region, one afternoon. Hetzner,
+Vultr and a Raspberry Pi are all still unmeasured.
 
 **Caddy on Docker Desktop for macOS.** It needs host networking. Linux and
 OrbStack are both measured and fine. `hobby init` detects the absence and warns,
