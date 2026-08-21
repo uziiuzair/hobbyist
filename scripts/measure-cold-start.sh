@@ -4,6 +4,12 @@
 #
 #   ./scripts/measure-cold-start.sh
 #   N=30 PROJECT=coldstart ./scripts/measure-cold-start.sh
+#   KIND=app ./scripts/measure-cold-start.sh
+#
+# KIND=postgres (the default) times a connect and a query through the wire
+# protocol proxy. KIND=app deploys a tiny static server and times an HTTP
+# request through the wake router, which needs no Caddy: the router keys off
+# the Host header, so curl supplies one.
 #
 # Deliberately measured through the shipped product rather than a harness: the
 # real proxy on 5432, the real daemon, and a real psql client. The number this
@@ -30,10 +36,17 @@ SETTLE_MS="${SETTLE_MS:-500}"
 die() { printf '\nerror: %s\n' "$1" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+KIND="${KIND:-postgres}"
+case "$KIND" in postgres|app) ;; *) die "KIND must be postgres or app, not $KIND" ;; esac
+
 have hobby  || die "hobby is not on PATH."
 have docker || die "docker is not installed."
-have psql   || die "psql is not installed. On Ubuntu: sudo apt-get install -y postgresql-client"
 have python3 || die "python3 is not installed."
+if [ "$KIND" = postgres ]; then
+  have psql || die "psql is not installed. On Ubuntu: sudo apt-get install -y postgresql-client"
+else
+  have curl || die "curl is not installed."
+fi
 date +%s%3N >/dev/null 2>&1 || die "this needs GNU date, for millisecond timestamps."
 
 hobby ls --json >/dev/null 2>&1 || die "the daemon is not reachable. Start it with: hobby daemon &"
@@ -50,24 +63,66 @@ else
   printf '    already exists, reusing it\n'
 fi
 
-CONN="$(hobby connect "$PROJECT" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["connectionString"])')"
-[ -n "$CONN" ] || die "could not get a connection string."
+# Looks the resource up by name when one is given, and by kind otherwise, so
+# the same helper serves both modes.
+resource_state() {
+  local want_name="${1:-}"
+  hobby ls --json | python3 -c "
+import json,sys
+proj, want_name, want_kind = sys.argv[1], sys.argv[2], sys.argv[3]
+for d in json.load(sys.stdin):
+    if d['project']['name'] == proj:
+        for r in d['resources']:
+            if (r['name'] == want_name) if want_name else (r['kind'] == want_kind):
+                print(r['state']); raise SystemExit
+print('unknown')
+" "$PROJECT" "$want_name" "$KIND"
+}
+
+state_of() {
+  if [ "$KIND" = app ]; then resource_state "$APP_NAME"; else resource_state ""; fi
+}
+
+APP_NAME="${APP_NAME:-web}"
+HTTP_PORT="${HTTP_PORT:-7433}"
+
+if [ "$KIND" = postgres ]; then
+  CONN="$(hobby connect "$PROJECT" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["connectionString"])')"
+  [ -n "$CONN" ] || die "could not get a connection string."
+  TARGET="$PROJECT"
+else
+  TARGET="$PROJECT/$APP_NAME"
+  # busybox httpd is already in the alpine base image, so this pulls about 8MB
+  # and builds in seconds, which matters on the hardware this is aimed at.
+  FIXTURE="$(mktemp -d)"
+  cat > "$FIXTURE/Dockerfile" <<'DOCKER'
+FROM alpine:3.20
+RUN mkdir -p /www && echo ok > /www/index.html
+EXPOSE 8080
+CMD ["httpd", "-f", "-p", "8080", "-h", "/www"]
+DOCKER
+  if ! resource_state "$APP_NAME" >/dev/null 2>&1 || [ "$(resource_state "$APP_NAME")" = "unknown" ]; then
+    printf '    deploying a tiny static server as %s\n' "$TARGET"
+    hobby deploy "$FIXTURE" --project "$PROJECT" --name "$APP_NAME" --port 8080 >/dev/null \
+      || die "deploy failed. Run it without --json to see why."
+  else
+    printf '    %s already deployed, reusing it\n' "$TARGET"
+  fi
+  HOSTNAME_APP="$(hobby ls --json | python3 -c "
+import json,sys
+proj, name = sys.argv[1], sys.argv[2]
+for d in json.load(sys.stdin):
+    if d['project']['name'] == proj:
+        for r in d['resources']:
+            if r['name'] == name:
+                print(r.get('config', {}).get('hostname', '')); raise SystemExit
+" "$PROJECT" "$APP_NAME")"
+  [ -n "$HOSTNAME_APP" ] || die "could not find the app's hostname in hobby ls --json."
+  printf '    reachable as %s via the router on :%s\n' "$HOSTNAME_APP" "$HTTP_PORT"
+fi
 
 # Reports the resource's state as the daemon sees it, which is the only source
 # that knows whether the container is really down.
-state_of() {
-  hobby ls --json | python3 -c "
-import json,sys
-want = sys.argv[1]
-for d in json.load(sys.stdin):
-    if d['project']['name'] == want:
-        for r in d['resources']:
-            if r['kind'] == 'postgres':
-                print(r['state']); raise SystemExit
-print('unknown')
-" "$PROJECT"
-}
-
 wait_sleeping() {
   local i
   for i in $(seq 1 120); do
@@ -77,25 +132,34 @@ wait_sleeping() {
   die "it never reached sleeping. State is now: $(state_of)"
 }
 
-printf '==> Measuring %s wakes\n' "$N"
+# One timed request, asserted. The assertion is the point: a connection that
+# fails fast must never be recorded as a wake that succeeded fast.
+timed_request() {
+  local label="$1" start end out
+  start="$(date +%s%3N)"
+  if [ "$KIND" = postgres ]; then
+    out="$(psql "$CONN" -tAq -c 'select 1' 2>/dev/null || true)"
+    end="$(date +%s%3N)"
+    [ "$(printf '%s' "$out" | tr -d '[:space:]')" = "1" ] \
+      || die "$label did not return 1."
+  else
+    out="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+             -H "Host: $HOSTNAME_APP" "http://127.0.0.1:${HTTP_PORT}/" || true)"
+    end="$(date +%s%3N)"
+    [ "$out" = "200" ] || die "$label returned HTTP ${out:-nothing}, not 200."
+  fi
+  printf '%s' "$(( end - start ))"
+}
+
+printf '==> Measuring %s wakes (%s)\n' "$N" "$KIND"
 COLD=(); WARM=()
 for i in $(seq 1 "$N"); do
-  hobby sleep "$PROJECT" >/dev/null 2>&1 || true
+  hobby sleep "$TARGET" >/dev/null 2>&1 || true
   wait_sleeping
   python3 -c "import time,sys; time.sleep(int(sys.argv[1])/1000)" "$SETTLE_MS"
 
-  start="$(date +%s%3N)"
-  out="$(psql "$CONN" -tAq -c 'select 1' 2>/dev/null || true)"
-  end="$(date +%s%3N)"
-  [ "$(printf '%s' "$out" | tr -d '[:space:]')" = "1" ] \
-    || die "iteration $i did not return 1. A failed connection is not a fast one."
-  COLD+=( "$(( end - start ))" )
-
-  start="$(date +%s%3N)"
-  out="$(psql "$CONN" -tAq -c 'select 1' 2>/dev/null || true)"
-  end="$(date +%s%3N)"
-  [ "$(printf '%s' "$out" | tr -d '[:space:]')" = "1" ] || die "warm query $i failed."
-  WARM+=( "$(( end - start ))" )
+  COLD+=( "$(timed_request "cold, iteration $i")" )
+  WARM+=( "$(timed_request "warm, iteration $i")" )
 
   printf '    %2d/%s  cold %sms  warm %sms\n' "$i" "$N" "${COLD[-1]}" "${WARM[-1]}"
 done
