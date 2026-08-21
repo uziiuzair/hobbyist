@@ -100,9 +100,6 @@ export function App() {
       currentProject={projectName}
       currentSection={projectName === undefined ? accountSection : section}
       currentResource={resourceName}
-      currentView={
-        tab === "tables" || tab === "sql" || tab === "schema" ? tab : undefined
-      }
       wide={resourceName !== undefined}
       crumbs={
         <>

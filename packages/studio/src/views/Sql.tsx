@@ -147,6 +147,9 @@ export function Sql({
 
   return (
     <Workbench
+      projectName={projectName}
+      resourceName={resourceName}
+      view="sql"
       sidebar={
         <>
           <div className="wb-side-head">

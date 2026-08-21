@@ -375,8 +375,8 @@ p {
   background: var(--surface);
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 10px;
+  gap: 1px;
+  padding: 8px;
   overflow-y: auto;
 }
 
@@ -384,7 +384,7 @@ p {
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 6px 8px 12px;
+  padding: 4px 8px 10px;
   color: var(--ink);
   text-decoration: none;
   font-weight: 600;
@@ -420,27 +420,71 @@ p {
 }
 
 .rail-group {
-  margin-top: 14px;
+  margin-top: 9px;
 }
 
-.rail-label {
+/* The section header is the fold. One caret per group, not one per row: the
+   rail carries fourteen destinations and a project uses four of them, so what
+   folds usefully is Storage or Connect entire, never Databases on its own. */
+.rail-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 8px 4px;
+  border: 0;
+  background: none;
+  font: inherit;
   font-size: 10.5px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--ink-3);
-  padding: 0 8px 6px;
   font-weight: 600;
+  color: var(--ink-3);
+  cursor: pointer;
+  text-align: left;
+}
+
+.rail-group-head:hover {
+  background: none;
+  color: var(--ink-2);
+}
+
+.rail-group-head .caret {
+  margin-left: auto;
+  flex: none;
+  transition: transform 120ms ease;
+}
+
+.rail-group-head.is-open .caret {
+  transform: rotate(90deg);
+}
+
+/* Hidden rather than unmounted, so the horizontal rail on a narrow screen can
+   show the items regardless of what was folded on a wide one. */
+.rail-items {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.rail-items.is-closed {
+  display: none;
+}
+
+/* Overview sits above the first section with no label over it. */
+.rail-top {
+  margin-top: 6px;
 }
 
 .rail-link {
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 7px 8px;
+  padding: 4px 8px;
   border-radius: var(--radius-sm);
   color: var(--ink-2);
   text-decoration: none;
-  font-size: 13.5px;
+  font-size: 13px;
   border: 1px solid transparent;
   transition:
     background 140ms ease,
@@ -450,19 +494,6 @@ p {
 .rail-link:hover {
   background: var(--surface-2);
   color: var(--ink);
-}
-
-/* A resource that exists but has no view yet (apps and workers, pre-D1).
-   Same row anatomy as a link, but it is a fact rather than a destination:
-   no hover invitation, no pointer. */
-.rail-item {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 7px 8px;
-  border-radius: var(--radius-sm);
-  color: var(--ink-2);
-  font-size: 13.5px;
 }
 
 /* Where you are is a neutral fact, not an accent moment: a deeper surface
@@ -485,22 +516,6 @@ p {
   opacity: 1;
 }
 
-/* Kind identity in the rail: sage databases, iris apps, honey workers, at
-   rest opacity so the tree stays quiet until you read it. The active row's
-   mark is its fill and weight, never a recolored icon: kind hue survives
-   selection. */
-.ic-sage {
-  color: var(--sage);
-}
-
-.ic-iris {
-  color: var(--iris);
-}
-
-.ic-honey {
-  color: var(--honey-t);
-}
-
 .rail-link:hover svg {
   opacity: 1;
 }
@@ -512,86 +527,14 @@ p {
   font-variant-numeric: tabular-nums;
 }
 
-/* A row is a destination and a fold sitting together. The label owns the
-   click, the caret owns the fold, so neither one surprises you. */
-.rail-row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.rail-row .rail-link {
-  flex: 1;
-  min-width: 0;
-}
-
-.rail-toggle {
-  flex: none;
-  width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--ink-3);
-  cursor: pointer;
-  padding: 0;
-}
-
-.rail-toggle:hover {
-  background: var(--surface-2);
-  color: var(--ink);
-}
-
-.rail-toggle .caret {
-  transition: transform 120ms ease;
-}
-
-.rail-toggle.is-open .caret {
-  transform: rotate(90deg);
-}
-
-/* The database's own views, nested under it. Indented and quieter than the
-   service they belong to, so the hierarchy is legible without a second panel. */
-.rail-sub {
-  margin: 2px 0 2px 12px;
-  padding-left: 10px;
-  border-left: 1px solid var(--line);
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.rail-node {
-  display: flex;
-  flex-direction: column;
-}
-
-.rail-link-sub {
-  padding: 5px 8px;
-  font-size: 13px;
-}
-
-/* The database you are inside is not the current page (one of its views is),
+/* The section you are inside is not the current page (a resource under it is),
    so it is marked as the trail rather than the destination. */
 .rail-link.is-trail {
   color: var(--ink);
 }
 
-.rail-link .state {
-  color: inherit;
-  font-size: inherit;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.rail-link .state-failed {
-  color: var(--danger);
-}
-
-/* A resource row is icon, name, dot: the name owns the flexible middle and
-   truncates, the dot keeps its size and sits on the trailing edge. */
+/* A row is a name and a trailing mark: the name owns the flexible middle and
+   truncates, the count or the badge keeps its size on the trailing edge. */
 .rail-name {
   flex: 1 1 auto;
   min-width: 0;
@@ -600,17 +543,9 @@ p {
   white-space: nowrap;
 }
 
-.rail-link .rail-dot,
-.rail-item .rail-dot {
-  margin-left: auto;
-  flex: none;
-  overflow: visible;
-  min-width: auto;
-}
-
 .rail-foot {
   margin-top: auto;
-  padding-top: 10px;
+  padding-top: 8px;
   border-top: 1px solid var(--line);
 }
 
@@ -1897,6 +1832,52 @@ kbd {
   overflow: hidden;
 }
 
+/* The database and its three views. Active is the same neutral treatment the
+   rail uses for where you are: a deeper surface step, full ink, more weight,
+   and no chroma spent on something that is neither action nor state. */
+.wb-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 14px;
+  height: 42px;
+}
+
+.wb-head-name {
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.wb-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.wb-tab {
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--ink-2);
+  text-decoration: none;
+  font-size: 13px;
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.wb-tab:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.wb-tab[aria-current="page"] {
+  background: var(--surface-3);
+  color: var(--ink);
+  font-weight: 600;
+}
+
 .workbench-body {
   flex: 1;
   display: grid;
@@ -3073,25 +3054,16 @@ table.data th {
     gap: 6px;
   }
 
-  .rail-label {
+  .rail-group-head {
     display: none;
   }
 
-  /* The tree lies down: the same nodes, chained left to right, since a
-     vertical tree inside a horizontal strip has nowhere to grow. */
-  .rail-sub {
-    margin: 0;
-    padding-left: 6px;
-    border-left: 0;
+  .rail-items,
+  .rail-items.is-closed {
+    display: flex;
     flex-direction: row;
     align-items: center;
-    gap: 4px;
-  }
-
-  .rail-node {
-    flex-direction: row;
-    align-items: center;
-    gap: 4px;
+    gap: 6px;
   }
 
   .rail-link {

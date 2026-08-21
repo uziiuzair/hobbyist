@@ -218,6 +218,9 @@ export function Tables({
 
   return (
     <Workbench
+      projectName={projectName}
+      resourceName={resourceName}
+      view="tables"
       sidebar={
         <>
           <div className="wb-side-head">

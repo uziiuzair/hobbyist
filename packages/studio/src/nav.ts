@@ -59,19 +59,19 @@ export interface NavGroup {
 
 export const PROJECT_NAV: NavGroup[] = [
   {
-    id: "build",
-    label: "Build",
+    id: "compute",
+    label: "Compute",
     items: [
       {
-        id: "databases",
-        label: "Databases",
-        status: "ready",
-        kind: "postgres",
+        id: "apps",
+        label: "Apps",
+        status: "preview",
+        kind: "app",
         blurb:
-          "Postgres instances that sleep when nothing is connected and wake on the first query.",
+          "Long running containers of any runtime, woken by the HTTP router on the first request.",
         today:
-          "Built. Tables, SQL and schema views, connection strings, import and export.",
-        phase: "Phase 1",
+          "The daemon builds, deploys, wakes and sleeps apps. Studio lists them; there is no per app page.",
+        phase: "Phase 2",
       },
       {
         id: "workers",
@@ -82,17 +82,6 @@ export const PROJECT_NAV: NavGroup[] = [
           "Request handlers on workerd, deployed from a wrangler manifest, asleep between requests.",
         today:
           "The daemon builds, deploys, wakes and sleeps workers. Studio lists them; there is no per worker page, so deploys and logs are CLI only.",
-        phase: "Phase 2",
-      },
-      {
-        id: "apps",
-        label: "Apps",
-        status: "preview",
-        kind: "app",
-        blurb:
-          "Long running containers of any runtime, woken by the HTTP router on the first request.",
-        today:
-          "The daemon builds, deploys, wakes and sleeps apps. Studio lists them; there is no per app page.",
         phase: "Phase 2",
       },
       {
@@ -123,6 +112,56 @@ export const PROJECT_NAV: NavGroup[] = [
     label: "Storage",
     items: [
       {
+        id: "databases",
+        label: "Databases",
+        status: "ready",
+        kind: "postgres",
+        blurb:
+          "Postgres instances that sleep when nothing is connected and wake on the first query.",
+        today:
+          "Built. Tables, SQL and schema views, connection strings, import and export.",
+        phase: "Phase 1",
+      },
+      {
+        id: "d1",
+        label: "D1",
+        status: "soon",
+        blurb:
+          "SQLite databases a worker binds and queries, with a browser for their tables.",
+        today:
+          "A worker can already bind one: Miniflare provides the D1 API inside the runtime (ADR 0011), and `d1Databases` is read off the wrangler manifest. The daemon does not manage them as resources, so nothing here can list, query or size them.",
+        phase: "Phase 2",
+      },
+      {
+        id: "kv",
+        label: "KV",
+        status: "soon",
+        blurb: "Key value namespaces a worker reads and writes.",
+        today:
+          "Same as D1: Miniflare provides the API inside the runtime and `kvNamespaces` is read off the manifest, but the daemon owns no route over the keys.",
+        phase: "Phase 2",
+      },
+      {
+        id: "object-storage",
+        label: "Object storage",
+        status: "soon",
+        blurb:
+          "S3 compatible buckets on your own disk, addressable from workers and apps.",
+        today:
+          "Nothing on the daemon side: `docs/storage/specs` is empty. A worker's R2 bindings run inside Miniflare and are invisible from here.",
+        phase: "Phase 3",
+      },
+      {
+        id: "volumes",
+        label: "Volumes",
+        status: "soon",
+        blurb:
+          "Persistent disks attached to compute, so an app can hold state that is not a database.",
+        today:
+          "Nothing. Phase 2 compute is deliberately stateless and gets its persistence from Postgres.",
+        phase: "Phase 3",
+      },
+      {
         id: "branches",
         label: "Branches",
         status: "soon",
@@ -141,25 +180,6 @@ export const PROJECT_NAV: NavGroup[] = [
         today:
           "Nothing. Export on the project page runs a `pg_dump` you drive yourself, and that keeps working whatever happens here.",
         phase: "Not phased",
-      },
-      {
-        id: "object-storage",
-        label: "Object storage",
-        status: "soon",
-        blurb:
-          "S3 compatible buckets on your own disk, addressable from workers and apps.",
-        today: "Nothing. `docs/storage/specs` is empty.",
-        phase: "Phase 3",
-      },
-      {
-        id: "volumes",
-        label: "Volumes",
-        status: "soon",
-        blurb:
-          "Persistent disks attached to compute, so an app can hold state that is not a database.",
-        today:
-          "Nothing. Phase 2 compute is deliberately stateless and gets its persistence from Postgres.",
-        phase: "Phase 3",
       },
     ],
   },
