@@ -120,10 +120,20 @@ export function reflinkWarning(report: PreflightReport): string | null {
   if (report.filesystem.reflinkSupported) {
     return null
   }
+  // Deliberately "note" and not "warning", and deliberately not phrased as
+  // branching being degraded. Branching is not built and snapshots are not
+  // reachable from any command, so nothing a reader can run today is slower
+  // because of this. Warning about a feature that does not exist, in the first
+  // message most cheap-VPS users ever see, spends credibility for nothing.
+  //
+  // The link is a URL rather than a repo path, because someone who ran the
+  // one-liner has no checkout in front of them to open.
   return (
-    'warning: this filesystem does not support reflinks. branching will fall back to a full copy ' +
-    'instead of an instant clone. this is expected on ext4, the default on many cheap VPS images. ' +
-    'see docs/branching for detail.'
+    'note: this filesystem has no reflink support, so copying a project will be a full copy ' +
+    'rather than an instant one. nothing available today depends on it: snapshots and branching ' +
+    'are both still to come. this is expected on ext4, the default on many cheap VPS images. ' +
+    'if you want cheap copies later, put $HOBBY_HOME on XFS, ZFS or APFS. ' +
+    'https://hobbyist.sh/docs/reference/filesystems/'
   )
 }
 
