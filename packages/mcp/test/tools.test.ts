@@ -56,6 +56,7 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     health: notWired('health'),
     listProjects: notWired('listProjects'),
     createProject: notWired('createProject'),
+    setSleepPolicy: notWired('setSleepPolicy'),
     getProject: notWired('getProject'),
     deleteProject: notWired('deleteProject'),
     createResource: notWired('createResource'),
