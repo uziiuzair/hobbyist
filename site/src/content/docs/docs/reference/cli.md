@@ -118,6 +118,30 @@ Starts it now. Rarely necessary: a resource wakes by itself when something
 connects, which is the whole point. `wake` is for when you want it warm before
 something else needs it. Accepts `--json`.
 
+### `hobby pin <project>`
+
+Stops this project ever being put to sleep automatically. Useful for the one
+thing on the box that has to answer instantly, or anything whose first request
+genuinely cannot afford to wait.
+
+Pinning is per project, not per box, so pinning your status page does not keep
+nine other projects awake with it. Accepts `--json`.
+
+### `hobby unpin <project> [--sleep-after <seconds>]`
+
+Lets it sleep again. Without the flag it goes back to the box-wide default.
+
+If the box-wide default is itself "never sleep", `unpin` refuses rather than
+writing a value that would make it a no-op reporting success, and asks you for
+an explicit number.
+
+Accepts `--json`.
+
+:::note
+`sleep` and `wake` act on something right now. `pin` and `unpin` change what
+the hibernator is allowed to do from now on. Different tense, different verb.
+:::
+
 ### `hobby logs <target> [--tail N]`
 
 Tails the resource's logs.
