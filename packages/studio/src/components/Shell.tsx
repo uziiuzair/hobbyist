@@ -8,14 +8,8 @@
 
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
-import type {
-  Project,
-  Resource,
-  ResourceKind,
-  WorkerResource,
-} from "@hobby.sh/core";
+import type { Project, Resource, WorkerResource } from "@hobby.sh/core";
 import { navigate } from "../lib/router.js";
-import { stateClass, stateLabel } from "./State.js";
 import { Wrapper } from "./reusable/wrapper.js";
 import { Button } from "./reusable/button.js";
 import { Badge } from "./reusable/badge.js";
@@ -52,38 +46,6 @@ function Chevron() {
         strokeWidth="1.4"
         strokeLinecap="round"
         strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function DatabaseIcon() {
-  return (
-    <svg
-      className="ic-sage"
-      width="14"
-      height="14"
-      viewBox="0 0 14 14"
-      fill="none"
-      aria-hidden="true"
-    >
-      <ellipse
-        cx="7"
-        cy="3.2"
-        rx="4.6"
-        ry="1.9"
-        stroke="currentColor"
-        strokeWidth="1.2"
-      />
-      <path
-        d="M2.4 3.2v7.6c0 1.05 2.06 1.9 4.6 1.9s4.6-.85 4.6-1.9V3.2"
-        stroke="currentColor"
-        strokeWidth="1.2"
-      />
-      <path
-        d="M2.4 7c0 1.05 2.06 1.9 4.6 1.9s4.6-.85 4.6-1.9"
-        stroke="currentColor"
-        strokeWidth="1.2"
       />
     </svg>
   );
@@ -135,64 +97,6 @@ function GridIcon() {
         strokeWidth="1.2"
       />
     </svg>
-  );
-}
-
-// A browser window: the app kind serves pages.
-function AppIcon() {
-  return (
-    <svg
-      className="ic-iris"
-      width="14"
-      height="14"
-      viewBox="0 0 14 14"
-      fill="none"
-      aria-hidden="true"
-    >
-      <rect
-        x="1.5"
-        y="2"
-        width="11"
-        height="10"
-        rx="1.6"
-        stroke="currentColor"
-        strokeWidth="1.2"
-      />
-      <path d="M1.5 4.8h11" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="3.4" cy="3.4" r="0.5" fill="currentColor" />
-    </svg>
-  );
-}
-
-// A bolt: the worker kind runs on demand and goes away.
-function WorkerIcon() {
-  return (
-    <svg
-      className="ic-honey"
-      width="14"
-      height="14"
-      viewBox="0 0 14 14"
-      fill="none"
-      aria-hidden="true"
-    >
-      <path
-        d="M7.8 1.5 3 8h3.4l-.9 4.5L10.8 6H7.4l.4-4.5Z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-// The dot alone, pushed to the row's trailing edge. The state word still
-// exists for screen readers: colour and shape are never the only carrier.
-function RailDot({ state }: { state: string }) {
-  return (
-    <span className={`state rail-dot ${stateClass(state)}`}>
-      <span className="dot" aria-hidden="true" />
-      <span className="sr-only">{stateLabel(state)}</span>
-    </span>
   );
 }
 
@@ -297,14 +201,6 @@ function ProjectSwitcher({
   );
 }
 
-export type RailSection = "tables" | "sql" | "schema";
-
-const DB_VIEWS: Array<{ id: RailSection; label: string }> = [
-  { id: "tables", label: "Tables" },
-  { id: "sql", label: "SQL" },
-  { id: "schema", label: "Schema" },
-];
-
 // The caret a Cloudflare style group carries: it points right when the group
 // is closed and rotates down when it opens, so the rail reads as a tree that
 // is currently folded rather than a list that mysteriously grew.
@@ -329,31 +225,6 @@ function Caret() {
   );
 }
 
-// A disclosure is a destination and a group at once: the label navigates, the
-// caret folds. Splitting them means clicking "Databases" never surprises you
-// by doing the other thing.
-function Disclosure({
-  open,
-  onToggle,
-  label,
-}: {
-  open: boolean;
-  onToggle: () => void;
-  label: string;
-}) {
-  return (
-    <Button
-      type="button"
-      className={`rail-toggle${open ? " is-open" : ""}`}
-      aria-expanded={open}
-      aria-label={`${open ? "Collapse" : "Expand"} ${label}`}
-      onClick={onToggle}
-    >
-      <Caret />
-    </Button>
-  );
-}
-
 // How many of a kind this project holds. Durable Objects are the exception
 // and are counted from what every worker declares, because they are not
 // resources in the store: see views/DurableObjects.tsx.
@@ -370,105 +241,23 @@ function countFor(item: NavItem, resources: Resource[]): number | null {
   return resources.filter((r) => r.kind === item.kind).length;
 }
 
-function iconFor(kind: ResourceKind) {
-  if (kind === "postgres") return <DatabaseIcon />;
-  if (kind === "app") return <AppIcon />;
-  if (kind === "worker") return <WorkerIcon />;
-  // A queue has no container and no icon of its own yet. The row still reads
-  // as a resource because of where it sits, so an invented glyph would be
-  // decoration standing in for a distinction that does not exist.
-  return null;
-}
-
-// A resource under its section. Postgres is the only kind with views of its
-// own, so it is the only kind that renders as a destination; the rest are
-// facts (kind, name, state) until they have a page to go to, because a link
-// to nothing is worse than no link.
-function ResourceRow({
-  resource,
-  projectName,
-  currentResource,
-  currentView,
-}: {
-  resource: Resource;
-  projectName: string;
-  currentResource?: string;
-  currentView?: RailSection;
-}) {
-  const icon = iconFor(resource.kind);
-
-  if (resource.kind !== "postgres") {
-    return (
-      <div className="rail-item">
-        {icon}
-        <span className="rail-name">{resource.name}</span>
-        <RailDot state={resource.state} />
-      </div>
-    );
-  }
-
-  const here = resource.name === currentResource;
-  const base = `#/projects/${encodeURIComponent(projectName)}/resources/${encodeURIComponent(resource.name)}`;
-
-  return (
-    <div className="rail-node">
-      <a
-        className={`rail-link${here ? " is-trail" : ""}`}
-        href={`${base}/tables`}
-      >
-        {icon}
-        <span className="rail-name">{resource.name}</span>
-        <RailDot state={resource.state} />
-      </a>
-      {/* The three views appear under the database you are actually in.
-          Hanging them off every database at once would triple the rail for a
-          project with four of them, to show links you are not going to use
-          from here. */}
-      {here && (
-        <div className="rail-sub">
-          {DB_VIEWS.map((view) => (
-            <a
-              key={view.id}
-              className="rail-link rail-link-sub"
-              href={`${base}/${view.id}`}
-              aria-current={currentView === view.id ? "page" : undefined}
-            >
-              {view.label}
-            </a>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function ProjectItem({
   item,
   projectName,
   resources,
   currentSection,
   currentResource,
-  currentView,
-  open,
-  onToggle,
 }: {
   item: NavItem;
   projectName: string;
   resources: Resource[];
   currentSection?: string;
   currentResource?: string;
-  currentView?: RailSection;
-  open: boolean;
-  onToggle: () => void;
 }) {
   const here = currentSection === item.id;
   const count = countFor(item, resources);
-  const rows =
-    item.kind === undefined
-      ? []
-      : resources.filter((r) => r.kind === item.kind);
 
-  const link = (
+  return (
     <a
       className={`rail-link${here && currentResource !== undefined ? " is-trail" : ""}`}
       href={`#/projects/${encodeURIComponent(projectName)}/${item.id}`}
@@ -488,28 +277,39 @@ function ProjectItem({
       ) : null}
     </a>
   );
+}
 
-  if (rows.length === 0) return link;
-
+// The group is what folds now. Its header is the control, so there is one
+// caret per section rather than one per row, and the sections a given project
+// never uses (Storage, Connect) collapse to a single line each.
+//
+// Children stay mounted and are hidden in CSS rather than unmounted, because
+// the horizontal rail on a narrow screen has no room for a header and needs
+// to show the items regardless of what was folded on a wide one.
+function RailGroup({
+  label,
+  open,
+  onToggle,
+  children,
+}: {
+  label: string;
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
   return (
-    <div className="rail-node">
-      <div className="rail-row">
-        {link}
-        <Disclosure open={open} onToggle={onToggle} label={item.label} />
-      </div>
-      {open && (
-        <div className="rail-sub">
-          {rows.map((row) => (
-            <ResourceRow
-              key={row.id}
-              resource={row}
-              projectName={projectName}
-              currentResource={currentResource}
-              currentView={currentView}
-            />
-          ))}
-        </div>
-      )}
+    <div className="rail-group">
+      <Button
+        type="button"
+        variant="ghost"
+        className={`rail-group-head${open ? " is-open" : ""}`}
+        aria-expanded={open}
+        onClick={onToggle}
+      >
+        <span>{label}</span>
+        <Caret />
+      </Button>
+      <div className={`rail-items${open ? "" : " is-closed"}`}>{children}</div>
     </div>
   );
 }
@@ -519,7 +319,6 @@ export function Shell({
   currentProject,
   currentSection,
   currentResource,
-  currentView,
   wide,
   crumbs,
   onLogout,
@@ -529,7 +328,6 @@ export function Shell({
   currentProject?: string;
   currentSection?: string;
   currentResource?: string;
-  currentView?: RailSection;
   wide?: boolean;
   crumbs: ReactNode;
   onLogout: () => void;
@@ -541,14 +339,14 @@ export function Shell({
   const active = projects.find((row) => row.project.name === currentProject);
   const resources = active?.resources ?? [];
 
-  // Each node remembers whether it was folded, falling back to a default the
-  // route decides: the section you are inside starts open, the rest start
-  // closed. Storing the override rather than seeding state from the route
-  // matters, because the route changes on every click and would otherwise keep
-  // reopening a group you deliberately folded.
+  // Every group starts collapsed. What the rail shows on arrival is five
+  // section names, which is the shape of the product in five lines; opening
+  // one is how you ask what is in it. Storing the override rather than seeding
+  // state from the route matters, because the route changes on every click and
+  // would otherwise keep reopening a group you deliberately shut.
   const [folds, setFolds] = useState<Record<string, boolean>>({});
-  const isOpen = (key: string, fallback: boolean): boolean => folds[key] ?? fallback; // prettier-ignore
-  const toggle = (key: string, fallback: boolean) => () => setFolds((prev) => ({ ...prev, [key]: !(prev[key] ?? fallback) })); // prettier-ignore
+  const isOpen = (key: string): boolean => folds[key] ?? false; // prettier-ignore
+  const toggle = (key: string) => () => setFolds((prev) => ({ ...prev, [key]: !(prev[key] ?? false) })); // prettier-ignore
 
   return (
     <div className="shell">
@@ -570,8 +368,12 @@ export function Shell({
           // everything Hobbyist does is scoped to a project: there is one
           // owner and one box, so there is no organisation layer to fill.
           ACCOUNT_NAV.map((group) => (
-            <div className="rail-group" key={group.id}>
-              <div className="rail-label">{group.label}</div>
+            <RailGroup
+              key={group.id}
+              label={group.label}
+              open={isOpen(`group:${group.id}`)}
+              onToggle={toggle(`group:${group.id}`)}
+            >
               {group.items.map((item) => (
                 <a
                   key={item.id}
@@ -581,7 +383,6 @@ export function Shell({
                     (currentSection ?? "") === item.id ? "page" : undefined
                   }
                 >
-                  <GridIcon />
                   <span className="rail-name">{item.label}</span>
                   {item.status === "soon" ? (
                     <Badge tone="soon" className="ml-auto">
@@ -592,25 +393,24 @@ export function Shell({
                   ) : null}
                 </a>
               ))}
-            </div>
+            </RailGroup>
           ))
         ) : (
           <>
-            <div className="rail-group">
-              <div className="rail-label">Project</div>
-              <a
-                className="rail-link"
-                href={`#/projects/${encodeURIComponent(currentProject)}`}
-                aria-current={
-                  currentSection === undefined && currentResource === undefined
-                    ? "page"
-                    : undefined
-                }
-              >
-                <GridIcon />
-                Overview
-              </a>
-            </div>
+            {/* Overview is one row and was never a section. A group label over
+                a single link spends a line saying nothing. */}
+            <a
+              className="rail-link rail-top"
+              href={`#/projects/${encodeURIComponent(currentProject)}`}
+              aria-current={
+                currentSection === undefined && currentResource === undefined
+                  ? "page"
+                  : undefined
+              }
+            >
+              <GridIcon />
+              Overview
+            </a>
 
             {/* The whole map, not the finished half. Every destination
                 Hobbyist intends to have is listed, and the ones that are not
@@ -619,8 +419,12 @@ export function Shell({
                 them describes the project, which is the thing a reader is
                 actually deciding about. */}
             {PROJECT_NAV.map((group) => (
-              <div className="rail-group" key={group.id}>
-                <div className="rail-label">{group.label}</div>
+              <RailGroup
+                key={group.id}
+                label={group.label}
+                open={isOpen(`group:${group.id}`)}
+                onToggle={toggle(`group:${group.id}`)}
+              >
                 {group.items.map((item) => (
                   <ProjectItem
                     key={item.id}
@@ -629,15 +433,9 @@ export function Shell({
                     resources={resources}
                     currentSection={currentSection}
                     currentResource={currentResource}
-                    currentView={currentView}
-                    open={isOpen(`nav:${item.id}`, currentSection === item.id)}
-                    onToggle={toggle(
-                      `nav:${item.id}`,
-                      currentSection === item.id,
-                    )}
                   />
                 ))}
-              </div>
+              </RailGroup>
             ))}
           </>
         )}

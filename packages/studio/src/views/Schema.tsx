@@ -87,6 +87,9 @@ export function Schema({
 
   return (
     <Workbench
+      projectName={projectName}
+      resourceName={resourceName}
+      view="schema"
       sidebar={
         <>
           <div className="wb-side-head">
