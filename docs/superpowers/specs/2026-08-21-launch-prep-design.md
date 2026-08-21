@@ -10,7 +10,7 @@ makes those files load bearing for a second consumer.
 
 ## Why now
 
-The repository has 66 test files, four resource kinds, sixteen ADRs and 61
+The repository has 66 test files, four resource kinds, fifteen ADRs and 61
 filed documents, and a `README.md` that is zero bytes. `install.sh` at the repo
 root already documents a bootstrap script at `https://hobby.sh/install` that
 does not exist. Two owned domains point at nothing. The project is buildable
@@ -161,7 +161,7 @@ Guides        postgres · apps · workers · durable objects · queues · studio
               snapshots and restore · eject and adopt · tailscale and tunnels
 Reference     CLI · daemon HTTP API · MCP tools · configuration and paths ·
               filesystem requirements
-Decisions     ADRs 0001 to 0016, synced from docs/decisions/
+Decisions     ADRs 0001 to 0016 (0015 not yet filed), synced from docs/decisions/
 Contributing
 ```
 
