@@ -1,0 +1,79 @@
+# Builds hobbyist.sh and publishes it to GitHub Pages.
+#
+# The decision records on the site are generated from docs/decisions/ at build
+# time, so this workflow watches that directory as well as site/. An ADR
+# amended without a site rebuild would leave the published copy disagreeing
+# with the committed one, and the amendments are the interesting part.
+
+name: Site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'docs/decisions/**'
+      - 'packages/cli/src/cli/main.ts'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and never cancel one in flight: a half-published site
+# is worse than a slightly late one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install
+        working-directory: site
+        run: npm ci
+
+      # Runs before the build rather than after, so a drifted ADR fails the
+      # job in ten seconds instead of after a full build.
+      - name: Decision records are in sync with docs/decisions/
+        working-directory: site
+        run: npm run check:adrs
+
+      - name: CLI reference matches the binary's help
+        working-directory: site
+        run: npm run check:cli
+
+      - name: Build
+        working-directory: site
+        run: npm run build
+
+      - name: Internal links resolve
+        working-directory: site
+        run: node scripts/check-links.mjs
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
