@@ -29,8 +29,10 @@ project has to keep working forever.
 - Documentation that corrects something wrong, or writes down something that
   was only ever true in someone's head.
 - A cold start measurement on hardware nobody has measured yet. The five dollar
-  VPS number in particular does not exist and the project's central claim is
-  written against it.
+  VPS is done now (p50 710ms, none over a second, filed in
+  `docs/proxy/research/`), so the open ones are Hetzner, a Raspberry Pi, and app
+  and worker wake on anything cheap. `scripts/measure-cold-start.sh` runs it and
+  prints the hardware with the numbers.
 - Anything that makes leaving easier: `hobby eject`, `pg_dump` paths,
   portability of the data directory.
 

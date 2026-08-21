@@ -23,13 +23,14 @@ of them are good ideas. That is exactly the problem.
 
 ## Most useful right now
 
-1. **A cold start measurement on a cheap VPS.** The project's central claim is
-   written against a machine nobody has measured. File the numbers with the
-   hardware stated.
-2. **The Linux queue producer fix.** Add extra hosts to `ContainerSpec` and emit
+1. **The Linux queue producer fix.** Add extra hosts to `ContainerSpec` and emit
    the flag, or resolve the gateway address into the URL at container start.
-3. **A CLI verb for snapshots.** The daemon half is written and tested and
+2. **A CLI verb for snapshots.** The daemon half is written and tested and
    reachable from nothing.
+3. **Cold start on hardware nobody has tried.** The five dollar VPS is measured
+   now, so the open ones are Hetzner, a Raspberry Pi, and app and worker wake on
+   anything cheap. `scripts/measure-cold-start.sh` prints the hardware alongside
+   the numbers.
 
 ## Needs a decision record before any code
 

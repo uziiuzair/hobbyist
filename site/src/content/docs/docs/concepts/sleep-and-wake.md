@@ -68,14 +68,28 @@ a release blocker rather than a slow path.
 
 | Path | p50 | p95 | Measured on | When |
 |---|---|---|---|---|
+| Postgres, wire protocol | **710ms** | **859ms** | **$5 VPS: 1 vCPU, 512MB, ext4** | 2026-08-22 |
 | Postgres, wire protocol | 170ms | 186ms | Apple silicon laptop | 2026-08-07 |
 | HTTP app | 121ms | 133ms | Apple M5 Pro | 2026-08-10 |
 | Worker, workerd | 299ms | 321ms | Apple M5 Pro | 2026-08-10 |
 
-**The five dollar VPS has never been measured.** Every number above came from a
-laptop. The budget is written against the cheap machine, and the cheap machine
-is the one nobody has run this on. Treat the table as an existence proof rather
-than a promise about your hardware.
+The first row is the one that matters, because the budget was written for that
+machine. Thirty consecutive wakes on a DigitalOcean `1vcpu-512mb` droplet on
+ext4: **none exceeded the 1 second target**, and the slowest was 968ms.
+
+Those two rows are not measured the same way. The VPS figure is end to end as a
+client sees it, including `psql` startup, and the laptop figure is the proxy's
+own internal span. Subtracting the client's own cost from the VPS run gives
+about 608ms of wake work, so a five dollar box is roughly 3.6 times slower than
+an M5 Pro. Same order, both inside budget.
+
+Read the caveats before quoting it. The very first wake was the slowest at
+968ms, because nothing was cached yet, and that is the case a real user meets.
+The box was otherwise idle. And 512MB needs swap to install at all, so those
+numbers describe 512MB *with swap*.
+[The full write-up](https://github.com/uziiuzair/hobbyist/blob/main/docs/proxy/research/2026-08-22-cold-start-on-a-five-dollar-vps.md).
+
+App and worker wake on that hardware are still unmeasured.
 
 ## What sends something to sleep
 
