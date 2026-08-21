@@ -12,12 +12,15 @@ import {
   cmdDeploy,
   cmdNew,
   cmdPg,
+  cmdPin,
   cmdQueueCreate,
   cmdQueueLs,
   cmdQueuePurge,
   cmdQueueRm,
   cmdQueueSend,
   cmdQueueSet,
+  cmdUnpin,
+  UsageError,
   type Ctx,
 } from '../src/index.js'
 import type { Api, QueueListEntry } from '../src/cli/client.js'
@@ -33,6 +36,12 @@ interface Recorded {
   // touching what those tests already check.
   resourceBodies: Array<{ project: string; body: { kind: string; name: string } }>
   deleted: string[]
+  // The second argument each createProject call received: undefined when
+  // the command let the daemon's config default decide, null when it asked
+  // for a pinned project. Same projection idea as resourceBodies above.
+  createSleepPolicies: Array<number | null | undefined>
+  // Every setSleepPolicy call, in order.
+  sleepPolicies: Array<{ project: string; sleepAfterSeconds: number | null }>
 }
 
 // Only the methods cmdNew, cmdCreate and cmdDeploy reach for. Casting a
@@ -57,14 +66,34 @@ function fakeCtx(
   out: string[]
   err: string[]
 } {
-  const recorded: Recorded = { created: [], resources: [], resourceBodies: [], deleted: [] }
+  const recorded: Recorded = {
+    created: [],
+    resources: [],
+    resourceBodies: [],
+    deleted: [],
+    createSleepPolicies: [],
+    sleepPolicies: [],
+  }
   const out: string[] = []
   const err: string[] = []
 
   const api = {
-    async createProject(name: string) {
+    async createProject(name: string, sleepAfterSeconds?: number | null) {
       recorded.created.push(name)
-      return { project: { id: 'p1', name, networkName: `hobby-${name}`, sleepAfterSeconds: 300, createdAt: new Date() } }
+      recorded.createSleepPolicies.push(sleepAfterSeconds)
+      return {
+        project: {
+          id: 'p1',
+          name,
+          networkName: `hobby-${name}`,
+          sleepAfterSeconds: sleepAfterSeconds === undefined ? 300 : sleepAfterSeconds,
+          createdAt: new Date(),
+        },
+      }
+    },
+    async setSleepPolicy(project: string, sleepAfterSeconds: number | null) {
+      recorded.sleepPolicies.push({ project, sleepAfterSeconds })
+      return { project: { id: 'p1', name: project, networkName: `hobby-${project}`, sleepAfterSeconds, createdAt: new Date() } }
     },
     async createResource(projectName: string, body: { kind: string; name: string }) {
       recorded.resources.push(`${projectName}/${body.name}`)
@@ -117,6 +146,75 @@ test('hobby new prints the connection string and leaves the project in place', a
   assert.deepEqual(recorded.resources, ['blog/primary'])
   assert.deepEqual(recorded.deleted, [], 'a successful create rolls back nothing')
   assert.deepEqual(out, ['postgres://postgres:secret@127.0.0.1:5432/blog'])
+})
+
+// The sleep-policy surface: `--pin` at birth, pin/unpin afterward. What
+// these pin is the argument each command actually sends, because the wire
+// contract is three-valued (undefined defers to the daemon's config
+// default, null pins, a number is a threshold) and a command that collapses
+// undefined into null would silently pin every new project.
+test('hobby new without --pin lets the daemon default decide', async () => {
+  const { ctx, recorded } = fakeCtx()
+
+  const code = await cmdNew(ctx, ['blog'], {})
+
+  assert.equal(code, 0)
+  assert.deepEqual(recorded.createSleepPolicies, [undefined])
+})
+
+test('hobby new --pin creates the project pinned awake', async () => {
+  const { ctx, recorded } = fakeCtx()
+
+  const code = await cmdNew(ctx, ['prod'], { pin: true })
+
+  assert.equal(code, 0)
+  assert.deepEqual(recorded.createSleepPolicies, [null])
+})
+
+test('hobby pin sets a null sleep policy and says so', async () => {
+  const { ctx, recorded, out } = fakeCtx()
+
+  const code = await cmdPin(ctx, ['prod'], {})
+
+  assert.equal(code, 0)
+  assert.deepEqual(recorded.sleepPolicies, [{ project: 'prod', sleepAfterSeconds: null }])
+  assert.deepEqual(out, ['project prod: pinned awake, never sleeps'])
+})
+
+test('hobby unpin --sleep-after sends that threshold', async () => {
+  const { ctx, recorded, out } = fakeCtx()
+
+  const code = await cmdUnpin(ctx, ['prod'], { 'sleep-after': '120' })
+
+  assert.equal(code, 0)
+  assert.deepEqual(recorded.sleepPolicies, [{ project: 'prod', sleepAfterSeconds: 120 }])
+  assert.deepEqual(out, ['project prod: sleeps after 120s idle'])
+})
+
+test('hobby unpin without a flag falls back to the box default', async () => {
+  const { ctx, recorded } = fakeCtx()
+  ctx.config = { ...ctx.config, sleepAfterSeconds: 300 }
+
+  const code = await cmdUnpin(ctx, ['prod'], {})
+
+  assert.equal(code, 0)
+  assert.deepEqual(recorded.sleepPolicies, [{ project: 'prod', sleepAfterSeconds: 300 }])
+})
+
+test('hobby unpin refuses to guess when the box default is itself null', async () => {
+  const { ctx, recorded } = fakeCtx()
+  ctx.config = { ...ctx.config, sleepAfterSeconds: null }
+
+  await assert.rejects(cmdUnpin(ctx, ['prod'], {}), UsageError)
+  assert.deepEqual(recorded.sleepPolicies, [], 'nothing was sent')
+})
+
+test('hobby unpin rejects a non-integer threshold', async () => {
+  const { ctx, recorded } = fakeCtx()
+
+  await assert.rejects(cmdUnpin(ctx, ['prod'], { 'sleep-after': '1.5' }), UsageError)
+  await assert.rejects(cmdUnpin(ctx, ['prod'], { 'sleep-after': '0' }), UsageError)
+  assert.deepEqual(recorded.sleepPolicies, [])
 })
 
 // The failure this exists for: without the rollback, the project survived its

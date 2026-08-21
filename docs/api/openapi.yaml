@@ -89,6 +89,10 @@ paths:
                   type: string
                   pattern: "^[a-z][a-z0-9-]{1,62}$"
                   description: Lowercase, digits, dashes; reserved names (postgres, template0, template1, hobby) refused.
+                sleepAfterSeconds:
+                  type: [integer, "null"]
+                  minimum: 1
+                  description: "Optional. Omitted takes the daemon's config default; null pins the project awake from birth; a positive integer is the project's own idle threshold in seconds."
       responses:
         "201":
           content:
@@ -199,6 +203,31 @@ paths:
                   dataDirs: { type: array, items: { type: string } }
                   released: { type: boolean }
                   notEjectable: { type: array, items: { type: string } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{name}/sleep-policy:
+    post:
+      summary: "Set the project's sleep policy: null pins it awake (the hibernator skips it entirely), a positive integer is its own idle threshold in seconds."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sleepAfterSeconds]
+              properties:
+                sleepAfterSeconds:
+                  type: [integer, "null"]
+                  minimum: 1
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
 
   /v1/projects/{name}/adopt:

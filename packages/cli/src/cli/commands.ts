@@ -472,10 +472,14 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
 export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const name = positionals[0]
   if (name === undefined) {
-    throw new UsageError('usage: hobby new <name> [--empty]')
+    throw new UsageError('usage: hobby new <name> [--empty] [--pin]')
   }
 
-  const { project } = await c.api.createProject(name)
+  // `--pin`: born pinned awake, for the project that must never cold-start
+  // (a production database on a box whose other projects all sleep).
+  // Omitting the field, not sending a number, keeps the daemon's config
+  // default in charge of the unpinned case.
+  const { project } = await c.api.createProject(name, flags.pin === true ? null : undefined)
 
   // `--empty`: a project and nothing else. A project is a namespace holding
   // typed resources (root CLAUDE.md's Scope section), not a database with a
@@ -741,6 +745,71 @@ export function cmdSleep(c: Ctx, positionals: string[], flags: Flags): Promise<n
 
 export function cmdWake(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   return cmdSleepWake(c, 'wake', positionals, flags)
+}
+
+function renderSleepPolicyLine(project: Project): string {
+  return project.sleepAfterSeconds === null
+    ? `project ${project.name}: pinned awake, never sleeps`
+    : `project ${project.name}: sleeps after ${project.sleepAfterSeconds}s idle`
+}
+
+// `hobby pin <project>` and `hobby unpin <project> [--sleep-after N]`: the
+// CLI face of POST /v1/projects/:name/sleep-policy. "Pinned" is the
+// hibernator's own word for a null threshold (hibernator.ts checks it
+// before anything else), so the verb teaches the model rather than adding a
+// second vocabulary. Sleep and wake act on a resource right now; pin and
+// unpin set what the hibernator is allowed to do from now on. Different
+// tense, different verb.
+export async function cmdPin(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const name = positionals[0]
+  if (name === undefined) {
+    throw new UsageError('usage: hobby pin <project>')
+  }
+  const result = await c.api.setSleepPolicy(name, null)
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+  } else {
+    c.io.out(renderSleepPolicyLine(result.project))
+  }
+  return 0
+}
+
+export async function cmdUnpin(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const name = positionals[0]
+  if (name === undefined) {
+    throw new UsageError('usage: hobby unpin <project> [--sleep-after <seconds>]')
+  }
+  const raw = flagString(flags, 'sleep-after')
+  let sleepAfterSeconds: number
+  if (raw === undefined) {
+    // No flag: fall back to the box-wide default the project would have been
+    // created with. If that default is itself null, the box is configured to
+    // never sleep anything, and silently writing null here would make unpin
+    // a no-op that reports success; asking for an explicit value is the
+    // honest move. `== null` on purpose: a config that never resolved the
+    // field (a partial test config) must land here too, not send undefined
+    // over the wire.
+    if (c.config.sleepAfterSeconds == null) {
+      throw new UsageError(
+        'this box has no default idle threshold (sleepAfterSeconds is null in config), so pass one: hobby unpin <project> --sleep-after <seconds>'
+      )
+    }
+    sleepAfterSeconds = c.config.sleepAfterSeconds
+  } else {
+    sleepAfterSeconds = Number(raw)
+    if (!Number.isInteger(sleepAfterSeconds) || sleepAfterSeconds <= 0) {
+      throw new UsageError('--sleep-after must be a positive whole number of seconds')
+    }
+  }
+  const result = await c.api.setSleepPolicy(name, sleepAfterSeconds)
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+  } else {
+    c.io.out(renderSleepPolicyLine(result.project))
+  }
+  return 0
 }
 
 export async function cmdLogs(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
