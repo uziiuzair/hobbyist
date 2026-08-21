@@ -44,12 +44,10 @@ jobs:
         working-directory: site
         run: npm ci
 
-      # Runs before the build rather than after, so a drifted ADR fails the
-      # job in ten seconds instead of after a full build.
-      - name: Decision records are in sync with docs/decisions/
-        working-directory: site
-        run: npm run check:adrs
-
+      # There is deliberately no drift check on the decision records. They are
+      # generated from docs/decisions/ by the build's own prebuild step and are
+      # not committed, so drift is impossible by construction rather than
+      # policed after the fact.
       - name: CLI reference matches the binary's help
         working-directory: site
         run: npm run check:cli

@@ -68,7 +68,6 @@ jobs:
       - working-directory: site
         run: |
           npm ci
-          npm run check:adrs
           npm run check:cli
           npm run build
           node scripts/check-links.mjs
