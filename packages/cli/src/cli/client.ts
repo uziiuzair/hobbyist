@@ -242,7 +242,11 @@ export interface EjectResponse {
 export interface Api {
   health(): Promise<HealthResponse>
   listProjects(): Promise<ProjectsResponse>
-  createProject(name: string): Promise<ProjectResponse>
+  // sleepAfterSeconds: omitted takes the daemon's config default, null pins
+  // the project awake, a positive number is its own idle threshold.
+  createProject(name: string, sleepAfterSeconds?: number | null): Promise<ProjectResponse>
+  // The same value, changed after creation. POST /v1/projects/:name/sleep-policy.
+  setSleepPolicy(project: string, sleepAfterSeconds: number | null): Promise<ProjectResponse>
   getProject(name: string): Promise<ProjectDetailResponse>
   deleteProject(name: string): Promise<DeletedResponse>
   createResource(
@@ -302,7 +306,18 @@ export function createApi(socketPath: string): Api {
   return {
     health: () => call(client, 'GET', '/v1/health'),
     listProjects: () => call(client, 'GET', '/v1/projects'),
-    createProject: (name) => call(client, 'POST', '/v1/projects', { name }),
+    createProject: (name, sleepAfterSeconds) =>
+      call(
+        client,
+        'POST',
+        '/v1/projects',
+        // JSON.stringify drops an undefined property, but building the body
+        // conditionally keeps "the field was not sent" explicit rather than
+        // an artifact of serialization.
+        sleepAfterSeconds === undefined ? { name } : { name, sleepAfterSeconds }
+      ),
+    setSleepPolicy: (project, sleepAfterSeconds) =>
+      call(client, 'POST', `/v1/projects/${p(project)}/sleep-policy`, { sleepAfterSeconds }),
     getProject: (name) => call(client, 'GET', `/v1/projects/${p(name)}`),
     deleteProject: (name) => call(client, 'DELETE', `/v1/projects/${p(name)}`),
     createResource: (project, input) => call(client, 'POST', `/v1/projects/${p(project)}/resources`, input),

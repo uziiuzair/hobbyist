@@ -30,6 +30,7 @@ export interface Store {
   listProjects(): Project[]
   deleteProject(id: ProjectId): void
   setProjectReleased(id: ProjectId, at: Date | null): void
+  setProjectSleepAfterSeconds(id: ProjectId, sleepAfterSeconds: number | null): void
   createResource(input: {
     projectId: ProjectId
     kind: ResourceKind
@@ -231,6 +232,15 @@ export function openStore(path: string): Store {
     // directory are all still here, and only whether hobby acts on them moves.
     setProjectReleased(id: ProjectId, at: Date | null): void {
       db.prepare('UPDATE projects SET released_at = ? WHERE id = ?').run(at === null ? null : at.toISOString(), id)
+    },
+
+    // The per-project sleep policy. Null pins the project awake: the
+    // hibernator checks it before anything else (packages/cli/src/daemon/
+    // hibernator.ts) and never puts a pinned project's resources to sleep.
+    // A number is this project's own idle threshold, overriding the
+    // box-wide config default it was created with.
+    setProjectSleepAfterSeconds(id: ProjectId, sleepAfterSeconds: number | null): void {
+      db.prepare('UPDATE projects SET sleep_after_seconds = ? WHERE id = ?').run(sleepAfterSeconds, id)
     },
 
     getProject,

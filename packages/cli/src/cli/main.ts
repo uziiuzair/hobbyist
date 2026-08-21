@@ -20,11 +20,13 @@ import {
   cmdLs,
   cmdNew,
   cmdPg,
+  cmdPin,
   cmdQueue,
   cmdRm,
   cmdSleep,
   cmdStudio,
   cmdStudioPasswd,
+  cmdUnpin,
   cmdWake,
   UsageError,
   type Ctx,
@@ -125,6 +127,7 @@ function printHelp(io: Io): void {
   io.out('  hobby daemon                         run the daemon in the foreground')
   io.out('  hobby new <name>                     project + postgres + connection string')
   io.out('  hobby new <name> --empty             a project with nothing in it')
+  io.out('  hobby new <name> --pin               born pinned: never auto-sleeps')
   io.out('  hobby ls                             everything, with sleep state')
   io.out('  hobby deploy [path]                  build a Dockerfile here and serve it')
   io.out('  hobby create <kind> <name> --project <p>  a resource with no code yet')
@@ -132,6 +135,8 @@ function printHelp(io: Io): void {
   io.out('  hobby connect <target>                open psql against it')
   io.out('  hobby sleep <target>                  put it to sleep')
   io.out('  hobby wake <target>                   wake it back up')
+  io.out('  hobby pin <project>                   never auto-sleep this project')
+  io.out('  hobby unpin <project> [--sleep-after N]  auto-sleep it again')
   io.out('  hobby logs <target> [--tail N]        tail its logs')
   io.out('  hobby rm <target> [--yes]              destroy, with confirmation')
   io.out('  hobby eject <project>                 emit docker-compose.yml plus data')
@@ -222,7 +227,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
 
     switch (cmd) {
       case 'new': {
-        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'empty'] })
+        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'empty', 'pin'] })
         return await cmdNew(ctx, positionals, flags)
       }
       case 'ls': {
@@ -248,6 +253,14 @@ export async function run(argv: string[], io: Io): Promise<number> {
       case 'wake': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
         return await cmdWake(ctx, positionals, flags)
+      }
+      case 'pin': {
+        const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+        return await cmdPin(ctx, positionals, flags)
+      }
+      case 'unpin': {
+        const { positionals, flags } = parseArgs(rest, { bool: ['json'], value: ['sleep-after'] })
+        return await cmdUnpin(ctx, positionals, flags)
       }
       case 'logs': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json'], value: ['tail'] })

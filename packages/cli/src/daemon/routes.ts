@@ -171,14 +171,65 @@ function getOwningProjectOrThrow(ctx: DaemonContext, resource: Resource): Projec
   return project
 }
 
+// The one shape a sleep policy can take on the wire: null pins the project
+// awake (the hibernator checks it before anything else and skips the
+// project entirely), a positive whole number of seconds is the project's
+// own idle threshold. `undefined` means the caller did not send the field
+// at all, which createProjectRoute maps to the box-wide config default.
+// Everything else, including fractions, zero, negatives and the string
+// "null", is a usage error rather than a coercion: the difference between
+// "sleeps aggressively" and "never sleeps" is not one a typo should cross.
+function parseSleepAfterSeconds(raw: unknown, route: string): number | null | undefined {
+  if (raw === undefined) return undefined
+  if (raw === null) return null
+  if (typeof raw === 'number' && Number.isInteger(raw) && raw > 0) return raw
+  throw new HobbyError(
+    'usage',
+    'sleepAfterSeconds must be a positive whole number of seconds, or null to pin the project awake',
+    `${route} expects { "sleepAfterSeconds": number | null }`
+  )
+}
+
 async function createProjectRoute(ctx: DaemonContext, req: IncomingMessage): Promise<Project> {
   const body = await readJsonBody(req)
-  const name = isRecord(body) ? body['name'] : undefined
+  const fields = isRecord(body) ? body : {}
+  const name = fields['name']
   if (typeof name !== 'string' || name.length === 0) {
     throw new HobbyError('usage', 'name is required', 'POST /v1/projects expects { "name": string }')
   }
   validateName(name)
-  return ctx.store.createProject({ name, sleepAfterSeconds: ctx.config.sleepAfterSeconds })
+  const sleepAfterSeconds = parseSleepAfterSeconds(fields['sleepAfterSeconds'], 'POST /v1/projects')
+  return ctx.store.createProject({
+    name,
+    sleepAfterSeconds: sleepAfterSeconds === undefined ? ctx.config.sleepAfterSeconds : sleepAfterSeconds,
+  })
+}
+
+// The control surface for a policy the model has carried since Phase 1:
+// Project.sleepAfterSeconds was always per-project in the store and in the
+// hibernator (null means pinned, checked before anything else), but every
+// project was created with the box-wide default and nothing could change it
+// afterward. This route makes "this one project never sleeps, the rest of
+// the box does" reachable without touching the wedge for any other project.
+async function setSleepPolicyRoute(ctx: DaemonContext, req: IncomingMessage, name: string): Promise<RouteResult> {
+  const project = getProjectByNameOrThrow(ctx, name)
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  if (!('sleepAfterSeconds' in fields)) {
+    throw new HobbyError(
+      'usage',
+      'sleepAfterSeconds is required',
+      'POST /v1/projects/:name/sleep-policy expects { "sleepAfterSeconds": number | null }'
+    )
+  }
+  const sleepAfterSeconds = parseSleepAfterSeconds(
+    fields['sleepAfterSeconds'],
+    'POST /v1/projects/:name/sleep-policy'
+  )
+  // parseSleepAfterSeconds returns undefined only for an absent field, and
+  // the `in` check above has already rejected that, so this is number | null.
+  ctx.store.setProjectSleepAfterSeconds(project.id, sleepAfterSeconds ?? null)
+  return { status: 200, body: { project: ctx.store.getProject(project.id) } }
 }
 
 async function getProjectRoute(ctx: DaemonContext, name: string): Promise<RouteResult> {
@@ -1768,6 +1819,11 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       const name = decodeURIComponent(segments[2] as string)
       const resource = await createResourceRoute(ctx, req, name)
       return { status: 201, body: { resource: await toWireResource(ctx, resource) } }
+    }
+
+    if (segments.length === 4 && method === 'POST' && segments[3] === 'sleep-policy') {
+      const name = decodeURIComponent(segments[2] as string)
+      return await setSleepPolicyRoute(ctx, req, name)
     }
 
     if (segments.length === 4 && method === 'POST' && segments[3] === 'eject') {

@@ -296,6 +296,85 @@ test('GET /v1/projects/:name returns 404 project_not_found for an unknown projec
   })
 })
 
+// The per-project sleep policy. Omitting the field keeps the config default
+// (testConfig's 300); null pins the project awake from birth; the
+// sleep-policy route changes it afterward. The hibernator side of the
+// contract (a null threshold is checked before anything else and skips the
+// project) is pinned by hibernator.test.ts; these pin the control surface.
+test('POST /v1/projects without sleepAfterSeconds takes the config default', async () => {
+  await withServer(buildContext(), async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', '/v1/projects', { name: 'blog' })
+    assert.equal(res.status, 201)
+    const body = res.body as { project: { sleepAfterSeconds: number | null } }
+    assert.equal(body.project.sleepAfterSeconds, 300)
+  })
+})
+
+test('POST /v1/projects with sleepAfterSeconds null creates a pinned project', async () => {
+  await withServer(buildContext(), async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', '/v1/projects', { name: 'prod', sleepAfterSeconds: null })
+    assert.equal(res.status, 201)
+    const body = res.body as { project: { sleepAfterSeconds: number | null } }
+    assert.equal(body.project.sleepAfterSeconds, null)
+  })
+})
+
+test('POST /v1/projects with a custom sleepAfterSeconds stores it', async () => {
+  await withServer(buildContext(), async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', '/v1/projects', { name: 'blog', sleepAfterSeconds: 60 })
+    assert.equal(res.status, 201)
+    const body = res.body as { project: { sleepAfterSeconds: number | null } }
+    assert.equal(body.project.sleepAfterSeconds, 60)
+  })
+})
+
+test('POST /v1/projects rejects zero, fractional and string sleepAfterSeconds', async () => {
+  await withServer(buildContext(), async (baseUrl) => {
+    for (const bad of [0, -5, 1.5, 'null', '300']) {
+      const res = await call(baseUrl, 'POST', '/v1/projects', { name: 'blog', sleepAfterSeconds: bad })
+      assert.equal(res.status, 400, `expected 400 for ${JSON.stringify(bad)}`)
+      const body = res.body as { error: { code: string } }
+      assert.equal(body.error.code, 'usage')
+    }
+  })
+})
+
+test('POST /v1/projects/:name/sleep-policy pins and unpins a project', async () => {
+  await withServer(buildContext(), async (baseUrl) => {
+    const created = await call(baseUrl, 'POST', '/v1/projects', { name: 'blog' })
+    assert.equal(created.status, 201)
+
+    const pinned = await call(baseUrl, 'POST', '/v1/projects/blog/sleep-policy', { sleepAfterSeconds: null })
+    assert.equal(pinned.status, 200)
+    assert.equal((pinned.body as { project: { sleepAfterSeconds: number | null } }).project.sleepAfterSeconds, null)
+
+    // The change is persisted, not just echoed.
+    const fetched = await call(baseUrl, 'GET', '/v1/projects/blog')
+    assert.equal((fetched.body as { project: { sleepAfterSeconds: number | null } }).project.sleepAfterSeconds, null)
+
+    const unpinned = await call(baseUrl, 'POST', '/v1/projects/blog/sleep-policy', { sleepAfterSeconds: 120 })
+    assert.equal(unpinned.status, 200)
+    assert.equal((unpinned.body as { project: { sleepAfterSeconds: number | null } }).project.sleepAfterSeconds, 120)
+  })
+})
+
+test('POST /v1/projects/:name/sleep-policy without the field returns 400 usage', async () => {
+  await withServer(buildContext(), async (baseUrl) => {
+    await call(baseUrl, 'POST', '/v1/projects', { name: 'blog' })
+    const res = await call(baseUrl, 'POST', '/v1/projects/blog/sleep-policy', {})
+    assert.equal(res.status, 400)
+    assert.equal((res.body as { error: { code: string } }).error.code, 'usage')
+  })
+})
+
+test('POST /v1/projects/:name/sleep-policy on an unknown project returns 404', async () => {
+  await withServer(buildContext(), async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', '/v1/projects/ghost/sleep-policy', { sleepAfterSeconds: null })
+    assert.equal(res.status, 404)
+    assert.equal((res.body as { error: { code: string } }).error.code, 'project_not_found')
+  })
+})
+
 test('GET /v1/projects/:name returns the project with its resources', async () => {
   const ctx = buildContext()
   const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
