@@ -1,0 +1,405 @@
+---
+import Base from '../layouts/Base.astro'
+import InstallCommand from '../components/InstallCommand.astro'
+import WakeDemo from '../components/WakeDemo.astro'
+
+const kinds = [
+  {
+    kind: 'postgres',
+    title: 'Databases',
+    body: 'Postgres 18 in a container, on a plain data directory. Unmodified, no extensions required, pg_dump always works.',
+    wake: 'wakes on an inbound connection',
+  },
+  {
+    kind: 'app',
+    title: 'Apps',
+    body: 'Any Dockerfile. Point hobby deploy at a directory, get a build and an HTTP route with TLS in front of it.',
+    wake: 'wakes on an inbound request',
+  },
+  {
+    kind: 'worker',
+    title: 'Workers',
+    body: 'Cloudflare-style Workers on workerd, with Durable Objects and their alarms mirrored outside the runtime.',
+    wake: 'wakes on an inbound request',
+  },
+  {
+    kind: 'queue',
+    title: 'Queues',
+    body: 'Durable messages with a consumer binding. The first thing here where stored state, not a connection, starts a container.',
+    wake: 'wakes on a message arriving',
+  },
+]
+
+const measurements = [
+  { path: 'Postgres, wire protocol', p50: '170ms', p95: '186ms', box: 'Apple silicon laptop', when: '2026-08-07' },
+  { path: 'HTTP app', p50: '121ms', p95: '133ms', box: 'Apple M5 Pro', when: '2026-08-10' },
+  { path: 'Worker, workerd', p50: '299ms', p95: '321ms', box: 'Apple M5 Pro', when: '2026-08-10' },
+]
+
+const working = [
+  { what: 'postgres', state: 'running', note: 'The reliable part. Cold start measured, eject verified end to end against real Docker.' },
+  { what: 'app', state: 'running', note: 'Any Dockerfile, built and served. Cold start measured.' },
+  { what: 'worker', state: 'running', note: 'Durable Object state survives a sleep, verified against real Docker rather than asserted.' },
+  { what: 'eject', state: 'running', note: 'A docker-compose.yml and your data. The promise that makes the rest honest.' },
+  { what: 'studio', state: 'starting', note: 'A web UI for tables, SQL and schema. Young, and network exposed by design. Put it behind Tailscale or a tunnel.' },
+  { what: 'mcp', state: 'starting', note: 'Fourteen tools over the daemon API. Creating an app or worker from an agent is not wired yet.' },
+]
+
+const broken = [
+  {
+    what: 'queue producers',
+    note: 'Sending a message from inside a container fails DNS on Linux. The consumer half works everywhere. Unimplemented, not untested: nothing passes the flag the container needs.',
+    href: 'https://github.com/uziiuzair/hobbyist/blob/main/docs/queues/CLAUDE.md',
+  },
+  {
+    what: 'caddy certificates',
+    note: 'The certificate store is not persisted, so replacing the container re-issues certificates. That matters against Let’s Encrypt rate limits.',
+    href: '/docs/guides/tls-and-domains/',
+  },
+  {
+    what: 'ext4',
+    note: 'Cheap copies need reflinks, and ext4 has none. It is the default image on a lot of the cheap VPS providers this is aimed at. Detected at hobby init, warned about rather than fatal.',
+    href: '/docs/reference/filesystems/',
+  },
+]
+
+const unbuilt = [
+  { what: 'snapshots', note: 'Implemented and tested in the daemon, reachable from no command and no route. Use pg_dump until a verb exists.' },
+  { what: 'branching', note: 'Copy-on-write project branches. Phase 1.5, designed and not built.' },
+  { what: 'remote deploy', note: 'The CLI talks to a unix socket, so today it has to run on the daemon’s own box. Laptop to VPS needs its own decision record first.' },
+  { what: 'object storage', note: 'S3-compatible storage and volumes for compute. Phase 3.' },
+]
+---
+
+<Base
+  title="Hobbyist: your stack, your box, their convenience"
+  description="A self-hosted platform that feels like Neon and Supabase, on hardware you own. Everything sleeps when nothing is using it, and wakes when something connects. v0-alpha."
+>
+  <!-- 1. Hook, and the thesis in one panel -->
+  <section class="hero">
+    <div class="wrap hero__grid">
+      <div>
+        <p class="hero__tag"><b>v0-alpha</b> · not production ready · not a business</p>
+        <h1 class="h-display">
+          Ten projects,<br />one small box,<br /><em>all of them asleep.</em>
+        </h1>
+        <p class="lede hero__lede">
+          A self-hosted platform that feels like Neon and Supabase, on hardware you own.
+          Everything sleeps when nothing is using it, and wakes when something connects.
+          One command, one box, no Kubernetes.
+        </p>
+        <div class="hero__cta">
+          <InstallCommand />
+          <p class="hero__note">
+            Ubuntu, Debian or macOS. Needs Docker. Installs Bun for you.{' '}
+            <a href="/docs/install/">What it does</a>.
+          </p>
+        </div>
+      </div>
+      <WakeDemo />
+    </div>
+  </section>
+
+  <!-- 2. Who this is for -->
+  <section class="section">
+    <div class="wrap stack">
+      <blockquote class="quote">
+        <p>
+          With the rise of AI came a lot of new hobbyists, people who build stuff for
+          themselves. Hobby is for them. Deploy it on your own server. Mine runs on my home
+          server, reachable through Tailscale and a Cloudflare Tunnel, and it hosts my
+          demo environments.
+        </p>
+        <footer>The reason this exists, written to a friend before it had a website</footer>
+      </blockquote>
+      <div class="prose">
+        <p>
+          If you have a home server, an old ThinkPad, or a five dollar VPS, and a folder of
+          half-finished projects that each want a database, this is for you. The problem was
+          never that Postgres is hard to run. It is that running ten of them costs ten times
+          as much attention and ten times as much memory as running one, and nine of them are
+          idle at any moment.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. The problem -->
+  <section class="section">
+    <div class="wrap">
+      <div class="section__head">
+        <span class="state state--sleeping">the gap</span>
+        <h2 class="h-section">You are already paying for convenience, not capability</h2>
+        <p class="lede">
+          Every primitive underneath a managed platform is free and mature. Postgres is free.
+          Containers are free. Caddy gets you TLS for nothing. The convenience is what people
+          pay for, and it is the only thing missing from the self-hosted world.
+        </p>
+      </div>
+      <div class="grid grid--2">
+        <div class="card">
+          <h3>What managed platforms sell</h3>
+          <p>
+            Instant provisioning. Branching. Scale to zero. A connection string that just
+            works. A dashboard that makes a database legible. A deploy that happens on push.
+          </p>
+        </div>
+        <div class="card">
+          <h3>What self-hosting gives you</h3>
+          <p>
+            All of the primitives, none of the feel. A compose file you wrote once and no
+            longer remember, running at full cost whether or not anything is using it.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4. The wedge -->
+  <section class="section" id="wedge">
+    <div class="wrap">
+      <div class="section__head">
+        <span class="state state--awake">the wedge</span>
+        <h2 class="h-section">Everything sleeps, and everything wakes on demand</h2>
+        <p class="lede">
+          Sleep is what makes ten projects fit on one small box. Wake is what makes sleep
+          invisible. Neither is useful without the other, and the pair is the whole product.
+          It is also the one thing no self-hostable alternative does.
+        </p>
+      </div>
+
+      <div class="grid grid--2">
+        <div class="card">
+          <h3>Self-hosted Supabase never sleeps</h3>
+          <p>
+            A large multi-container stack that runs at full cost whether or not anything is
+            using it.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Xata&rsquo;s open plugin cannot wake</h3>
+          <p>
+            In their own words, it &ldquo;can&rsquo;t handle reactivation because the cluster
+            is no longer running once it&rsquo;s hibernated.&rdquo; Reactivation on connect is
+            what they kept in the paid cloud.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Coolify and Dokploy do not sleep apps</h3>
+          <p>They deploy well, and everything they deploy keeps running.</p>
+        </div>
+        <div class="card">
+          <h3>Hobbyist holds your connection open</h3>
+          <p>
+            A proxy speaking the Postgres wire protocol starts the container, waits for the
+            database to accept queries, then finishes the handshake. Your client sees one
+            slightly slow connection. It never sees an error.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5. The numbers, including the one that does not exist -->
+  <section class="section" id="cold-start">
+    <div class="wrap stack">
+      <div class="section__head">
+        <span class="state state--starting">cold start</span>
+        <h2 class="h-section">Under a second, or it does not count</h2>
+        <p class="lede">
+          The budget is 1 second target and 3 seconds hard ceiling. Three seconds is roughly
+          where common ORM and pool connect timeouts start firing, so anything above it is a
+          release blocker rather than a slow path.
+        </p>
+      </div>
+
+      <div class="tablewrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th scope="col">Path</th>
+              <th scope="col">p50</th>
+              <th scope="col">p95</th>
+              <th scope="col">Measured on</th>
+              <th scope="col">When</th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              measurements.map((m) => (
+                <tr>
+                  <th scope="row">{m.path}</th>
+                  <td class="num">{m.p50}</td>
+                  <td class="num">{m.p95}</td>
+                  <td class="dim">{m.box}</td>
+                  <td class="dim num">{m.when}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
+
+      <div class="assume">
+        <h3>The measurement that does not exist</h3>
+        <p style="margin:0">
+          Every number above came from a laptop, which is the easy end of the matrix.
+          <strong>The five dollar VPS has never been measured</strong>, and it is the machine
+          this project is aimed at. Treat the table as an existence proof that the approach
+          works, not as a promise about your hardware. Filing a measurement from a cheap VPS
+          is the single most useful contribution available right now.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6. What is in the box -->
+  <section class="section">
+    <div class="wrap">
+      <div class="section__head">
+        <span class="state state--sleeping">four kinds</span>
+        <h2 class="h-section">A project is a namespace holding typed resources</h2>
+        <p class="lede">
+          Adding a kind means implementing one interface and adding one line to a registry.
+          That is why later phases add to this list instead of rewriting it. Durable Objects
+          are a capability of a worker, not a fifth kind.
+        </p>
+      </div>
+      <div class="grid grid--4">
+        {
+          kinds.map((k) => (
+            <div class={`card card--${k.kind}`}>
+              <code class="card__kind">{k.kind}</code>
+              <h3>{k.title}</h3>
+              <p>{k.body}</p>
+              <div class="card__wake">{k.wake}</div>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <!-- 7. Status, told honestly, tagged with the product's own states -->
+  <section class="section" id="status">
+    <div class="wrap stack">
+      <div class="section__head">
+        <span class="state state--failed">status</span>
+        <h2 class="h-section">What works, and what is openly broken</h2>
+        <p class="lede">
+          This is v0-alpha. Postgres is the part that is reliably configured and working.
+          Everything below is stated so you can decide correctly whether to run it, which is
+          the only thing this page is for.
+        </p>
+      </div>
+
+      <div>
+        <h3 class="h-sub" style="margin-bottom:0.9rem">Working</h3>
+        <ul class="status">
+          {
+            working.map((row) => (
+              <li data-state={row.state}>
+                <span class="status__what">{row.what}</span>
+                <span class="status__note">{row.note}</span>
+              </li>
+            ))
+          }
+        </ul>
+      </div>
+
+      <div>
+        <h3 class="h-sub" style="margin-bottom:0.9rem">Known broken</h3>
+        <ul class="status">
+          {
+            broken.map((row) => (
+              <li data-state="failed">
+                <span class="status__what">{row.what}</span>
+                <span class="status__note">
+                  {row.note} <a href={row.href}>Details</a>.
+                </span>
+              </li>
+            ))
+          }
+        </ul>
+      </div>
+
+      <div>
+        <h3 class="h-sub" style="margin-bottom:0.9rem">Not built yet</h3>
+        <ul class="status">
+          {
+            unbuilt.map((row) => (
+              <li data-state="undeployed">
+                <span class="status__what">{row.what}</span>
+                <span class="status__note">{row.note}</span>
+              </li>
+            ))
+          }
+        </ul>
+        <p class="checked">
+          <a href="/docs/status/">The full status page</a> keeps this list current and links
+          each item to the file that records it.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 8. Leaving -->
+  <section class="section" id="leaving">
+    <div class="wrap stack">
+      <div class="section__head">
+        <span class="state state--sleeping">the exit</span>
+        <h2 class="h-section">You can always leave</h2>
+        <p class="lede">
+          This is the first promise and the one that makes the rest honest. The data directory
+          is a plain Postgres data directory. Nothing is a proprietary format, no extension is
+          required, and Postgres itself is unmodified.
+        </p>
+      </div>
+      <div class="install" style="max-width:38rem">
+        <div class="install__cmd">
+          <span class="install__prompt" aria-hidden="true">$</span>
+          <code>hobby eject blog --release</code>
+        </div>
+      </div>
+      <div class="prose">
+        <p>
+          What you get is a directory you can <code>docker compose up</code> on any machine
+          with Docker, with no Hobbyist installed anywhere. That is the whole exit. There is no
+          export queue, no support ticket and no thirty day window.
+          <a href="/docs/guides/eject/">How eject works</a>.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 9. Not a business -->
+  <section class="section" id="not-a-business">
+    <div class="wrap stack">
+      <div class="section__head">
+        <span class="state state--sleeping">no pricing page</span>
+        <h2 class="h-section">Nobody is expected to pay</h2>
+      </div>
+      <div class="prose">
+        <p>
+          There is no cloud offering, no hosted tier, no paid feature, no metering and no
+          billing, and no roadmap toward one. Nothing is held back behind a paid guard.
+        </p>
+        <p>
+          That is load-bearing rather than a disclaimer. It removes multi-tenancy, isolation
+          hardening, usage accounting and quota enforcement from scope, and those removals are
+          what make the project buildable by one person. It is also why there is no warranty:
+          nothing here ships whose failure mode is someone else losing data quietly, and what
+          does ship is labelled.
+        </p>
+        <p>
+          The success metric is that the author is still using it daily in six months. Stars,
+          forks and issue count are noise.
+          <a href="/compare/">See how it compares, and what it costs to run</a>.
+        </p>
+      </div>
+      <div>
+        <InstallCommand />
+      </div>
+    </div>
+  </section>
+</Base>

@@ -1,0 +1,31 @@
+{
+  "name": "hobbyist-site",
+  "version": "1.0.0",
+  "description": "hobbyist.sh: the landing page, the documentation, and the comparison",
+  "scripts": {
+    "sync:adrs": "node scripts/sync-adrs.mjs",
+    "check:adrs": "node scripts/sync-adrs.mjs --check",
+    "check:cli": "node scripts/check-cli-reference.mjs",
+    "prebuild": "npm run sync:adrs && npm run sync:install",
+    "dev": "npm run sync:adrs && npm run sync:install && astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check",
+    "sync:install": "node scripts/sync-install.mjs",
+    "check:links": "node scripts/check-links.mjs",
+    "check:visual": "node scripts/visual-check.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@astrojs/sitemap": "^3.7.3",
+    "@astrojs/starlight": "^0.41.7",
+    "astro": "^7.2.4"
+  },
+  "private": true,
+  "devDependencies": {
+    "puppeteer-core": "^25.8.0"
+  }
+}

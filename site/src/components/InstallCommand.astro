@@ -1,0 +1,43 @@
+---
+interface Props {
+  command?: string
+}
+const { command = 'curl -fsSL https://hobby.sh/install | bash' } = Astro.props
+---
+
+<div class="install">
+  <div class="install__cmd">
+    <span class="install__prompt" aria-hidden="true">$</span>
+    <code data-install-command>{command}</code>
+  </div>
+  <button class="install__copy" type="button" data-install-copy aria-label="Copy install command">
+    copy
+  </button>
+</div>
+
+<script>
+  // Progressive enhancement only: with no JavaScript the command is still
+  // selectable text, which is how most people copy it anyway.
+  document.querySelectorAll<HTMLButtonElement>('[data-install-copy]').forEach((button) => {
+    const root = button.closest('.install')
+    const code = root?.querySelector<HTMLElement>('[data-install-command]')
+    if (!code) return
+
+    button.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(code.textContent ?? '')
+        button.textContent = 'copied'
+        button.dataset.copied = 'true'
+      } catch {
+        // Clipboard access can be refused (an insecure context, a permission
+        // policy). Saying so is better than a button that silently does
+        // nothing and looks broken.
+        button.textContent = 'select it'
+      }
+      window.setTimeout(() => {
+        button.textContent = 'copy'
+        delete button.dataset.copied
+      }, 1600)
+    })
+  })
+</script>

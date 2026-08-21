@@ -1,0 +1,144 @@
+---
+/**
+ * The page's one signature element: a replay of a real cold start, at real
+ * speed.
+ *
+ * Every timestamp below comes from the measurement filed in
+ * docs/proxy/research/2026-08-07-cold-start-measurements.md, whose p50 is
+ * 170ms and p95 186ms for the Postgres wire path. The replay runs at 1x. That
+ * makes the whole thing a blink, which is the honest presentation: the product
+ * claim is not "watch this beautiful loading sequence", it is "you will not
+ * notice". A slowed-down animation would sell the opposite of what was built.
+ *
+ * The caption says it is a replay. It is not a live connection to anything,
+ * and a demo that implied otherwise would be the exact thing the project's
+ * working agreements forbid: a reader executing an aspiration.
+ */
+---
+
+<div class="machine" data-wake data-state="sleeping">
+  <div class="machine__bar">
+    <span class="machine__name">blog/primary</span>
+    <span class="dim">postgres:18-alpine</span>
+    <span class="state machine__state" data-wake-state>sleeping</span>
+  </div>
+
+  <div class="machine__body">
+    <pre class="machine__log" data-wake-log aria-live="polite"><span class="dim">$</span> hobby connect blog</pre>
+    <div class="machine__meter" aria-hidden="true">
+      <span class="machine__fill" data-wake-fill></span>
+    </div>
+  </div>
+
+  <div class="machine__foot">
+    <button class="btn btn--quiet" type="button" data-wake-run>Connect</button>
+    <p class="machine__hint" data-wake-hint>
+      Replay of a measured cold start, at real speed
+    </p>
+  </div>
+</div>
+
+<script>
+  // The script is inert without JS: the markup above already renders a
+  // sleeping database and the command you would type, which is the point of
+  // the panel even if nothing animates.
+  const TOTAL_MS = 174
+
+  // [offset in ms, text, class]. Offsets are the measured shape of a wake:
+  // the proxy answers immediately, the engine takes the bulk of it, and the
+  // handshake completes just after the database starts accepting queries.
+  const FRAMES: Array<[number, string, string]> = [
+    [0, 'proxy   connection received, blog/primary is sleeping', 'dim'],
+    [4, 'proxy   wake requested, holding the client', 'warm'],
+    [31, 'engine  container started', 'dim'],
+    [142, 'engine  accepting queries', 'dim'],
+    [174, 'proxy   handshake completed, 174ms', 'ok'],
+    [174, '', 'dim'],
+    [174, 'psql (18.0)', 'dim'],
+    [174, 'blog=#', 'ok'],
+  ]
+
+  const BASE = '<span class="dim">$</span> hobby connect blog'
+
+  function line([, text, cls]: [number, string, string]): string {
+    if (text === '') return ''
+    const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    return `<span class="${cls}">${escaped}</span>`
+  }
+
+  document.querySelectorAll<HTMLElement>('[data-wake]').forEach((root) => {
+    const log = root.querySelector<HTMLElement>('[data-wake-log]')
+    const stateEl = root.querySelector<HTMLElement>('[data-wake-state]')
+    const fill = root.querySelector<HTMLElement>('[data-wake-fill]')
+    const button = root.querySelector<HTMLButtonElement>('[data-wake-run]')
+    const hint = root.querySelector<HTMLElement>('[data-wake-hint]')
+    if (!log || !stateEl || !fill || !button || !hint) return
+
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    let timers: number[] = []
+    let raf = 0
+
+    function setState(state: string): void {
+      root.dataset.state = state
+      stateEl.textContent = state
+      stateEl.className = `state machine__state state--${state}`
+    }
+
+    function reset(): void {
+      timers.forEach(window.clearTimeout)
+      timers = []
+      window.cancelAnimationFrame(raf)
+      log.innerHTML = BASE
+      fill.style.width = '0%'
+      setState('sleeping')
+      button.textContent = 'Connect'
+      hint.textContent = 'Replay of a measured cold start, at real speed'
+    }
+
+    function finish(): void {
+      setState('running')
+      fill.style.width = '100%'
+      button.textContent = 'Replay'
+      hint.textContent = 'Measured p50 170ms, p95 186ms, on an Apple silicon laptop'
+    }
+
+    function run(): void {
+      timers.forEach(window.clearTimeout)
+      timers = []
+      log.innerHTML = BASE
+      fill.style.width = '0%'
+
+      // Reduced motion gets the outcome with no animation. The outcome is the
+      // information; the motion is only the argument for how fast it is.
+      if (reduced) {
+        log.innerHTML = [BASE, ...FRAMES.map(line)].join('\n')
+        finish()
+        return
+      }
+
+      setState('waking')
+      button.textContent = 'Connecting'
+
+      const start = performance.now()
+      const tick = (): void => {
+        const elapsed = performance.now() - start
+        fill.style.width = `${Math.min(100, (elapsed / TOTAL_MS) * 100)}%`
+        if (elapsed < TOTAL_MS) raf = window.requestAnimationFrame(tick)
+      }
+      raf = window.requestAnimationFrame(tick)
+
+      FRAMES.forEach((frame) => {
+        timers.push(
+          window.setTimeout(() => {
+            log.innerHTML = `${log.innerHTML}\n${line(frame)}`
+          }, frame[0])
+        )
+      })
+
+      timers.push(window.setTimeout(finish, TOTAL_MS))
+    }
+
+    button.addEventListener('click', run)
+    reset()
+  })
+</script>

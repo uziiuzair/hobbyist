@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="Hobbyist">
+  <!-- Starlight renders this through an <img>, which is its own document: it
+       inherits nothing from the page, so currentColor here resolves to black
+       rather than to the accent. Both colours are therefore literal. #4ed492
+       is the dark-theme accent, and it is the brand colour in both themes
+       rather than two marks that disagree. -->
+  <circle cx="12" cy="12" r="10.5" fill="none" stroke="#4ed492" stroke-opacity="0.34" stroke-width="1.5"/>
+  <circle cx="12" cy="12" r="4.5" fill="#4ed492"/>
+</svg>
