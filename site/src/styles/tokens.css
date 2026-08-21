@@ -1,0 +1,190 @@
+/*
+ * The site and the product share one palette.
+ *
+ * Every value below is lifted from packages/studio/src/theme.css rather than
+ * re-picked, so hobbyist.sh and the Studio a reader eventually opens are
+ * visibly the same piece of software. The two rules that carry the most
+ * meaning, and that anything added here must respect:
+ *
+ *   1. One chroma for state. --accent is the only green, and it means either
+ *      "you can press this" or "this is awake". Sleeping has no chroma at all,
+ *      because sleeping is the product working correctly, not a warning.
+ *
+ *   2. The jewel family (sage, iris, honey, rose) is decorative only. It
+ *      labels the four resource kinds and never encodes state.
+ *
+ * Fonts are self-hosted from public/fonts, copied from the Studio's own
+ * bundle. No CDN: the Studio's comment explains it runs on a box that may
+ * have no internet, and matching that here keeps one set of files.
+ */
+
+@font-face {
+  font-family: 'Fraunces';
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url('/fonts/fraunces-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Fraunces';
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+  src: url('/fonts/fraunces-latin-600-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-sans-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-sans-latin-500-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-sans-latin-600-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2');
+}
+
+:root {
+  --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-serif: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Dark first. The physical scene is a developer at a desk, often at night,
+     with this tab parked beside an editor, driving a machine in a cupboard. */
+  --ground: #131110;
+  --surface: #1a1715;
+  --surface-2: #211d1a;
+  --surface-3: #2a2521;
+  --line: #2f2925;
+  --line-strong: #423a32;
+
+  --ink: #f2eee6;
+  --ink-2: #b9ae9f;
+  --ink-3: #998f80;
+
+  --accent: #4ed492;
+  --accent-hover: #63e0a2;
+  --accent-ink: #052419;
+  --accent-dim: rgba(78, 212, 146, 0.14);
+  --accent-line: rgba(78, 212, 146, 0.34);
+
+  --awake: var(--accent);
+  --awake-ring: rgba(78, 212, 146, 0.34);
+  --waking: #e9b45c;
+  --waking-dim: rgba(233, 180, 92, 0.13);
+  --waking-line: rgba(233, 180, 92, 0.34);
+
+  --danger: #ee8a7c;
+  --danger-dim: rgba(238, 138, 124, 0.12);
+
+  --sage: #97d8b0;
+  --iris: #b6acf5;
+  --honey: #e3b878;
+  --rose: #e9a3ab;
+
+  --glow-awake: rgba(78, 212, 146, 0.28);
+  --glow-waking: rgba(233, 180, 92, 0.3);
+  --focus: var(--accent);
+
+  --radius: 13px;
+  --radius-sm: 9px;
+  --radius-lg: 16px;
+
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 1px 3px rgba(0, 0, 0, 0.35);
+  --shadow-lift: 0 10px 32px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
+
+  --measure: 68rem;
+  --measure-prose: 40rem;
+}
+
+/* Someone's OS may be in light mode and this is their own machine, so light
+   is a real theme, not an afterthought. Same structure, same one-chroma rule. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --ground: #faf9f7;
+    --surface: #ffffff;
+    --surface-2: #f6f4f1;
+    --surface-3: #edeae4;
+    --line: #e6e2db;
+    --line-strong: #cfc9bf;
+
+    --ink: #1c1917;
+    --ink-2: #5f5a52;
+    --ink-3: #6e685e;
+
+    --accent: #147a48;
+    --accent-hover: #0f643b;
+    --accent-ink: #ffffff;
+    --accent-dim: rgba(20, 122, 72, 0.12);
+    --accent-line: rgba(20, 122, 72, 0.32);
+
+    --awake-ring: rgba(20, 122, 72, 0.3);
+    --waking: #8a5a0e;
+    --waking-dim: rgba(138, 90, 14, 0.12);
+    --waking-line: rgba(138, 90, 14, 0.32);
+
+    --danger: #b3392c;
+    --danger-dim: rgba(179, 57, 44, 0.1);
+
+    --sage: #2f7d55;
+    --iris: #5b4fc4;
+    --honey: #8a5a0e;
+    --rose: #a8434f;
+
+    --glow-awake: rgba(20, 122, 72, 0.2);
+    --glow-waking: rgba(138, 90, 14, 0.22);
+
+    --shadow-card: 0 1px 2px rgba(28, 25, 23, 0.06);
+    --shadow-lift: 0 10px 32px rgba(28, 25, 23, 0.1), 0 1px 3px rgba(28, 25, 23, 0.06);
+  }
+}
+
+/* Starlight stamps data-theme on the root for its own toggle. Honour it in
+   both directions so a reader's explicit choice beats the media query. */
+:root[data-theme='light'] {
+  --ground: #faf9f7;
+  --surface: #ffffff;
+  --surface-2: #f6f4f1;
+  --surface-3: #edeae4;
+  --line: #e6e2db;
+  --line-strong: #cfc9bf;
+  --ink: #1c1917;
+  --ink-2: #5f5a52;
+  --ink-3: #6e685e;
+  --accent: #147a48;
+  --accent-hover: #0f643b;
+  --accent-ink: #ffffff;
+  --accent-dim: rgba(20, 122, 72, 0.12);
+  --accent-line: rgba(20, 122, 72, 0.32);
+  --awake-ring: rgba(20, 122, 72, 0.3);
+  --waking: #8a5a0e;
+  --waking-dim: rgba(138, 90, 14, 0.12);
+  --waking-line: rgba(138, 90, 14, 0.32);
+  --danger: #b3392c;
+  --danger-dim: rgba(179, 57, 44, 0.1);
+  --sage: #2f7d55;
+  --iris: #5b4fc4;
+  --honey: #8a5a0e;
+  --rose: #a8434f;
+  --glow-awake: rgba(20, 122, 72, 0.2);
+  --glow-waking: rgba(138, 90, 14, 0.22);
+  --shadow-card: 0 1px 2px rgba(28, 25, 23, 0.06);
+  --shadow-lift: 0 10px 32px rgba(28, 25, 23, 0.1), 0 1px 3px rgba(28, 25, 23, 0.06);
+}

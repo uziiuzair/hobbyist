@@ -1,0 +1,778 @@
+/*
+ * Styles for the two hand-built pages, / and /compare/. The documentation
+ * pages are Starlight's and are themed separately in starlight.css.
+ *
+ * The organising device is the state chip. `packages/core/src/types.ts`
+ * defines ResourceState as creating | running | starting | sleeping |
+ * stopping | failed | destroying | undeployed, and this page labels its own
+ * sections with real members of that union: the section about unbuilt things
+ * is `undeployed`, the list of broken things is `failed`. The vocabulary is
+ * the product's, used truthfully, not invented for decoration.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-color: var(--accent-line);
+  text-underline-offset: 0.2em;
+}
+a:hover {
+  color: var(--accent-hover);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
+code,
+kbd,
+samp,
+pre {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+}
+
+/* --- Skip link --------------------------------------------------------- */
+
+/* Clipped rather than pushed to left: -9999px. The offset technique works, but
+   it leaves a real 140px box outside the viewport, which any honest overflow
+   audit then has to special-case. Clipping occupies no space at all. */
+.skip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 100;
+  padding: 0.6rem 1rem;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-radius: 0 0 var(--radius-sm) 0;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.skip:focus {
+  clip-path: none;
+}
+
+/* --- Shell ------------------------------------------------------------- */
+
+.wrap {
+  width: 100%;
+  max-width: var(--measure);
+  margin-inline: auto;
+  padding-inline: clamp(1.15rem, 4vw, 2.5rem);
+}
+
+.site-head {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  backdrop-filter: blur(12px);
+  background: color-mix(in srgb, var(--ground) 88%, transparent);
+  border-bottom: 1px solid var(--line);
+}
+.site-head__in {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  height: 58px;
+}
+.site-head__mark {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  font-size: 1.0625rem;
+  color: var(--ink);
+  text-decoration: none;
+  letter-spacing: -0.01em;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+.site-head__nav {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: clamp(0.9rem, 2.5vw, 1.6rem);
+  font-size: 0.875rem;
+}
+.site-head__nav a {
+  color: var(--ink-2);
+  text-decoration: none;
+}
+.site-head__nav a:hover {
+  color: var(--ink);
+}
+
+.site-foot {
+  border-top: 1px solid var(--line);
+  margin-top: 6rem;
+  padding-block: 3rem 4rem;
+  color: var(--ink-3);
+  font-size: 0.875rem;
+}
+.site-foot__grid {
+  display: grid;
+  gap: 2rem;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+}
+.site-foot h2 {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 0 0 0.75rem;
+  font-weight: 400;
+}
+.site-foot ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+.site-foot a {
+  color: var(--ink-2);
+  text-decoration: none;
+}
+.site-foot a:hover {
+  color: var(--ink);
+}
+.site-foot__legal {
+  margin-top: 2.5rem;
+  padding-top: 1.75rem;
+  border-top: 1px solid var(--line);
+  max-width: var(--measure-prose);
+}
+
+/* --- Type -------------------------------------------------------------- */
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.12;
+  text-wrap: balance;
+  margin: 0;
+}
+
+.h-display {
+  font-size: clamp(2.4rem, 6.2vw, 4.1rem);
+  line-height: 1.04;
+}
+.h-section {
+  font-size: clamp(1.75rem, 3.6vw, 2.5rem);
+}
+.h-sub {
+  font-size: clamp(1.15rem, 2vw, 1.375rem);
+  line-height: 1.28;
+}
+
+.lede {
+  font-size: clamp(1.0625rem, 1.6vw, 1.1875rem);
+  color: var(--ink-2);
+  max-width: var(--measure-prose);
+  line-height: 1.62;
+}
+
+.prose {
+  max-width: var(--measure-prose);
+  color: var(--ink-2);
+}
+.prose p {
+  margin: 0 0 1.1rem;
+}
+.prose p:last-child {
+  margin-bottom: 0;
+}
+.prose strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* --- Section rhythm ---------------------------------------------------- */
+
+.section {
+  padding-block: clamp(3.5rem, 8vw, 6rem);
+  border-top: 1px solid var(--line);
+}
+.section:first-of-type {
+  border-top: 0;
+}
+.section__head {
+  margin-bottom: clamp(1.75rem, 4vw, 2.75rem);
+}
+.section__head .lede {
+  margin-top: 1rem;
+}
+
+/* --- The state chip: the page's structural device ---------------------- */
+
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.07em;
+  color: var(--ink-3);
+  margin-bottom: 0.9rem;
+}
+.state::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  flex: none;
+}
+.state--running::before,
+.state--awake::before {
+  background: var(--awake);
+  box-shadow: 0 0 0 3px var(--awake-ring), 0 0 12px var(--glow-awake);
+}
+.state--running,
+.state--awake {
+  color: var(--accent);
+}
+.state--waking::before,
+.state--starting::before {
+  background: var(--waking);
+  box-shadow: 0 0 0 3px var(--waking-line), 0 0 12px var(--glow-waking);
+}
+.state--waking,
+.state--starting {
+  color: var(--waking);
+}
+.state--failed::before {
+  background: var(--danger);
+}
+.state--failed {
+  color: var(--danger);
+}
+.state--undeployed::before {
+  background: transparent;
+  border: 1px dashed var(--line-strong);
+}
+/* sleeping keeps the bare grey dot on purpose: sleeping is the product
+   working, so it gets no chroma and no glow. */
+
+/* --- Buttons ----------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  font: inherit;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  padding: 0.6rem 1.1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.btn--primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.btn--primary:hover {
+  background: var(--accent-hover);
+  color: var(--accent-ink);
+  box-shadow: 0 0 18px var(--glow-awake);
+}
+.btn--quiet {
+  background: transparent;
+  border-color: var(--line-strong);
+  color: var(--ink-2);
+}
+.btn--quiet:hover {
+  color: var(--ink);
+  border-color: var(--ink-3);
+}
+
+/* --- Install command --------------------------------------------------- */
+
+.install {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  /* width: 100% is what keeps this inside the viewport on a phone. Its parent
+     is a column flex container with align-items: flex-start, which sizes a
+     child shrink-to-fit, and shrink-to-fit here means the command's nowrap
+     max-content width plus the copy button, about 398px. Resolving against the
+     parent instead lets install__cmd's own overflow-x do the scrolling, which
+     is what it is there for. */
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  max-width: 34rem;
+}
+.install__cmd {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+.install__cmd::-webkit-scrollbar {
+  display: none;
+}
+.install__prompt {
+  color: var(--ink-3);
+  user-select: none;
+  flex: none;
+}
+.install__copy {
+  flex: none;
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding-inline: 0.95rem;
+  cursor: pointer;
+  transition: color 120ms ease, background-color 120ms ease;
+}
+.install__copy:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+.install__copy[data-copied='true'] {
+  color: var(--accent);
+}
+
+/* --- Hero -------------------------------------------------------------- */
+
+.hero {
+  padding-block: clamp(3.5rem, 9vw, 6.5rem) clamp(3rem, 7vw, 5rem);
+}
+.hero__grid {
+  display: grid;
+  /* minmax(0, 1fr) rather than the implicit `auto` track. An auto track's max
+     is max-content, and max-content here is the install command's nowrap text
+     plus the copy button, about 398px. On a 390px phone that widens the track
+     past the viewport and scrolls the whole page sideways, instead of letting
+     the command scroll inside its own box the way it was built to. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: clamp(2.5rem, 5vw, 4rem);
+  align-items: start;
+}
+@media (min-width: 61rem) {
+  .hero__grid {
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+    gap: clamp(2rem, 4vw, 3.5rem);
+  }
+}
+.hero__tag {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  letter-spacing: 0.04em;
+  margin: 0 0 1.4rem;
+}
+.hero__tag b {
+  color: var(--waking);
+  font-weight: 400;
+}
+.hero h1 em {
+  font-style: normal;
+  color: var(--accent);
+}
+.hero__lede {
+  margin-top: 1.5rem;
+}
+.hero__cta {
+  margin-top: 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  align-items: flex-start;
+}
+.hero__note {
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+  margin: 0;
+}
+
+/* --- The wake demo: the one thing this page is remembered by ------------ */
+
+.machine {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lift);
+  overflow: hidden;
+  transition: border-color 400ms ease, box-shadow 400ms ease;
+}
+.machine[data-state='waking'] {
+  border-color: var(--waking-line);
+}
+.machine[data-state='running'] {
+  border-color: var(--accent-line);
+  box-shadow: var(--shadow-lift), 0 0 40px -12px var(--glow-awake);
+}
+.machine__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink-3);
+}
+.machine__name {
+  color: var(--ink-2);
+}
+.machine__state {
+  margin-left: auto;
+  margin-bottom: 0;
+}
+.machine__body {
+  padding: 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.78125rem;
+  line-height: 1.85;
+  min-height: 13.5rem;
+  display: flex;
+  flex-direction: column;
+}
+.machine__log {
+  margin: 0;
+  flex: 1 1 auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink-2);
+}
+.machine__log .dim {
+  color: var(--ink-3);
+}
+.machine__log .ok {
+  color: var(--accent);
+}
+.machine__log .warm {
+  color: var(--waking);
+}
+.machine__foot {
+  border-top: 1px solid var(--line);
+  padding: 0.85rem 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  flex-wrap: wrap;
+}
+.machine__hint {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--ink-3);
+  margin: 0;
+}
+.machine__meter {
+  height: 2px;
+  background: var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 0.75rem;
+}
+.machine__fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--waking);
+  transition: width 90ms linear, background-color 200ms ease;
+}
+.machine[data-state='running'] .machine__fill {
+  background: var(--accent);
+}
+
+/* --- Cards and grids --------------------------------------------------- */
+
+.grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1fr);
+}
+/* Exactly two columns above the breakpoint, rather than auto-fit. auto-fit
+   with a 19rem minimum resolves to three columns at this measure, which turns
+   a four-card section into a row of three and an orphan. */
+.grid--2 {
+  grid-template-columns: 1fr;
+}
+@media (min-width: 48rem) {
+  .grid--2 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+.grid--4 {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.25rem 1.35rem;
+  box-shadow: var(--shadow-card);
+}
+.card h3 {
+  font-size: 1.0625rem;
+  margin-bottom: 0.5rem;
+}
+.card p {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+}
+.card__kind {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  margin-bottom: 0.7rem;
+  display: block;
+}
+.card--postgres .card__kind { color: var(--sage); }
+.card--app .card__kind { color: var(--iris); }
+.card--worker .card__kind { color: var(--honey); }
+.card--queue .card__kind { color: var(--rose); }
+
+.card__wake {
+  margin-top: 0.85rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--ink-3);
+}
+
+/* --- Measurement table ------------------------------------------------- */
+
+/* min-width: 0 is load bearing, not defensive. A grid item's default track is
+   minmax(auto, 1fr), and `auto` resolves to the item's min-content, which here
+   is table.data's own min-width of 34rem. Without this the track grows to
+   544px on a 390px phone and overflow-x never engages, so the whole page
+   scrolls sideways instead of the table. */
+.tablewrap {
+  min-width: 0;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  min-width: 34rem;
+}
+table.data th,
+table.data td {
+  text-align: left;
+  padding: 0.7rem 0.9rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+table.data thead th {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 400;
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+table.data tbody tr:last-child td {
+  border-bottom: 0;
+}
+table.data td.num {
+  font-family: var(--font-mono);
+  color: var(--ink);
+  white-space: nowrap;
+}
+table.data td.dim {
+  color: var(--ink-3);
+}
+table.data th[scope='row'] {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.mark {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+.mark--yes { color: var(--accent); }
+.mark--partial { color: var(--waking); }
+.mark--no { color: var(--ink-3); }
+.mark--na { color: var(--ink-3); opacity: 0.6; }
+
+/* --- Status list ------------------------------------------------------- */
+
+.status {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+.status li {
+  display: grid;
+  gap: 0.15rem 1rem;
+  grid-template-columns: 1fr;
+  padding: 0.85rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+@media (min-width: 44rem) {
+  .status li {
+    grid-template-columns: 11rem 1fr;
+    align-items: baseline;
+  }
+}
+.status__what {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--ink);
+}
+.status__note {
+  color: var(--ink-2);
+  font-size: 0.9375rem;
+}
+.status li[data-state='failed'] {
+  border-color: color-mix(in srgb, var(--danger) 36%, var(--line));
+  background: linear-gradient(var(--danger-dim), var(--danger-dim)), var(--surface);
+}
+.status li[data-state='failed'] .status__what {
+  color: var(--danger);
+}
+.status li[data-state='running'] .status__what {
+  color: var(--accent);
+}
+
+/* --- Quote ------------------------------------------------------------- */
+
+.quote {
+  margin: 0;
+  padding-left: clamp(1rem, 3vw, 1.75rem);
+  border-left: 2px solid var(--accent-line);
+  max-width: var(--measure-prose);
+}
+.quote p {
+  font-family: var(--font-serif);
+  font-size: clamp(1.15rem, 2.2vw, 1.5rem);
+  line-height: 1.42;
+  color: var(--ink);
+  margin: 0;
+  text-wrap: pretty;
+}
+.quote footer {
+  margin-top: 0.9rem;
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+}
+
+/* --- Comparison-only bits ---------------------------------------------- */
+
+.assume {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 1rem 1.15rem;
+  font-size: 0.875rem;
+  color: var(--ink-2);
+  max-width: var(--measure-prose);
+}
+.assume h3 {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 400;
+  margin-bottom: 0.5rem;
+}
+.assume ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.checked {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--ink-3);
+  margin: 0.75rem 0 0;
+}
+
+.footnotes {
+  margin-top: 1.5rem;
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+  max-width: var(--measure-prose);
+}
+.footnotes ol {
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.stack {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: clamp(1.5rem, 3vw, 2.25rem);
+}

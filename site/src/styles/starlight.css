@@ -1,0 +1,143 @@
+/*
+ * Starlight, wearing the Studio's clothes.
+ *
+ * Starlight themes through its own --sl-color-* variables, so this file maps
+ * them onto the tokens in tokens.css rather than restating any colour. One
+ * palette, two consumers: change tokens.css and the documentation follows.
+ */
+
+:root {
+  --sl-font: var(--font-sans);
+  --sl-font-mono: var(--font-mono);
+
+  --sl-color-accent-low: var(--accent-dim);
+  --sl-color-accent: var(--accent);
+  --sl-color-accent-high: var(--accent-hover);
+
+  --sl-color-white: var(--ink);
+  --sl-color-gray-1: var(--ink);
+  --sl-color-gray-2: var(--ink-2);
+  --sl-color-gray-3: var(--ink-3);
+  --sl-color-gray-4: var(--line-strong);
+  --sl-color-gray-5: var(--line);
+  --sl-color-gray-6: var(--surface-2);
+  --sl-color-gray-7: var(--surface-3);
+  --sl-color-black: var(--ground);
+
+  --sl-color-bg: var(--ground);
+  --sl-color-bg-nav: color-mix(in srgb, var(--ground) 88%, transparent);
+  --sl-color-bg-sidebar: var(--ground);
+  --sl-color-bg-inline-code: var(--surface-2);
+  --sl-color-hairline: var(--line);
+  --sl-color-hairline-light: var(--line);
+  --sl-color-hairline-shade: var(--line);
+  --sl-color-text: var(--ink-2);
+  --sl-color-text-accent: var(--accent);
+  --sl-color-text-invert: var(--accent-ink);
+
+  --sl-content-width: 48rem;
+  --sl-text-h1: clamp(2rem, 4.4vw, 2.75rem);
+  --sl-text-h2: clamp(1.5rem, 3vw, 1.875rem);
+}
+
+/* Headings keep the display face. It is the one place the documentation is
+   allowed to have a voice, and it is what ties these pages to the landing. */
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3,
+.sl-markdown-content h4,
+.content-panel h1,
+.site-title {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  letter-spacing: -0.018em;
+}
+
+.site-title {
+  gap: 0.55rem;
+}
+
+.sl-markdown-content {
+  --sl-text-code: 0.875em;
+}
+
+.sl-markdown-content a:not(:where(.not-content *)) {
+  text-underline-offset: 0.2em;
+}
+
+/* Tables in the documentation get the same treatment as the ones on the
+   landing page: a bordered surface that scrolls on its own rather than
+   pushing the page sideways. */
+.sl-markdown-content table:not(:where(.not-content *)) {
+  display: block;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  border-collapse: collapse;
+  font-size: 0.9375rem;
+}
+.sl-markdown-content table :is(th, td):not(:where(.not-content *)) {
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 0.65rem 0.9rem;
+}
+.sl-markdown-content thead th:not(:where(.not-content *)) {
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 400;
+  white-space: nowrap;
+}
+.sl-markdown-content tbody tr:last-child td:not(:where(.not-content *)) {
+  border-bottom: 0;
+}
+
+/* The status vocabulary the whole site uses, available in markdown as
+   <span class="state state--failed">known broken</span>. Documentation pages
+   open with one of these, so a reader knows before the first paragraph
+   whether the page describes something they can run today. */
+.sl-markdown-content .state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.07em;
+  color: var(--ink-3);
+}
+.sl-markdown-content .state::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  flex: none;
+}
+.sl-markdown-content .state--running {
+  color: var(--accent);
+}
+.sl-markdown-content .state--running::before {
+  background: var(--awake);
+  box-shadow: 0 0 0 3px var(--awake-ring);
+}
+.sl-markdown-content .state--starting {
+  color: var(--waking);
+}
+.sl-markdown-content .state--starting::before {
+  background: var(--waking);
+  box-shadow: 0 0 0 3px var(--waking-line);
+}
+.sl-markdown-content .state--failed {
+  color: var(--danger);
+}
+.sl-markdown-content .state--failed::before {
+  background: var(--danger);
+}
+.sl-markdown-content .state--undeployed::before {
+  background: transparent;
+  border: 1px dashed var(--line-strong);
+}

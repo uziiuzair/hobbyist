@@ -1,0 +1,519 @@
+---
+import Base from '../layouts/Base.astro'
+
+const CHECKED = '2026-08-21'
+
+// yes | partial | no | na, with an optional footnote number.
+const rows = [
+  { f: 'Postgres', h: ['yes', 1], cf: ['no'], neon: ['yes'], sb: ['yes'], fly: ['yes'] },
+  { f: 'Scale to zero', h: ['yes'], cf: ['na', 2], neon: ['yes'], sb: ['partial', 3], fly: ['yes'] },
+  { f: 'Wake on connect', h: ['yes', 4], cf: ['na', 2], neon: ['yes'], sb: ['no', 3], fly: ['partial', 5] },
+  { f: 'Runs on hardware you own', h: ['yes'], cf: ['no'], neon: ['no'], sb: ['partial', 6], fly: ['no'] },
+  { f: 'Self-hosted, and still sleeps', h: ['yes', 7], cf: ['no'], neon: ['no'], sb: ['no', 6], fly: ['no'] },
+  { f: 'Database branching', h: ['no', 8], cf: ['partial'], neon: ['yes'], sb: ['yes'], fly: ['no'] },
+  { f: 'Dashboard / studio', h: ['partial', 9], cf: ['yes'], neon: ['yes'], sb: ['yes'], fly: ['yes'] },
+  { f: 'HTTP apps from a Dockerfile', h: ['yes', 10], cf: ['partial'], neon: ['no'], sb: ['no'], fly: ['yes'] },
+  { f: 'Workers / edge functions', h: ['yes', 11], cf: ['yes'], neon: ['partial'], sb: ['yes'], fly: ['partial'] },
+  { f: 'Durable Objects', h: ['yes', 12], cf: ['yes'], neon: ['no'], sb: ['no'], fly: ['no'] },
+  { f: 'Queues', h: ['partial', 13], cf: ['yes'], neon: ['no'], sb: ['partial'], fly: ['no'] },
+  { f: 'Object storage', h: ['no', 14], cf: ['yes'], neon: ['yes'], sb: ['yes'], fly: ['partial'] },
+  { f: 'Backups you can restore', h: ['partial', 15], cf: ['yes'], neon: ['yes'], sb: ['yes'], fly: ['yes'] },
+  { f: 'Point in time recovery', h: ['no', 16], cf: ['partial'], neon: ['yes'], sb: ['yes'], fly: ['partial'] },
+  { f: 'Custom domains and TLS', h: ['partial', 17], cf: ['yes'], neon: ['na'], sb: ['yes'], fly: ['yes'] },
+  { f: 'MCP tools for agents', h: ['yes', 18], cf: ['yes'], neon: ['yes'], sb: ['yes'], fly: ['no'] },
+  { f: 'Multi-region', h: ['no', 19], cf: ['yes'], neon: ['yes'], sb: ['yes'], fly: ['yes'] },
+  { f: 'Auth as a service', h: ['no', 19], cf: ['yes'], neon: ['yes'], sb: ['yes'], fly: ['no'] },
+  { f: 'Realtime subscriptions', h: ['no', 19], cf: ['yes'], neon: ['no'], sb: ['yes'], fly: ['no'] },
+  { f: 'Walk away with your data', h: ['yes', 20], cf: ['partial'], neon: ['yes'], sb: ['yes'], fly: ['yes'] },
+  { f: 'Production ready today', h: ['no', 21], cf: ['yes'], neon: ['yes'], sb: ['yes'], fly: ['yes'] },
+]
+
+const footnotes = [
+  'Postgres 18, unmodified, on a plain data directory. The reliable part of the project.',
+  'Cloudflare has no managed Postgres. D1 is SQLite and Workers are request scoped, so scale to zero is not a feature it has, it is how the platform works.',
+  'Free tier projects are paused after a week of inactivity, and resuming is manual. That is pausing, not sleeping, and it is capped at two active projects.',
+  'A proxy speaking the Postgres wire protocol holds the connection open, starts the container, waits for real readiness, then finishes the handshake. Measured p50 170ms.',
+  'Fly Machines auto stop and auto start. It is closest to the same idea, on machines rather than on a database connection.',
+  'Self-hosted Supabase is a large multi-container stack that never sleeps. You can own the hardware, and it will run at full cost whether or not anything is using it.',
+  'This is the wedge, and the reason the project exists.',
+  'Copy-on-write branching is Phase 1.5. The cloneTree primitive it needs is written. The feature is not.',
+  'Studio browses tables, runs SQL and reads schema. It is v0-alpha, network exposed by design, and best kept behind a tunnel.',
+  'Any Dockerfile. hobby deploy detects the kind from the directory contents.',
+  'workerd, through Miniflare, which is a documented development tool being run as a server. The tradeoff and its fallback are recorded in ADR 0011.',
+  'Including alarms that fire for an object whose container is stopped, verified against real Docker.',
+  'Consuming works, and a message wakes a sleeping consumer. Producing from inside a container is broken on Linux.',
+  'S3-compatible storage is Phase 3.',
+  'Whole-project snapshots are implemented and tested in the daemon and reachable from no command or route. pg_dump and hobby eject both work today.',
+  'Cut deliberately rather than deferred. PITR means WAL archiving, a retention policy and a restore path that needs its own testing discipline. ADR 0016.',
+  'Caddy is wired and off by default. Certificates are not persisted across a container replacement, which matters against rate limits.',
+  'Fourteen tools over the daemon API. Creating an app or worker from an agent is not wired yet.',
+  'Explicitly out of scope. Adding it needs a decision record arguing the case, and the reason is that scope, not competition, is what kills this project.',
+  'hobby eject hands you a docker-compose.yml and the data directory, and hobby eject --release stops it managing them.',
+  'It is v0-alpha. This row is the one that matters most right now.',
+]
+
+const hardware = [
+  {
+    what: 'Home server, hardware you already own',
+    spec: 'An old laptop or desktop under a desk',
+    cost: '~$1 to $4 / mo',
+    note: 'Electricity only. At 15W average and $0.20/kWh that is $2.19 a month.',
+  },
+  {
+    what: 'Mac mini M4, bought for this',
+    spec: '10-core, 16 GB, 256 GB, $599',
+    cost: '~$17.50 / mo',
+    note: 'Hardware over three years is $16.64, plus about $0.70 of electricity. Apple rates it at 4W idle and 65W maximum.',
+  },
+  {
+    what: 'Cheap VPS',
+    spec: 'DigitalOcean basic, 1 vCPU, 1 GiB, 25 GiB SSD',
+    cost: '$6.00 / mo',
+    note: 'The tier the cold start budget is written against, and the one that has never been measured.',
+  },
+  {
+    what: 'Hetzner cloud',
+    spec: 'CX23, 2 vCPU, 4 GB, 40 GB NVMe, 20 TB traffic',
+    cost: '€2.99 / mo',
+    note: 'The best price to performance in this list, and the machine most of this audience actually buys.',
+  },
+  {
+    what: 'Hetzner dedicated',
+    spec: 'AX42, Ryzen 7 PRO 8700GE, 64 GB DDR5 ECC, 2 x 1.92 TB NVMe',
+    cost: '€46 / mo + €39 setup',
+    note: 'Where a self-hosted box stops being a compromise. 64 GB of ECC memory runs a great many sleeping databases.',
+  },
+]
+---
+
+<Base
+  title="Hobbyist compared: parity and pricing against Cloudflare, Neon, Supabase and Fly.io"
+  description="An honest feature parity table and a real price comparison, with every assumption stated and every figure dated."
+>
+  <section class="section" style="border-top:0">
+    <div class="wrap stack">
+      <div class="section__head">
+        <span class="state state--sleeping">comparison</span>
+        <h1 class="h-display" style="font-size:clamp(2.1rem,4.6vw,3.1rem)">
+          What you give up, and what you get back
+        </h1>
+        <p class="lede">
+          Hobbyist is not a business and has nothing to sell you, which means this page has no
+          reason to be an advertisement. Rows it loses stay in the table and say so. Every
+          price is dated, and every assumption behind a scenario is printed next to it rather
+          than in a footnote.
+        </p>
+      </div>
+
+      <div class="assume">
+        <h3>The short version</h3>
+        <p style="margin:0 0 0.75rem">
+          If you have ten mostly-idle side projects, <strong>Neon's free tier and
+          Cloudflare's free tier both cost nothing and are genuinely good</strong>. That is the
+          honest starting point, and no scenario below is rigged to hide it.
+        </p>
+        <p style="margin:0">
+          Hobbyist is worth running when you want the box to be yours, when your projects
+          outgrow a free tier, when you want a Postgres and an app and a worker and a queue in
+          one namespace on one machine, or when you would simply rather not be a row in
+          somebody's usage table. It is also v0-alpha, and that is the row at the bottom of the
+          parity table.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Parity -->
+  <section class="section" id="parity">
+    <div class="wrap stack">
+      <div class="section__head">
+        <span class="state state--sleeping">parity</span>
+        <h2 class="h-section">Feature by feature</h2>
+      </div>
+
+      <div class="tablewrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th scope="col">&nbsp;</th>
+              <th scope="col">Hobbyist</th>
+              <th scope="col">Cloudflare</th>
+              <th scope="col">Neon</th>
+              <th scope="col">Supabase</th>
+              <th scope="col">Fly.io</th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              rows.map((row) => (
+                <tr>
+                  <th scope="row">{row.f}</th>
+                  {[row.h, row.cf, row.neon, row.sb, row.fly].map((cell) => (
+                    <td>
+                      <span class={`mark mark--${cell[0]}`}>
+                        {cell[0] === 'yes' && 'yes'}
+                        {cell[0] === 'partial' && 'partial'}
+                        {cell[0] === 'no' && 'no'}
+                        {cell[0] === 'na' && 'n/a'}
+                      </span>
+                      {cell[1] !== undefined && (
+                        <sup>
+                          <a href={`#fn${cell[1]}`}>{cell[1]}</a>
+                        </sup>
+                      )}
+                    </td>
+                  ))}
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
+
+      <div class="footnotes">
+        <ol>
+          {footnotes.map((note, i) => <li id={`fn${i + 1}`}>{note}</li>)}
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- Hardware -->
+  <section class="section" id="pricing">
+    <div class="wrap stack">
+      <div class="section__head">
+        <span class="state state--sleeping">what a box costs</span>
+        <h2 class="h-section">Hobbyist costs whatever the machine costs</h2>
+        <p class="lede">
+          There is no licence, no per-project fee and no usage metering, so the entire price of
+          running it is the price of the box. Requires Ubuntu, Debian, or macOS, and Docker.
+        </p>
+      </div>
+
+      <div class="tablewrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th scope="col">Basis</th>
+              <th scope="col">Specification</th>
+              <th scope="col">Cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              hardware.map((h) => (
+                <tr>
+                  <th scope="row">
+                    {h.what}
+                    <br />
+                    <span class="dim" style="font-weight:400;font-size:0.8125rem">{h.note}</span>
+                  </th>
+                  <td class="dim">{h.spec}</td>
+                  <td class="num">{h.cost}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
+
+      <div class="assume">
+        <h3>Assumptions in that table</h3>
+        <ul>
+          <li>Electricity at $0.20 per kWh. Yours will differ, and it is the figure to change first.</li>
+          <li>Bought hardware amortised over three years, at which point it is still working.</li>
+          <li>Bandwidth is not counted: every option here includes far more than a hobby project uses.</li>
+          <li>A domain is not counted either. A `.sh` runs roughly $30 the first year and $45 to renew.</li>
+        </ul>
+      </div>
+
+      <p class="checked">All hardware prices checked {CHECKED}.</p>
+    </div>
+  </section>
+
+  <!-- Platform rates -->
+  <section class="section">
+    <div class="wrap stack">
+      <div class="section__head">
+        <span class="state state--sleeping">what the platforms charge</span>
+        <h2 class="h-section">The rates the scenarios are built from</h2>
+      </div>
+
+      <div class="tablewrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th scope="col">Platform</th>
+              <th scope="col">Free tier</th>
+              <th scope="col">First paid tier</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">Neon</th>
+              <td class="dim">
+                0.5 GB storage and 100 CU-hours per project, up to 100 projects. Scales to zero
+                after 5 minutes. Hitting a monthly limit suspends compute until the next billing
+                month
+              </td>
+              <td class="dim">
+                Launch: pay for use with no stated monthly minimum. $0.106 per CU-hour,
+                $0.35 per GB-month. Scale: $0.222 per CU-hour
+              </td>
+            </tr>
+            <tr>
+              <th scope="row">Supabase</th>
+              <td class="dim">
+                500 MB database, 5 GB egress, <strong>two active projects</strong>, and projects
+                are paused after a week of inactivity
+              </td>
+              <td class="dim">
+                Pro from $25 per month, 8 GB disk per project then $0.125 per GB, 250 GB egress
+                then $0.09 per GB, $10 of compute credits. Never pauses
+              </td>
+            </tr>
+            <tr>
+              <th scope="row">Fly.io</th>
+              <td class="dim">No free tier for machines</td>
+              <td class="dim">
+                shared-cpu-1x with 1 GB is $5.92 per month in Amsterdam. Volumes $0.15 per
+                GB-month, snapshots $0.08 per GB-month with the first 10 GB free, egress $0.02
+                per GB in North America and Europe
+              </td>
+            </tr>
+            <tr>
+              <th scope="row">Cloudflare</th>
+              <td class="dim">
+                Workers 100,000 requests a day at 10ms CPU each. D1 5 GB storage. R2 10 GB-month.
+                Durable Objects 100,000 requests a day. Queues 10,000 operations a day
+              </td>
+              <td class="dim">
+                $5 per month minimum. 10M requests and 30M CPU-milliseconds included. R2 $0.015
+                per GB-month. Queues $0.40 per million operations
+              </td>
+            </tr>
+            <tr>
+              <th scope="row">Hobbyist</th>
+              <td class="dim">Not applicable. There is no tier, no metering and no account</td>
+              <td class="dim">The price of the box, above</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="checked">
+        Platform prices read from each vendor's own pricing page on {CHECKED}. Fly.io Managed
+        Postgres is priced separately and is not quoted here, because its pricing page was not
+        reachable at the time of checking. Prices change; this page does not update itself.
+      </p>
+    </div>
+  </section>
+
+  <!-- Scenarios -->
+  <section class="section" id="scenarios">
+    <div class="wrap stack">
+      <div class="section__head">
+        <span class="state state--sleeping">worked examples</span>
+        <h2 class="h-section">Two scenarios, with the assumptions in the open</h2>
+      </div>
+
+      <div>
+        <h3 class="h-sub" style="margin-bottom:0.75rem">Ten small side projects, mostly idle</h3>
+        <div class="assume" style="margin-bottom:1.25rem">
+          <h3>Assumed</h3>
+          <ul>
+            <li>Ten projects, each one Postgres database, about 200 MB of data.</li>
+            <li>Each is genuinely used about an hour a day, and idle the rest of the time.</li>
+            <li>Negligible bandwidth. No custom domains.</li>
+          </ul>
+        </div>
+        <div class="tablewrap">
+          <table class="data">
+            <thead>
+              <tr>
+                <th scope="col">Option</th>
+                <th scope="col">Monthly</th>
+                <th scope="col">Why</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Neon, free</th>
+                <td class="num">$0</td>
+                <td class="dim">
+                  Ten projects fit well inside 100. About 30 CU-hours each against a 100 CU-hour
+                  allowance, and 200 MB against 500 MB. This genuinely costs nothing
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">Cloudflare, free</th>
+                <td class="num">$0</td>
+                <td class="dim">
+                  Also nothing, but it is D1 and Workers rather than Postgres, so it is a
+                  different application, not a cheaper one
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">Hobbyist on a Hetzner CX23</th>
+                <td class="num">€2.99</td>
+                <td class="dim">
+                  All ten on one box. Nine are asleep at any moment, which is the only reason
+                  they fit in 4 GB
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">Hobbyist on hardware you own</th>
+                <td class="num">~$2.19</td>
+                <td class="dim">Electricity</td>
+              </tr>
+              <tr>
+                <th scope="row">Fly.io</th>
+                <td class="num">~$1.50+</td>
+                <td class="dim">
+                  Machines auto stop, so idle time is cheap, but ten 1 GB volumes still bill at
+                  $0.15 per GB-month. Managed Postgres would add its own line
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">Supabase</th>
+                <td class="num">~$115</td>
+                <td class="dim">
+                  The free tier allows two active projects and pauses them after a week, so ten
+                  needs Pro: $25 plus ten Micro instances at about $10 each, less the $10 credit
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="checked">
+          Hobbyist does not win this one on price, and pretending otherwise would be the kind
+          of comparison this project has no reason to publish. It wins on whose machine it is.
+        </p>
+      </div>
+
+      <div>
+        <h3 class="h-sub" style="margin-bottom:0.75rem">
+          Ten real projects: a database, an app and a worker each
+        </h3>
+        <div class="assume" style="margin-bottom:1.25rem">
+          <h3>Assumed</h3>
+          <ul>
+            <li>Ten projects. Each has a Postgres with 5 GB of data, an HTTP app, and a worker.</li>
+            <li>Each is used a few hours a day. 50 GB of database storage in total.</li>
+            <li>Custom domains on the ones that face the world.</li>
+          </ul>
+        </div>
+        <div class="tablewrap">
+          <table class="data">
+            <thead>
+              <tr>
+                <th scope="col">Option</th>
+                <th scope="col">Monthly</th>
+                <th scope="col">Why</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Hobbyist on a Hetzner AX42</th>
+                <td class="num">€46</td>
+                <td class="dim">
+                  64 GB of ECC memory and 3.8 TB of NVMe. Thirty resources on one box, most of
+                  them asleep at any moment. One price, and it does not move when you add the
+                  eleventh project
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">Hobbyist on a Hetzner CX23</th>
+                <td class="num">€2.99</td>
+                <td class="dim">
+                  Plausible if usage really is spread out, uncomfortable if several wake at
+                  once. 4 GB is the constraint, not the disk
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">Neon, Launch</th>
+                <td class="num">~$17.50 + compute</td>
+                <td class="dim">
+                  50 GB at $0.35 per GB-month is $17.50 before a single CU-hour. Databases only:
+                  the apps and workers live somewhere else and cost something else
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">Supabase, Pro</th>
+                <td class="num">~$115+</td>
+                <td class="dim">
+                  $25 plus compute per project, plus disk beyond the 8 GB included per project
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">Fly.io</th>
+                <td class="num">~$60+</td>
+                <td class="dim">
+                  Twenty machines at $5.92 if they were always on, less with auto stop, plus 50
+                  GB of volumes at $7.50, plus Managed Postgres
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="checked">
+          The shape that matters is not the number, it is the slope. A box is a fixed price and
+          a platform is a function of what you use. Below some usage the platform is free and
+          the box is a waste. Above it, the box stops moving and the platform does not.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- When not to -->
+  <section class="section">
+    <div class="wrap stack">
+      <div class="section__head">
+        <span class="state state--failed">do not use this</span>
+        <h2 class="h-section">When Hobbyist is the wrong answer</h2>
+      </div>
+      <ul class="status">
+        <li data-state="failed">
+          <span class="status__what">anything paying</span>
+          <span class="status__note">
+            It is v0-alpha with no warranty, written by one person. If someone is paying you for
+            uptime, buy uptime from someone who sells it.
+          </span>
+        </li>
+        <li data-state="failed">
+          <span class="status__what">other people's data</span>
+          <span class="status__note">
+            Every tenant here is assumed to be the same person. There is no isolation between
+            projects beyond what Docker gives you, and hardening that is deliberately out of
+            scope.
+          </span>
+        </li>
+        <li data-state="failed">
+          <span class="status__what">you need PITR</span>
+          <span class="status__note">
+            Point in time recovery was cut rather than deferred. Snapshots are written and not
+            yet reachable. Today, backup means pg_dump.
+          </span>
+        </li>
+        <li data-state="failed">
+          <span class="status__what">multi-region, or high availability</span>
+          <span class="status__note">
+            One box. If a feature needs a cluster it is out of scope, and that is a permanent
+            answer rather than a roadmap item.
+          </span>
+        </li>
+        <li data-state="failed">
+          <span class="status__what">you want auth, realtime, or edge</span>
+          <span class="status__note">
+            All three are explicitly out of scope. Supabase and Cloudflare are good at them and
+            this will never compete there.
+          </span>
+        </li>
+      </ul>
+      <p class="checked">
+        <a href="/docs/status/">The full status page</a> is more detailed and is the thing to
+        read before installing anything.
+      </p>
+    </div>
+  </section>
+</Base>

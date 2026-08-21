@@ -1,0 +1,10 @@
+dist/
+node_modules/
+.astro/
+
+# Generated at prebuild from the repository root. One bootstrap.sh in git.
+public/install
+public/install.sh
+
+# Generated at prebuild from docs/decisions/.
+src/content/docs/docs/decisions/

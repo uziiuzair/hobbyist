@@ -1,0 +1,137 @@
+---
+/**
+ * The shell for the two hand-built pages, / and /compare/. Starlight brings
+ * its own shell for everything under /docs/, themed to match in
+ * styles/starlight.css.
+ */
+import '../styles/tokens.css'
+import '../styles/site.css'
+
+interface Props {
+  title: string
+  description: string
+  /** Rendered as the og:title when the page title is long. */
+  ogTitle?: string
+}
+
+const { title, description, ogTitle } = Astro.props
+const canonical = new URL(Astro.url.pathname, Astro.site ?? 'https://hobbyist.sh').href
+const year = 2026
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={ogTitle ?? title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:site_name" content="Hobbyist" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="color-scheme" content="dark light" />
+    <link
+      rel="preload"
+      href="/fonts/fraunces-latin-600-normal.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      href="/fonts/ibm-plex-sans-latin-400-normal.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="site-head">
+      <div class="wrap site-head__in">
+        <a class="site-head__mark" href="/">
+          <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+            <circle
+              cx="12"
+              cy="12"
+              r="10.5"
+              fill="none"
+              stroke="var(--accent)"
+              stroke-opacity="0.34"
+              stroke-width="1.5"></circle>
+            <circle cx="12" cy="12" r="4.5" fill="var(--accent)"></circle>
+          </svg>
+          Hobbyist
+        </a>
+        <nav class="site-head__nav" aria-label="Main">
+          <a href="/docs/">Docs</a>
+          <a href="/compare/">Compare</a>
+          <a href="/docs/status/">Status</a>
+          <a href="https://github.com/uziiuzair/hobbyist">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <slot />
+    </main>
+
+    <footer class="site-foot">
+      <div class="wrap">
+        <div class="site-foot__grid">
+          <div>
+            <h2>Start</h2>
+            <ul>
+              <li><a href="/docs/install/">Install</a></li>
+              <li><a href="/docs/first-project/">Your first project</a></li>
+              <li><a href="/docs/status/">Alpha status</a></li>
+            </ul>
+          </div>
+          <div>
+            <h2>Learn</h2>
+            <ul>
+              <li><a href="/docs/concepts/sleep-and-wake/">Sleep and wake</a></li>
+              <li><a href="/docs/reference/cli/">CLI reference</a></li>
+              <li><a href="/docs/decisions/">Decisions</a></li>
+            </ul>
+          </div>
+          <div>
+            <h2>Compare</h2>
+            <ul>
+              <li><a href="/compare/#parity">Feature parity</a></li>
+              <li><a href="/compare/#pricing">Pricing</a></li>
+            </ul>
+          </div>
+          <div>
+            <h2>Project</h2>
+            <ul>
+              <li><a href="https://github.com/uziiuzair/hobbyist">Source</a></li>
+              <li>
+                <a href="https://github.com/uziiuzair/hobbyist/blob/main/CONTRIBUTING.md"
+                  >Contributing</a
+                >
+              </li>
+              <li>
+                <a href="https://github.com/uziiuzair/hobbyist/blob/main/LICENSE">Licence</a>
+              </li>
+            </ul>
+          </div>
+        </div>
+        <div class="site-foot__legal">
+          <p>
+            Hobbyist is v0-alpha and is not production ready. Apache License 2.0, provided on an
+            &ldquo;as is&rdquo; basis without warranties or conditions of any kind. It is not a
+            business: there is no hosted tier, no billing, and no support obligation.
+          </p>
+          <p>&copy; {year} Uzair Hayat. Built to be walked away from.</p>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>
