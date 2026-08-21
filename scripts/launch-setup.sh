@@ -220,6 +220,20 @@ else
   note "from RFC 5737, chosen so that a misconfiguration fails obviously rather"
   note "than reaching somebody else's server."
   upsert "$INSTALL_ZONE_ID" A "$INSTALL_ZONE" "192.0.2.1" true
+
+  # A registrar parks a new domain with a CNAME on www, and a CNAME cannot
+  # coexist with an A at the same name, so creating the A without removing it
+  # first fails. Found on the real zone: www.hobby.sh was a CNAME to
+  # parkingpage.namecheap.com. MX and TXT records are never touched, because on
+  # this zone they are live email forwarding.
+  PARKED_WWW="$(api_checked GET "/zones/${INSTALL_ZONE_ID}/dns_records?type=CNAME&name=www.${INSTALL_ZONE}" | jq -r '.result[0].id // empty')"
+  if [ -n "$PARKED_WWW" ]; then
+    printf '    %sdelete%s CNAME www.%s (a parked CNAME blocks the A record)\n' "$RED" "$RESET" "$INSTALL_ZONE"
+    if $APPLY; then
+      api_checked DELETE "/zones/${INSTALL_ZONE_ID}/dns_records/${PARKED_WWW}" >/dev/null
+      ok "deleted"
+    fi
+  fi
   upsert "$INSTALL_ZONE_ID" A "www.${INSTALL_ZONE}" "192.0.2.1" true
 fi
 
