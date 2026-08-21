@@ -34,7 +34,7 @@ The routing rule is in `docs/CLAUDE.md`. The project context is in the root
 | `studio/` | The web UI and its auth | M4 |
 | `mcp/` | The MCP server | M5 |
 | `branching/` | Copy-on-write branches | Phase 1.5 |
-| `backups/` | Backup, restore, PITR | Phase 1.5 |
+| `backups/` | Whole-project snapshots and restore. Designed 2026-08-16 (ADR 0015), not built. PITR deliberately cut | Phase 1.5 |
 | `compute/` | Stateless workers and apps. `app` and `worker` kinds, built 2026-08-10. Resource creation split from deploy, 2026-08-13 (ADR 0014) | Phase 2 |
 | `durable-objects/` | Durable Objects: alarms across sleep, catalog, storage lifecycle | Phase 2 |
 | `queues/` | Queues: the broker outside the runtime. Designed 2026-08-13, built and verified against real Docker 2026-08-14 | Phase 2 |
@@ -66,6 +66,7 @@ longer in force.
 | `docs/decisions/0012` | Durable Objects as a resource kind, and the alarm mirror that lets them sleep |
 | `docs/decisions/0013` | Queues as a resource kind, with the broker held outside the runtime |
 | `docs/decisions/0014` | Resource records exist before code: creating an `app` or `worker` and deploying code into it are two acts, not one |
+| `docs/decisions/0016` | Project snapshots by quiesce and clone, and no point-in-time recovery |
 
 **The numbering was reserved, not sequential.** Three sessions were filing an
 ADR at once against a `main` that topped out at 0012: `record-before-code`, a
@@ -73,6 +74,11 @@ parallel branch adding a `queue` resource kind, and a third adding a Tailscale
 ingress lane. The three agreed in writing to take 0013, 0014 and 0015
 respectively rather than collide. 0013 and 0014 are both here now; 0015 lands
 when the Tailscale branch merges.
+
+**0015 is still held for Tailscale**, which is why snapshots took 0016 on
+2026-08-16 rather than the next free number. The reservation outlives the
+branch: taking a held number because the holder is slow is how two documents end
+up with one identity.
 
 ## The one number
 
