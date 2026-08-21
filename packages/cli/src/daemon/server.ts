@@ -454,7 +454,7 @@ export async function startDaemon(
   // kind already points a container's producer shim at
   // (packages/worker/src/worker.ts's buildRunnerManifest).
   const queueEndpoint = await startQueueEndpoint(ctx, {
-    port: ctx.config.queuePort ?? 7434,
+    port: ctx.config.queuePort,
     hosts: await queueEndpointHosts(ctx),
     tokenFor: queueTokenFor(ctx),
   })
