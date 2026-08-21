@@ -76,6 +76,10 @@ function testConfig(): HobbyConfig {
     sleepAfterSeconds: 300,
     wakeTimeoutMs: 150,
     readinessPollMs: 20,
+    // 0 means "do not bind". The snapshots tests never enqueue, and this
+    // branch predates queuePort becoming required, so the field arrives here
+    // by way of the merge rather than because these tests want a broker.
+    queuePort: 0,
     caddyEnabled: false,
     caddyAdminPort: 2019,
     caddyStudioHost: null,
