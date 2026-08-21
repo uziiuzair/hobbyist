@@ -58,8 +58,10 @@ daily use before Phase 2 began. `docs/decisions/0010` removes it, two days
 after Phase 1 merged, and says plainly that the gate was correct and was
 removed anyway. Nothing now paces this project except the author.
 
-**Sub-project B, wiring Caddy, is done, on branch `caddy-wiring`, not yet
-merged to `main`.** `createCaddyManager` (`packages/cli/src/daemon/caddy.ts`)
+**Sub-project B, wiring Caddy, is done and merged to `main` at `d9e356b`.**
+This paragraph read "on branch `caddy-wiring`, not yet merged" until
+2026-08-16; that was true when written and has been false since the merge.
+`createCaddyManager` (`packages/cli/src/daemon/caddy.ts`)
 now has a production caller: `startDaemon`
 (`packages/cli/src/daemon/server.ts`) calls `ensureRunning()`,
 `setFallback()`, an optional Studio `addRoute()`, and `stop()` on shutdown,
@@ -97,6 +99,7 @@ macOS has been detected but never actually run against.
 | Cold start, Postgres | 170 to 186ms p50/p95, measured 2026-08-07 | `docs/proxy/research/` |
 | Cold start, HTTP | app p95 133ms, worker p95 321ms, measured 2026-08-10 on a Mac | `docs/compute/research/` |
 | Resource creation vs. deploy | Two acts, not one. `undeployed` is a real resting state | ADR 0014 |
+| Backups | Whole-project snapshots, quiesce then clone. No PITR | ADR 0016 |
 
 ## Build order
 
@@ -117,12 +120,23 @@ order they were scoped:
 | Sub-project | Ships | State |
 |---|---|---|
 | **A** record before code | Resource creation split from deploy; `undeployed` state; ADR 0014 | **merged to `main` at `e0d56a2`** |
-| **B** wire Caddy | `createCaddyManager` gets a production caller | **built, branch `caddy-wiring`, not yet merged to `main`** |
+| **B** wire Caddy | `createCaddyManager` gets a production caller | **merged to `main` at `d9e356b`** |
 | **D1** Studio and MCP for all kinds | Drop the hardcoded `kind: 'postgres'` at `packages/studio/src/api.ts:152` and `packages/mcp/src/tools.ts:116`. A has merged, so there is now something else to send | not started |
 | **D2** Studio API tokens | Not yet designed beyond the label; no spec filed as of this writing | not started |
 | **C** remote deploy | Laptop to VPS. Needs its own ADR: the CLI talks to a unix socket (`packages/cli/src/cli/client.ts`), so today it must run on the daemon's own box | not started |
 
 ## The immediate next steps
+
+**Chosen 2026-08-16: snapshots, ahead of the five-sub-project list below.**
+Five kinds now hold state a user would not accept losing and none of it is
+backed up, which is the failure mode the root `CLAUDE.md` says we do not ship.
+Designed, not built: ADR `docs/decisions/0016` and
+`docs/backups/specs/2026-08-16-project-snapshots-design.md`. Point-in-time
+recovery was cut rather than deferred. The one new primitive, `cloneTree` in
+`packages/core/src/copy.ts`, is also what Phase 1.5 branching needs, which is
+an argument for doing snapshots before branching rather than after.
+
+Then, in the order they were already scoped:
 
 1. **`record-before-code` (sub-project A) is merged to `main`**, at `e0d56a2`,
    which is also `caddy-wiring`'s own base. Task 10 of that plan, the docs

@@ -77,7 +77,7 @@ docs/<capability>/
 | [`studio/`](studio/) | The web UI and its auth. Browse, query, read schema, control plane. | M4 |
 | [`mcp/`](mcp/) | The MCP server exposing the CLI verbs to agents. | M5 |
 | [`branching/`](branching/) | Copy-on-write branching. Filesystem detection and fallbacks. | Phase 1.5 |
-| [`backups/`](backups/) | Backup, restore and point-in-time recovery, wrapping existing tools. | Phase 1.5 |
+| [`backups/`](backups/) | Whole-project snapshots and restore, by quiescing and cloning. No PITR (ADR 0016). | Phase 1.5 |
 | [`compute/`](compute/) | Stateless workers and apps. Build, deploy, wake on request. | Phase 2 |
 | [`durable-objects/`](durable-objects/) | The durable half of Durable Objects: alarms that survive sleep, the object catalog, storage lifecycle. The runtime is `compute/`. | Phase 2 |
 | [`queues/`](queues/) | The broker that holds messages outside the runtime, so a backlog survives sleep and a message can wake its consumer. | Phase 2 |
