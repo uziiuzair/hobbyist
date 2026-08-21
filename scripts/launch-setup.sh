@@ -94,7 +94,7 @@ zone_id() {
 # Returns empty rather than dying when the install zone is not on the account
 # yet, so that a run before hobby.sh has been added still completes the site
 # half instead of failing at the first API call. The site publishes the same
-# bootstrap.sh at /install, so the mirror keeps working either way. Re-run this
+# web-install.sh at /install, so the mirror keeps working either way. Re-run this
 # once hobby.sh is on the account and the worker half completes too.
 zone_id_optional() {
   local name="$1"
@@ -261,7 +261,7 @@ cat <<EOF
          curl -sSI https://${SITE_ZONE}/ | head -1
          curl -fsSL https://${SITE_ZONE}/install | head -5
 
-       That last one should print the first lines of bootstrap.sh, not HTML.
+       That last one should print the first lines of web-install.sh, not HTML.
 
     5. Only if ${INSTALL_ZONE} is on the account, the shorter URL as well:
 

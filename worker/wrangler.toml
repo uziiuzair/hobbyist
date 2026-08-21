@@ -11,7 +11,7 @@ main = "src/index.ts"
 compatibility_date = "2026-08-21"
 workers_dev = false
 
-# The script is bundled at deploy time from the repository's own bootstrap.sh
+# The script is bundled at deploy time from scripts/web-install.sh
 # rather than copied into this directory. One script, not two, so it cannot
 # drift from the one a manual `git clone && ./install.sh` reader sees.
 # fallthrough keeps wrangler's own default rules (.txt, .html, .sql) alive

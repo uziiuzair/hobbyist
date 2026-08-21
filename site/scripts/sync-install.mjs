@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Copies the repository's bootstrap.sh to public/install, so the site itself
- * serves the installer.
+ * Copies scripts/web-install.sh to public/install, so the site itself serves
+ * the installer.
  *
  * The install URL is https://hobby.sh/install, served by the worker in
  * worker/. This publishes the same bytes at https://hobbyist.sh/install as a
@@ -9,7 +9,7 @@
  * to pipe into their shell is a bad shape. Two hosts, one file.
  *
  * Generated rather than committed, and gitignored, so that there is exactly
- * one bootstrap.sh in version control and no chance of the copies disagreeing.
+ * one copy in version control and no chance of the copies disagreeing.
  * The build depends on this running, so it is wired into prebuild.
  */
 
@@ -18,7 +18,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const SOURCE = join(here, '..', '..', 'bootstrap.sh')
+const SOURCE = join(here, '..', '..', 'scripts', 'web-install.sh')
 const OUT_DIR = join(here, '..', 'public')
 
 const script = await readFile(SOURCE, 'utf8')
@@ -34,4 +34,4 @@ await mkdir(OUT_DIR, { recursive: true })
 await writeFile(join(OUT_DIR, 'install'), script)
 await writeFile(join(OUT_DIR, 'install.sh'), script)
 
-console.log(`published bootstrap.sh to public/install and public/install.sh (${script.length} bytes)`)
+console.log(`published scripts/web-install.sh to public/install and public/install.sh (${script.length} bytes)`)

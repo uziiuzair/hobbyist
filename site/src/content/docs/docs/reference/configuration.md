@@ -92,7 +92,7 @@ Read by [the bootstrap script](/docs/install/#options), not by the daemon:
 
 | Variable | Default | What |
 |---|---|---|
-| `HOBBY_SRC` | `~/.hobby/src` | Where the checkout lives |
-| `HOBBY_REF` | `main` | Branch or tag to install |
-| `HOBBY_REPO` | the canonical repository | Where to clone from |
+| `HOBBY_SRC_DIR` | `~/.hobby/src` | Where the checkout lives |
+| `HOBBY_REPO_REF` | `main` | Branch or tag to install |
+| `HOBBY_REPO_URL` | the canonical repository | Where to clone from |
 | `HOBBY_BIN_DIR` | `/usr/local/bin` or `~/.local/bin` | Where the launcher goes |
