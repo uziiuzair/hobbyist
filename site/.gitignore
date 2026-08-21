@@ -2,7 +2,7 @@ dist/
 node_modules/
 .astro/
 
-# Generated at prebuild from the repository root. One bootstrap.sh in git.
+# Generated at prebuild from scripts/web-install.sh. One copy in git.
 public/install
 public/install.sh
 

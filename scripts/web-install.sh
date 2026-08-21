@@ -36,6 +36,15 @@ die() {
   exit 1
 }
 
+# Checked here rather than left to install.sh, because otherwise the first
+# failure a Windows user sees is a build error rather than an answer. Wording
+# matches install.sh's so the two halves read as one program.
+case "$(uname -s)" in
+  Linux|Darwin) ;;
+  *) die "hobby runs on Linux and macOS, and this is $(uname -s)." \
+         "One box, one daemon, docker underneath. There is no Windows path today." ;;
+esac
+
 command -v git >/dev/null 2>&1 || die "git is not installed." \
   "Install git and run this again:
 
@@ -43,11 +52,34 @@ command -v git >/dev/null 2>&1 || die "git is not installed." \
   Fedora/RHEL:    sudo dnf install git
   macOS:          xcode-select --install"
 
+# Piping into bash makes stdin the script, so anything install.sh later wants
+# to read from a human would read the rest of this file instead. The open is
+# probed in a subshell first rather than guarded with [ -e /dev/tty ]: the path
+# exists even in a process with no controlling terminal (a container build, a
+# CI step, ssh with no tty), where opening it fails, and a failed redirection
+# on `exec` exits a non-interactive shell outright. `|| true` does not save it.
+if [ ! -t 0 ] && ( : < /dev/tty ) 2>/dev/null; then
+  exec < /dev/tty
+fi
+
 if [ -d "$SRC_DIR/.git" ]; then
   # Already installed: this is an upgrade. Fetch and hard-reset rather than
   # pull, because a merge conflict in a directory the user never edits on
   # purpose is a dead end they did not ask to be in.
   printf '%s==>%s Updating %s\n' "$BOLD" "$RESET" "$SRC_DIR"
+  # The hard reset below is safe only if this is actually our checkout. On an
+  # unrelated repository that someone happens to keep at this path, it would
+  # destroy their work without asking.
+  ORIGIN_URL="$(git -C "$SRC_DIR" remote get-url origin 2>/dev/null || true)"
+  case "$ORIGIN_URL" in
+    *hobbyist*) ;;
+    *) die "$SRC_DIR is a git checkout, but its origin is not hobbyist." \
+           "origin is: ${ORIGIN_URL:-(none)}
+
+  Refusing to touch it. Install somewhere else:
+
+    HOBBY_SRC_DIR=~/somewhere-else bash <(curl -fsSL https://hobby.sh/install)" ;;
+  esac
   git -C "$SRC_DIR" fetch --quiet origin "$REPO_REF" || die "could not fetch from $REPO_URL."
   git -C "$SRC_DIR" reset --quiet --hard "origin/$REPO_REF" || die "could not update $SRC_DIR."
 else

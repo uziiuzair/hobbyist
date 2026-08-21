@@ -53,7 +53,7 @@ jobs:
       - name: Check the install path
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
-          shellcheck --severity=warning bootstrap.sh install.sh scripts/*.sh
+          shellcheck --severity=warning install.sh scripts/*.sh
 
   site:
     name: site builds

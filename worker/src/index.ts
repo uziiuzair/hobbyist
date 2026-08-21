@@ -6,11 +6,11 @@
 // There is deliberately no landing page here. One site, at hobbyist.sh, and a
 // second one to keep in sync is a second one to let rot.
 
-// Bundled from the repository root at deploy time, via the Text rule in
-// wrangler.toml. Importing it rather than inlining a copy is what guarantees
-// that the script a curl gets and the script in the repository are the same
-// bytes.
-import bootstrap from '../../bootstrap.sh'
+// Bundled from scripts/web-install.sh at deploy time, via the Text rule in
+// wrangler.toml. That file is the artifact, named in ADR 0006. Importing it
+// rather than inlining a copy is what guarantees that the script a curl gets
+// and the script in the repository are the same bytes.
+import bootstrap from '../../scripts/web-install.sh'
 
 const SITE = 'https://hobbyist.sh'
 
@@ -44,7 +44,7 @@ export default {
           'cache-control': CACHE_CONTROL,
           // A curl into bash is exactly the case where a reader might want to
           // read first. Telling them where costs one header.
-          'x-source': 'https://github.com/uziiuzair/hobbyist/blob/main/bootstrap.sh',
+          'x-source': 'https://github.com/uziiuzair/hobbyist/blob/main/scripts/web-install.sh',
           'x-content-type-options': 'nosniff',
         },
       })

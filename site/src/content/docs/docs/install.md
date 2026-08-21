@@ -10,7 +10,7 @@ curl -fsSL https://hobby.sh/install | bash
 ```
 
 Piping a script into a shell asks you to trust a URL. If you would rather not,
-[read it first](https://github.com/uziiuzair/hobbyist/blob/main/bootstrap.sh) or
+[read it first](https://github.com/uziiuzair/hobbyist/blob/main/scripts/web-install.sh) or
 [do it by hand](#by-hand). Every path runs the identical installer, which is
 deliberate and is stated at the top of the script itself. The same bytes are
 also mirrored at `https://hobbyist.sh/install`.
@@ -76,12 +76,12 @@ The bootstrap script reads three environment variables:
 
 | Variable | Default | What |
 |---|---|---|
-| `HOBBY_SRC` | `~/.hobby/src` | Where the checkout lives |
-| `HOBBY_REF` | `main` | The branch or tag to install |
-| `HOBBY_REPO` | the canonical repository | Where to clone from |
+| `HOBBY_SRC_DIR` | `~/.hobby/src` | Where the checkout lives |
+| `HOBBY_REPO_REF` | `main` | The branch or tag to install |
+| `HOBBY_REPO_URL` | the canonical repository | Where to clone from |
 
 ```sh
-HOBBY_SRC=~/code/hobbyist bash <(curl -fsSL https://hobby.sh/install)
+HOBBY_SRC_DIR=~/code/hobbyist bash <(curl -fsSL https://hobby.sh/install)
 ```
 
 The installer itself reads `HOBBY_BIN_DIR` if you want the launcher somewhere
@@ -89,10 +89,10 @@ specific.
 
 ## Upgrading
 
-Run the same one-liner again. An existing checkout is fetched and moved forward
-rather than re-cloned. It refuses to touch a checkout with uncommitted changes
-rather than discarding your work, and refuses a directory whose git origin is
-not this project.
+Run the same one-liner again. An existing checkout is fetched and reset to the
+latest commit rather than re-cloned, which is why nothing you edit by hand
+under `~/.hobby/src` survives an upgrade. It refuses outright if the directory
+is a checkout of something other than this project.
 
 ## Uninstalling
 
