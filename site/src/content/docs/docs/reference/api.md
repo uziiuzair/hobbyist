@@ -41,6 +41,7 @@ Through the Studio listener, only `/studio/login`, `/studio/logout`,
 | `POST /v1/projects/{name}/resources` | Create a resource. Body `{ kind, name }` |
 | `POST /v1/projects/{name}/eject` | Render the compose file |
 | `POST /v1/projects/{name}/adopt` | Manage a released project again |
+| `POST /v1/projects/{name}/sleep-policy` | Body `{ sleepAfterSeconds }`. `null` pins the project awake, a positive integer is its own idle threshold |
 | `GET` `DELETE /v1/resources/{id}` | Detail, destroy |
 | `POST /v1/resources/{id}/start` | Wake |
 | `POST /v1/resources/{id}/stop` | Sleep |

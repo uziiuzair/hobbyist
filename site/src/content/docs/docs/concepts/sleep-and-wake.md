@@ -88,6 +88,23 @@ A kind can refuse to sleep. `ResourceKindHandler.guard` is where that lives, and
 the worker handler uses it to refuse a sleep when a Durable Object alarm is
 about to fire, because an alarm cannot fire inside a stopped container.
 
+## Keeping one thing awake
+
+Sometimes one project genuinely cannot afford a slow first request. You can
+exempt it, and only it:
+
+```sh
+hobby pin blog                       # never sleep this project
+hobby unpin blog                     # back to the box-wide default
+hobby unpin blog --sleep-after 3600  # or its own threshold, in seconds
+```
+
+The threshold is a property of the project rather than of the box, which is
+what makes this usable: pinning your status page awake does not also keep nine
+idle side projects running. "Pinned" is the hibernator's own word for a project
+with no threshold set, so the command uses the same vocabulary the code does
+rather than inventing a second one.
+
 ## What wakes it
 
 | Kind | Wakes on |
