@@ -20,7 +20,9 @@ hobby studio           # prints the URL, and opens it
 The password prompt never echoes what you type, so the credential does not
 appear on screen, in scrollback, or in a terminal recording.
 
-By default Studio listens on 8443. If you have
+Studio is served by the daemon itself, on `apiPort` (7432 by default), bound to
+`127.0.0.1` only. There is no separate Studio server: `studioPort` exists in the
+config and nothing listens on it. If you have
 [configured a public host through Caddy](/docs/guides/tls-and-domains/),
 `hobby studio` prints that instead of the loopback URL.
 
@@ -40,6 +42,15 @@ that can create and destroy databases is worth as much as the databases.
 
 The recommendation, plainly: **do not expose Studio on the open internet.** Reach
 it over [Tailscale or a Cloudflare Tunnel](/docs/guides/tailscale-and-tunnels/).
+
+Because it binds loopback, its tailnet address alone will refuse the connection.
+One command bridges it:
+
+```sh
+tailscale serve --bg 7432
+```
+
+[The full instructions, including the SSH tunnel alternative](/docs/guides/tailscale-and-tunnels/#reaching-studio-over-the-tailnet).
 
 This is not a statement that the authentication is known to be weak. It is that
 this is a v0-alpha surface on a project with no security team, the failure mode

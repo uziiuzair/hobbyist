@@ -57,10 +57,57 @@ ingress:
 sleeping app or worker exactly as they would arriving through Caddy: the router
 does not care what is in front of it.
 
-For Studio, point a second hostname at 8443 and put a Cloudflare Access policy
-in front of it. Studio's own credential is
+For Studio, point a second hostname at the daemon's port, 7432, and put a
+Cloudflare Access policy in front of it. Studio's own credential is
 [a real boundary](/docs/guides/studio/), and an Access policy in front of it
 means an attacker has to get through both.
+
+## Reaching Studio over the tailnet
+
+Studio binds `127.0.0.1` only, on purpose: it is a control plane that can create
+and destroy databases, so it does not put itself on a network by default. Its
+tailnet address will refuse a connection. `tailscale serve` is the way across,
+and it is the recommended one, because it terminates TLS with your tailnet's own
+certificate and exposes nothing beyond the tailnet.
+
+```sh
+tailscale serve --bg 7432
+```
+
+Then open the URL that prints, which is your machine's tailnet name over HTTPS.
+To find it:
+
+```sh
+tailscale status --json | grep DNSName
+```
+
+Older `tailscale` builds want the longer form:
+
+```sh
+tailscale serve https / http://127.0.0.1:7432
+```
+
+To check or undo it:
+
+```sh
+tailscale serve status
+tailscale serve --bg --https=443 off
+```
+
+Do not reach for `tailscale funnel` here. Funnel publishes to the open
+internet, which is the opposite of the reason to use a tailnet, and Studio is
+the last surface in this project that should be there.
+
+### Without Tailscale, an SSH tunnel does the same job
+
+Nothing to install or configure on the box:
+
+```sh
+ssh -L 7432:127.0.0.1:7432 you@your-box
+```
+
+Then open `http://127.0.0.1:7432` on your own machine. The tunnel lasts as long
+as the SSH session.
 
 ## Why this is the recommendation
 

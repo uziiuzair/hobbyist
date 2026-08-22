@@ -24,7 +24,7 @@ the daemon enforces.
 |---|---|
 | Loopback TCP, `apiPort`, default 7432 | **None.** Local shell access is the root of trust |
 | The unix socket, `~/.hobby/hobby.sock` | Filesystem permissions |
-| The Studio listener, default 8443 | The operator session cookie |
+| Studio, on the same loopback listener as the API | The operator session cookie |
 
 Through the Studio listener, only `/studio/login`, `/studio/logout`,
 `/studio/session` and `/v1/health` answer unauthenticated.
