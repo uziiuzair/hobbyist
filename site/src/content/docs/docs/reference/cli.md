@@ -257,10 +257,23 @@ hobby update           # update to the newest tag
 hobby update --check   # print the newest tag and change nothing
 ```
 
-It refuses if the checkout has uncommitted changes rather than discarding them.
-If the rebuild fails it says the checkout has already moved, because believing
-you are still on the old version would be worse than the failure. Restart the
-daemon afterwards.
+It refuses if the checkout has *tracked* modifications rather than discarding
+them. Untracked files do not block it, which matters because `bun install`
+leaves a `bun.lock` in every built checkout. If the rebuild fails it says the
+checkout has already moved, because believing you are still on the old version
+would be worse than the failure. Restart the daemon afterwards.
+
+:::caution[On v0.1.0-alpha.1, use the installer instead]
+`hobby update` in alpha.1 counted untracked files, so it refuses on any box
+that has ever been built. Re-run the install one-liner once to get past it:
+
+```sh
+curl -fsSL https://hobby.sh/install | bash
+```
+
+That does the same work and is safe to re-run. Every version after alpha.1
+updates normally.
+:::
 
 ## Studio
 
