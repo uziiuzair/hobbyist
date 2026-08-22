@@ -92,10 +92,15 @@ interface RawResponse {
 // before a byte reaches the wire, which is exactly what a path-traversal
 // attempt must not be allowed to rely on either succeeding or failing
 // because of. node:http's `path` option is passed through verbatim.
-function rawCall(baseUrl: string, method: string, path: string): Promise<RawResponse> {
+function rawCall(
+  baseUrl: string,
+  method: string,
+  path: string,
+  headers: Record<string, string> = {}
+): Promise<RawResponse> {
   const url = new URL(baseUrl)
   return new Promise((resolve, reject) => {
-    const req = httpRequest({ hostname: url.hostname, port: url.port, method, path }, (res) => {
+    const req = httpRequest({ hostname: url.hostname, port: url.port, method, path, headers }, (res) => {
       const chunks: Buffer[] = []
       res.on('data', (chunk: Buffer) => chunks.push(chunk))
       res.on('end', () => {
@@ -106,6 +111,42 @@ function rawCall(baseUrl: string, method: string, path: string): Promise<RawResp
     req.end()
   })
 }
+
+// --- security headers -------------------------------------------------
+
+test('every response carries the security headers, static bundle included', async () => {
+  const distDir = buildFixtureDist()
+  await withStudioServer(buildContext(), distDir, async (baseUrl) => {
+    for (const path of ['/', '/assets/app.js', '/v1/health', '/studio/session']) {
+      const res = await rawCall(baseUrl, 'GET', path)
+      const csp = String(res.headers['content-security-policy'] ?? '')
+
+      assert.match(csp, /default-src 'self'/, `${path} has a default-src`)
+      // The one that actually matters for XSS: script has no unsafe-inline.
+      assert.match(csp, /script-src 'self'(;|$)/, `${path} allows no inline script`)
+      assert.match(csp, /frame-ancestors 'none'/, `${path} refuses to be framed`)
+      assert.match(csp, /object-src 'none'/, `${path} allows no plugins`)
+      assert.equal(res.headers['x-content-type-options'], 'nosniff', `${path} is nosniff`)
+      assert.equal(res.headers['x-frame-options'], 'DENY', `${path} sets X-Frame-Options`)
+      assert.equal(res.headers['referrer-policy'], 'no-referrer', `${path} leaks no referrer`)
+    }
+  })
+})
+
+test('HSTS is sent only when the request arrived over TLS', async () => {
+  const distDir = buildFixtureDist()
+  await withStudioServer(buildContext(), distDir, async (baseUrl) => {
+    const plain = await rawCall(baseUrl, 'GET', '/')
+    assert.equal(
+      plain.headers['strict-transport-security'],
+      undefined,
+      'plain http must not pin loopback to https for the whole browser profile'
+    )
+
+    const forwarded = await rawCall(baseUrl, 'GET', '/', { 'x-forwarded-proto': 'https' })
+    assert.match(String(forwarded.headers['strict-transport-security'] ?? ''), /max-age=\d+/)
+  })
+})
 
 // --- the whole bundle loads unauthenticated ---------------------------
 

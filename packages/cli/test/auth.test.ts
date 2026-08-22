@@ -143,6 +143,52 @@ test('LoginThrottle resets a key on success, and a fresh key is never affected b
 
 // --- SessionStore --------------------------------------------------------
 
+test('SessionStore expires a session that has gone idle', () => {
+  let now = 1_000_000
+  const sessions = new SessionStore(() => now)
+  const token = sessions.issue()
+
+  now += 11 * 60 * 60 * 1000
+  assert.equal(sessions.verify(token), true, 'still inside the idle window')
+
+  // Verifying above slid the idle clock, so another 11 hours is still fine.
+  now += 11 * 60 * 60 * 1000
+  assert.equal(sessions.verify(token), true, 'idle clock slides on use')
+
+  now += 13 * 60 * 60 * 1000
+  assert.equal(sessions.verify(token), false, 'idle for longer than the window')
+})
+
+test('SessionStore expires a session on the absolute clock even when used constantly', () => {
+  let now = 1_000_000
+  const sessions = new SessionStore(() => now)
+  const token = sessions.issue()
+
+  // Use it every hour for 30 days. The idle clock never trips, which is the
+  // point: without an absolute clock a stolen token would live forever.
+  for (let hour = 0; hour < 30 * 24; hour += 1) {
+    now += 60 * 60 * 1000
+    assert.equal(sessions.verify(token), true, `still live at hour ${hour}`)
+  }
+
+  now += 60 * 60 * 1000
+  assert.equal(sessions.verify(token), false, 'past the absolute lifetime')
+})
+
+test('SessionStore forgets expired sessions rather than growing forever', () => {
+  let now = 1_000_000
+  const sessions = new SessionStore(() => now)
+  for (let i = 0; i < 50; i += 1) {
+    sessions.issue()
+  }
+  now += 13 * 60 * 60 * 1000
+  const survivor = sessions.issue()
+
+  // Verifying sweeps, so the 50 dead entries go and only the survivor remains.
+  assert.equal(sessions.verify(survivor), true)
+  assert.equal(sessions.size, 1, 'expired sessions are dropped on verify')
+})
+
 test('SessionStore issues a token that verifies, and stops verifying once revoked', () => {
   const sessions = new SessionStore()
   const token = sessions.issue()
