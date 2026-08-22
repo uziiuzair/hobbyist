@@ -94,7 +94,9 @@ above it is a release blocker rather than a slow path.
 |---|---|---|---|---|
 | Postgres, on a $5 VPS | **691ms** | **845ms** | 1 vCPU, 512MB and 1GB, ext4 | 2026-08-22 |
 | Postgres, wire protocol | 170ms | 186ms | Apple silicon laptop | 2026-08-07 |
-| HTTP app | 121ms | 133ms | Apple M5 Pro | 2026-08-10 |
+| HTTP app, **Next.js**, $5 VPS | **1828ms** | **1989ms** | 1 vCPU, 1GB, ext4 | 2026-08-22 |
+| HTTP app, static file server, $5 VPS | 386ms | 632ms | 1 vCPU, 1GB, ext4 | 2026-08-22 |
+| HTTP app, static file server, laptop | 121ms | 133ms | Apple M5 Pro | 2026-08-10 |
 | Worker (workerd) | 299ms | 321ms | Apple M5 Pro | 2026-08-10 |
 
 **The five dollar VPS is measured.** Sixty consecutive wakes on DigitalOcean

@@ -70,6 +70,18 @@ this is aimed at. There the copy is a real copy, which is correct but slow and
 costs full disk space. `hobby init` detects it and warns rather than failing.
 [Filesystem requirements](/docs/reference/filesystems/).
 
+### An app cannot wake its own database
+
+An app reaches its sibling database by container name on the project's docker
+network. Docker resolves running containers only, so a woken app pointed at a
+sleeping database gets `EAI_AGAIN` and stays broken. Worse, it cannot wake it:
+the connection never reaches the wake-on-connect proxy, so nothing triggers.
+
+The two sleep on independent timers, so this is the ordinary case for a web app
+and its database, not an edge case. Measured 2026-08-22 while benchmarking a
+Next.js app bound to Postgres.
+[The finding, with three options](https://github.com/uziiuzair/hobbyist/blob/main/docs/compute/research/2026-08-22-real-app-cold-start-and-the-sibling-wake-gap.md).
+
 ### The Postgres proxy binds every interface
 
 The proxy listens on all interfaces and there is no setting to change it:
