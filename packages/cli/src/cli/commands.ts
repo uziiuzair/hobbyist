@@ -451,15 +451,34 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     return 0
   }
 
+  // --database binds a sibling postgres, which is how an app gets DATABASE_URL
+  // (packages/app/src/app.ts's resolveDatabaseUrl). The daemon route has always
+  // accepted databaseResourceId and the CLI had no way to send it, so an app
+  // could not be pointed at its own project's database without editing state
+  // by hand.
+  let databaseResourceId: string | undefined
+  const databaseFlag = flagString(flags, 'database')
+  if (databaseFlag !== undefined) {
+    const { resource: database } = await resolveTarget(
+      c.api,
+      databaseFlag.includes('/') ? databaseFlag : `${projectName}/${databaseFlag}`
+    )
+    if (database.kind !== 'postgres') {
+      throw new UsageError(`--database must name a postgres resource, and ${databaseFlag} is a ${database.kind}`)
+    }
+    databaseResourceId = database.id
+  }
+
   const { resource } = await c.api.createResource(
     projectName,
     kind === 'worker'
-      ? { kind: 'worker', name, source: { path } }
+      ? { kind: 'worker', name, source: { path }, ...(databaseResourceId === undefined ? {} : { databaseResourceId }) }
       : {
           kind: 'app',
           name,
           source: { path },
           ...(portFlag === undefined ? {} : { port: portFlag }),
+          ...(databaseResourceId === undefined ? {} : { databaseResourceId }),
         }
   )
 
