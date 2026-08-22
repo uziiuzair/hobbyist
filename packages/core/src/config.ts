@@ -72,6 +72,17 @@ export function resolvePgdataPath(hostDataDir: string): string {
 export interface HobbyConfig {
   image: string
   proxyPort: number
+  // Which addresses the Postgres proxy binds. ADR 0017.
+  //
+  //   an address  bound literally, for example "127.0.0.1" or "10.0.0.5"
+  //   "tailnet"   loopback plus this machine's Tailscale address
+  //   "all"       every interface, the pre-0.1 behaviour, spelled out
+  //
+  // Defaults to loopback because the proxy speaks no TLS: it answers an
+  // SSLRequest with N, so anything reaching it over a network sends its
+  // password in cleartext. Two boxes installed from hobby.sh/install were
+  // measured reachable from the open internet before this existed.
+  proxyHost: string
   studioPort: number
   apiPort: number
   // Where the HTTP wake router listens, on loopback. Caddy's catch-all route
@@ -123,6 +134,7 @@ export interface HobbyConfig {
 const DEFAULT_CONFIG: HobbyConfig = {
   image: 'postgres:18-alpine',
   proxyPort: 5432,
+  proxyHost: '127.0.0.1',
   studioPort: 8443,
   apiPort: 7432,
   httpPort: 7433,
@@ -178,6 +190,7 @@ function readEnvConfig(env: NodeJS.ProcessEnv): Partial<HobbyConfig> {
   const config: Partial<HobbyConfig> = {}
   if (env.HOBBY_IMAGE !== undefined) config.image = env.HOBBY_IMAGE
   if (env.HOBBY_PROXY_PORT !== undefined) config.proxyPort = Number(env.HOBBY_PROXY_PORT)
+  if (env.HOBBY_PROXY_HOST !== undefined) config.proxyHost = env.HOBBY_PROXY_HOST
   if (env.HOBBY_STUDIO_PORT !== undefined) config.studioPort = Number(env.HOBBY_STUDIO_PORT)
   if (env.HOBBY_API_PORT !== undefined) config.apiPort = Number(env.HOBBY_API_PORT)
   if (env.HOBBY_HTTP_PORT !== undefined) config.httpPort = Number(env.HOBBY_HTTP_PORT)

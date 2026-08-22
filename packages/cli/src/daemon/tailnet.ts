@@ -32,6 +32,28 @@ export function parseTailscaleStatus(stdout: string): string | null {
 // Silicon prefix is /opt/homebrew/bin), and Linux packages use /usr/bin.
 // A daemon started by launchd or systemd gets a minimal PATH that may hold
 // none of them, so the bare name is tried first and the known homes after.
+// The DNSName parser above answers "what should a connection string say".
+// Binding needs an address, not a name: MagicDNS may be off, and a listener
+// should not depend on the resolver of the machine it is running on.
+// Self.TailscaleIPs is ordered v4 first, which is what we want to bind.
+export function parseTailscaleIp(stdout: string): string | null {
+  let status: unknown
+  try {
+    status = JSON.parse(stdout)
+  } catch {
+    return null
+  }
+  if (typeof status !== 'object' || status === null) return null
+  const self = (status as { Self?: unknown }).Self
+  if (typeof self !== 'object' || self === null) return null
+  const ips = (self as { TailscaleIPs?: unknown }).TailscaleIPs
+  if (!Array.isArray(ips)) return null
+  for (const ip of ips) {
+    if (typeof ip === 'string' && ip.includes('.')) return ip
+  }
+  return null
+}
+
 const TAILSCALE_CANDIDATES = ['tailscale', '/usr/local/bin/tailscale', '/opt/homebrew/bin/tailscale', '/usr/bin/tailscale']
 
 function runTailscaleStatus(): Promise<string> {

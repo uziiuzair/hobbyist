@@ -116,6 +116,37 @@ export function renderPreflight(report: PreflightReport): string[] {
 // caller, in both --json and human mode, since it is advisory information
 // that must never land on the same stream as the JSON body or the plain
 // report lines above.
+// ADR 0017 changed the default from every interface to loopback, so the first
+// thing a user does after installing, connect something, now behaves
+// differently depending on a setting they have never seen. This states what
+// was bound and how to change it, rather than leaving them to discover it from
+// a refused connection.
+export function proxyBindNote(proxyHost: string): string {
+  const setting = proxyHost.trim()
+
+  if (setting === 'all') {
+    return (
+      'warning: the proxy is bound to every interface, and it speaks no TLS. On a machine with a ' +
+      'public address that puts postgres on the internet in cleartext. Firewall the port, or set ' +
+      'proxyHost to "tailnet" or an address. https://hobbyist.sh/docs/reference/configuration/'
+    )
+  }
+
+  if (setting === 'tailnet') {
+    return 'proxy: bound to loopback and this machine\'s tailnet address.'
+  }
+
+  if (setting === '127.0.0.1' || setting === 'localhost' || setting === '::1') {
+    return (
+      'proxy: bound to loopback only, so nothing off this box can reach a database yet. ' +
+      'To change that, set proxyHost to "tailnet" (recommended), to an address, or to "all". ' +
+      'https://hobbyist.sh/docs/reference/configuration/'
+    )
+  }
+
+  return `proxy: bound to ${setting}.`
+}
+
 export function reflinkWarning(report: PreflightReport): string | null {
   if (report.filesystem.reflinkSupported) {
     return null

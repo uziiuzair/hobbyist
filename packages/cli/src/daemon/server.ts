@@ -18,6 +18,7 @@ import { chmod, rm } from 'node:fs/promises'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import net from 'node:net'
 import { promisify } from 'node:util'
+import { HobbyError } from '@hobby.sh/core'
 import { startAlarmMirror } from '@hobby.sh/do'
 import { startHttpRouter, startPgProxy, TLS_ASK_PATH } from '@hobby.sh/proxy'
 import { startQueueTick } from '@hobby.sh/queue'
@@ -29,6 +30,7 @@ import { startQueueEndpoint } from './queue-endpoint.js'
 import { drainableQueues, queueDeliverFn, queueStateOf } from './queues.js'
 import { handleRequest } from './routes.js'
 import { createStudioApp } from './studio/routes.js'
+import { parseTailscaleIp } from './tailnet.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -118,6 +120,51 @@ function queueTokenFor(ctx: DaemonContext): (token: string) => string | null {
 // own milestone table already marks the Linux gateway bind as owed, not
 // closed, and a daemon that silently only ever bound loopback on Linux would
 // look like it worked right up until the first real container tried to send.
+// ADR 0017: which addresses the Postgres proxy binds.
+//
+//   "all"      every interface. The pre-0.1 default, now opt in and spelled out
+//   "tailnet"  loopback plus this machine's Tailscale address
+//   anything   bound literally
+//
+// The default is loopback, because the proxy speaks no TLS: it answers an
+// SSLRequest with N, so anything reaching it across a network sends its
+// password in cleartext. Two boxes installed from hobby.sh/install were
+// measured reachable from the open internet before this existed
+// (docs/proxy/research/2026-08-22-the-proxy-binds-every-interface.md).
+export async function resolveProxyHosts(ctx: DaemonContext): Promise<string[]> {
+  const setting = ctx.config.proxyHost.trim()
+
+  if (setting === 'all') {
+    return ['0.0.0.0']
+  }
+
+  if (setting !== 'tailnet') {
+    return [setting]
+  }
+
+  let ip: string | null = null
+  try {
+    const { stdout } = await execFileAsync('tailscale', ['status', '--json'])
+    ip = parseTailscaleIp(stdout)
+  } catch {
+    ip = null
+  }
+
+  if (ip === null) {
+    // Loud and fatal rather than a quiet fallback. Falling back to loopback
+    // would look like it worked and leave the operator's other machines
+    // unable to connect with no reason given; falling back to every
+    // interface would silently do the thing this decision exists to stop.
+    throw new HobbyError(
+      'usage',
+      'proxyHost is "tailnet" but no tailscale address could be found',
+      'Start tailscaled, or set proxyHost to an address, to "all", or remove it to use loopback.'
+    )
+  }
+
+  return ['127.0.0.1', ip]
+}
+
 async function queueEndpointHosts(ctx: DaemonContext): Promise<string[]> {
   const hosts = new Set<string>(['127.0.0.1'])
   if (process.platform !== 'linux') {
@@ -356,11 +403,24 @@ export async function startDaemon(
   // Started with the daemon's other listeners, bound to ctx.config.proxyPort,
   // and using the real ProxyDeps built from this same DaemonContext (see
   // context.ts's createProxyDeps for exactly what resolve/wake do and why).
-  const proxy = await startPgProxy({
-    port: ctx.config.proxyPort,
-    deps: createProxyDeps(ctx),
-    wakeTimeoutMs: ctx.config.wakeTimeoutMs,
-  })
+  // ADR 0017. One proxy per resolved address, because startPgProxy binds one
+  // host and "tailnet" has to be two: the tailnet address for other machines
+  // and loopback for the box itself, since `hobby connect` builds its string
+  // against 127.0.0.1 and would otherwise stop working on the very box the
+  // database lives on.
+  const proxyHosts = await resolveProxyHosts(ctx)
+  const proxies: Array<{ port: number; close: () => Promise<void> }> = []
+  for (const host of proxyHosts) {
+    proxies.push(
+      await startPgProxy({
+        port: ctx.config.proxyPort,
+        host,
+        deps: createProxyDeps(ctx),
+        wakeTimeoutMs: ctx.config.wakeTimeoutMs,
+      })
+    )
+  }
+  const proxy = proxies[0]!
 
   // The HTTP half of the same router (M7, docs/compute/specs/2026-08-10-
   // phase-2-compute-design.md). Caddy holds :80 and :443 and forwards
@@ -535,7 +595,9 @@ export async function startDaemon(
       // instant this loop stopped it, which is the one ordering constraint
       // called out explicitly for this shutdown sequence.
       try {
-        await proxy.close()
+        // Every one, not just the first: "tailnet" binds two, and a listener
+        // left open holds the port and stops the daemon restarting cleanly.
+        await Promise.all(proxies.map((p) => p.close()))
       } catch (err) {
         console.error(`daemon shutdown: failed to close the wake-on-connect proxy cleanly: ${errorMessage(err)}`)
       }
