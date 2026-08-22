@@ -15,6 +15,7 @@ import { test } from 'node:test'
 import { createFakeRuntime, openStore, resolvePaths, type HobbyConfig, type Store } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
 import { createDefaultKindRegistry } from '../src/daemon/context.js'
+import { issueToken, readTokens, revokeToken } from '../src/daemon/studio/tokens.js'
 import {
   createApp,
   createStudioApp,
@@ -319,6 +320,90 @@ function cookieFrom(res: JsonResponse): string {
   assert.ok(setCookie !== null, 'expected a Set-Cookie header')
   return (setCookie as string).split(';')[0] as string
 }
+
+// --- API tokens (ADR 0018) ------------------------------------------------
+
+test('POST /studio/token exchanges the operator password for a usable token', async () => {
+  const ctx = buildContext()
+  await setOperatorPassword(ctx.paths, 'correct horse battery staple')
+
+  await withStudioServer(ctx, async (baseUrl) => {
+    const issued = await call(baseUrl, 'POST', '/studio/token', {
+      body: { password: 'correct horse battery staple', name: 'laptop' },
+    })
+    assert.equal(issued.status, 200)
+    const token = (issued.body as { token: string }).token
+    assert.match(token, /^hob_/, 'tokens are recognisable so a leaked one can be searched for')
+
+    // A protected route with no credential at all is refused.
+    const denied = await call(baseUrl, 'GET', '/v1/projects')
+    assert.equal(denied.status, 401)
+
+    // The same route with the token is allowed.
+    const allowed = await call(baseUrl, 'GET', '/v1/projects', {
+      headers: { authorization: `Bearer ${token}` },
+    })
+    assert.equal(allowed.status, 200)
+  })
+})
+
+test('POST /studio/token with the wrong password is refused, and issues nothing', async () => {
+  const ctx = buildContext()
+  await setOperatorPassword(ctx.paths, 'correct horse battery staple')
+
+  await withStudioServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', '/studio/token', {
+      body: { password: 'wrong', name: 'laptop' },
+    })
+    assert.equal(res.status, 401)
+    assert.equal((res.body as { error: { message: string } }).error.message, 'invalid credentials')
+    assert.equal(readTokens(ctx.paths).length, 0, 'a failed exchange must not create a token')
+  })
+})
+
+test('a revoked token stops working immediately', async () => {
+  const ctx = buildContext()
+  await setOperatorPassword(ctx.paths, 'correct horse battery staple')
+
+  await withStudioServer(ctx, async (baseUrl) => {
+    const issued = await call(baseUrl, 'POST', '/studio/token', {
+      body: { password: 'correct horse battery staple', name: 'laptop' },
+    })
+    const token = (issued.body as { token: string }).token
+    const auth = { authorization: `Bearer ${token}` }
+
+    assert.equal((await call(baseUrl, 'GET', '/v1/projects', { headers: auth })).status, 200)
+    assert.equal(revokeToken(ctx.paths, 'laptop'), true)
+    assert.equal((await call(baseUrl, 'GET', '/v1/projects', { headers: auth })).status, 401)
+  })
+})
+
+test('only a hash is stored, so the token file is not a list of live credentials', async () => {
+  const ctx = buildContext()
+  const plain = await issueToken(ctx.paths, 'laptop')
+  const stored = readTokens(ctx.paths)
+
+  assert.equal(stored.length, 1)
+  assert.equal(stored[0]?.name, 'laptop')
+  assert.match(String(stored[0]?.hash), /^\$argon2id\$/)
+  assert.equal(
+    JSON.stringify(stored).includes(plain),
+    false,
+    'the plaintext must appear nowhere in what is written to disk'
+  )
+  assert.equal(stored[0]?.tail, plain.slice(-6), 'only a tail, for matching by eye')
+})
+
+test('a garbage bearer header is refused rather than throwing', async () => {
+  const ctx = buildContext()
+  await setOperatorPassword(ctx.paths, 'pw')
+  await withStudioServer(ctx, async (baseUrl) => {
+    for (const header of ['', 'Bearer', 'Bearer   ', 'Basic abc', 'Bearer not-a-token']) {
+      const res = await call(baseUrl, 'GET', '/v1/projects', { headers: { authorization: header } })
+      assert.equal(res.status, 401, `header ${JSON.stringify(header)} must be refused`)
+    }
+  })
+})
 
 test('POST /studio/login with the wrong password fails with a generic message', async () => {
   const ctx = buildContext()

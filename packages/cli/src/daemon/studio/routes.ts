@@ -23,6 +23,7 @@
 import { HobbyError } from '@hobby.sh/core'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { DaemonContext } from '../context.js'
+import { issueToken, readBearerToken, verifyToken } from './tokens.js'
 import { DUMMY_CREDENTIAL_HASH, LoginThrottle, readOperatorCredential, verifyPassword } from './auth.js'
 import { readSessionCookie, serializeClearCookie, serializeSessionCookie, SessionStore } from './session.js'
 import { resolveStudioDistDir, serveStudioStatic } from './static.js'
@@ -256,6 +257,42 @@ function sessionHandler(ctx: DaemonContext, req: IncomingMessage): RouteResult {
 // renders (which only ever carries status and body): login and logout are
 // the two handlers that need to attach a Set-Cookie header alongside a JSON
 // body, so each sets it on `res` itself before returning.
+// POST /studio/token, the CLI's half of login (ADR 0018). Same password, same
+// throttle, same deliberately indistinguishable failure as the browser login
+// above: this route must not become an oracle for whether a credential exists
+// just because it returns a different kind of success.
+//
+// Deliberately not reachable with a token. A token cannot mint another token,
+// so a leaked one cannot be used to quietly issue a second credential that
+// survives revoking the first.
+async function tokenHandler(ctx: DaemonContext, req: IncomingMessage): Promise<RouteResult> {
+  const state = stateFor(ctx)
+  const key = remoteKey(req)
+  state.throttle.check(key)
+
+  const body = await readJsonBody(req)
+  const password = isRecord(body) ? body['password'] : undefined
+  const name = isRecord(body) ? body['name'] : undefined
+  if (typeof password !== 'string' || password.length === 0) {
+    throw new HobbyError('usage', 'password is required', 'POST /studio/token expects { "password": string, "name": string }')
+  }
+  if (typeof name !== 'string' || name.trim().length === 0) {
+    throw new HobbyError('usage', 'name is required', 'a token is named so it can be revoked by name later')
+  }
+
+  const stored = readOperatorCredential(ctx.paths)
+  const ok = await verifyPassword(password, stored ?? DUMMY_CREDENTIAL_HASH)
+  if (!ok || stored === null) {
+    state.throttle.fail(key)
+    throw new HobbyError('unauthorized', 'invalid credentials')
+  }
+  state.throttle.succeed(key)
+
+  const token = await issueToken(ctx.paths, name)
+  // The only time the plaintext exists outside the caller's memory.
+  return { status: 200, body: { token, name: name.trim() } }
+}
+
 export function mountStudioRoutes(app: Router, ctx: DaemonContext): void {
   // Ensures state exists for this ctx immediately, so the very first
   // request (whichever route it hits first) is never the thing that lazily
@@ -267,6 +304,8 @@ export function mountStudioRoutes(app: Router, ctx: DaemonContext): void {
   app.add('POST', '/studio/logout', (routeCtx, req, res) => Promise.resolve(logoutHandler(routeCtx, req, res)))
 
   app.add('GET', '/studio/session', (routeCtx, req) => Promise.resolve(sessionHandler(routeCtx, req)))
+
+  app.add('POST', '/studio/token', (routeCtx, req) => tokenHandler(routeCtx, req))
 }
 
 // Every path an unauthenticated request may reach on the studio-fronted TCP
@@ -278,14 +317,27 @@ export function mountStudioRoutes(app: Router, ctx: DaemonContext): void {
 // required already being authenticated it could never usefully answer "no."
 // Everything else, without exception, needs a session: this list is the
 // entire exception surface, and the gate is default-deny around it.
-const UNAUTHENTICATED_PATHS = new Set(['studio/login', 'studio/logout', 'studio/session', 'v1/health'])
+const UNAUTHENTICATED_PATHS = new Set(['studio/login', 'studio/logout', 'studio/session', 'studio/token', 'v1/health'])
 
-export function isAuthenticated(ctx: DaemonContext, req: IncomingMessage): boolean {
-  const token = readSessionCookie(req)
-  if (token === null) {
+// One gate for two credentials (ADR 0018). A browser presents the session
+// cookie; a CLI presents an API token as a bearer header. Both end here rather
+// than each getting its own check, so there is a single place that can be
+// wrong and a single place to read when asking what is protected.
+//
+// The cookie is tried first because it is the cheap, in-memory path: a token
+// costs an argon2 verify per stored token, and a browser making many requests
+// should not pay that on every one.
+export async function isAuthenticated(ctx: DaemonContext, req: IncomingMessage): Promise<boolean> {
+  const cookie = readSessionCookie(req)
+  if (cookie !== null && stateFor(ctx).sessions.verify(cookie)) {
+    return true
+  }
+
+  const bearer = readBearerToken(req.headers.authorization)
+  if (bearer === null) {
     return false
   }
-  return stateFor(ctx).sessions.verify(token)
+  return verifyToken(ctx.paths, bearer)
 }
 
 // Reduces a request to exactly the identity ../routes.ts's `dispatch` routes
@@ -469,7 +521,7 @@ async function handle(
     return
   }
 
-  if (!isAuthenticated(ctx, req)) {
+  if (!(await isAuthenticated(ctx, req))) {
     sendJson(res, 401, { error: { code: 'unauthorized', message: 'authentication required' } })
     return
   }
