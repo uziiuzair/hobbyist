@@ -49,6 +49,23 @@ const year = 2026
       type="font/woff2"
       crossorigin
     />
+
+    <!-- Google tag (gtag.js). is:inline on both tags is required: without it
+         Astro bundles and hoists the snippet, which breaks the ordering gtag
+         depends on. -->
+    <script
+      is:inline
+      async
+      src="https://www.googletagmanager.com/gtag/js?id=G-PYGZJTQPBG"></script>
+    <script is:inline>
+      window.dataLayer = window.dataLayer || []
+      function gtag() {
+        dataLayer.push(arguments)
+      }
+      gtag('js', new Date())
+
+      gtag('config', 'G-PYGZJTQPBG')
+    </script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
