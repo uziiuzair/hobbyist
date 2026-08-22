@@ -818,6 +818,24 @@ function realHttpServer(status: number): Promise<{ server: Server; port: number 
   })
 }
 
+// A port nothing is listening on, obtained by having the OS allocate one and
+// then releasing it, rather than by assuming some other port plus one is free.
+//
+// The assume-plus-one version was flaky: it took an ephemeral port for the main
+// server and used port + 1 for the control port, which another concurrently
+// running test suite can perfectly well be holding. Under six parallel runs of
+// this suite it failed with "the main port answers but nothing is listening on
+// the control port yet", because something was.
+//
+// This still has a theoretical window between close and use, but the port was
+// allocated to this process rather than guessed, which is the difference that
+// matters.
+async function reservedFreePort(): Promise<number> {
+  const { server, port } = await realHttpServer(200)
+  await closeServer(server)
+  return port
+}
+
 function closeServer(server: Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()))
 }
@@ -837,10 +855,12 @@ test('readiness requires the control port too, once the worker declares a queue 
   const { server: mainServer, port: hostPort } = await realHttpServer(200)
 
   try {
+    const controlPort = await reservedFreePort()
     const config = sampleWorkerConfig({
       hostPort,
       // Nothing is listening here yet, which is the first assertion below.
-      controlPort: hostPort + 1,
+      // Reserved rather than hostPort + 1: see reservedFreePort.
+      controlPort,
       manifest: sampleWorkerManifest({
         queues: {
           producers: [],
@@ -891,11 +911,13 @@ test('readiness does not wait on the control port for a worker with no queue bin
   const { server: mainServer, port: hostPort } = await realHttpServer(200)
 
   try {
+    const controlPort = await reservedFreePort()
     const config = sampleWorkerConfig({
       hostPort,
       // Nothing is listening here, and nothing should ever have to be: this
-      // worker declares no producer and no consumer.
-      controlPort: hostPort + 1,
+      // worker declares no producer and no consumer. Reserved rather than
+      // hostPort + 1 for the same reason as the test above.
+      controlPort,
       manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [] } }),
     })
     const created = deps.store.createResource({ projectId: project.id, kind: 'worker', name: 'api', config })
