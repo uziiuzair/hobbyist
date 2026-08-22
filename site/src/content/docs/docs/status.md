@@ -70,6 +70,28 @@ this is aimed at. There the copy is a real copy, which is correct but slow and
 costs full disk space. `hobby init` detects it and warns rather than failing.
 [Filesystem requirements](/docs/reference/filesystems/).
 
+### The Postgres proxy binds every interface
+
+The proxy listens on all interfaces and there is no setting to change it:
+`packages/proxy/src/proxy.ts:611` defaults to `0.0.0.0` and the daemon never
+passes a host. On a cloud VM with a public address and no firewall, that puts
+Postgres on the internet, and the proxy answers an `SSLRequest` with `N`, so
+there is no TLS and credentials cross in cleartext.
+
+Measured on two DigitalOcean droplets on 2026-08-22, both reachable from the
+open internet on 5432. Until this is fixed, firewall the port or keep the box
+off a public network.
+[The finding](https://github.com/uziiuzair/hobbyist/blob/main/docs/proxy/research/2026-08-22-the-proxy-binds-every-interface.md).
+
+### The queue producer break has a second half
+
+Previously recorded as one bug, the container not resolving
+`host.docker.internal`. Measured on Linux, the daemon is not listening on the
+project's bridge gateway either, because that address set is a snapshot taken at
+daemon startup and every project created afterwards misses it. Both halves have
+to be fixed for a producer to work.
+[The finding](https://github.com/uziiuzair/hobbyist/blob/main/docs/queues/research/2026-08-22-the-producer-path-on-real-linux.md).
+
 ## Not reachable
 
 ### Snapshots
