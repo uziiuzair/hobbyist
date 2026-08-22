@@ -39,7 +39,7 @@ Start the daemon from the directory holding your `hobby.json`.
 |---|---|---|---|
 | `image` | | `postgres:18-alpine` | The Postgres image |
 | `proxyPort` | `HOBBY_PROXY_PORT` | `5432` | Where the wire-protocol proxy listens |
-| `studioPort` | `HOBBY_STUDIO_PORT` | `8443` | Studio |
+| `studioPort` | `HOBBY_STUDIO_PORT` | `8443` | **Nothing listens on this.** Studio is served by the daemon on `apiPort`. The value is only used by a preflight port check |
 | `apiPort` | | `7432` | The daemon API, loopback only |
 | `httpPort` | | `7433` | The HTTP wake router |
 | `queuePort` | | `7434` | The queue endpoint |

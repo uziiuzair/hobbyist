@@ -104,10 +104,9 @@ OrbStack and unmeasured on Docker Desktop for macOS.
 | Port | What | Exposure |
 |---|---|---|
 | 5432 | Postgres proxy | Whatever you bind it to |
-| 7432 | Daemon API | Loopback only |
+| 7432 | Daemon API **and Studio** | Loopback only |
 | 7433 | HTTP wake router | Behind Caddy |
 | 7434 | Queue endpoint | Loopback and the project bridge |
-| 8443 | Studio | Network, deliberately |
 | 2019 | Caddy admin | Loopback only |
 
 Every one of them is overridable. [Configuration](/docs/reference/configuration/).
