@@ -1609,9 +1609,15 @@ export async function cmdUpdate(io: Io, paths: Paths, flags: Flags): Promise<num
     return 0
   }
 
-  // Refuse rather than discard. A checkout with local edits is someone's work,
+  // Tracked modifications only. `bun install` leaves an untracked bun.lock in
+  // every built checkout, so counting untracked files here made update refuse
+  // on any box that had ever been built, which is all of them. A checkout
+  // cannot lose an untracked file anyway; if one collides with a path the new
+  // tag adds, git says so itself.
+  //
+  // Refuse rather than discard: a checkout with local edits is someone's work,
   // even under ~/.hobby/src.
-  if (git(['status', '--porcelain']).length > 0) {
+  if (git(['status', '--porcelain', '--untracked-files=no']).length > 0) {
     throw new HobbyError(
       'conflict',
       `${src} has uncommitted changes`,
