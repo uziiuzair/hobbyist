@@ -39,6 +39,8 @@ Start the daemon from the directory holding your `hobby.json`.
 |---|---|---|---|
 | `image` | | `postgres:18-alpine` | The Postgres image |
 | `proxyPort` | `HOBBY_PROXY_PORT` | `5432` | Where the wire-protocol proxy listens |
+| `proxyHost` | `HOBBY_PROXY_HOST` | `127.0.0.1` | Which addresses it binds. An address, `"tailnet"`, or `"all"`. See below |
+| `project` | | `null` | Which project this directory belongs to. Written by `hobby link` |
 | `studioPort` | `HOBBY_STUDIO_PORT` | `8443` | **Nothing listens on this.** Studio is served by the daemon on `apiPort`. The value is only used by a preflight port check |
 | `apiPort` | | `7432` | The daemon API, loopback only |
 | `httpPort` | | `7433` | The HTTP wake router |
@@ -60,6 +62,31 @@ A minimal `hobby.json`:
   "domain": "example.com"
 }
 ```
+
+## Reaching a database from another machine
+
+`proxyHost` decides what the Postgres proxy binds, and it defaults to loopback.
+
+| Value | Binds |
+|---|---|
+| `"127.0.0.1"` (default) | Loopback only. Nothing off the box can connect |
+| `"tailnet"` | Loopback **and** this machine's Tailscale address |
+| `"all"` | Every interface |
+| any address | That address literally |
+
+`"tailnet"` is the recommended setting for a box you want to reach from your
+laptop. It binds loopback as well, because `hobby connect` builds its string
+against `127.0.0.1` and would otherwise stop working on the box itself.
+
+:::danger[`"all"` puts Postgres on the internet]
+The proxy speaks no TLS. It answers an `SSLRequest` with `N`, so anything
+connecting across a network sends its password in cleartext. On a cloud VM with
+a public address and no firewall, `"all"` means anyone can reach your database.
+
+Two boxes installed from `hobby.sh/install` were measured in exactly that state
+on 2026-08-22, which is why the default changed.
+[ADR 0017](/docs/decisions/0017-the-proxy-binds-loopback-by-default/).
+:::
 
 ## Paths
 
