@@ -1588,7 +1588,12 @@ export async function cmdUpdate(io: Io, paths: Paths, flags: Flags): Promise<num
   const before = git(['rev-parse', '--short', 'HEAD'])
 
   io.err('==> Fetching releases')
-  git(['fetch', '--tags', '--quiet', 'origin'])
+  // --force because the remote decides what a tag points at. Without it, a tag
+  // that was moved (a release re-cut before anyone had it) makes fetch refuse
+  // with "would clobber existing tag" and update dies for a reason the user
+  // cannot act on. Measured: retagging a release broke update on a box holding
+  // the old ref.
+  git(['fetch', '--tags', '--force', '--quiet', 'origin'])
 
   // Sorted by version, newest last, so this picks the highest tag rather than
   // the most recently created one.
