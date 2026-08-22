@@ -65,6 +65,19 @@ export default defineConfig({
         { tag: 'link', attrs: { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' } },
         { tag: 'meta', attrs: { property: 'og:image', content: 'https://hobbyist.sh/og.png' } },
         { tag: 'meta', attrs: { name: 'twitter:card', content: 'summary_large_image' } },
+        // Google tag (gtag.js). Starlight renders its own shell, so the copy
+        // in layouts/Base.astro does not reach any page under /docs/. These
+        // two entries are that same snippet, in the order gtag needs: the
+        // async loader first, then the dataLayer bootstrap.
+        {
+          tag: 'script',
+          attrs: { async: true, src: 'https://www.googletagmanager.com/gtag/js?id=G-PYGZJTQPBG' },
+        },
+        {
+          tag: 'script',
+          content:
+            "window.dataLayer = window.dataLayer || [];\nfunction gtag(){dataLayer.push(arguments);}\ngtag('js', new Date());\ngtag('config', 'G-PYGZJTQPBG');",
+        },
       ],
     }),
     sitemap(),
