@@ -7,7 +7,8 @@
 // constructs a real, process-backed Io.
 
 import { resolveConfig, resolvePaths, HobbyError } from '@hobby.sh/core'
-import { createApi, DaemonUnreachableError } from './client.js'
+import { createApi, createRemoteClient, DaemonUnreachableError } from './client.js'
+import { activeRemote } from './remote.js'
 import {
   cmdConnect,
   cmdDaemon,
@@ -16,8 +17,14 @@ import {
   cmdDeploy,
   cmdEject,
   cmdInit,
+  cmdLink,
+  cmdLogin,
+  cmdLogout,
   cmdLogs,
   cmdLs,
+  cmdRemote,
+  cmdToken,
+  cmdUpdate,
   cmdNew,
   cmdPg,
   cmdPin,
@@ -149,6 +156,14 @@ function printHelp(io: Io): void {
   io.out('  hobby queue purge <target>             delete every message, with confirmation')
   io.out('  hobby queue rm <target> [--yes]        destroy the queue, with confirmation')
   io.out('  hobby queue set <target> --retention <seconds>   change how long messages are kept')
+  io.out('  hobby login <url>                     connect this machine to a box')
+  io.out('  hobby logout [url]                    forget a box')
+  io.out('  hobby remote ls                       which boxes this machine knows')
+  io.out('  hobby link <project>                  point this directory at a project')
+  io.out('  hobby token create <name>             a token for another machine')
+  io.out('  hobby token ls                        tokens this box has issued')
+  io.out('  hobby token rm <name>                 revoke one')
+  io.out('  hobby update                          update to the latest release')
   io.out('  hobby studio passwd                   set the studio operator password')
   io.out('  hobby studio                          print the studio URL and open it')
   io.out('')
@@ -209,6 +224,32 @@ export async function run(argv: string[], io: Io): Promise<number> {
     // paths and config to build the URL and check whether a credential
     // exists. Neither belongs after the api client is constructed, same
     // reasoning as init and daemon above.
+    // Talk to no daemon: login is how a credential is obtained in the first
+    // place, and logout and remote only touch local files.
+    if (cmd === 'login') {
+      const { positionals, flags } = parseArgs(rest, { bool: ['json'], value: ['name'] })
+      return await cmdLogin(io, paths, positionals, flags)
+    }
+    if (cmd === 'logout') {
+      const { positionals } = parseArgs(rest, {})
+      return cmdLogout(io, paths, positionals)
+    }
+    if (cmd === 'remote') {
+      const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+      return cmdRemote(io, paths, positionals, flags)
+    }
+
+    // Local by definition: both manage this box's own files and neither
+    // should ever be reachable with a token from another machine.
+    if (cmd === 'token') {
+      const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+      return await cmdToken(io, paths, positionals, flags)
+    }
+    if (cmd === 'update') {
+      const { flags } = parseArgs(rest, { bool: ['json', 'check'] })
+      return await cmdUpdate(io, paths, flags)
+    }
+
     if (cmd === 'studio') {
       const sub = rest[0]
       if (sub === 'passwd') {
@@ -222,7 +263,11 @@ export async function run(argv: string[], io: Io): Promise<number> {
       return cmdStudio(io, paths, config)
     }
 
-    const api = createApi(paths.socketPath)
+    // ADR 0018: the same Api over either transport. A configured remote wins;
+    // with none, this is the unix socket exactly as before, so a local install
+    // behaves identically to how it always has.
+    const remote = activeRemote(paths, io.env)
+    const api = remote === null ? createApi(paths.socketPath) : createApi(createRemoteClient(remote.url, remote.token))
     const ctx: Ctx = { io, api, paths, config }
 
     switch (cmd) {
@@ -276,6 +321,10 @@ export async function run(argv: string[], io: Io): Promise<number> {
           value: ['project', 'name', 'port', 'kind'],
         })
         return await cmdDeploy(ctx, positionals, flags)
+      }
+      case 'link': {
+        const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+        return await cmdLink(ctx, positionals, flags)
       }
       case 'adopt': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json'] })

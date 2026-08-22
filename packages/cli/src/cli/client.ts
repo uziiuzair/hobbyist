@@ -11,6 +11,7 @@
 // file ever touches raw HTTP.
 
 import http from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { HobbyError, type ErrorCode, type Project } from '@hobby.sh/core'
 import type { WireResource } from '../daemon/wire.js'
 
@@ -299,8 +300,78 @@ export interface Api {
   setRetention(id: string, retentionSeconds: number): Promise<ResourceResponse>
 }
 
-export function createApi(socketPath: string): Api {
-  const client = createClient(socketPath)
+// Accepts a transport rather than only a socket path (ADR 0018). Every verb
+// above this line is unchanged and unaware: the remote CLI works because both
+// transports speak the same API, which is the seam the root CLAUDE.md names as
+// the reason the CLI and MCP cannot diverge. A string is still accepted so the
+// twenty-odd existing call sites and their tests did not have to move.
+// The remote transport (ADR 0018). Same DaemonClient shape as the unix socket
+// one above, so everything built on it is unchanged.
+//
+// The token is a bearer credential with no transport security of its own, so
+// this refuses a plain-http remote unless it is loopback: sending a credential
+// that grants create and destroy on every database over cleartext, to a URL a
+// user typed, is not a mistake worth allowing quietly. Loopback is exempt
+// because a tunnel terminating locally is the documented setup and never
+// crosses a wire.
+export function createRemoteClient(baseUrl: string, token: string): DaemonClient {
+  const url = new URL(baseUrl)
+  const loopback = url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1'
+  if (url.protocol !== 'https:' && !loopback) {
+    throw new HobbyError(
+      'usage',
+      `refusing to send a token to ${url.origin} over plain http`,
+      'Use https, or a tunnel that terminates on loopback. An API token can create and destroy every database on the box.'
+    )
+  }
+
+  const driver = url.protocol === 'https:' ? httpsRequest : http.request
+
+  return {
+    request(method: string, path: string, body?: unknown): Promise<RawResponse> {
+      return new Promise((resolve, reject) => {
+        const payload = body === undefined ? undefined : JSON.stringify(body)
+        const req = driver(
+          {
+            protocol: url.protocol,
+            hostname: url.hostname,
+            port: url.port,
+            method,
+            path,
+            headers: {
+              authorization: `Bearer ${token}`,
+              ...(payload === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }),
+            },
+          },
+          (res) => {
+            const chunks: Buffer[] = []
+            res.on('data', (chunk: Buffer) => chunks.push(chunk))
+            res.on('end', () => {
+              const text = Buffer.concat(chunks).toString('utf8')
+              let parsed: unknown = null
+              if (text.length > 0) {
+                try {
+                  parsed = JSON.parse(text)
+                } catch {
+                  parsed = text
+                }
+              }
+              resolve({ status: res.statusCode ?? 0, body: parsed })
+            })
+          }
+        )
+        req.on('error', (err: unknown) => {
+          reject(new DaemonUnreachableError(`cannot reach the hobby daemon at ${url.origin}: ${errorMessage(err)}`))
+        })
+        if (payload !== undefined) req.write(payload)
+        req.end()
+      })
+    },
+  }
+}
+
+export function createApi(transport: string | DaemonClient): Api {
+  const client = typeof transport === 'string' ? createClient(transport) : transport
   const p = (segment: string): string => encodeURIComponent(segment)
 
   return {

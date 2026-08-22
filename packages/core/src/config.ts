@@ -129,6 +129,9 @@ export interface HobbyConfig {
   // catch-all, which is correct for a box that runs apps and does not
   // want its control plane on the network.
   caddyStudioHost: string | null
+  // The project this directory belongs to, written by `hobby link` (ADR 0018).
+  // Null means unlinked, and commands that need a project ask for one.
+  project: string | null
 }
 
 const DEFAULT_CONFIG: HobbyConfig = {
@@ -146,6 +149,7 @@ const DEFAULT_CONFIG: HobbyConfig = {
   caddyEnabled: false,
   caddyAdminPort: 2019,
   caddyStudioHost: null,
+  project: null,
 }
 
 function findConfigFile(cwd: string): string | null {

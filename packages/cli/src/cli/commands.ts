@@ -8,8 +8,9 @@
 // for a failure path.
 
 import { spawn, spawnSync } from 'node:child_process'
+import { hostname } from 'node:os'
 import { existsSync } from 'node:fs'
-import { chmod, mkdir, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, join as joinPath, resolve as resolvePath } from 'node:path'
 import {
   HobbyError,
@@ -25,8 +26,10 @@ import { reconcile } from '../daemon/reconcile.js'
 import { acquireDaemonLock } from '../daemon/single-instance.js'
 import { startDaemon } from '../daemon/server.js'
 import { hasOperatorCredential, setOperatorPassword } from '../daemon/studio/auth.js'
+import { issueToken, readTokens, revokeToken } from '../daemon/studio/tokens.js'
 import type { WireResource } from '../daemon/wire.js'
-import type { Api } from './client.js'
+import { createRemoteClient, type Api } from './client.js'
+import { forgetRemote, listRemotes, saveRemote } from './remote.js'
 import { exitCodeForError } from './exit.js'
 import {
   hostNetworkingWarning,
@@ -597,6 +600,13 @@ export async function cmdLs(c: Ctx, flags: Flags): Promise<number> {
   return 0
 }
 
+// --project, or the project this directory is linked to (ADR 0018), in that
+// order. An explicit flag always wins, so a linked directory never silently
+// overrides what someone typed.
+function projectFrom(c: Ctx, flags: Flags): string | undefined {
+  return flagString(flags, 'project') ?? c.config.project ?? undefined
+}
+
 export type CreatableKind = 'postgres' | 'app' | 'worker'
 
 // One call to the one route (`POST /v1/projects/:name/resources`, body
@@ -636,7 +646,7 @@ export async function cmdCreate(c: Ctx, positionals: string[], flags: Flags): Pr
   if (typeof name !== 'string' || name.length === 0) {
     throw new UsageError('usage: hobby create <kind> <name> --project <project>')
   }
-  const project = flagString(flags, 'project')
+  const project = projectFrom(c, flags)
   if (project === undefined) {
     throw new UsageError('usage: hobby create <kind> <name> --project <project>')
   }
@@ -652,7 +662,7 @@ export async function cmdPg(c: Ctx, positionals: string[], flags: Flags): Promis
     throw new UsageError(`usage: hobby pg create --project <project> <name>${sub === undefined ? '' : ` (got: ${sub})`}`)
   }
   const name = positionals[1]
-  const project = flagString(flags, 'project')
+  const project = projectFrom(c, flags)
   if (project === undefined || name === undefined) {
     throw new UsageError('usage: hobby pg create --project <project> <name>')
   }
@@ -937,7 +947,7 @@ export async function cmdQueueCreate(c: Ctx, positionals: string[], flags: Flags
   if (typeof name !== 'string' || name.length === 0) {
     throw new UsageError('usage: hobby queue create <name> --project <project>')
   }
-  const project = flagString(flags, 'project')
+  const project = projectFrom(c, flags)
   if (project === undefined) {
     throw new UsageError('usage: hobby queue create <name> --project <project>')
   }
@@ -1341,5 +1351,290 @@ export function cmdStudio(io: Io, paths: Paths, config: HobbyConfig, openBrowser
 
   io.out(url)
   openBrowser(url)
+  return 0
+}
+
+// --- remote access (ADR 0018) ---------------------------------------------
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+// `hobby login <url>`: exchange the operator password for a token and store it.
+//
+// The password is read through Io.readLine with silent: true, the same path
+// `hobby studio passwd` uses, so it never appears on screen, in scrollback, or
+// in a terminal recording, and never becomes an argv element any process list
+// can read.
+export async function cmdLogin(
+  io: Io,
+  paths: Paths,
+  positionals: string[],
+  flags: Flags
+): Promise<number> {
+  const raw = positionals[0]
+  if (raw === undefined) {
+    throw new UsageError('usage: hobby login <url>')
+  }
+
+  let url: URL
+  try {
+    url = new URL(raw.includes('://') ? raw : `https://${raw}`)
+  } catch {
+    throw new UsageError(`not a url: ${raw}`)
+  }
+  const origin = url.origin
+
+  const name = flagString(flags, 'name') ?? `${hostname()}-${Date.now().toString(36)}`
+
+  io.err(`password for ${origin}: `)
+  const password = await io.readLine({ silent: true })
+  if (password.length === 0) {
+    throw new HobbyError('usage', 'no password given')
+  }
+
+  // Unauthenticated by definition: this is the call that gets the credential,
+  // so it goes through a transport with no token attached.
+  const anon = createRemoteClient(origin, '')
+  const res = await anon.request('POST', '/studio/token', { password, name })
+
+  if (res.status === 401) {
+    throw new HobbyError('unauthorized', 'invalid credentials', 'the password is the one set by `hobby studio passwd` on that box')
+  }
+  if (res.status >= 400) {
+    throw new HobbyError('internal', `login failed with status ${res.status}`)
+  }
+
+  const token = isRecord(res.body) ? res.body['token'] : undefined
+  if (typeof token !== 'string') {
+    throw new HobbyError('internal', 'the daemon did not return a token')
+  }
+
+  saveRemote(paths, { url: origin, token, name, addedAt: new Date().toISOString() })
+
+  if (flags.json === true) {
+    io.out(JSON.stringify({ url: origin, name }))
+  } else {
+    io.out(`logged in to ${origin} as ${name}`)
+    io.out('every command now runs against that box. `hobby logout` to stop.')
+  }
+  return 0
+}
+
+// `hobby logout [url]`: forget a remote. The token stays valid on the box
+// until it is revoked there, and this says so rather than implying otherwise.
+export function cmdLogout(io: Io, paths: Paths, positionals: string[]): number {
+  const forgotten = forgetRemote(paths, positionals[0] ?? null)
+  if (forgotten === null) {
+    io.err('not logged in to anything')
+    return 1
+  }
+  io.out(`forgot ${forgotten}`)
+  io.out(`the token is still valid on that box. revoke it there with \`hobby token rm\` if it should not be.`)
+  return 0
+}
+
+export function cmdRemote(io: Io, paths: Paths, positionals: string[], flags: Flags): number {
+  const sub = positionals[0] ?? 'ls'
+  if (sub !== 'ls') {
+    throw new UsageError(`unknown remote subcommand: ${sub}`)
+  }
+  const { current, remotes } = listRemotes(paths)
+  if (flags.json === true) {
+    io.out(JSON.stringify({ current, remotes: remotes.map((r) => ({ url: r.url, name: r.name, addedAt: r.addedAt })) }))
+    return 0
+  }
+  if (remotes.length === 0) {
+    io.out('no remotes. `hobby login <url>` to add one.')
+    return 0
+  }
+  for (const r of remotes) {
+    io.out(`${r.url === current ? '*' : ' '} ${r.url}  ${r.name}`)
+  }
+  return 0
+}
+
+// `hobby link <project>`: write the project name into the hobby.json this
+// directory resolves to, so commands below it stop needing --project.
+//
+// The file written is the one resolveConfig already reads by walking up from
+// cwd (packages/core/src/config.ts), which is the same file that carries
+// proxyHost and the rest. One project file, not a second one.
+export async function cmdLink(
+  c: Ctx,
+  positionals: string[],
+  flags: Flags
+): Promise<number> {
+  const name = positionals[0]
+  if (name === undefined) {
+    throw new UsageError('usage: hobby link <project>')
+  }
+
+  // Fail if the project is not there, rather than writing a file that points
+  // at nothing and letting the next command produce the confusing error.
+  await c.api.getProject(name)
+
+  const target = joinPath(c.io.cwd, 'hobby.json')
+  let existing: Record<string, unknown> = {}
+  if (existsSync(target)) {
+    try {
+      const parsed: unknown = JSON.parse(await readFile(target, 'utf8'))
+      if (isRecord(parsed)) existing = parsed
+    } catch {
+      throw new HobbyError('usage', `${target} is not valid json`, 'fix or remove it, then run this again')
+    }
+  }
+
+  existing['project'] = name
+  await writeFile(target, `${JSON.stringify(existing, null, 2)}\n`)
+
+  if (flags.json === true) {
+    c.io.out(JSON.stringify({ project: name, file: target }))
+  } else {
+    c.io.out(`${target} now points at ${name}`)
+    c.io.out('commands run from here default to that project.')
+  }
+  return 0
+}
+
+// `hobby token create|ls|rm`: the box side of ADR 0018. Deliberately local
+// only, reached through the unix socket, so tokens are minted by someone with
+// shell access on the box rather than by anyone holding an existing token.
+export async function cmdToken(
+  io: Io,
+  paths: Paths,
+  positionals: string[],
+  flags: Flags
+): Promise<number> {
+  const sub = positionals[0]
+
+  if (sub === 'create') {
+    const name = positionals[1]
+    if (name === undefined) {
+      throw new UsageError('usage: hobby token create <name>')
+    }
+    const token = await issueToken(paths, name)
+    if (flags.json === true) {
+      io.out(JSON.stringify({ name, token }))
+    } else {
+      io.out(token)
+      io.err('')
+      io.err('this is the only time it is shown. store it now.')
+      io.err(`on the other machine: hobby login <url>, or set it directly.`)
+    }
+    return 0
+  }
+
+  if (sub === 'ls' || sub === undefined) {
+    const tokens = readTokens(paths)
+    if (flags.json === true) {
+      io.out(JSON.stringify(tokens.map(({ name, createdAt, tail }) => ({ name, createdAt, tail }))))
+      return 0
+    }
+    if (tokens.length === 0) {
+      io.out('no tokens. `hobby token create <name>` to make one.')
+      return 0
+    }
+    for (const t of tokens) {
+      io.out(`${t.name}  ...${t.tail}  ${t.createdAt}`)
+    }
+    return 0
+  }
+
+  if (sub === 'rm') {
+    const name = positionals[1]
+    if (name === undefined) {
+      throw new UsageError('usage: hobby token rm <name>')
+    }
+    if (!revokeToken(paths, name)) {
+      throw new HobbyError('resource_not_found', `no token named ${name}`, 'run `hobby token ls` to see them')
+    }
+    io.out(`revoked ${name}`)
+    io.out('any machine holding it is locked out immediately.')
+    return 0
+  }
+
+  throw new UsageError(`usage: hobby token <create|ls|rm> ... (got: ${sub})`)
+}
+
+// `hobby update`: fetch the newest release and rebuild in place.
+//
+// Deliberately a thin wrapper over the checkout rather than a downloader of
+// binaries. install.sh already knows how to build and install a launcher, and
+// scripts/web-install.sh already knows how to move a checkout forward, so this
+// reuses both instead of inventing a third path that can drift from them.
+//
+// Runs against tags, not main. Someone typing `hobby update` is asking for the
+// newest release, and main is whatever was merged an hour ago.
+export async function cmdUpdate(io: Io, paths: Paths, flags: Flags): Promise<number> {
+  const src = process.env.HOBBY_SRC_DIR ?? joinPath(paths.home, 'src')
+
+  if (!existsSync(joinPath(src, '.git'))) {
+    throw new HobbyError(
+      'usage',
+      `${src} is not a checkout, so there is nothing to update`,
+      'if you installed somewhere else, set HOBBY_SRC_DIR to it'
+    )
+  }
+
+  const git = (args: string[]): string => {
+    const res = spawnSync('git', ['-C', src, ...args], { encoding: 'utf8' })
+    if (res.status !== 0) {
+      throw new HobbyError('internal', `git ${args[0]} failed`, (res.stderr || '').trim() || undefined)
+    }
+    return (res.stdout || '').trim()
+  }
+
+  const before = git(['rev-parse', '--short', 'HEAD'])
+
+  io.err('==> Fetching releases')
+  git(['fetch', '--tags', '--quiet', 'origin'])
+
+  // Sorted by version, newest last, so this picks the highest tag rather than
+  // the most recently created one.
+  const tags = git(['tag', '--list', 'v*', '--sort=v:refname']).split('\n').filter((t) => t.length > 0)
+  const latest = tags[tags.length - 1]
+  if (latest === undefined) {
+    throw new HobbyError('internal', 'no release tags found', 'the remote has no v* tags to update to')
+  }
+
+  const current = git(['describe', '--tags', '--exact-match']).length > 0 ? git(['describe', '--tags', '--exact-match']) : null
+  if (current === latest) {
+    io.out(`already on ${latest}`)
+    return 0
+  }
+
+  if (flags['check'] === true) {
+    io.out(latest)
+    return 0
+  }
+
+  // Refuse rather than discard. A checkout with local edits is someone's work,
+  // even under ~/.hobby/src.
+  if (git(['status', '--porcelain']).length > 0) {
+    throw new HobbyError(
+      'conflict',
+      `${src} has uncommitted changes`,
+      'commit or stash them, then run this again'
+    )
+  }
+
+  io.err(`==> Updating to ${latest}`)
+  git(['checkout', '--quiet', latest])
+
+  io.err('==> Rebuilding')
+  const build = spawnSync(joinPath(src, 'install.sh'), [], { stdio: 'inherit', cwd: src, env: process.env })
+  if (build.status !== 0) {
+    // The checkout has already moved, so say so: leaving someone believing
+    // they are still on the old version would be worse than the failure.
+    throw new HobbyError(
+      'internal',
+      'the rebuild failed',
+      `the checkout is now at ${latest}. Fix the error above and run ${src}/install.sh again.`
+    )
+  }
+
+  io.out(`updated ${before} -> ${latest}`)
+  io.out('restart the daemon for it to take effect.')
   return 0
 }
