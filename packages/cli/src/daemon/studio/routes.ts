@@ -361,6 +361,7 @@ export function createStudioApp(
   const studioDistDir = opts.studioDistDir ?? resolveStudioDistDir()
 
   return (req, res) => {
+    applySecurityHeaders(req, res)
     handle(ctx, router, req, res, next, studioDistDir).catch((err: unknown) => {
       console.error(`studio: request handling failed outside the normal error path: ${errorMessage(err)}`)
       if (!res.headersSent) {
@@ -370,6 +371,54 @@ export function createStudioApp(
         res.end(JSON.stringify({ error: { code: 'internal', message: 'internal error' } }))
       }
     })
+  }
+}
+
+// Set on every response this listener produces, static bundle included, before
+// any handler runs. There was previously no security header anywhere: a stored
+// XSS anywhere in Studio's own bundle had nothing standing in its way, and
+// nothing stopped another origin framing the page.
+//
+// The policy is tight because it can be. Studio is a self-contained bundle that
+// loads no third-party script, talks only to its own origin, and embeds nothing:
+// so script-src and connect-src are 'self' and there is no CDN to allow. The
+// one concession is style-src 'unsafe-inline', because the bundler emits inline
+// style attributes; script has no such exemption, which is the half that
+// matters for XSS.
+//
+// frame-ancestors 'none' rather than X-Frame-Options: it is the modern
+// equivalent, it is what CSP-aware browsers honour, and X-Frame-Options is sent
+// alongside only for anything that does not read CSP yet.
+const STUDIO_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'self'",
+  "form-action 'self'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+].join('; ')
+
+export function applySecurityHeaders(req: IncomingMessage, res: ServerResponse): void {
+  res.setHeader('content-security-policy', STUDIO_CSP)
+  res.setHeader('x-content-type-options', 'nosniff')
+  res.setHeader('x-frame-options', 'DENY')
+  res.setHeader('referrer-policy', 'no-referrer')
+  // Nothing here needs a camera, a microphone or a location, and saying so
+  // costs one header.
+  res.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=(), interest-cohort=()')
+
+  // HSTS only when the request actually arrived over TLS. Sending it on plain
+  // http://127.0.0.1 would be at best ignored and at worst would pin loopback
+  // to https for the whole browser profile, which breaks the default local
+  // setup for a user who never asked for TLS.
+  const proto = req.headers['x-forwarded-proto']
+  const overTls = proto === 'https' || (Array.isArray(proto) && proto[0] === 'https')
+  if (overTls) {
+    res.setHeader('strict-transport-security', 'max-age=31536000; includeSubDomains')
   }
 }
 

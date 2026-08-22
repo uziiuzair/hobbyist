@@ -77,16 +77,55 @@ function decodeToken(token: string): Buffer | null {
   return buf
 }
 
+// Sessions expire on two clocks, and a session dies when it hits either.
+//
+// Idle: a session unused for this long is dead, so a cookie captured from a
+// machine somebody has walked away from stops working on its own.
+//
+// Absolute: a session is dead this long after it was issued no matter how
+// active it has been, which bounds the damage from a token that was stolen
+// and is being actively used, because refreshing on use cannot extend it
+// forever.
+//
+// Before this, the store had no expiry at all: a session lived until the
+// daemon process restarted, so a stolen cookie stayed valid indefinitely on a
+// box that stays up, which is exactly the box this is for.
+const IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000
+const ABSOLUTE_TIMEOUT_MS = 30 * 24 * 60 * 60 * 1000
+
+interface SessionRecord {
+  readonly issuedAt: number
+  lastUsedAt: number
+}
+
 // One operator, so at most a handful of concurrent sessions (a few browser
 // tabs or devices) ever exist at once: the linear scan in verify() below is
 // not a scaling concern here the way it would be for a multi-tenant service.
 export class SessionStore {
-  private readonly tokens = new Set<string>()
+  private readonly tokens = new Map<string, SessionRecord>()
+
+  // Injectable so a test can drive expiry without sleeping for twelve hours.
+  constructor(private readonly now: () => number = Date.now) {}
 
   issue(): string {
     const token = randomBytes(TOKEN_BYTES).toString('base64url')
-    this.tokens.add(token)
+    const at = this.now()
+    this.tokens.set(token, { issuedAt: at, lastUsedAt: at })
     return token
+  }
+
+  private expired(record: SessionRecord, at: number): boolean {
+    return at - record.lastUsedAt > IDLE_TIMEOUT_MS || at - record.issuedAt > ABSOLUTE_TIMEOUT_MS
+  }
+
+  // Dropping expired entries on each verify keeps the store from growing
+  // without bound on a daemon that runs for months, with no timer to own.
+  private sweep(at: number): void {
+    for (const [token, record] of this.tokens) {
+      if (this.expired(record, at)) {
+        this.tokens.delete(token)
+      }
+    }
   }
 
   // Never a plain `===` or Set.has() against the raw presented token: a
@@ -103,20 +142,44 @@ export class SessionStore {
     if (candidate === null) {
       return false
     }
-    let found = false
-    for (const stored of this.tokens) {
+    const at = this.now()
+    this.sweep(at)
+
+    // Still a full constant-time scan over every live session: the loop does
+    // not break on a match, and the expiry check happens after the compare so
+    // that a live token and an expired one take the same path here.
+    let matched: string | null = null
+    for (const [stored] of this.tokens) {
       const storedBuf = Buffer.from(stored, 'base64url')
       if (timingSafeEqual(storedBuf, candidate)) {
-        found = true
+        matched = stored
       }
     }
-    return found
+    if (matched === null) {
+      return false
+    }
+
+    // Sliding refresh on the idle clock only. The absolute clock is never
+    // touched, which is what stops an attacker with a live token from holding
+    // it forever simply by using it.
+    const record = this.tokens.get(matched)
+    if (record === undefined) {
+      return false
+    }
+    record.lastUsedAt = at
+    return true
   }
 
   // Called only with a token the caller already owns (its own cookie), never
   // with attacker-supplied input on its own, so a direct Set.delete is fine
   // here: nothing is learned by an attacker from its timing that verify()'s
   // constant-time scan above does not already have to defend against.
+  // Exposed for tests, which is how the sweep is proved to actually drop
+  // entries rather than merely refusing to verify them.
+  get size(): number {
+    return this.tokens.size
+  }
+
   revoke(token: string): void {
     this.tokens.delete(token)
   }
