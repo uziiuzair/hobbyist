@@ -1,0 +1,40 @@
+# A systemd unit for the daemon.
+#
+# `hobby daemon &` dies with the shell that started it, which on a box reached
+# over ssh means the daemon stops when the connection drops. That is fine for
+# trying it out and wrong for a box meant to stay up.
+#
+#   sudo cp scripts/hobby.service /etc/systemd/system/hobby.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now hobby
+#   systemctl status hobby
+#   journalctl -u hobby -f
+#
+# Runs as root by default because the daemon talks to the docker socket, which
+# on most installs is root-owned. To run as another user, add them to the
+# docker group and change User= below.
+
+[Unit]
+Description=Hobbyist daemon
+Documentation=https://hobbyist.sh/docs/
+# Docker is not optional: every resource is a container, so starting before it
+# is ready produces a daemon that cannot do the one thing it exists for.
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Environment=HOME=/root
+ExecStart=/usr/local/bin/hobby daemon
+Restart=on-failure
+RestartSec=5s
+# The daemon holds long-lived connections it is deliberately slow to drop: it
+# drains queues and stops containers in order on shutdown, and killing it
+# partway leaves containers running that the store thinks are stopped.
+TimeoutStopSec=90
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
