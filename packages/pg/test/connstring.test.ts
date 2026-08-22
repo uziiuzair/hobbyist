@@ -64,7 +64,8 @@ test('connectionString renders the resource host port for viaProxy: false', () =
 test('connectionString renders a different port for each viaProxy value given the same opts.proxyPort', () => {
   const project = sampleProject()
   const resource = sampleResource()
-  const opts = { host: 'db.example.com', proxyPort: 5432, viaProxy: true }
+  const opts = { host: 'db.example.com', proxyPort: 5432,
+  proxyHost: '127.0.0.1', viaProxy: true }
 
   const proxied = connectionString(project, resource, opts)
   const direct = connectionString(project, resource, { ...opts, viaProxy: false })

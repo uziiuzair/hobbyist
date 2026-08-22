@@ -30,6 +30,7 @@ import type { Api } from './client.js'
 import { exitCodeForError } from './exit.js'
 import {
   hostNetworkingWarning,
+  proxyBindNote,
   reflinkWarning,
   renderPreflight,
   renderQueueLine,
@@ -209,6 +210,8 @@ export async function cmdInit(io: Io, paths: Paths, config: HobbyConfig, json: b
   if (hostNetworkingIssue !== null) {
     io.err(hostNetworkingIssue)
   }
+
+  io.err(proxyBindNote(config.proxyHost))
 
   if (!report.runtimeAvailable) {
     io.err('the container runtime is not reachable; hobby refuses to continue until it is')

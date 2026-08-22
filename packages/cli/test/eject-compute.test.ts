@@ -35,6 +35,7 @@ function testConfig(): HobbyConfig {
   return {
     image: 'postgres:18-alpine',
     proxyPort: 5432,
+  proxyHost: '127.0.0.1',
     studioPort: 8443,
     apiPort: 7432,
     httpPort: 7433,
