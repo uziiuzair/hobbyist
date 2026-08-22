@@ -84,6 +84,7 @@ function testConfig(): HobbyConfig {
     caddyEnabled: false,
     caddyAdminPort: 2019,
     caddyStudioHost: null,
+    project: null,
   }
 }
 
