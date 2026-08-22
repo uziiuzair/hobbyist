@@ -544,12 +544,18 @@ h3 {
   overflow: hidden;
   margin-top: 0.75rem;
 }
+/* Scaled, not resized. The fill is driven from a requestAnimationFrame loop in
+   WakeDemo.astro, so writing `width` would put a layout pass in every frame of
+   the one animation on the page whose whole argument is that it is fast. */
 .machine__fill {
   display: block;
   height: 100%;
-  width: 0%;
+  width: 100%;
+  transform: scaleX(0);
+  transform-origin: left center;
+  will-change: transform;
   background: var(--waking);
-  transition: width 90ms linear, background-color 200ms ease;
+  transition: transform 90ms linear, background-color 200ms ease;
 }
 .machine[data-state='running'] .machine__fill {
   background: var(--accent);

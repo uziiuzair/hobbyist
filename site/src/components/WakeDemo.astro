@@ -88,7 +88,7 @@
       timers = []
       window.cancelAnimationFrame(raf)
       log.innerHTML = BASE
-      fill.style.width = '0%'
+      fill.style.transform = 'scaleX(0)'
       setState('sleeping')
       button.textContent = 'Connect'
       hint.textContent = 'Not a live server. Real recorded timings'
@@ -96,7 +96,7 @@
 
     function finish(): void {
       setState('running')
-      fill.style.width = '100%'
+      fill.style.transform = 'scaleX(1)'
       button.textContent = 'Replay'
       hint.textContent = 'That was 174ms. Typically 170ms, worst of twenty 186ms'
     }
@@ -105,7 +105,7 @@
       timers.forEach(window.clearTimeout)
       timers = []
       log.innerHTML = BASE
-      fill.style.width = '0%'
+      fill.style.transform = 'scaleX(0)'
 
       // Reduced motion gets the outcome with no animation. The outcome is the
       // information; the motion is only the argument for how fast it is.
@@ -121,7 +121,7 @@
       const start = performance.now()
       const tick = (): void => {
         const elapsed = performance.now() - start
-        fill.style.width = `${Math.min(100, (elapsed / TOTAL_MS) * 100)}%`
+        fill.style.transform = `scaleX(${Math.min(1, elapsed / TOTAL_MS)})`
         if (elapsed < TOTAL_MS) raf = window.requestAnimationFrame(tick)
       }
       raf = window.requestAnimationFrame(tick)
