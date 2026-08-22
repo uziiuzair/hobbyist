@@ -165,6 +165,25 @@ export async function resolveProxyHosts(ctx: DaemonContext): Promise<string[]> {
   return ['127.0.0.1', ip]
 }
 
+// The bridge gateway of a docker network, or null if it has none or docker
+// cannot be asked. Shared by the startup snapshot and the per-project hook so
+// both agree on what "the gateway" means.
+async function networkGateway(name: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync('docker', [
+      'network',
+      'inspect',
+      name,
+      '--format',
+      '{{range .IPAM.Config}}{{.Gateway}}{{end}}',
+    ])
+    const gateway = stdout.trim()
+    return gateway.length > 0 ? gateway : null
+  } catch {
+    return null
+  }
+}
+
 async function queueEndpointHosts(ctx: DaemonContext): Promise<string[]> {
   const hosts = new Set<string>(['127.0.0.1'])
   if (process.platform !== 'linux') {
@@ -173,15 +192,8 @@ async function queueEndpointHosts(ctx: DaemonContext): Promise<string[]> {
 
   for (const project of ctx.store.listProjects()) {
     try {
-      const { stdout } = await execFileAsync('docker', [
-        'network',
-        'inspect',
-        project.networkName,
-        '--format',
-        '{{range .IPAM.Config}}{{.Gateway}}{{end}}',
-      ])
-      const gateway = stdout.trim()
-      if (gateway.length > 0) {
+      const gateway = await networkGateway(project.networkName)
+      if (gateway !== null) {
         hosts.add(gateway)
       }
     } catch (err) {
@@ -513,11 +525,31 @@ export async function startDaemon(
   // DEFAULT_CONFIG.queuePort (7434 in packages/core/src/config.ts) the worker
   // kind already points a container's producer shim at
   // (packages/worker/src/worker.ts's buildRunnerManifest).
+  // Wired below, after the endpoint exists, so a project created while the
+  // daemon runs gets its gateway bound at once.
   const queueEndpoint = await startQueueEndpoint(ctx, {
     port: ctx.config.queuePort,
     hosts: await queueEndpointHosts(ctx),
     tokenFor: queueTokenFor(ctx),
   })
+
+  // Linux only, and a no-op elsewhere: on macOS docker resolves
+  // host.docker.internal itself and there is no gateway to bind.
+  //
+  // Wrapping ensureNetwork rather than hooking each resource kind: postgres,
+  // app and worker all call it, and three call sites is three chances for the
+  // next kind to forget. Every path that can create a project network goes
+  // through here.
+  if (process.platform === 'linux') {
+    const inner = ctx.runtime.ensureNetwork.bind(ctx.runtime)
+    ctx.runtime.ensureNetwork = async (name: string): Promise<void> => {
+      await inner(name)
+      const gateway = await networkGateway(name)
+      if (gateway !== null) {
+        await queueEndpoint.addHost(gateway)
+      }
+    }
+  }
 
   // The keystone's queue half: notices a batch is ready, wakes a sleeping
   // consumer, delivers, and refuses to let expireLeases lose a message a

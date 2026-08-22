@@ -32,6 +32,12 @@ export interface ContainerSpec {
   ports: PortMapping[]
   binds: Array<{ host: string; container: string }>
   network?: string
+  // Extra name-to-address entries for the container's /etc/hosts, emitted as
+  // --add-host. On Linux, host.docker.internal does not resolve inside a
+  // container unless it is mapped explicitly, which is half of why the queue
+  // producer path never worked there
+  // (docs/queues/research/2026-08-22-the-producer-path-on-real-linux.md).
+  extraHosts?: Array<{ name: string; address: string }>
 }
 
 export interface ContainerStatus {

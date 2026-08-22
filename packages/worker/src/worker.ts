@@ -184,10 +184,7 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
   // "undefined" wherever the runner concatenates it into a header. In
   // practice startWorker backfills the token before this ever runs, so the
   // gate is a belt-and-suspenders check, not the primary fix.
-  const hasProducers =
-    config.manifest.queues.producers.length > 0 &&
-    typeof config.queueToken === 'string' &&
-    config.queueToken.length > 0
+  const hasProducers = producesToQueues(config)
 
   const runnerManifest: RunnerManifest = {
     port: CONTAINER_PORT,
@@ -241,6 +238,23 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
   return runnerManifest
 }
 
+// Whether this worker can send to a queue, which decides both what the runner
+// manifest carries and whether the container needs host.docker.internal mapped.
+// One definition rather than two, because the two disagreeing is precisely how
+// a container would be handed an endpoint it has no way to resolve.
+function producesToQueues(config: WorkerResource['config']): boolean {
+  // manifest is null on an undeployed worker, which has no container and no
+  // producers by definition.
+  if (config.manifest === null) {
+    return false
+  }
+  return (
+    config.manifest.queues.producers.length > 0 &&
+    typeof config.queueToken === 'string' &&
+    config.queueToken.length > 0
+  )
+}
+
 function containerSpec(deps: WorkerDeps, resource: WorkerResource, project: Project): ContainerSpec {
   const config = resource.config
   if (config.image === null) {
@@ -273,6 +287,12 @@ function containerSpec(deps: WorkerDeps, resource: WorkerResource, project: Proj
       { host: deps.paths.resourcePath(project.name, resource.name, 'do'), container: CONTAINER_DO },
     ],
     network: project.networkName,
+    // Half one of the Linux producer fix. host.docker.internal is what the
+    // runner manifest hands producers, and on Linux nothing resolves that name
+    // inside a container unless it is mapped. Harmless on macOS, where docker
+    // provides it already and this simply restates the same address.
+    // docs/queues/research/2026-08-22-the-producer-path-on-real-linux.md
+    extraHosts: producesToQueues(config) ? [{ name: 'host.docker.internal', address: 'host-gateway' }] : [],
   }
 }
 

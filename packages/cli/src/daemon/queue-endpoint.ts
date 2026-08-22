@@ -60,6 +60,10 @@ export interface QueueEndpointOptions {
 
 export interface QueueEndpointHandle {
   port: number
+  // Returns true if this call bound the address, false if it was already
+  // bound or could not be. See the implementation for why a failure here is
+  // logged rather than thrown.
+  addHost(host: string): Promise<boolean>
   stop(): Promise<void>
 }
 
@@ -394,8 +398,38 @@ export async function startQueueEndpoint(ctx: DaemonContext, opts: QueueEndpoint
     throw err
   }
 
+  const bound = new Set(opts.hosts)
+
   return {
     port,
+    // Binds one more address after startup (ADR 0013's Linux gap, measured in
+    // docs/queues/research/2026-08-22-the-producer-path-on-real-linux.md).
+    //
+    // The host set used to be a snapshot taken once, over the projects that
+    // existed at that moment, which meant the ordinary sequence of install,
+    // start the daemon, then create a project left every project's bridge
+    // gateway unbound until the next restart. A producer resolving
+    // host.docker.internal to that gateway reached nothing.
+    //
+    // Idempotent, and deliberately forgiving: a gateway that cannot be bound
+    // is logged and skipped rather than thrown, because failing to add one
+    // address must not take down an endpoint that is already serving others.
+    async addHost(host: string): Promise<boolean> {
+      if (bound.has(host)) {
+        return false
+      }
+      const server = http.createServer(handler)
+      try {
+        await listen(server, host, port)
+      } catch (err) {
+        await closeServer(server).catch(() => undefined)
+        console.error(`queue endpoint: could not also listen on ${host}: ${err instanceof Error ? err.message : String(err)}`)
+        return false
+      }
+      servers.push(server)
+      bound.add(host)
+      return true
+    },
     async stop(): Promise<void> {
       await Promise.all(servers.map(closeServer))
     },

@@ -65,6 +65,15 @@ export interface DaemonContext {
   // listening. reconcile.ts reads the same field for its own readiness
   // probe. Production never sets it and gets pgProbe, a real connection.
   probeFactory?: (config: PostgresConfig) => () => Promise<boolean>
+  // Set by startDaemon once the queue endpoint is listening, so that creating
+  // a project can bind that project's bridge gateway immediately rather than
+  // leaving it until the next daemon restart. Optional because a test builds a
+  // context with no endpoint at all, and because the CLI's own local commands
+  // construct one to talk to the store without ever serving anything.
+  //
+  // The gap this closes is measured in
+  // docs/queues/research/2026-08-22-the-producer-path-on-real-linux.md.
+  onProjectNetworkCreated?: (gateway: string) => Promise<void>
   // Same polarity as probeFactory, inverted purpose: production sets it
   // (createDaemonContext wires the real `tailscale status --json` probe,
   // see tailnet.ts) and tests either leave it unset, getting a
