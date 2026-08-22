@@ -934,6 +934,68 @@ test('miniflare is never given queueProducers or queueConsumers, so its in-memor
 // A worker with no producer binding has nothing for the shim to reach: a
 // live URL and a real token with no binding pointed at them would just be
 // an unused credential sitting in the manifest.
+test('a producer container maps host.docker.internal, because Linux does not resolve it', async () => {
+  // Half one of the Linux producer break. The runner manifest hands producers
+  // http://host.docker.internal/enqueue, and nothing inside a container on
+  // Linux resolves that name unless it is mapped. Before this, nothing emitted
+  // --add-host, so every send failed DNS on exactly the hardware this project
+  // is aimed at.
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const result = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(
+      `
+name = "api"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[[queues.producers]]
+binding = "JOBS"
+queue = "jobs"
+`,
+      'wrangler.toml'
+    ),
+    databaseResourceId: null,
+  })
+
+  const spec = runtime._specs.get(result.resource.config.containerName)
+  assert.ok(spec !== undefined)
+  assert.deepEqual(
+    spec.extraHosts,
+    [{ name: 'host.docker.internal', address: 'host-gateway' }],
+    'host-gateway, not a literal address: the gateway differs per project network'
+  )
+})
+
+test('a worker with no producers is given no extra hosts', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  // Explicitly manifest-free: the default SAMPLE_TOML fixture declares a
+  // producer, so using it here would have asserted the opposite of the
+  // intent and passed for the wrong reason.
+  const result = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(
+      `
+name = "api"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+`,
+      'wrangler.toml'
+    ),
+    databaseResourceId: null,
+  })
+
+  const spec = runtime._specs.get(result.resource.config.containerName)
+  assert.ok(spec !== undefined)
+  assert.deepEqual(spec.extraHosts, [], 'nothing to reach, nothing to map')
+})
+
 test('a worker with no queue producer gets no queue endpoint or token', async () => {
   const deps = buildDeps()
   const project = makeProject(deps.store)

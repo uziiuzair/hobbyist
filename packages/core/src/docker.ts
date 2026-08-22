@@ -113,6 +113,13 @@ function buildCreateArgs(spec: ContainerSpec): string[] {
   if (spec.network) {
     args.push('--network', spec.network)
   }
+  // host-gateway is docker's own token for "the bridge gateway of whichever
+  // network this container is on", which is the address the daemon's queue
+  // endpoint binds on Linux. Emitting a literal address here instead would be
+  // wrong the moment a project gets a different network.
+  for (const host of spec.extraHosts ?? []) {
+    args.push('--add-host', `${host.name}:${host.address}`)
+  }
   args.push(spec.image)
   return args
 }
