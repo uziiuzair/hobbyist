@@ -98,7 +98,7 @@ else
   FIXTURE_NAME="${FIXTURE:-static}"
   FIXTURE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fixtures/${FIXTURE_NAME}"
   [ -d "$FIXTURE_DIR" ] || die "no fixture named ${FIXTURE_NAME}" \
-    "available: $(ls "$(dirname "$FIXTURE_DIR")" | grep -v README | tr '\n' ' ')"
+    "available: $(for d in "$(dirname "$FIXTURE_DIR")"/*/; do basename "$d"; done | tr '\n' ' ')"
   printf '    fixture: %s\n' "$FIXTURE_NAME"
   if ! resource_state "$APP_NAME" >/dev/null 2>&1 || [ "$(resource_state "$APP_NAME")" = "unknown" ]; then
     printf '    deploying %s as %s (a build on one vCPU can take minutes)\n' "$FIXTURE_NAME" "$TARGET"
