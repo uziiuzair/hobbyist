@@ -92,21 +92,27 @@ if [ "$KIND" = postgres ]; then
   TARGET="$PROJECT"
 else
   TARGET="$PROJECT/$APP_NAME"
-  # busybox-extras, not the base image's busybox: alpine ships busybox without
-  # the httpd applet, so a plain CMD ["httpd", ...] fails at container start
-  # with "executable file not found in $PATH". Measured: this builds to a 4.0MB
-  # image and serves 200, which is what a fixture on this hardware should cost.
-  FIXTURE="$(mktemp -d)"
-  cat > "$FIXTURE/Dockerfile" <<'DOCKER'
-FROM alpine:3.20
-RUN apk add --no-cache busybox-extras && mkdir -p /www && echo ok > /www/index.html
-EXPOSE 8080
-CMD ["httpd", "-f", "-p", "8080", "-h", "/www"]
-DOCKER
+
+  # Which app to measure. The fixtures live in scripts/fixtures and differ only
+  # in how much they do before they can answer: see that directory's README.
+  FIXTURE_NAME="${FIXTURE:-static}"
+  FIXTURE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fixtures/${FIXTURE_NAME}"
+  [ -d "$FIXTURE_DIR" ] || die "no fixture named ${FIXTURE_NAME}" \
+    "available: $(ls "$(dirname "$FIXTURE_DIR")" | grep -v README | tr '\n' ' ')"
+  printf '    fixture: %s\n' "$FIXTURE_NAME"
   if ! resource_state "$APP_NAME" >/dev/null 2>&1 || [ "$(resource_state "$APP_NAME")" = "unknown" ]; then
-    printf '    deploying a tiny static server as %s\n' "$TARGET"
-    hobby deploy "$FIXTURE" --project "$PROJECT" --name "$APP_NAME" --port 8080 >/dev/null \
-      || die "deploy failed. Run it without --json to see why."
+    printf '    deploying %s as %s (a build on one vCPU can take minutes)\n' "$FIXTURE_NAME" "$TARGET"
+    # nextjs-db needs a database to talk to, and --database is how a deploy is
+    # told which sibling to bind. Every other fixture ignores it.
+    DEPLOY_ARGS=(--project "$PROJECT" --name "$APP_NAME" --port 8080)
+    if [ "$FIXTURE_NAME" = "nextjs-db" ]; then
+      # hobby new creates a postgres called primary, which is the sibling this
+      # fixture queries. Both are asleep before each measurement, so one request
+      # wakes two containers in sequence.
+      DEPLOY_ARGS+=(--database primary)
+    fi
+    hobby deploy "$FIXTURE_DIR" "${DEPLOY_ARGS[@]}" >/dev/null \
+      || die "deploy failed. Run it without redirecting output to see why."
   else
     printf '    %s already deployed, reusing it\n' "$TARGET"
   fi
@@ -157,6 +163,11 @@ printf '==> Measuring %s wakes (%s)\n' "$N" "$KIND"
 COLD=(); WARM=()
 for i in $(seq 1 "$N"); do
   hobby sleep "$TARGET" >/dev/null 2>&1 || true
+  # For the app-plus-database fixture the database has to be asleep too, or the
+  # measurement is only ever half the wake it claims to be.
+  if [ "$KIND" = app ] && [ "${FIXTURE_NAME:-static}" = "nextjs-db" ]; then
+    hobby sleep "$PROJECT/primary" >/dev/null 2>&1 || true
+  fi
   wait_sleeping
   python3 -c "import time,sys; time.sleep(int(sys.argv[1])/1000)" "$SETTLE_MS"
 

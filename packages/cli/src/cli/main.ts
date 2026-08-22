@@ -137,6 +137,7 @@ function printHelp(io: Io): void {
   io.out('  hobby new <name> --pin               born pinned: never auto-sleeps')
   io.out('  hobby ls                             everything, with sleep state')
   io.out('  hobby deploy [path]                  build a Dockerfile here and serve it')
+  io.out('  hobby deploy [path] --database <r>   the same, bound to a sibling database')
   io.out('  hobby create <kind> <name> --project <p>  a resource with no code yet')
   io.out('  hobby pg create --project <p> <name> the explicit form, for a second database')
   io.out('  hobby connect <target>                open psql against it')
@@ -318,7 +319,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
       case 'deploy': {
         const { positionals, flags } = parseArgs(rest, {
           bool: ['json'],
-          value: ['project', 'name', 'port', 'kind'],
+          value: ['project', 'name', 'port', 'kind', 'database'],
         })
         return await cmdDeploy(ctx, positionals, flags)
       }
