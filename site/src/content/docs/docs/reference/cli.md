@@ -180,6 +180,88 @@ Destroys the queue, with confirmation.
 Changes how long messages are kept. Note that
 [retention never sweeps a queue with no drainable consumer](/docs/guides/queues/#retention-has-a-gap-too).
 
+## Connecting from another machine
+
+These are the commands that make the CLI work from your laptop against a box.
+See [ADR 0018](/docs/decisions/0018-the-cli-talks-to-a-remote-daemon/) for the
+reasoning, and [the remote guide](/docs/guides/remote/) for a walkthrough.
+
+### `hobby login <url>`
+
+Exchanges the operator password for an API token and stores it. Every command
+afterwards runs against that box instead of the local socket.
+
+```sh
+hobby login https://your-box.tailnet.ts.net
+```
+
+The password is read without echoing and never becomes a command-line argument.
+`--name` labels the token, so you can tell one machine's from another's when
+revoking; it defaults to your hostname.
+
+It refuses to send a token to a plain `http://` origin unless it is loopback. A
+token can create and destroy every database on the box, and that is not a thing
+to send in cleartext.
+
+### `hobby logout [url]`
+
+Forgets a remote on this machine. The token stays valid on the box until you
+revoke it there with `hobby token rm`, and the output says so.
+
+### `hobby remote ls`
+
+Which boxes this machine is logged in to, with the current one marked.
+
+Set `HOBBY_REMOTE=<url>` to aim a single command at a different one without
+changing the default.
+
+### `hobby link <project>`
+
+Writes the project name into the `hobby.json` in the current directory, so
+commands run from there default to it and stop needing `--project`.
+
+```sh
+cd ~/code/blog
+hobby link blog
+hobby create worker api      # no --project needed
+```
+
+An explicit `--project` always wins over the linked one. The project must
+already exist: link checks, rather than writing a file that points at nothing.
+
+### `hobby token create <name>`
+
+Issues an API token. **Local only**, over the unix socket, so tokens are minted
+by someone with shell access to the box rather than by anyone already holding
+one. Shown once and never recoverable: only an argon2id hash is stored.
+
+### `hobby token ls`
+
+Names, creation dates, and the last six characters of each token, which is
+enough to match one against a value a machine is holding without the file
+containing anything usable.
+
+### `hobby token rm <name>`
+
+Revokes it. Any machine holding it is locked out on its next request.
+
+## Updating
+
+### `hobby update`
+
+Moves the checkout to the newest release tag and rebuilds it by re-running
+`install.sh`, which is the same path a fresh install takes.
+
+```sh
+hobby update           # update to the newest tag
+hobby update --check   # print the newest tag and change nothing
+```
+
+It refuses if the checkout has uncommitted changes rather than discarding them.
+If the rebuild fails it says the checkout has already moved, because believing
+you are still on the old version would be worse than the failure. Restart the
+daemon afterwards.
+
 ## Studio
 
 ### `hobby studio`
