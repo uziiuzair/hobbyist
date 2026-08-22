@@ -123,12 +123,25 @@ copies of Alpine and Node, not one shared base plus ten thin writable layers.
 "Ten projects fit on one small box" is a load-bearing claim in `CLAUDE.md`, and
 ten sleeping apps here is 7.6GB before any data.
 
-**Cold page cache, first restore: 1605ms.** Run 1 of 12 was 1605ms; runs 2
+**Cold page cache, first restore: 1473ms.** Run 1 of 12 was 1605ms; runs 2
 through 12 were 424ms to 490ms. The difference is whether the 512MB memory file
-is in host page cache. On a 961MB box that cache is contended, so the honest
-figure for an app nobody has touched in a day is closer to the 1605ms than the
-442ms. This spike did not measure restore after a deliberate `drop_caches`, and
-it should before any number is published.
+is in host page cache, and on a 961MB box that cache is contended, so the state
+an app nobody has touched all day is in is the cold one.
+
+Measured properly on 2026-08-23, dropping the host page cache before every
+single run of both paths:
+
+| Path, cold page cache | n | min | p50 | max |
+|---|---|---|---|---|
+| Firecracker snapshot restore | 5 | 1435ms | **1473ms** | 1545ms |
+| Docker `docker start` | 5 | 3403ms | **3635ms** | 3955ms |
+
+**This corrects the paragraph that used to be here.** It read that the honest
+cold figure was "closer to the 1605ms than the 442ms" and treated that as
+weakening the case. That compared a cold Firecracker against a warm Docker.
+Measured on equal terms, Docker degrades harder: restore is 2.5x faster than
+`docker start` with a cold cache, and 6x faster with a warm one. Restore is also
+far more consistent, a 110ms spread against Docker's 552ms.
 
 **The guest clock is frozen at the snapshot instant.** Measured directly off the
 `Date` header the guest generates:
@@ -211,6 +224,21 @@ hibernation mechanism, and it is what "everything sleeps and everything wakes"
 was always reaching for. Firecracker matters to the second only because its
 snapshot support is mature while Docker's CRIU checkpoint has been experimental
 since 2016.
+
+## Docker's own checkpoint is not an option on the target OS
+
+Checked 2026-08-23, because if `docker checkpoint` worked it would deliver the
+same win with no second runtime and the rest of this document would be moot.
+
+It does not. On Ubuntu 24.04.4 with `universe` enabled and the index updated,
+`apt-cache policy criu` reports `Candidate: (none)` and an empty version table.
+The only matches for a `criu` search are Go bindings and podman, which vendors
+its own. So CRIU is not merely experimental on the OS this project tells people
+to run, it is not installable from the archive at all. Docker was left untouched
+by this check: no `daemon.json` was written and `Experimental` is still `false`.
+
+That closes the cheap alternative. Snapshot and restore on this platform means a
+VMM that has it built in.
 
 Before anything is built, the open questions above (cold page cache, clock
 resync, stale sockets, concurrent networking) need answers, because each of them
