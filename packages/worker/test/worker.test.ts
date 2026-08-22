@@ -855,12 +855,15 @@ test('readiness requires the control port too, once the worker declares a queue 
   const { server: mainServer, port: hostPort } = await realHttpServer(200)
 
   try {
-    const controlPort = await reservedFreePort()
+    // Named for the phase it belongs to: the test later starts a real control
+    // server and rebinds the config to that one, so two different ports are in
+    // play and calling both controlPort is what collided.
+    const quietControlPort = await reservedFreePort()
     const config = sampleWorkerConfig({
       hostPort,
       // Nothing is listening here yet, which is the first assertion below.
       // Reserved rather than hostPort + 1: see reservedFreePort.
-      controlPort,
+      controlPort: quietControlPort,
       manifest: sampleWorkerManifest({
         queues: {
           producers: [],
