@@ -417,8 +417,11 @@ export function startHttpRouter(
             // keep-alive socket it has accepted, and a browser holding one
             // open would make daemon shutdown hang indefinitely. The same
             // hazard the Postgres proxy's own startup deadline addresses.
-            server.closeAllConnections?.()
+            // close() is registered first: under bun, closeAllConnections()
+            // stops the listener itself and a later close() errors (see
+            // closeServer in packages/cli/src/daemon/queue-endpoint.ts).
             server.close(() => resolveClose())
+            server.closeAllConnections?.()
           })
         },
       })
