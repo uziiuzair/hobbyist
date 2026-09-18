@@ -15,7 +15,7 @@
 // no cache of its own that would need an invalidation path back from a
 // process it does not observe.
 
-import type { ResourceState } from '@hobby.sh/core'
+import { createStopSignal, type ResourceState } from '@hobby.sh/core'
 import {
   applyResult,
   enqueue,
@@ -241,10 +241,9 @@ export function startQueueTick(opts: QueueTickOptions): { stop(): Promise<void> 
   const sleepFor = opts.sleepFor ?? defaultSleepFor
 
   let stopped = false
-  let resolveStopSignal: () => void = () => {}
-  const stopSignal = new Promise<void>((resolve) => {
-    resolveStopSignal = resolve
-  })
+  // One promise per wait, not one .then() per wait on a promise that stays
+  // pending for the life of the daemon. See core's stop-signal.ts.
+  const stopSignal = createStopSignal()
 
   // Tracks the in-flight tick so stop() can drain rather than returning while
   // a delivery is half done. Set synchronously before the await and cleared
@@ -255,14 +254,7 @@ export function startQueueTick(opts: QueueTickOptions): { stop(): Promise<void> 
   // Races the interval against stop(), so shutdown does not wait out a full
   // interval. Returns true when the interval elapsed normally.
   async function waitOrStop(ms: number): Promise<boolean> {
-    let sleptFully = true
-    await Promise.race([
-      sleepFor(ms),
-      stopSignal.then(() => {
-        sleptFully = false
-      }),
-    ])
-    return sleptFully
+    return stopSignal.wait(sleepFor(ms))
   }
 
   const loop = (async (): Promise<void> => {
@@ -296,7 +288,7 @@ export function startQueueTick(opts: QueueTickOptions): { stop(): Promise<void> 
         return currentTick ?? Promise.resolve()
       }
       stopped = true
-      resolveStopSignal()
+      stopSignal.stop()
       return currentTick ?? Promise.resolve()
     },
   }

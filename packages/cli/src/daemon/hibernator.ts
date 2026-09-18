@@ -5,7 +5,7 @@
 // one pg_stat_activity guard, calling stopPostgres, lives in startHibernator,
 // the only place in this file that touches real time or a real resource.
 
-import { guardFor, type ActivityGuardResult, type Resource, type ResourceState } from '@hobby.sh/core'
+import { createStopSignal, guardFor, type ActivityGuardResult, type Resource, type ResourceState } from '@hobby.sh/core'
 import type { DaemonContext } from './context.js'
 
 export interface ShouldSleepInput {
@@ -214,10 +214,9 @@ export function startHibernator(ctx: DaemonContext, opts: StartHibernatorOptions
     ((resource: Resource): Promise<ActivityGuardResult> => guardFor(ctx.kinds, ctx, resource))
 
   let stopped = false
-  let resolveStopSignal: () => void = () => {}
-  const stopSignal = new Promise<void>((resolve) => {
-    resolveStopSignal = resolve
-  })
+  // One promise per wait, not one .then() per wait on a promise that stays
+  // pending for the life of the daemon. See core's stop-signal.ts.
+  const stopSignal = createStopSignal()
 
   // Tracks whatever tick() call is currently in flight, if any, so stop()
   // (below) can await it rather than returning while a tick is still
@@ -232,14 +231,7 @@ export function startHibernator(ctx: DaemonContext, opts: StartHibernatorOptions
   // interval out. Returns true if the interval elapsed normally, false if
   // stop() won the race.
   async function waitOrStop(ms: number): Promise<boolean> {
-    let sleptFully = true
-    await Promise.race([
-      sleepFor(ms),
-      stopSignal.then(() => {
-        sleptFully = false
-      }),
-    ])
-    return sleptFully
+    return stopSignal.wait(sleepFor(ms))
   }
 
   const loop = (async (): Promise<void> => {
@@ -281,7 +273,7 @@ export function startHibernator(ctx: DaemonContext, opts: StartHibernatorOptions
         return currentTick ?? Promise.resolve()
       }
       stopped = true
-      resolveStopSignal()
+      stopSignal.stop()
       return currentTick ?? Promise.resolve()
     },
   }
