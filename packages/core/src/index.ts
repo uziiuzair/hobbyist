@@ -15,3 +15,6 @@ export * from './docker.js'
 // knowledge in sqlite.ts must stay in exactly one file, so the second consumer
 // imports it from here rather than reimplementing the node/bun split.
 export * from './sqlite.js'
+// Shared by the three daemon loops that sleep between ticks (hibernator,
+// alarm mirror, queue tick). See the file for the memory leak it replaced.
+export * from './stop-signal.js'
