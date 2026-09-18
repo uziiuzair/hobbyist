@@ -11,7 +11,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260821.1",
     "typescript": "^5.9.3",
-    "wrangler": "^4.125.0"
+    "wrangler": "^4.131.0"
   },
   "allowScripts": {
     "workerd@1.20260820.1": true
