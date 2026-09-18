@@ -18,7 +18,7 @@ import { chmod, rm } from 'node:fs/promises'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import net from 'node:net'
 import { promisify } from 'node:util'
-import { HobbyError } from '@hobby.sh/core'
+import { HobbyError, type Resource } from '@hobby.sh/core'
 import { startAlarmMirror } from '@hobby.sh/do'
 import { startHttpRouter, startPgProxy, TLS_ASK_PATH } from '@hobby.sh/proxy'
 import { startQueueTick } from '@hobby.sh/queue'
@@ -374,6 +374,36 @@ export interface StartDaemonOptions {
   caddy?: CaddyManager
 }
 
+// Which resources the daemon stops on its way down: every `running` one,
+// except those in a pinned project (a null sleepAfterSeconds, the same test
+// hibernator.ts applies before anything else).
+//
+// A pinned project is one its operator has said must stay awake, and a daemon
+// restart is a control-plane event, usually an upgrade, not a reason to take
+// the data plane down. Leaving the container running is safe because nothing
+// about it depends on this process: docker keeps it up, the proxy that fronts
+// it closes above either way, and on the next start reconcile finds it
+// running, records it as `running` after its readiness probe, and touches its
+// activity clock (reconcile.ts). What a restart costs a pinned project is then
+// the proxy's own gap, a reconnect, rather than a clean Postgres shutdown and
+// a cold start on the next connection.
+//
+// Projects that can sleep are still stopped cleanly, exactly as before: they
+// would be stopped by the hibernator soon enough anyway, and stopping them
+// here keeps a stopped daemon from leaving containers running that nothing
+// will ever put to sleep.
+export function resourcesToStopOnShutdown(ctx: DaemonContext): Resource[] {
+  return ctx.store.listResources().filter((resource) => {
+    if (resource.state !== 'running') {
+      return false
+    }
+    // A resource with no project row is not pinned by anyone, so it keeps
+    // the old behaviour and is stopped.
+    const project = ctx.store.getProject(resource.projectId)
+    return project === null || project.sleepAfterSeconds !== null
+  })
+}
+
 export async function startDaemon(
   ctx: DaemonContext,
   opts: StartDaemonOptions
@@ -648,9 +678,9 @@ export async function startDaemon(
       // stopPostgres / docker.ts), which is what keeps the next wake out of
       // Postgres crash recovery, landing inside a user's first query. An
       // unclean daemon exit here is exactly the failure mode this step
-      // exists to prevent.
-      const running = ctx.store.listResources().filter((resource) => resource.state === 'running')
-      for (const resource of running) {
+      // exists to prevent. Pinned projects are left running, see
+      // resourcesToStopOnShutdown.
+      for (const resource of resourcesToStopOnShutdown(ctx)) {
         try {
           await ctx.kinds.get(resource.kind).stop(ctx, resource)
         } catch (err) {
