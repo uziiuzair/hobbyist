@@ -388,3 +388,27 @@ test('a bind failure for a later host closes every socket already opened, and do
 
   fixture.ctx.store.close()
 })
+
+// Under bun, which is what the daemon runs on, closeAllConnections() stops the
+// listener as well as the sockets, so a close() issued after it fails with
+// ERR_SERVER_NOT_RUNNING. node does not behave that way, and this suite runs
+// on node, so the test makes node behave like bun for its duration. Before the
+// fix, stop() rejected here, and on a real box that rejection aborted the
+// daemon's whole shutdown sequence at its first step.
+test('stop() resolves when closeAllConnections also stops the listener, as it does under bun', async () => {
+  const original = http.Server.prototype.closeAllConnections
+  http.Server.prototype.closeAllConnections = function (this: http.Server): void {
+    original.call(this)
+    if (this.listening) {
+      this.close()
+    }
+  }
+  try {
+    await withEndpoint(buildFixture(), async (base) => {
+      const res = await fetch(`${base}/enqueue`, { method: 'POST' })
+      assert.equal(res.status, 401)
+    })
+  } finally {
+    http.Server.prototype.closeAllConnections = original
+  }
+})
