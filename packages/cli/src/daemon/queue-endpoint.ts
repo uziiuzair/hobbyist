@@ -352,10 +352,21 @@ function resolvedPort(server: http.Server, fallback: number): number {
   return typeof address === 'object' && address !== null ? address.port : fallback
 }
 
+// close() first, then closeAllConnections(), and the order is load-bearing.
+// Under bun, which is what the daemon runs on, closeAllConnections() also
+// stops the listener, so a close() issued after it fails with
+// ERR_SERVER_NOT_RUNNING. Under node both orders succeed, which is why the
+// test suite (node --test) never saw it. On a real box every SIGTERM hit that
+// rejection in the first step of performShutdown (server.ts), so shutdown
+// stopped there: the proxy was never closed, no resource was stopped, the
+// socket file and the daemon lock were left behind, and the process exited 1.
+// Registering close() first has its callback fire once the listener is down
+// on both runtimes, and closeAllConnections() still ends keep-alive sockets
+// that would otherwise hold it open.
 function closeServer(server: http.Server): Promise<void> {
   return new Promise((resolve, reject) => {
-    server.closeAllConnections?.()
     server.close((err) => (err ? reject(err) : resolve()))
+    server.closeAllConnections?.()
   })
 }
 
