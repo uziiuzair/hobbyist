@@ -74,6 +74,25 @@ The explicit form, for creating a second database. An alias for
 
 Accepts `--json`.
 
+### `hobby branch <project> <name> [--allow-pause]`
+
+Makes a new project, `<name>`, from a copy of `<project>`'s Postgres data, so
+you can experiment against real data without risking it. On a filesystem with
+reflinks (XFS, ZFS, APFS) the copy is instant; on ext4 it is a real copy, and
+the command says so.
+
+The branch gets its own container, port, network and data directory, and keeps
+the source's database user and password, which live inside the copied data. It
+starts asleep, like `hobby new`, and is never pinned, whatever the source was.
+
+An asleep source is copied as it is. An awake one is paused for the length of
+the copy and then resumed, and the command prints how long the pause was. A
+pinned source that is awake is refused unless you pass `--allow-pause`, because
+pinning it said it must stay up. A project holding apps, workers or queues
+cannot be branched yet. Remove a branch with `hobby rm`.
+
+Accepts `--json`.
+
 ### `hobby rm <target> [--yes]`
 
 Destroys a resource, or a project, with confirmation. `--yes` skips the prompt.
@@ -285,6 +304,46 @@ loopback URL when one is configured through Caddy.
 ### `hobby studio passwd`
 
 Sets the operator password. The prompt never echoes.
+
+## Snapshots
+
+A snapshot is a copy of a whole project's data, taken on this box. It is local:
+it does not survive losing the disk, and the command reminds you of that. There
+is no point-in-time recovery (see ADR 0016).
+
+### `hobby snapshot <project> [--allow-pause]`
+
+Takes a snapshot. The project is held asleep for the length of the copy, so
+nothing can wake it halfway through, and whatever was running is started again
+afterwards. A pinned project that has something running is refused unless you
+pass `--allow-pause`, because pinning it said it must stay up. Prints the
+snapshot's id.
+
+Accepts `--json`.
+
+### `hobby snapshot ls <project>`
+
+The project's snapshots, newest first. Snapshots outlive their project, so this
+still works after the project is deleted. Accepts `--json`.
+
+### `hobby snapshot restore <project> <id> [--as <name> | --in-place] [--allow-pause] [--yes]`
+
+Without `--in-place`, restores into a new project, `<project>-restored` or the
+name given with `--as`, and leaves the original untouched.
+
+`--in-place` replaces the project's own data and keeps its connection strings.
+The snapshot is copied first while the project stays up, then the project is
+stopped, the data swapped, and whatever was running started again. The old data
+is kept until everything has come back, and its path is printed if anything did
+not. It asks you to type the project name unless `--yes` is given, and it
+refuses if the project's resources have changed since the snapshot. It restores
+data, not configuration.
+
+Accepts `--json`.
+
+### `hobby snapshot rm <project> <id> [--yes]`
+
+Deletes one snapshot, with confirmation. `--yes` skips the prompt.
 
 ## Leaving
 

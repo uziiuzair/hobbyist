@@ -1,6 +1,8 @@
 # `docs/backups/` snapshots and restore
 
-**Status:** DESIGNED, not built. `docs/decisions/0016` settles the shape,
+**Status:** PARTLY BUILT. Manual snapshot, list, restore and delete are wired
+and reachable (below). Scheduling, retention, the free-space floor and weekly
+verification are not built. `docs/decisions/0016` settles the shape,
 `specs/2026-08-16-project-snapshots-design.md` is actionable.
 
 Backups that happen without being thought about, and a restore that works on the
@@ -52,6 +54,83 @@ is internally inconsistent in a way nobody notices until they restore it.
   is a serializer over the same inventory rather than a second system, but until
   that exists this capability is local snapshots and must not be described as
   more than that
+
+## What is built
+
+Everything below goes through the daemon API (the only control surface), so
+Studio and MCP can reach it; neither has a screen or a tool for it yet.
+
+| CLI | Route | Code |
+|---|---|---|
+| `hobby snapshot <project> [--allow-pause]` | `POST /v1/projects/:name/snapshots` | `takeSnapshot`, `packages/cli/src/daemon/snapshots.ts` |
+| `hobby snapshot ls <project>` | `GET /v1/projects/:name/snapshots` | `listSnapshots` |
+| `hobby snapshot restore <project> <id> [--as <name>]` | `POST /v1/snapshots/:id/restore` | `restoreSnapshot` |
+| `hobby snapshot restore <project> <id> --in-place [--allow-pause] [--yes]` | the same, `{ "inPlace": true }` | `restoreInPlace` |
+| `hobby snapshot rm <project> <id> [--yes]` | `DELETE /v1/snapshots/:id` | `deleteSnapshot` |
+
+Restore, both shapes:
+
+- **Into a new project** (the default, named `<project>-restored` unless
+  `--as` says otherwise). Non-destructive: the original is untouched and may
+  keep running. Ports (from each kind's own range), container names,
+  hostnames, the data directory path and the queue token are reallocated, and
+  Durable Object storage is renamed to the new resource ids (`rewriteConfig`
+  and `renameDurableObjectDirs`). Each postgres gets a real container, created
+  stopped on the cloned data (`createPostgresFromClone`,
+  `packages/pg/src/postgres.ts`), because its start path only ever starts an
+  existing one; an app or worker is created on its first wake.
+- **In place** (`--in-place`). Replaces the project's data with the snapshot's
+  and keeps its resource ids, so connection strings do not change. The snapshot
+  is cloned into a staging directory first, with the project still up; then the
+  project is quiesced exactly as for a snapshot, the live directory is renamed
+  aside and staging renamed into place, and whatever was running is started
+  again. The replaced data is deleted only once everything that was running has
+  come back on the restored data; otherwise it stays at
+  `projects/<project>.pre-restore-<id>` and its path is reported. Refused when
+  the project's resources have changed since the snapshot (use `--as`).
+  Restores data, not configuration: code is whatever was last deployed.
+
+  This differs from the spec's first draft, which refused an in-place restore
+  unless the project was already fully stopped. Quiescing it with the
+  snapshot's own guard and resuming afterwards is strictly better than asking
+  the operator to do the same by hand with neither.
+
+Two refusals the routes add (`refusePausingPinned` and `refuseReleased`,
+`packages/cli/src/daemon/routes.ts`):
+
+- A **pinned** project (`sleepAfterSeconds` null) with anything running is
+  refused unless the request says `allowPause` (`--allow-pause`), because the
+  snapshot or in-place restore stops it for the copy. A pinned project that is
+  all asleep, and any unpinned project, need nothing.
+- A **released** project is refused: its data belongs to a compose stack hobby
+  cannot quiesce.
+
+While a snapshot or in-place restore runs, the project is held asleep
+(`holdProjectAsleep`, `packages/cli/src/daemon/context.ts`): a wake through
+the proxy, the HTTP router, the query route or `hobby wake` waits rather than
+starting a resource in the middle of the clone. Without it, an application's
+connection pool reconnecting after quiesce would wake the database straight
+back up and the snapshot would be a hot copy filed as a good one.
+
+Manifests cross the wire redacted (`toWireSnapshotManifest`,
+`packages/cli/src/daemon/wire.ts`); the file on disk keeps every credential,
+because restore needs them.
+
+**Not built, stated plainly:** the daily schedule, retention and pruning, the
+free-space floor, weekly verification (every snapshot reads `unverified`), an
+MCP tool, a Studio screen, and offsite copies.
+
+**Known gaps:**
+
+- A queue's enqueue endpoint and delivery tick write `messages.sqlite` without
+  waking anything, so the wake fence does not cover them. A message enqueued
+  during a snapshot's clone can land in a copy that is mid-write.
+- On Linux a PGDATA is owned by the container's postgres uid, not the daemon's
+  user (`createDefaultRemoveDataDir`'s comment, `packages/pg/src/postgres.ts`).
+  Whether the clone can read it, and whether the in-place restore can delete
+  the set-aside copy, has not been run on Linux. On macOS (Docker Desktop
+  masks the uid) snapshot, both restores, the pinned refusal and the wake
+  fence have been run against real Docker.
 
 ## Answered, and where
 

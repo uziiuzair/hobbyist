@@ -35,6 +35,7 @@ export * from './cli/main.js'
 export * from './cli/exit.js'
 export * from './cli/client.js'
 export {
+  cmdBranch,
   cmdConnect,
   cmdCreate,
   cmdDaemon,
@@ -56,6 +57,11 @@ export {
   cmdQueueSet,
   cmdRm,
   cmdSleep,
+  cmdSnapshot,
+  cmdSnapshotLs,
+  cmdSnapshotRestore,
+  cmdSnapshotRm,
+  cmdSnapshotTake,
   cmdStudio,
   cmdStudioPasswd,
   cmdUnpin,
