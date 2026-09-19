@@ -69,13 +69,24 @@ function fakeCtx(typed: string[] = []): { ctx: Ctx; calls: string[]; out: string
 test('hobby snapshot <project> takes one, sends allowPause only when asked, and states its limits', async () => {
   const plain = fakeCtx()
   assert.equal(await cmdSnapshot(plain.ctx, ['blog'], {}), 0)
-  assert.deepEqual(plain.calls, ['takeSnapshot blog {"allowPause":false}'])
+  assert.deepEqual(plain.calls, ['takeSnapshot blog {"allowPause":false,"online":false}'])
   assert.ok(plain.out.some((line) => line.includes(ID)))
   assert.ok(plain.err.some((line) => line.includes('not losing this disk')))
 
   const allowed = fakeCtx()
   await cmdSnapshot(allowed.ctx, ['blog'], { 'allow-pause': true })
-  assert.deepEqual(allowed.calls, ['takeSnapshot blog {"allowPause":true}'])
+  assert.deepEqual(allowed.calls, ['takeSnapshot blog {"allowPause":true,"online":false}'])
+})
+
+test('hobby snapshot --online sends online, and refuses --allow-pause beside it before calling anything', async () => {
+  const online = fakeCtx()
+  assert.equal(await cmdSnapshot(online.ctx, ['blog'], { online: true }), 0)
+  assert.deepEqual(online.calls, ['takeSnapshot blog {"allowPause":false,"online":true}'])
+  assert.ok(online.out.some((line) => line.includes('online (nothing paused)')))
+
+  const both = fakeCtx()
+  await assert.rejects(cmdSnapshot(both.ctx, ['blog'], { online: true, 'allow-pause': true }), UsageError)
+  assert.deepEqual(both.calls, [])
 })
 
 test('hobby snapshot --json prints exactly the API response', async () => {
