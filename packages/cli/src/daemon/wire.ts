@@ -45,6 +45,7 @@ import type {
 } from '@hobby.sh/core'
 import type { DaemonContext } from './context.js'
 import { resourceSize } from './size.js'
+import type { SnapshotManifest, SnapshotResourceEntry } from './snapshots.js'
 
 export type WirePostgresConfig = Omit<PostgresConfig, 'password'>
 export type WireAppConfig = AppConfig
@@ -155,4 +156,27 @@ export async function toWireResource(ctx: DaemonContext, resource: Resource): Pr
 
 export function toWireResources(ctx: DaemonContext, resources: Resource[]): Promise<WireResource[]> {
   return Promise.all(resources.map((resource) => toWireResource(ctx, resource)))
+}
+
+// A snapshot manifest carries every resource's config verbatim
+// (takeSnapshot, packages/cli/src/daemon/snapshots.ts), password, app env,
+// worker vars and queue token included, because restore needs all of them
+// and the manifest on disk is the only place they survive the project being
+// deleted. On disk that is correct. Over the wire it is every secret in the
+// project, once per snapshot, in a listing: exactly the leak this file
+// exists to prevent, arriving through a payload that does not look like a
+// resource. So a manifest crosses through the same redactConfig as a
+// resource does, and the file on disk is never touched.
+export interface WireSnapshotResourceEntry extends Omit<SnapshotResourceEntry, 'config'> {
+  config: WireResourceConfig
+}
+export interface WireSnapshotManifest extends Omit<SnapshotManifest, 'resources'> {
+  resources: WireSnapshotResourceEntry[]
+}
+
+export function toWireSnapshotManifest(manifest: SnapshotManifest): WireSnapshotManifest {
+  return {
+    ...manifest,
+    resources: manifest.resources.map((entry) => ({ ...entry, config: redactConfig(entry.kind, entry.config) })),
+  }
 }

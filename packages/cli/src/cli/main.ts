@@ -13,6 +13,7 @@ import {
   cmdConnect,
   cmdDaemon,
   cmdAdopt,
+  cmdBranch,
   cmdCreate,
   cmdDeploy,
   cmdEject,
@@ -31,6 +32,7 @@ import {
   cmdQueue,
   cmdRm,
   cmdSleep,
+  cmdSnapshot,
   cmdStudio,
   cmdStudioPasswd,
   cmdUnpin,
@@ -136,6 +138,8 @@ function printHelp(io: Io): void {
   io.out('  hobby new <name> --empty             a project with nothing in it')
   io.out('  hobby new <name> --pin               born pinned: never auto-sleeps')
   io.out('  hobby ls                             everything, with sleep state')
+  io.out('  hobby branch <project> <name>        a new project from a copy of its data, unpinned')
+  io.out('  hobby branch ... --allow-pause        accept pausing a pinned, awake source')
   io.out('  hobby deploy [path]                  build a Dockerfile here and serve it')
   io.out('  hobby deploy [path] --database <r>   the same, bound to a sibling database')
   io.out('  hobby create <kind> <name> --project <p>  a resource with no code yet')
@@ -150,6 +154,11 @@ function printHelp(io: Io): void {
   io.out('  hobby eject <project>                 emit docker-compose.yml plus data')
   io.out('  hobby eject <project> --release       the same, and stop managing it')
   io.out('  hobby adopt <project>                 manage a released project again')
+  io.out('  hobby snapshot <project> [--allow-pause]    a local snapshot, everything quiesced')
+  io.out('  hobby snapshot ls <project>           its snapshots, newest first')
+  io.out('  hobby snapshot restore <project> <id> [--as <name>]   into a new project, original untouched')
+  io.out('  hobby snapshot restore <project> <id> --in-place [--yes]   replace its data, old data kept until it works')
+  io.out('  hobby snapshot rm <project> <id> [--yes]    delete one, with confirmation')
   io.out('  hobby queue ls [project]              list queues, with depth and consumer')
   io.out('  hobby queue create <name> --project <p>   a queue with no consumer bound yet')
   io.out('  hobby queue peek <target> [--limit n]  the oldest messages, without leasing them')
@@ -276,6 +285,10 @@ export async function run(argv: string[], io: Io): Promise<number> {
         const { positionals, flags } = parseArgs(rest, { bool: ['json', 'empty', 'pin'] })
         return await cmdNew(ctx, positionals, flags)
       }
+      case 'branch': {
+        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'allow-pause'] })
+        return await cmdBranch(ctx, positionals, flags)
+      }
       case 'ls': {
         const { flags } = parseArgs(rest, { bool: ['json'] })
         return await cmdLs(ctx, flags)
@@ -342,6 +355,18 @@ export async function run(argv: string[], io: Io): Promise<number> {
           value: ['project', 'limit', 'retention'],
         })
         return await cmdQueue(ctx, positionals, flags)
+      }
+      case 'snapshot': {
+        // One parseArgs for every `hobby snapshot` shape, as `queue` does
+        // above: cmdSnapshot (commands.ts) reads the subcommand from the
+        // positionals. --in-place and --allow-pause are separate gates on
+        // purpose: one says "replace my data", the other says "stopping a
+        // pinned project is fine", and neither implies the other.
+        const { positionals, flags } = parseArgs(rest, {
+          bool: ['json', 'yes', 'in-place', 'allow-pause'],
+          value: ['as'],
+        })
+        return await cmdSnapshot(ctx, positionals, flags)
       }
       case 'eject': {
         // --release is its own gate and there is no confirmation prompt, a

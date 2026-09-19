@@ -1,6 +1,6 @@
 ---
 title: MCP tools
-description: Fourteen tools over the daemon API, so an agent drives the same control surface the CLI does.
+description: Fifteen tools over the daemon API, so an agent drives the same control surface the CLI does.
 sidebar:
   order: 4
 ---
@@ -17,6 +17,7 @@ drifting: there is no second path for them to drift along.
 |---|---|
 | `hobby_list` | `hobby ls` |
 | `hobby_new` | `hobby new` |
+| `hobby_branch` | `hobby branch` |
 | `hobby_connection_string` | `hobby connect --json` |
 | `hobby_sleep` | `hobby sleep` |
 | `hobby_wake` | `hobby wake` |

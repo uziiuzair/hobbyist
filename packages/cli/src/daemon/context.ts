@@ -156,13 +156,32 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
     }
 
     const promise = (async (): Promise<void> => {
-      const resource = ctx.store.getResource(resourceId)
+      let resource = ctx.store.getResource(resourceId)
       if (resource === null) {
         throw new HobbyError('resource_not_found', `no resource with id ${resourceId}`)
       }
       if (refused.has(resourceId)) {
         const project = ctx.store.getProject(resource.projectId)
         throw refusedWakeError(project === null ? resource.name : `${project.name}/${resource.name}`)
+      }
+      // A snapshot or an in-place restore holds this project asleep (see
+      // holdProjectAsleep below). Waking a resource in the middle of one is
+      // not a slow path, it is the failure ADR 0016 is built to prevent: a
+      // clone of a PGDATA that a freshly started postgres is writing to, filed
+      // as a good snapshot. Waiting rather than refusing keeps the wedge's
+      // promise, a first query that is slow rather than one that errors, and
+      // the snapshot's own resume has usually started the resource again by
+      // the time the wait ends, which is why the row is read a second time.
+      const fence = projectFences.get(ctx)?.get(resource.projectId)
+      if (fence !== undefined) {
+        await fence
+        resource = ctx.store.getResource(resourceId)
+        if (resource === null) {
+          throw new HobbyError('resource_not_found', `no resource with id ${resourceId}`)
+        }
+        if (resource.state === 'running') {
+          return
+        }
       }
       // Dispatched by kind rather than calling startPostgres directly, which
       // is what makes this one wake path serve every kind: an app waking on
@@ -222,6 +241,71 @@ export function clearWakeRefusal(ctx: DaemonContext, resourceId: string): void {
 }
 
 const wakeRegistry = new WeakMap<DaemonContext, (resourceId: string) => Promise<void>>()
+
+// Per-context, keyed by project id: a promise that settles when the project
+// may be woken again. Same WeakMap-per-context shape as wakeRegistry above,
+// for the same reason (one daemon, one map; every test's fresh ctx gets its
+// own). A module value rather than a DaemonContext field so that the dozens
+// of hand-built contexts across the test suites do not all have to learn
+// about it.
+const projectFences = new WeakMap<DaemonContext, Map<string, Promise<void>>>()
+
+// Holds every resource in a project asleep against the wake path until the
+// returned release function is called. quiesce
+// (packages/cli/src/daemon/snapshots.ts) stops what is running, but stopping
+// is not enough on its own: the proxy wakes anything a client connects to,
+// and an application's connection pool reconnects the instant quiesce drops
+// its connections. The activity guard passes a pool that is connected and
+// idle, so the most ordinary install there is (an app with a pool pointed at
+// its database) would otherwise get its database woken back up in the middle
+// of the clone that was meant to be of a stopped one.
+//
+// A second hold on the same project is refused outright rather than queued:
+// two snapshots, or a snapshot and a restore, interleaving on one project
+// means the first to finish resumes resources while the second is still
+// copying them, and there is no ordering of the two that is safe.
+//
+// Covers getOrCreateWake (the Postgres proxy, the HTTP router and the query
+// route all go through it) and startResourceRoute's explicit wake
+// (packages/cli/src/daemon/routes.ts, through waitForProjectAwakeable
+// below). It does not cover a queue's enqueue endpoint or delivery tick,
+// which write messages.sqlite without waking anything; docs/backups/CLAUDE.md
+// records that gap.
+export function holdProjectAsleep(ctx: DaemonContext, projectId: string, projectName: string): () => void {
+  let fences = projectFences.get(ctx)
+  if (fences === undefined) {
+    fences = new Map()
+    projectFences.set(ctx, fences)
+  }
+  if (fences.has(projectId)) {
+    throw new HobbyError(
+      'conflict',
+      `a snapshot or restore of ${projectName} is already in progress`,
+      'wait for it to finish, then try again'
+    )
+  }
+  let release: () => void = () => {}
+  const fence = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  fences.set(projectId, fence)
+  const held = fences
+  return () => {
+    if (held.get(projectId) === fence) {
+      held.delete(projectId)
+    }
+    release()
+  }
+}
+
+// For a caller that starts a resource without going through the wake
+// function above (startResourceRoute): the same wait, and nothing else.
+export async function waitForProjectAwakeable(ctx: DaemonContext, projectId: string): Promise<void> {
+  const fence = projectFences.get(ctx)?.get(projectId)
+  if (fence !== undefined) {
+    await fence
+  }
+}
 
 // Memoized per DaemonContext in a WeakMap, the same pattern
 // studio/routes.ts uses for its own per-context session state: this is what
