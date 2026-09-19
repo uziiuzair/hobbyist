@@ -63,6 +63,7 @@ Studio and MCP can reach it; neither has a screen or a tool for it yet.
 | CLI | Route | Code |
 |---|---|---|
 | `hobby snapshot <project> [--allow-pause]` | `POST /v1/projects/:name/snapshots` | `takeSnapshot`, `packages/cli/src/daemon/snapshots.ts` |
+| `hobby snapshot <project> --online` | the same, `{ "online": true }` | `takeOnlineSnapshot`, and `basebackupPostgres` in `packages/cli/src/daemon/basebackup.ts` |
 | `hobby snapshot ls <project>` | `GET /v1/projects/:name/snapshots` | `listSnapshots` |
 | `hobby snapshot restore <project> <id> [--as <name>]` | `POST /v1/snapshots/:id/restore` | `restoreSnapshot` |
 | `hobby snapshot restore <project> <id> --in-place [--allow-pause] [--yes]` | the same, `{ "inPlace": true }` | `restoreInPlace` |
@@ -95,13 +96,65 @@ Restore, both shapes:
   snapshot's own guard and resuming afterwards is strictly better than asking
   the operator to do the same by hand with neither.
 
+**Online** (`--online`, added 2026-09-19, ADR 0016's dated note). A snapshot
+that pauses nothing, for a project whose resources are all `postgres`; any
+other kind is refused (`onlineSnapshotRefusal`), because app, worker and queue
+state has no online copy mechanism. Nothing is quiesced:
+
+- A **running** postgres is copied with `pg_basebackup` run inside its own
+  container through `ComputeRuntime.execStream` (`packages/core/src/runtime.ts`,
+  `docker exec` in `packages/core/src/docker.ts`), over the local socket as
+  the resource's superuser, streaming a tar to stdout (`basebackupCommand`
+  has the flags and why each one). It has to run there: the image's
+  `pg_hba.conf` accepts replication connections only over the socket and
+  loopback inside the container, and `all` never matches replication. The
+  daemon unpacks the tar with the system `tar` into
+  `data/<resource>/pgdata/18/docker`, the same place a clone of the project
+  directory puts that PGDATA, so both restores work on it unchanged.
+- A **sleeping** postgres is cloned exactly as a quiesced snapshot would.
+- The manifest records per resource `method` (`clone` or `basebackup`) and
+  `stateAtSnapshot`. A manifest from before `--online` reads as all `clone`.
+- **A restored basebackup starts with recovery.** Its PGDATA carries the
+  `backup_label` pg_basebackup wrote, and the first start replays the WAL in
+  `pg_wal/` to the backup's end point before it accepts connections. That is
+  expected and the label must never be deleted: without it Postgres would
+  treat the copy as crashed at its last checkpoint and skip the WAL that
+  makes it consistent.
+- **The pinned refusal does not apply**, since nothing stops. The refusal for
+  a quiesced snapshot of a pinned, awake, postgres-only project now suggests
+  `--online`. `online` and `allowPause` together are a 400.
+- **Still exclusive, not fenced.** It takes `holdProjectExclusive`
+  (`context.ts`): the same map as `holdProjectAsleep`, so a second snapshot or
+  any restore of the project is refused while it runs, but wakes pass
+  straight through. Each resource's state is re-read at its turn (a sibling
+  woken meanwhile is backed up online, not cloned hot) and again after its
+  capture; any change fails the snapshot.
+- **The hibernator is held off with an activity handle**
+  (`ActivityTracker.open` on every resource for the whole capture), not a
+  touch and not a fence: a touch only restarts the idle clock and a long
+  backup would be slept under, a fence blocks wakes. An explicit `hobby
+  sleep` is not held off; it kills the backup and the snapshot fails.
+- **Failure leaves nothing.** The `.partial` directory is removed on any
+  error. Success needs pg_basebackup to exit 0, tar to exit 0, the pipe to
+  hold, and `backup_label` plus `global/pg_control` to be present (a tar cut
+  on a block boundary is accepted silently by both GNU tar and bsdtar, so the
+  last check is not decorative).
+- **Limits.** Each postgres is consistent on its own; two databases in one
+  project are captured one after another, so unlike a quiesced snapshot they
+  are not one point in time. `--wal-method=fetch` collects the WAL at the
+  end, so a long backup of a busy database can fail if checkpoints recycle
+  the segment it started from; it fails loudly and keeps nothing. A cluster
+  with a user-defined tablespace is refused by pg_basebackup in this shape;
+  hobby creates none. Not yet run against real Docker.
+
 Two refusals the routes add (`refusePausingPinned` and `refuseReleased`,
 `packages/cli/src/daemon/routes.ts`):
 
 - A **pinned** project (`sleepAfterSeconds` null) with anything running is
   refused unless the request says `allowPause` (`--allow-pause`), because the
   snapshot or in-place restore stops it for the copy. A pinned project that is
-  all asleep, and any unpinned project, need nothing.
+  all asleep, and any unpinned project, need nothing. An online snapshot
+  needs nothing either.
 - A **released** project is refused: its data belongs to a compose stack hobby
   cannot quiesce.
 
@@ -136,7 +189,9 @@ MCP tool, a Studio screen, and offsite copies.
 
 - **Does a backup wake a sleeping instance?** No. It works against the data
   directory at rest, and an awake resource is stopped first rather than
-  snapshotted hot. ADR 0016, "Quiesce, do not snapshot hot"
+  snapshotted hot, or, with `--online`, copied by Postgres's own online
+  backup rather than by a byte copy. ADR 0016, "Quiesce, do not snapshot
+  hot", and its 2026-09-19 note
 - **Retention defaults.** Seven daily snapshots, plus a free-space floor the
   snapshotter refuses to cross. Nearly free on a reflink filesystem, linear on
   ext4, which is why the floor exists. Spec, "Schedule, retention, free space"

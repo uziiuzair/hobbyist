@@ -3,6 +3,9 @@
 // core: this file only describes the contract and gives every later task's
 // test suite something to run against without Docker.
 
+import { Readable } from 'node:stream'
+import { HobbyError } from './errors.js'
+
 export type ContainerId = string
 
 // The host address a published port binds to when a spec does not name one.
@@ -64,6 +67,29 @@ export interface BuildSpec {
   cpuShares?: number
 }
 
+// A process run inside an already running container, with its stdout handed
+// back as a stream rather than buffered. Built for one caller today, the
+// online snapshot (packages/cli/src/daemon/basebackup.ts), which pipes a
+// pg_basebackup tar of a whole cluster through it: buffering that the way
+// ExecFn (docker.ts) buffers `docker inspect` would hold a database in the
+// daemon's memory, and the 16MB maxBuffer there would fail any real one.
+export interface ExecStream {
+  // The process's stdout, raw bytes. Never a TTY (docker.ts's execStream
+  // passes no -t), because a pseudo-terminal rewrites line endings and would
+  // corrupt a binary stream like a tar.
+  stdout: Readable
+  // Settles once the process has exited: resolves on status 0, rejects with
+  // a HobbyError carrying whatever the process wrote to stderr otherwise. A
+  // caller must treat stdout as untrustworthy until this resolves: a
+  // process that dies halfway still closes stdout cleanly, and what arrived
+  // until then looks like a shorter, valid stream.
+  done: Promise<void>
+  // Stops the process from the outside, for a caller whose consumer of
+  // stdout failed and who would otherwise leave the producer blocked on a
+  // full pipe forever. done still settles afterwards, rejected.
+  cancel(): void
+}
+
 export interface ComputeRuntime {
   available(): Promise<boolean>
   ensureCreated(spec: ContainerSpec): Promise<ContainerId>
@@ -83,6 +109,31 @@ export interface ComputeRuntime {
   // fails with a real error rather than the interface pretending.
   build?(spec: BuildSpec): Promise<string>
   removeImage?(tag: string): Promise<void>
+
+  // Runs `command` inside the running container `name`. Optional for the
+  // same reason build is: only the online snapshot needs it, and a future
+  // runtime that is not Docker may have no equivalent, in which case that
+  // caller refuses with a real error rather than the interface pretending.
+  //
+  // An argument array, never a shell string, for the reason docker.ts's
+  // header gives: container names and database role names reach it, and
+  // nothing here is ever interpreted by a shell.
+  execStream?(name: string, command: string[]): ExecStream
+}
+
+// One recorded execStream call on the fake runtime, and what a test hands
+// back for it. The handler sees the call and returns the stdout bytes (or a
+// stream of them) plus the exit it should report, so a test can supply a
+// real tar, a truncated one, or a failing pg_basebackup without Docker.
+export interface FakeExecCall {
+  name: string
+  command: string[]
+}
+
+export interface FakeExecResult {
+  stdout: Readable | Uint8Array
+  // Omitted means exit 0. A string is the stderr of a non-zero exit.
+  error?: string
 }
 
 const NOT_FOUND_STATUS: ContainerStatus = { exists: false, running: false, exitCode: null }
@@ -93,14 +144,71 @@ export function createFakeRuntime(): ComputeRuntime & {
   _networks: Set<string>
   _builds: BuildSpec[]
   _images: Set<string>
+  _exec: { calls: FakeExecCall[]; handler: ((call: FakeExecCall) => FakeExecResult) | null }
+  // Required here, where the interface has it optional: the fake always
+  // has one, and a test should not have to prove that at every call.
+  execStream(name: string, command: string[]): ExecStream
 } {
   const state = new Map<string, ContainerStatus>()
   const specs = new Map<string, ContainerSpec>()
   const networks = new Set<string>()
   const builds: BuildSpec[] = []
   const images = new Set<string>()
+  const exec: { calls: FakeExecCall[]; handler: ((call: FakeExecCall) => FakeExecResult) | null } = {
+    calls: [],
+    handler: null,
+  }
 
   return {
+    // Every execStream call, and the test's handler for them. Recorded for
+    // the same reason _builds is: an online snapshot that silently did not
+    // run pg_basebackup, or ran it with the wrong arguments, must be
+    // visible to an assertion.
+    _exec: exec,
+
+    // Refuses a container that is not running, as `docker exec` does ("is
+    // not running", exit 1): an online snapshot of a database that was
+    // stopped under it must fail here exactly as it would against Docker,
+    // not read whatever the handler happened to return.
+    execStream(name: string, command: string[]): ExecStream {
+      const call: FakeExecCall = { name, command: [...command] }
+      exec.calls.push(call)
+      if (state.get(name)?.running !== true) {
+        return failedExec(new HobbyError('runtime_unavailable', 'docker exec failed', `container ${name} is not running`))
+      }
+      if (exec.handler === null) {
+        return failedExec(new HobbyError('internal', 'fake runtime has no exec handler', 'set runtime._exec.handler'))
+      }
+      const result = exec.handler(call)
+      const stdout = result.stdout instanceof Readable ? result.stdout : Readable.from([Buffer.from(result.stdout)])
+      let cancelled = false
+      const done = new Promise<void>((resolve, reject) => {
+        const settle = (): void => {
+          if (cancelled) {
+            reject(new HobbyError('runtime_unavailable', 'docker exec failed', 'cancelled'))
+          } else if (result.error !== undefined) {
+            reject(new HobbyError('runtime_unavailable', 'docker exec failed', result.error))
+          } else {
+            resolve()
+          }
+        }
+        stdout.once('end', settle)
+        stdout.once('close', settle)
+        stdout.once('error', settle)
+      })
+      // A rejection nobody has awaited yet is still an unhandled one to
+      // node, and the caller awaits done only after stdout is consumed.
+      done.catch(() => {})
+      return {
+        stdout,
+        done,
+        cancel(): void {
+          cancelled = true
+          stdout.destroy()
+        },
+      }
+    },
+
     _state: state,
     _specs: specs,
     // Exposed for the same reason _specs is: a test asserting that a deploy
@@ -183,4 +291,10 @@ export function createFakeRuntime(): ComputeRuntime & {
       networks.delete(name)
     },
   }
+}
+
+function failedExec(error: HobbyError): ExecStream {
+  const done = Promise.reject(error)
+  done.catch(() => {})
+  return { stdout: Readable.from([]), done, cancel(): void {} }
 }

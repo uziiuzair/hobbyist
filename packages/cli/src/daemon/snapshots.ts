@@ -8,11 +8,13 @@
 
 import { randomUUID } from 'node:crypto'
 import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, relative, sep } from 'node:path'
 import {
   cloneTree,
+  expectKind,
   guardFor,
   HobbyError,
+  resolvePgdataPath,
   validateName,
   type ActivityGuardResult,
   type CloneMechanism,
@@ -27,7 +29,8 @@ import {
 import { APP_PORT_RANGE } from '@hobby.sh/app'
 import { createPostgresFromClone } from '@hobby.sh/pg'
 import { WORKER_PORT_RANGE } from '@hobby.sh/worker'
-import { holdProjectAsleep, type DaemonContext } from './context.js'
+import { basebackupPostgres, type UnpackOptions } from './basebackup.js'
+import { holdProjectAsleep, holdProjectExclusive, type DaemonContext } from './context.js'
 
 // Sortable, and lowercase because restore builds project names out of this and
 // validateName (packages/core/src/names.ts:10) allows only /^[a-z][a-z0-9-]/.
@@ -170,11 +173,28 @@ export async function resume(ctx: DaemonContext, ids: ResourceId[]): Promise<str
   return failures
 }
 
+// How one resource's data got into the snapshot.
+//
+//   clone        cloneTree of a directory nothing was writing to: a resource
+//                quiesce stopped, or one that was already asleep. What
+//                every snapshot did before --online, and what a manifest
+//                without the field means (readManifest fills it in).
+//   basebackup   pg_basebackup of a running postgres, through its own
+//                container (basebackup.ts). The PGDATA carries a
+//                backup_label, and its first start runs recovery to the
+//                backup's end point.
+export type CaptureMethod = 'clone' | 'basebackup'
+
 export interface SnapshotResourceEntry {
   id: string
   kind: ResourceKind
   name: string
+  // For a quiesced snapshot, the state after quiesce, so `sleeping` for
+  // anything it stopped. For an online one, the state the resource was in
+  // and stayed in for the whole capture: takeOnlineSnapshot fails rather
+  // than record a resource that changed state under it.
   stateAtSnapshot: ResourceState
+  method: CaptureMethod
   config: ResourceConfig
   durableObjectClasses: string[]
 }
@@ -273,6 +293,7 @@ export async function takeSnapshot(
         kind: resource.kind,
         name: resource.name,
         stateAtSnapshot: resource.state,
+        method: 'clone',
         config: resource.config,
         durableObjectClasses: durableObjectClassesOf(resource.config),
       })),
@@ -298,6 +319,215 @@ export async function takeSnapshot(
   }
 }
 
+// Why a project cannot be snapshotted online, or null when it can. Read by
+// takeOnlineSnapshot before it takes anything, and by the snapshot route's
+// pinned refusal (refusePausingPinned, routes.ts), which suggests --online
+// only to a project that would actually be accepted.
+//
+// Postgres only, because postgres is the only kind with a way to be copied
+// consistently while it runs. A worker's Durable Object sqlite files, a
+// queue's messages.sqlite and whatever an app writes have no online backup
+// protocol hobby can drive, and a byte copy of any of them while they are
+// being written is the hot copy ADR 0016 refuses to file as good. Refusing
+// the whole project, rather than quiescing the other kinds and copying only
+// postgres online, keeps the promise the flag makes: nothing is paused.
+export function onlineSnapshotRefusal(ctx: DaemonContext, project: Project): string | null {
+  const others = ctx.store.listResources(project.id).filter((resource) => resource.kind !== 'postgres')
+  if (others.length > 0) {
+    const names = others.map((resource) => `${resource.name} (${resource.kind})`).join(', ')
+    return (
+      `project ${project.name} holds ${names}, and only postgres has an online copy mechanism: ` +
+      'app, worker and queue state can only be snapshotted by stopping it'
+    )
+  }
+  return null
+}
+
+export interface TakeOnlineSnapshotOptions {
+  now?: () => number
+  suffix?: () => string
+  unpack?: UnpackOptions
+}
+
+// Where the snapshot's copy of a running postgres's PGDATA goes, relative to
+// the snapshot's data/ directory: the same place a clone of the whole project
+// directory puts it, so restore (restoreSnapshot and restoreInPlace below),
+// which only ever clones data/ back wholesale, cannot tell the two apart.
+// Derived from the stored dataDir and resolvePgdataPath
+// (packages/core/src/config.ts), never re-assembled from names, and refused
+// if the dataDir is somehow not inside the project directory, because then
+// an offline clone would not have captured it either and no path under
+// data/ is the right one.
+function pgdataRelativePath(ctx: DaemonContext, projectName: string, dataDir: string): string {
+  const projectDir = join(ctx.paths.projectsDir, projectName)
+  const rel = relative(projectDir, resolvePgdataPath(dataDir))
+  if (rel === '' || rel.startsWith('..') || rel.startsWith(sep)) {
+    throw new HobbyError(
+      'internal',
+      `data directory ${dataDir} is not inside ${projectDir}`,
+      'take the snapshot without --online'
+    )
+  }
+  return rel
+}
+
+// A snapshot with no pause: ADR 0016's 2026-09-19 note.
+//
+// The differences from takeSnapshot, each deliberate:
+//
+//   - Nothing is quiesced, stopped or resumed. A running postgres is copied
+//     with pg_basebackup inside its own container (basebackupPostgres,
+//     basebackup.ts); a sleeping one is already at rest and is cloned
+//     exactly as takeSnapshot would.
+//   - The project is held with holdProjectExclusive, not holdProjectAsleep:
+//     the same mutual exclusion (a second snapshot or any restore of the
+//     project is refused while this runs), without fencing wakes, since
+//     there is no stopped resource for a wake to make hot.
+//   - Every resource gets an activity handle (ActivityTracker.open,
+//     packages/proxy/src/activity.ts) for the whole capture. That is the
+//     hibernator decision. A touch would not do: it restarts the idle clock
+//     once, and a backup longer than sleepAfterSeconds would then be slept
+//     under. A wake fence would do too much: it blocks wakes, the opposite
+//     of the point. An open handle is exactly "something is connected",
+//     which is also the plain truth for a running database while
+//     pg_basebackup's session is attached, and the hibernator already skips
+//     any resource with a live connection and re-reads that count
+//     immediately before it stops anything (tick, hibernator.ts). For a
+//     sleeping resource the handle is what stops a wake-then-sleep inside
+//     the clone window from going unnoticed: a resource woken mid-clone
+//     cannot be put back to sleep by the hibernator until the handle is
+//     closed, so the state check after the clone sees it. An explicit
+//     `hobby sleep` is not the hibernator and is not held off; if it lands
+//     mid-backup it kills the session and the snapshot fails.
+//   - Each resource's state is read before its capture and again after,
+//     and any change fails the snapshot. A running postgres stopped under
+//     pg_basebackup fails the exec anyway; the re-read catches the stop
+//     that lands just after the stream ended, and a sleeping one that woke
+//     during its clone, which no process would report.
+//
+// Any failure removes the .partial directory, the same promise takeSnapshot
+// makes: nothing half-written is ever left where listSnapshots looks.
+export async function takeOnlineSnapshot(
+  ctx: DaemonContext,
+  projectName: string,
+  opts: TakeOnlineSnapshotOptions = {}
+): Promise<SnapshotManifest> {
+  const nowMs = (opts.now ?? Date.now)()
+  const suffix = (opts.suffix ?? (() => randomUUID().slice(0, 6)))()
+  const project = projectOrThrow(ctx, projectName)
+
+  const refusal = onlineSnapshotRefusal(ctx, project)
+  if (refusal !== null) {
+    throw new HobbyError('conflict', refusal, `take it without --online: hobby snapshot ${project.name}`)
+  }
+
+  const id = snapshotId(nowMs, suffix)
+  const finalDir = snapshotDir(ctx.paths, project.name, id)
+  const partialDir = `${finalDir}.partial`
+
+  // Outside the try, like takeSnapshot's hold: a refusal here has touched
+  // nothing, so there is nothing to undo.
+  const release = holdProjectExclusive(ctx, project.id, project.name)
+  const handles: Array<ReturnType<DaemonContext['activity']['open']>> = []
+  try {
+    const resources = ctx.store.listResources(project.id).map((resource) => expectKind(resource, 'postgres'))
+    // Every state is checked before anything is copied, for the same reason
+    // quiesce consults every guard before stopping anything: failing on the
+    // third resource after copying two is a slower way to the same refusal.
+    const unsettled = resources.filter((resource) => resource.state !== 'running' && resource.state !== 'sleeping')
+    if (unsettled.length > 0) {
+      throw new HobbyError(
+        'conflict',
+        `cannot snapshot ${project.name} online while ${unsettled.map((r) => `${r.name} is ${r.state}`).join(', ')}`,
+        'retry once it is running or asleep'
+      )
+    }
+    for (const resource of resources) {
+      handles.push(ctx.activity.open(resource.id))
+    }
+
+    await mkdir(join(partialDir, 'data'), { recursive: true })
+    const entries: SnapshotResourceEntry[] = []
+    let clone: CloneMechanism = 'reflink'
+    for (const listed of resources) {
+      // Re-read at its turn rather than trusted from the listing above: a
+      // wake is not fenced here, so a resource that was asleep when the
+      // snapshot began may be running by the time the ones before it are
+      // copied, and must then be backed up online rather than cloned hot.
+      const current = ctx.store.getResource(listed.id)
+      if (current === null) {
+        throw new HobbyError('conflict', `${listed.name} was deleted during the snapshot`, 'nothing was kept; retry the snapshot')
+      }
+      const resource = expectKind(current, 'postgres')
+      const before = resource.state
+      if (before !== 'running' && before !== 'sleeping') {
+        throw new HobbyError(
+          'conflict',
+          `cannot snapshot ${resource.name} online while it is ${before}`,
+          'nothing was kept; retry once it is running or asleep'
+        )
+      }
+      let method: CaptureMethod
+      if (before === 'running') {
+        const dest = join(partialDir, 'data', pgdataRelativePath(ctx, project.name, resource.config.dataDir))
+        await basebackupPostgres(ctx, resource, dest, `hobby snapshot ${id}`, opts.unpack)
+        method = 'basebackup'
+        // A tar written out byte by byte is a full copy by any measure that
+        // matters to ADR 0016's free-space reasoning.
+        clone = 'copy'
+      } else {
+        const result = await cloneTree(
+          ctx.paths.resourceDir(project.name, resource.name),
+          join(partialDir, 'data', resource.name)
+        )
+        method = 'clone'
+        if (result.mechanism === 'copy') {
+          clone = 'copy'
+        }
+      }
+
+      const after = ctx.store.getResource(resource.id)?.state
+      if (after !== before) {
+        throw new HobbyError(
+          'conflict',
+          `${resource.name} went from ${before} to ${after ?? 'deleted'} while it was being copied, so the copy cannot be trusted`,
+          'nothing was kept; retry the snapshot'
+        )
+      }
+      entries.push({
+        id: resource.id,
+        kind: resource.kind,
+        name: resource.name,
+        stateAtSnapshot: before,
+        method,
+        config: resource.config,
+        durableObjectClasses: durableObjectClassesOf(resource.config),
+      })
+    }
+
+    const manifest: SnapshotManifest = {
+      version: 1,
+      snapshotId: id,
+      createdAt: new Date(nowMs).toISOString(),
+      clone,
+      project: { name: project.name, sleepAfterSeconds: project.sleepAfterSeconds },
+      resources: entries,
+      verification: { status: 'unverified', at: null, detail: null },
+    }
+    await writeFile(join(partialDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+    await rename(partialDir, finalDir)
+    return manifest
+  } catch (err: unknown) {
+    await rm(partialDir, { recursive: true, force: true })
+    throw err
+  } finally {
+    for (const handle of handles) {
+      ctx.activity.close(handle)
+    }
+    release()
+  }
+}
+
 export interface FoundSnapshot {
   manifest: SnapshotManifest
   dir: string
@@ -310,7 +540,13 @@ async function readManifest(dir: string): Promise<SnapshotManifest | null> {
     if (!isSnapshotManifest(parsed)) {
       return null
     }
-    return parsed
+    // Written before online snapshots existed, when every resource was a
+    // clone. Filled in here, once, so no reader has to remember that an
+    // absent method means clone.
+    return {
+      ...parsed,
+      resources: parsed.resources.map((entry) => ({ ...entry, method: entry.method ?? 'clone' })),
+    }
   } catch {
     return null
   }

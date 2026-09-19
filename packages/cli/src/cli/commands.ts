@@ -1345,9 +1345,17 @@ async function snapshotOfProject(c: Ctx, project: string, id: string): Promise<v
 export async function cmdSnapshotTake(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const project = positionals[0]
   if (project === undefined || positionals.length > 1) {
-    throw new UsageError('usage: hobby snapshot <project> [--allow-pause]')
+    throw new UsageError('usage: hobby snapshot <project> [--online | --allow-pause]')
   }
-  const result = await c.api.takeSnapshot(project, { allowPause: flags['allow-pause'] === true })
+  const online = flags.online === true
+  const allowPause = flags['allow-pause'] === true
+  // Refused here as well as by the daemon (takeSnapshotRoute), so the
+  // mistake costs no round trip and reads as a usage line rather than an
+  // API error.
+  if (online && allowPause) {
+    throw new UsageError('--online and --allow-pause cannot be combined: --online pauses nothing, so there is no pause to allow')
+  }
+  const result = await c.api.takeSnapshot(project, { allowPause, online })
 
   if (flags.json) {
     c.io.out(JSON.stringify(result))
@@ -1357,9 +1365,19 @@ export async function cmdSnapshotTake(c: Ctx, positionals: string[], flags: Flag
   const count = result.snapshot.resources.length
   c.io.out(
     `snapshot ${result.snapshot.snapshotId} of ${project}: ${count} resource${count === 1 ? '' : 's'}, ` +
-      `${result.snapshot.clone === 'reflink' ? 'reflink clone' : 'full copy'}`
+      `${result.snapshot.clone === 'reflink' ? 'reflink clone' : 'full copy'}${online ? ', online (nothing paused)' : ''}`
   )
   c.io.out(`  ${result.dir}`)
+  // Said once, here, because it is the one visible difference an online
+  // snapshot makes later: the restored database's first start replays WAL
+  // from backup_label before it answers (basebackupPostgres, basebackup.ts).
+  const backedUp = result.snapshot.resources.filter((resource) => resource.method === 'basebackup')
+  if (backedUp.length > 0) {
+    c.io.out(
+      `  copied running with pg_basebackup: ${backedUp.map((resource) => resource.name).join(', ')}. ` +
+        'a restore of it runs recovery on its first start'
+    )
+  }
   // Truthful about what resume did, from the store: a resource that did not
   // come back is `failed` in this list, and the snapshot is still good.
   for (const resource of result.resources) {

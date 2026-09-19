@@ -61,9 +61,14 @@ export function renderResourceLine(resource: WireResource): string {
 // sortable and in UTC), so nothing is lost. The verification column prints
 // the tri-state as it is, `unverified` included, because a check that never
 // ran must never read as one that passed (the spec's "Verification").
+//
+// `online` is appended when any resource was captured running with
+// pg_basebackup, because that is the snapshot whose restore runs recovery
+// on first start, and a reader choosing which one to restore should see it.
 export function renderSnapshotLine(manifest: WireSnapshotManifest): string {
   const count = manifest.resources.length
-  return `${manifest.snapshotId}  ${count} resource${count === 1 ? '' : 's'}  ${manifest.clone}  ${manifest.verification.status}`
+  const online = manifest.resources.some((resource) => resource.method === 'basebackup') ? '  online' : ''
+  return `${manifest.snapshotId}  ${count} resource${count === 1 ? '' : 's'}  ${manifest.clone}  ${manifest.verification.status}${online}`
 }
 
 // The consumer column of `hobby queue ls`. Deliberately the same wording
