@@ -14,6 +14,7 @@ import { resolvePaths } from '@hobby.sh/core'
 import { createApi, type Api } from '@hobby.sh/cli'
 import { z } from 'zod'
 import {
+  branchTool,
   connectionStringTool,
   listTool,
   logsTool,
@@ -71,6 +72,26 @@ export function createServer(api: Api): McpServer {
       },
     },
     async (args) => newTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_branch',
+    {
+      description:
+        'create a new project whose postgres resources start from a copy of an existing project\'s data. ' +
+        'mirrors `hobby branch <source> <name>`. the branch starts asleep, is never pinned, and keeps the ' +
+        'source\'s database password. an awake source is paused for the length of the copy; a pinned, ' +
+        'awake source is refused unless allowPause is true. projects holding apps, workers or queues are refused.',
+      inputSchema: {
+        source: z.string().min(1).describe('the project to branch from'),
+        name: z.string().min(1).describe('the new project name'),
+        allowPause: z
+          .boolean()
+          .optional()
+          .describe('accept pausing a pinned project that is awake; leave unset unless the user asked for it'),
+      },
+    },
+    async (args) => branchTool(api, args)
   )
 
   server.registerTool(

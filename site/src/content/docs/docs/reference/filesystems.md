@@ -36,7 +36,7 @@ absent.
 | Feature | Without reflinks |
 |---|---|
 | [Snapshots](/docs/guides/snapshots/) | A full copy: slow, and full disk cost. Also [not reachable yet](/docs/status/#not-reachable) |
-| Copy-on-write branching, Phase 1.5 | The same. [Not built yet](/docs/status/#not-built) |
+| `hobby branch` | A full copy: slow, and full disk cost. It works, and says so when it happens |
 | Everything else | Unaffected |
 
 Day to day, running databases and apps and workers, this makes no difference at

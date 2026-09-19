@@ -4,6 +4,11 @@ Status: NOTES. A hypothesis to benchmark. **Nothing here is decided, and ADR 000
 stands until it is measured.**
 Date:   2026-08-07
 
+Update 2026-09-19: the first `hobby branch` (issue #19) is built on this path,
+with an awake instance quiesced first rather than cloned hot. Measurements 1
+to 4 below are still not done, so everything this note says about speed is
+still a claim. See `docs/branching/CLAUDE.md`, "What is built".
+
 ## The claim
 
 ADR 0005 names one constraint as the main unsolved implementation problem:
