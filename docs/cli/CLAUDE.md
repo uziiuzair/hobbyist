@@ -25,7 +25,7 @@ hobby sleep|wake <target>        manual override
 hobby connect <target>           open psql against it
 hobby studio                     print the URL, open the browser
 hobby studio passwd              set the operator credential, on the box only
-hobby branch <src> <dst>         copy-on-write branch (Phase 1.5)
+hobby branch <src> <dst>         a new project from a clone of <src>'s data
 hobby rm <target>                destroy, with a confirmation
 hobby eject <project>            emit docker-compose.yml plus data
 hobby eject <project> --release  the same, and hobby stops acting on it

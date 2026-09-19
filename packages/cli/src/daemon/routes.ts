@@ -51,6 +51,7 @@ import {
   findWranglerManifest,
   resolveWorkerSourcePath,
 } from '@hobby.sh/worker'
+import { branchProject } from './branch.js'
 import { getOrCreateWake, waitForProjectAwakeable, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
 import {
@@ -292,6 +293,44 @@ async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<Rou
   }
 
   return { status: 200, body: { deleted: true } }
+}
+
+// POST /v1/projects/:name/branch, the one route behind `hobby branch`, so
+// Studio (whose /v1 gate forwards here, studio/routes.ts) and MCP get the
+// same behaviour as the CLI without a second implementation. All of the
+// work, and every reason for it, is in branch.ts; this only reads the body.
+//
+// allowPause is accepted only as a literal true. Anything else, including
+// the string "true", leaves the pinned-project guard in force, because the
+// guard exists to stop a pinned project being paused by accident and a loose
+// reading of the override is how that accident would happen.
+async function branchProjectRoute(ctx: DaemonContext, req: IncomingMessage, sourceName: string): Promise<RouteResult> {
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const name = fields['name']
+  if (typeof name !== 'string' || name.length === 0) {
+    throw new HobbyError(
+      'usage',
+      'name is required',
+      'POST /v1/projects/:name/branch expects { "name": string, "allowPause"?: boolean }'
+    )
+  }
+  const allowPause = fields['allowPause']
+  if (allowPause !== undefined && typeof allowPause !== 'boolean') {
+    throw new HobbyError('usage', 'allowPause must be a boolean', 'send true to accept pausing a pinned project')
+  }
+  const result = await branchProject(ctx, sourceName, name, { allowPause: allowPause === true })
+  return {
+    status: 201,
+    body: {
+      project: result.project,
+      resources: await toWireResources(ctx, result.resources),
+      clone: result.clone,
+      paused: result.paused,
+      pausedMs: result.pausedMs,
+      resumeFailures: result.resumeFailures,
+    },
+  }
 }
 
 // The default port an app's process is asked to listen on. Handed to the
@@ -1995,6 +2034,11 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
     if (segments.length === 4 && method === 'POST' && segments[3] === 'sleep-policy') {
       const name = decodeURIComponent(segments[2] as string)
       return await setSleepPolicyRoute(ctx, req, name)
+    }
+
+    if (segments.length === 4 && method === 'POST' && segments[3] === 'branch') {
+      const name = decodeURIComponent(segments[2] as string)
+      return await branchProjectRoute(ctx, req, name)
     }
 
     if (segments.length === 4 && method === 'POST' && segments[3] === 'eject') {

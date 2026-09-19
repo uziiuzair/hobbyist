@@ -7,9 +7,9 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import type { Api, ConnectionResponse, DeletedResponse, LogsResponse, ProjectDetailResponse, ProjectsResponse, ResourceResponse, WireResource } from '@hobby.sh/cli'
+import type { Api, BranchResponse, ConnectionResponse, DeletedResponse, LogsResponse, ProjectDetailResponse, ProjectsResponse, ResourceResponse, WireResource } from '@hobby.sh/cli'
 import type { Project } from '@hobby.sh/core'
-import { connectionStringTool, listTool, logsTool, newTool, rmTool, sleepTool, wakeTool, type ToolResult } from '../src/tools.js'
+import { branchTool, connectionStringTool, listTool, logsTool, newTool, rmTool, sleepTool, wakeTool, type ToolResult } from '../src/tools.js'
 
 function project(name: string, id = `${name}-id`): Project {
   return { id, name, networkName: `hobby-${name}`, sleepAfterSeconds: 300, createdAt: new Date('2026-01-01'), releasedAt: null }
@@ -58,6 +58,7 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     createProject: notWired('createProject'),
     setSleepPolicy: notWired('setSleepPolicy'),
     getProject: notWired('getProject'),
+    branchProject: notWired('branchProject'),
     deleteProject: notWired('deleteProject'),
     createResource: notWired('createResource'),
     deployResource: notWired('deployResource'),
@@ -137,6 +138,29 @@ test('hobby_new: POST /v1/projects then POST /v1/projects/:name/resources with n
   const body = resultText(result) as { resource: WireResource }
   const config = body.resource.config as unknown as Record<string, unknown>
   assert.equal(config.password, undefined)
+})
+
+test('hobby_branch: one POST /v1/projects/:name/branch, allowPause false unless the agent set it', async () => {
+  const branched: BranchResponse = {
+    project: project('blog-exp'),
+    resources: [],
+    clone: 'reflink',
+    paused: [],
+    pausedMs: null,
+    resumeFailures: [],
+  }
+  const { api, calls } = fakeApi({
+    branchProject: async () => branched,
+  })
+
+  const plain = await branchTool(api, { source: 'blog', name: 'blog-exp' })
+  assert.equal(plain.isError, undefined)
+  const allowed = await branchTool(api, { source: 'blog', name: 'blog-exp', allowPause: true })
+  assert.equal(allowed.isError, undefined)
+  assert.deepEqual(calls, [
+    'branchProject("blog", "blog-exp", {"allowPause":false})',
+    'branchProject("blog", "blog-exp", {"allowPause":true})',
+  ])
 })
 
 test('hobby_connection_string: resolves the target then GET /v1/resources/:id/connection, password included', async () => {
