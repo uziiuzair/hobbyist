@@ -52,7 +52,7 @@ import {
   resolveWorkerSourcePath,
 } from '@hobby.sh/worker'
 import { branchProject } from './branch.js'
-import { getOrCreateWake, waitForProjectAwakeable, type DaemonContext } from './context.js'
+import { clearWakeRefusal, getOrCreateWake, waitForProjectAwakeable, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
 import {
   deleteSnapshot,
@@ -879,6 +879,12 @@ async function startResourceRoute(ctx: DaemonContext, id: string): Promise<Route
   // afterwards: the snapshot's own resume may have started it already.
   await waitForProjectAwakeable(ctx, resource.projectId)
   resource = getResourceOrThrow(ctx, id)
+  // An explicit start is the way out of a refused wake (issue #10, see
+  // buildWake in context.ts): someone looked and wants it tried again. The
+  // kind handler is called directly, never through buildWake, so the start
+  // itself cannot be refused; clearing first means the implicit wakes after
+  // it are not refused either.
+  clearWakeRefusal(ctx, resource.id)
   await ctx.kinds.get(resource.kind).start(ctx, resource)
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }

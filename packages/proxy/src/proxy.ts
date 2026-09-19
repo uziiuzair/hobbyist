@@ -11,11 +11,13 @@
 
 import net from 'node:net'
 import { HobbyError, parseRoutingKey } from '@hobby.sh/core'
-import type { ActivityTracker } from './activity.js'
+import type { ActivityTracker, ConnectionHandle } from './activity.js'
 import { CancelRegistry, type CancelRoute } from './cancel.js'
 import {
   buildCancelRequest,
   buildStartupPacket,
+  CANNOT_CONNECT_NOW,
+  classifyBackendAnswer,
   errorResponse,
   parseStartup,
   scanBackendStartup,
@@ -46,12 +48,18 @@ export interface ProxyDeps {
   // tenth container start) is the daemon's responsibility, not the
   // proxy's. See the task report for why that split is deliberate.
   wake(resourceId: string): Promise<void>
+  // True when a wake of this resource already failed and the daemon will not
+  // try again until an explicit start (issue #10; buildWake in
+  // packages/cli/src/daemon/context.ts owns the set). Asked before calling
+  // wake so a refused client gets its ErrorResponse at once, with no wake
+  // and no dial. Optional: absent means nothing is ever refused here, and
+  // wake itself stays the authority.
+  isWakeRefused?(resourceId: string): boolean
   activity: ActivityTracker
 }
 
 const PROTOCOL_VIOLATION = '08P01'
 const UNKNOWN_DATABASE = '3D000'
-const CANNOT_CONNECT_NOW = '57P03'
 
 // A client that never sends a complete startup packet (connects and goes
 // silent, or trickles a partial length prefix) must not hold this
@@ -84,6 +92,25 @@ const FORCE_CLOSE_GRACE_MS = 1000
 const DIAL_ATTEMPT_TIMEOUT_MS = 500
 const DIAL_RETRY_INTERVAL_MS = 100
 const DIAL_MAX_ATTEMPTS = 3
+
+// The pause between a backend refusing a session with 57P03 ("the database
+// system is starting up") and the next attempt at one. See holdUntilServing
+// for the whole mechanism. Only ever slept after a refusal, never on the
+// happy path, so a backend that is serving answers the first attempt and
+// pays nothing for this. 100ms matches DIAL_RETRY_INTERVAL_MS: fine enough
+// that a crash recovery finishing mid-wait costs the client at most a tenth
+// of a second of the 1 second cold-start target, coarse enough that a client
+// held for the whole budget costs Postgres ten short-lived refused backends
+// a second rather than a busy loop.
+const READY_RETRY_INTERVAL_MS = 100
+
+// The least time a freshly dialed backend is given to say anything at all,
+// however little of the connection's budget is left. The budget exists to
+// bound how long a client is held through refusals; it must not turn a wake
+// that succeeded late in its window into a failure because a healthy backend
+// took two milliseconds to send AuthenticationRequest after the deadline
+// passed. Same figure as a single dial attempt's timeout.
+const FIRST_ANSWER_FLOOR_MS = DIAL_ATTEMPT_TIMEOUT_MS
 
 // libpq's real default order can be two encryption negotiation round trips
 // before the actual startup packet: GSSENCRequest first (when gssencmode
@@ -287,14 +314,24 @@ function raceTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => Error)
 // ReadyForQuery, purely so BackendKeyData can be swapped for a key this
 // proxy can route a cancel on, and then becomes a plain pipe too. The cost
 // is bounded by the startup phase; query traffic is never parsed.
+//
+// The activity handle arrives already open rather than being opened here,
+// because the connection counts as activity from the moment its first dial
+// succeeds, not from the moment the backend agreed to serve it:
+// holdUntilServing can keep a client waiting on a starting backend for a
+// while, and that client is using this resource the whole time. `initial`
+// is what the backend already sent while holdUntilServing was deciding
+// whether it was serving at all, and `upstream` arrives paused so nothing it
+// sent since is lost before the listeners below exist.
 function spliceAndTrackActivity(
   client: net.Socket,
   upstream: net.Socket,
   activity: ActivityTracker,
+  handle: ConnectionHandle,
   cancels: CancelRegistry,
-  target: ProxyTarget
+  target: ProxyTarget,
+  initial: Buffer
 ): void {
-  const handle = activity.open(target.resourceId)
   // Registered before the backend has said anything, because the address is
   // already known and the key it will send is not. scanBackendStartup fills
   // in backendKey when BackendKeyData arrives; until then lookup refuses to
@@ -328,7 +365,11 @@ function spliceAndTrackActivity(
   // This connection behaves exactly as every connection did before cancel
   // routing existed.
   if (minted === null) {
+    if (initial.length > 0) {
+      client.write(initial)
+    }
     upstream.pipe(client)
+    closeIfAlreadyGone(upstream, finish)
     return
   }
 
@@ -372,6 +413,223 @@ function spliceAndTrackActivity(
   }
 
   upstream.on('data', onBackendData)
+  // After the listener, not before: if the bytes holdUntilServing already
+  // read run all the way to ReadyForQuery, onBackendData hands over to
+  // pipe() and detaches itself, and that detach has to find it attached.
+  if (initial.length > 0) {
+    onBackendData(initial)
+  }
+  upstream.resume()
+  closeIfAlreadyGone(upstream, finish)
+}
+
+// The backend can fail (a reset, an error) in the gap between
+// holdUntilServing letting go of the upstream socket and the listeners above
+// being attached, and its 'close' event would then have fired to nobody,
+// leaving both sockets and the activity handle open for good. `destroyed` is
+// set synchronously by that failure, so checking it once, after the
+// listeners exist, covers the gap; finish is idempotent if 'close' also
+// arrives.
+function closeIfAlreadyGone(upstream: net.Socket, finish: () => void): void {
+  if (upstream.destroyed) {
+    finish()
+  }
+}
+
+type BackendAnswerWait =
+  | { kind: 'answered'; bytes: Buffer }
+  | { kind: 'not_ready'; message: string }
+  | { kind: 'closed' }
+  | { kind: 'timeout' }
+  | { kind: 'client_gone' }
+
+// Reads the backend's first answer to the startup packet, and forwards none
+// of it. See classifyBackendAnswer in startup.ts for what counts as an
+// answer. Resolves with the upstream socket paused on 'answered', so bytes
+// that arrive between this resolving and spliceAndTrackActivity attaching its
+// own listener wait in the socket's buffer rather than being emitted to no
+// listener and lost.
+//
+// Also watches the client, because a client that gives up while its backend
+// is refusing it must end the hold rather than keep dialing for nobody.
+function awaitBackendAnswer(client: net.Socket, upstream: net.Socket, timeoutMs: number): Promise<BackendAnswerWait> {
+  return new Promise((resolve) => {
+    let received: Buffer = Buffer.alloc(0)
+    let settled = false
+
+    const settle = (result: BackendAnswerWait): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      upstream.off('data', onData)
+      upstream.off('close', onUpstreamClose)
+      client.off('close', onClientClose)
+      if (result.kind === 'answered') {
+        upstream.pause()
+      }
+      resolve(result)
+    }
+
+    const onData = (chunk: Buffer): void => {
+      received = received.length === 0 ? chunk : Buffer.concat([received, chunk])
+      const answer = classifyBackendAnswer(received)
+      if (answer.kind === 'incomplete') return
+      settle(answer.kind === 'answered' ? { kind: 'answered', bytes: received } : answer)
+    }
+    const onUpstreamClose = (): void => settle({ kind: 'closed' })
+    const onClientClose = (): void => settle({ kind: 'client_gone' })
+    const timer = setTimeout(() => settle({ kind: 'timeout' }), timeoutMs)
+
+    upstream.on('data', onData)
+    upstream.on('close', onUpstreamClose)
+    client.on('close', onClientClose)
+    if (client.destroyed) {
+      settle({ kind: 'client_gone' })
+    }
+  })
+}
+
+type HoldResult =
+  | { kind: 'serving'; upstream: net.Socket; initial: Buffer; handle: ConnectionHandle }
+  | { kind: 'refused'; message: string }
+  | { kind: 'client_gone' }
+
+// Dials the backend and replays the startup packet, and keeps doing that for
+// as long as the backend is not serving yet and the budget allows. Issue #9.
+// "Not serving yet" has two shapes on the wire, and both are retried:
+//
+//   - FATAL 57P03 as the first backend message: Postgres is up, reading
+//     startup packets, and refusing sessions (starting up, crash recovery).
+//   - The connection closing or resetting before any complete backend
+//     message: the TCP dial was accepted by something that is not Postgres.
+//     This is the more common of the two in a real deployment, and it was
+//     measured, not assumed: against postgres:18-alpine on Docker Desktop,
+//     killed with `docker kill` and restarted with `docker start` during a
+//     3M-row crash recovery, 8 of 25 back-to-back connections through the
+//     proxy got exactly this and none got 57P03. Docker's published port
+//     (docker-proxy, the Docker Desktop forwarder, the Linux userland proxy
+//     alike) accepts on the host side while nothing inside the container is
+//     listening yet, then closes. It is the same lie reconcile.ts's file
+//     comment describes for readiness: an accepted TCP connection says
+//     nothing about Postgres.
+//
+// Why this is needed on top of the wake: the wake path already waits for a
+// real authenticated connection before it resolves (startPostgres waits on
+// pgProbe, packages/pg/src/readiness.ts), but a target whose recorded state
+// is `running` skips the wake entirely, and `running` is a record, not an
+// observation. A container that crashed and was restarted outside the daemon
+// (the recorded state never changed), or one still finishing crash recovery,
+// accepts the TCP dial and then refuses the session with FATAL 57P03. Before
+// this, that FATAL went straight to the client milliseconds after connect,
+// which is precisely the experience wake-on-connect exists to eliminate.
+//
+// Why a retry is safe: in both shapes the backend has said nothing but a
+// refusal, before any authentication exchange (57P03 is Postgres's answer
+// to the startup packet itself; an early close is no answer at all).
+// Nothing has passed between this client and
+// any backend except the startup packet, which this proxy holds a copy of
+// (the rebuilt `packet`), and nothing the backend said has been forwarded,
+// because awaitBackendAnswer forwards nothing. So the refused connection is
+// discarded and a fresh one is dialed with the identical packet, and the
+// client, still waiting for its first reply, cannot tell the difference
+// between that and a backend that was slow to answer. The moment the answer
+// is anything else (an authentication request, a different error), it is
+// the backend's real answer and the client gets it untouched. The line is
+// the first complete backend message: once one has arrived the connection is
+// spliced, and a close after that is the session's business, never retried.
+// A refused dial never reaches this loop's retry at all; connectUpstream's
+// own bounded retry handles it.
+//
+// Bounded by `deadline`, the same wakeTimeoutMs budget a sleeping target's
+// wake gets, and ending in a real ErrorResponse naming what the backend last
+// said, never a dropped socket. A healthy backend is dialed once and its
+// first answer spliced the moment it arrives: there is no probe connection
+// and no sleep on that path, only the wait for a reply the client was
+// waiting for anyway.
+//
+// Activity is opened on the first successful dial, the moment it always was,
+// and held across every retry after it: a client waiting on this resource is
+// using it, and a hibernator tick that saw zero connections could otherwise
+// stop the very backend being waited on. It is handed to the splice on
+// 'serving' and closed here on every other way out, exactly once.
+async function holdUntilServing(
+  client: net.Socket,
+  target: ProxyTarget,
+  packet: Buffer,
+  deadline: number,
+  budgetMs: number,
+  activity: ActivityTracker
+): Promise<HoldResult> {
+  let handle: ConnectionHandle | null = null
+  const release = <T extends HoldResult>(result: T): T => {
+    if (handle !== null) {
+      activity.close(handle)
+      handle = null
+    }
+    return result
+  }
+  let lastRefusal: string | null = null
+  for (;;) {
+    let upstream: net.Socket
+    try {
+      upstream = await connectUpstream(target.host, target.port)
+    } catch (err) {
+      return release({ kind: 'refused', message: `could not connect to ${target.resourceId}: ${errorMessage(err)}` })
+    }
+    // Same reasoning as the safety net on the client socket in
+    // handleConnectionInner: connectUpstreamOnce's own 'error' listener is
+    // detached the moment it resolves, and an unhandled 'error' on this
+    // socket would otherwise crash the process rather than just this
+    // connection.
+    upstream.on('error', () => {})
+
+    // The client could have disconnected in the (very short, but non-zero,
+    // especially across dial retries) window between deciding to dial and
+    // the dial actually completing. If so, there is no one to splice to;
+    // tear the fresh upstream connection down rather than leak it, and
+    // never call activity.open for a connection that never really existed
+    // from the client's side.
+    if (client.destroyed) {
+      upstream.destroy()
+      return release({ kind: 'client_gone' })
+    }
+    handle ??= activity.open(target.resourceId)
+
+    upstream.write(packet)
+    const answer = await awaitBackendAnswer(client, upstream, Math.max(remainingMs(deadline), FIRST_ANSWER_FLOOR_MS))
+    if (answer.kind === 'answered') {
+      return { kind: 'serving', upstream, initial: answer.bytes, handle }
+    }
+    upstream.destroy()
+
+    if (answer.kind === 'client_gone') {
+      return release({ kind: 'client_gone' })
+    }
+    if (answer.kind === 'timeout') {
+      const said = lastRefusal === null ? '' : ` (it last said: ${lastRefusal})`
+      return release({ kind: 'refused', message: `${target.resourceId} accepted the connection but did not answer${said}` })
+    }
+
+    // A close or reset before the first backend message (awaitBackendAnswer
+    // reports both as 'closed': a reset emits 'error' and then 'close') is
+    // retried exactly like a 57P03. See the comment above for the measured
+    // reason; before this it reached the client as "closed the connection
+    // without answering", and before the hold existed, as a dropped socket.
+    lastRefusal =
+      answer.kind === 'closed'
+        ? 'the port accepted the connection but closed it before Postgres answered'
+        : answer.message
+    if (remainingMs(deadline) < READY_RETRY_INTERVAL_MS) {
+      return release({
+        kind: 'refused',
+        message: `${target.resourceId} was still not accepting connections after ${budgetMs}ms: ${lastRefusal}`,
+      })
+    }
+    await sleep(READY_RETRY_INTERVAL_MS)
+    if (client.destroyed) {
+      return release({ kind: 'client_gone' })
+    }
+  }
 }
 
 // A CancelRequest is a second connection carrying nothing but the key pair,
@@ -440,10 +698,43 @@ async function handleStartup(
     return
   }
 
+  // One budget for the whole connection attempt, a wake included, so that
+  // holdUntilServing below cannot stack a second full wakeTimeoutMs on top of
+  // a wake that already spent most of one.
+  const deadline = Date.now() + wakeTimeoutMs
+
   if (target.state !== 'running') {
     // The client may already be gone by the time we would even start a
     // multi-second wake; no point pinning a resource awake for nobody.
     if (socket.destroyed) {
+      return
+    }
+
+    // A resource whose wake already failed since the daemon started is
+    // answered immediately and not woken: docs/proxy/CLAUDE.md's `failed? ->
+    // send a real Postgres ErrorResponse`, which the code did not implement
+    // before issue #10. Waking it here was one fresh container start per
+    // incoming connection, so anything that retries (an uptime check, an ORM
+    // pool) drove a broken resource through an endless crash loop, and a
+    // start that failed by timing out made every one of those clients wait
+    // out the whole wakeTimeoutMs again to learn what the first one already
+    // had.
+    //
+    // Keyed on the daemon's record of a failed wake, not on
+    // `target.state === 'failed'`: reconcile writes `failed` for every
+    // container found stopped after an unclean reboot, and those wake fine,
+    // so a `failed` target that is not refused is woken exactly as before.
+    // Only a running target skips this, because being served needs no wake.
+    // The daemon refuses the same ids again inside wake itself (buildWake in
+    // packages/cli/src/daemon/context.ts); this check is what keeps the
+    // client off the wake path and off the dial entirely.
+    if (deps.isWakeRefused?.(target.resourceId) === true) {
+      sendErrorAndClose(
+        socket,
+        'FATAL',
+        CANNOT_CONNECT_NOW,
+        `${database} is not woken by a connection because its last wake failed; \`hobby logs\` shows why, and \`hobby wake\` retries it once the cause is fixed`
+      )
       return
     }
 
@@ -481,31 +772,6 @@ async function handleStartup(
     return
   }
 
-  let upstream: net.Socket
-  try {
-    upstream = await connectUpstream(target.host, target.port)
-  } catch (err) {
-    sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, `could not connect to ${target.resourceId}: ${errorMessage(err)}`)
-    return
-  }
-  // Same reasoning as the safety net on the client socket in
-  // handleConnectionInner: connectUpstreamOnce's own 'error' listener is
-  // detached the moment it resolves, and an unhandled 'error' on this
-  // socket would otherwise crash the process rather than just this
-  // connection.
-  upstream.on('error', () => {})
-
-  // And check once more: the client could have disconnected in the (very
-  // short, but non-zero, especially across dial retries) window between
-  // deciding to dial and the dial actually completing. If so, there is no
-  // one to splice to; tear the fresh upstream connection down rather than
-  // leak it, and never call activity.open for a connection that never
-  // really existed from the client's side.
-  if (socket.destroyed) {
-    upstream.destroy()
-    return
-  }
-
   // Auth passes through: every parameter and its order is carried over
   // unchanged from the parsed startup packet. The one deliberate edit is
   // the `database` value, substituted for the actual database name this
@@ -517,8 +783,16 @@ async function handleStartup(
   // this proxy never sees a password.
   const finalDatabase = routingKey.database ?? target.database
   const packet = buildStartupPacket({ ...message.params, database: finalDatabase }, message.version)
-  upstream.write(packet)
-  spliceAndTrackActivity(socket, upstream, deps.activity, cancels, target)
+
+  const held = await holdUntilServing(socket, target, packet, deadline, wakeTimeoutMs, deps.activity)
+  if (held.kind === 'refused') {
+    sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, held.message)
+    return
+  }
+  if (held.kind === 'client_gone') {
+    return
+  }
+  spliceAndTrackActivity(socket, held.upstream, deps.activity, held.handle, cancels, target, held.initial)
 }
 
 async function handleConnectionInner(

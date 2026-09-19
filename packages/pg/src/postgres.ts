@@ -22,7 +22,7 @@ import {
   type Resource,
   type Store,
 } from '@hobby.sh/core'
-import { pgProbe, waitReady } from './readiness.js'
+import { pgProbe, waitReady, type ProbeOutcome } from './readiness.js'
 
 export interface PgDeps {
   store: Store
@@ -47,7 +47,10 @@ export interface PgDeps {
   // timeout and land the resource in `failed`, not `sleeping`. Additive and
   // optional, so any caller building a PgDeps from just
   // { store, runtime, paths, config } still satisfies this interface.
-  probeFactory?: (config: PostgresConfig) => () => Promise<boolean>
+  // Returns ProbeOutcome rather than boolean so a fake can also play a server
+  // that answers with an error (see readiness.ts); `async () => true` is
+  // still a valid fake.
+  probeFactory?: (config: PostgresConfig) => () => Promise<ProbeOutcome>
   // Optional seam for tests. Defaults to createDefaultRemoveDataDir's
   // container-based removal below, not a plain fs.rm: on Linux the data
   // directory ends up owned by root or by the container's postgres uid (see
@@ -176,7 +179,9 @@ export async function createPostgres(
       deps.store.setResourceState(resource.id, 'failed')
       throw new HobbyError(
         'wake_failed',
-        `postgres for ${opts.project.name}/${opts.name} did not become ready during initial boot`,
+        result.broken === undefined
+          ? `postgres for ${opts.project.name}/${opts.name} did not become ready during initial boot`
+          : `postgres for ${opts.project.name}/${opts.name} answered its first readiness probe with an error: ${result.broken}`,
         `waited ${result.waitedMs}ms across ${result.attempts} attempts`
       )
     }
@@ -309,6 +314,24 @@ export async function startPostgres(deps: PgDeps, resource: PostgresResource): P
     timeoutMs: deps.config.wakeTimeoutMs,
     probe,
   })
+
+  // A server that answered with an error is a different failure from one
+  // that never answered, and it is reported as one: wake_failed rather than
+  // wake_timeout, carrying the server's own message, and reached after one
+  // probe instead of after the whole wakeTimeoutMs. Both record `failed`
+  // and throw; the throw is what the daemon's buildWake
+  // (packages/cli/src/daemon/context.ts) records as a failed wake and
+  // refuses to repeat until an explicit start, which is what keeps a
+  // resource whose boot reliably fails from getting a fresh container start
+  // per incoming connection.
+  if (!result.ready && result.broken !== undefined) {
+    deps.store.setResourceState(resource.id, 'failed')
+    throw new HobbyError(
+      'wake_failed',
+      `postgres for resource ${resource.id} is up but refused its readiness probe: ${result.broken}`,
+      `answered after ${result.waitedMs}ms across ${result.attempts} attempts; fix the cause, then \`hobby wake\` retries it`
+    )
+  }
 
   if (!result.ready) {
     deps.store.setResourceState(resource.id, 'failed')

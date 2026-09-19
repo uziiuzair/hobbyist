@@ -292,8 +292,14 @@ test('activity.close fires exactly once when the upstream closes before the clie
   // A second fake upstream server that hands back the raw socket so the
   // test can sever it from this side, simulating Postgres closing the
   // connection (e.g. the container was stopped).
+  // Answers the startup packet with AuthenticationOk first, so the close
+  // below lands on a spliced session. A close before any backend message is
+  // a different case now: the proxy holds the client and redials (issue #9,
+  // see holdUntilServing), which the tests further down cover.
   const server = net.createServer((socket) => {
     upstreamSocket = socket
+    socket.on('error', () => {})
+    socket.once('data', () => socket.write(Buffer.from([0x52, 0, 0, 0, 8, 0, 0, 0, 0])))
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
   const address = server.address()
@@ -807,5 +813,428 @@ test('bytes after ReadyForQuery are spliced untouched, including ones shaped lik
   } finally {
     await proxy.close()
     await upstream.close()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Issue #9: a `running` target whose backend is still starting up.
+// ---------------------------------------------------------------------------
+
+function authenticationOkBytes(): Buffer {
+  const buf = Buffer.alloc(9)
+  buf.write('R', 0, 'ascii')
+  buf.writeInt32BE(8, 1)
+  buf.writeInt32BE(0, 5)
+  return buf
+}
+
+// A hand-built FATAL 57P03 carrying Postgres's own wording, independent of
+// the proxy's errorResponse builder so the test is not checking the proxy
+// against itself.
+function startingUpBytes(): Buffer {
+  const body = Buffer.concat([
+    Buffer.from('SFATAL\0VFATAL\0C57P03\0Mthe database system is starting up\0', 'utf8'),
+    Buffer.from([0]),
+  ])
+  const header = Buffer.alloc(5)
+  header.write('E', 0, 'ascii')
+  header.writeInt32BE(4 + body.length, 1)
+  return Buffer.concat([header, body])
+}
+
+// Pulls the 'M' field out of an ErrorResponse, same hand-scan as
+// extractSqlState above.
+function extractMessage(buf: Buffer): string | null {
+  const mIndex = buf.indexOf(Buffer.from('\0M', 'ascii'))
+  if (mIndex === -1) return null
+  const end = buf.indexOf(0, mIndex + 2)
+  if (end === -1) return null
+  return buf.toString('utf8', mIndex + 2, end)
+}
+
+// The shape a Postgres in crash recovery has from the outside: it accepts
+// every TCP connection, reads the startup packet, and answers the first
+// `refusals` of them with FATAL 57P03 and a close, exactly as the postmaster
+// does while it cannot take sessions. After that it serves a normal
+// handshake: AuthenticationOk, BackendKeyData, ReadyForQuery. Every startup
+// packet it receives is recorded, so a test can assert the proxy replayed
+// the client's packet identically on each attempt. `refusals` of Infinity is
+// a backend that never recovers.
+//
+// `refuseWith` picks how a refusal looks. 'starting_up' is the 57P03 above.
+// 'close' and 'reset' are the shape Docker's published port has while
+// nothing inside the container listens yet: the host side accepts the TCP
+// connection, then ends it (FIN) or tears it down (RST) without a byte.
+function startRecoveringUpstream(
+  refusals: number,
+  refuseWith: 'starting_up' | 'close' | 'reset' = 'starting_up'
+): Promise<{
+  port: number
+  connectionCount: () => number
+  packets: Buffer[]
+  close: () => Promise<void>
+}> {
+  return new Promise((resolve, reject) => {
+    let connections = 0
+    const packets: Buffer[] = []
+    const sockets: net.Socket[] = []
+    const server = net.createServer((socket) => {
+      connections += 1
+      const refuse = connections <= refusals
+      sockets.push(socket)
+      socket.on('error', () => {})
+      socket.once('data', (chunk: Buffer) => {
+        packets.push(chunk)
+        if (refuse) {
+          if (refuseWith === 'close') {
+            socket.end()
+          } else if (refuseWith === 'reset') {
+            socket.resetAndDestroy()
+          } else {
+            socket.end(startingUpBytes())
+          }
+          return
+        }
+        socket.write(Buffer.concat([authenticationOkBytes(), backendKeyDataBytes(4242, 24242), readyForQueryBytes()]))
+      })
+    })
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      const port = typeof address === 'object' && address !== null ? address.port : 0
+      resolve({
+        port,
+        connectionCount: () => connections,
+        packets,
+        close: () => {
+          for (const socket of sockets) socket.destroy()
+          return new Promise((res, rej) => server.close((err) => (err ? rej(err) : res())))
+        },
+      })
+    })
+  })
+}
+
+test('issue #9: a running target answering 57P03 holds the client and completes the handshake once the backend recovers', async () => {
+  const upstream = await startRecoveringUpstream(3)
+  const activity = new ActivityTracker()
+  const deps = { ...runningDeps(upstream.port), activity }
+  // Destroyed in finally, so a failed assertion cannot leave a client
+  // holding proxy.close() open and hang the rest of the file.
+  const clients: net.Socket[] = []
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 2000 })
+
+  try {
+    const client = await connectClient(proxy.port)
+    clients.push(client)
+    const received: Buffer[] = []
+    client.on('data', (chunk: Buffer) => received.push(chunk))
+    const started = Date.now()
+    const packet = buildStartupPacket({ user: 'bob', database: 'proj1' })
+    client.write(packet)
+
+    // AuthenticationOk + BackendKeyData + ReadyForQuery, and not one byte of
+    // the three refusals before them.
+    const expectedLength = 9 + 13 + 6
+    while (Buffer.concat(received).length < expectedLength) {
+      await sleep(5)
+      assert.ok(Date.now() - started < 3000, 'the handshake did not complete inside the 3 second ceiling')
+    }
+    const elapsed = Date.now() - started
+    const handshake = Buffer.concat(received)
+
+    assert.equal(handshake[0], 0x52, 'the first thing the client saw was AuthenticationOk, not the backend refusal')
+    assert.equal(handshake.indexOf(Buffer.from('57P03', 'ascii')), -1, 'no 57P03 reached the client')
+    assert.equal(handshake.length, expectedLength)
+    assert.ok(elapsed < 3000, `took ${elapsed}ms, over the 3 second hard ceiling`)
+
+    assert.equal(upstream.connectionCount(), 4, 'three refused attempts, then the one that was served')
+    for (const replayed of upstream.packets) {
+      assert.deepEqual(replayed, packet, 'every attempt replays the identical startup packet')
+    }
+    assert.equal(activity.count('resource-1'), 1, 'the held-then-spliced connection is counted exactly once')
+
+    client.destroy()
+    await sleep(20)
+    assert.equal(activity.count('resource-1'), 0)
+  } finally {
+    for (const client of clients) client.destroy()
+    await proxy.close()
+    await upstream.close()
+  }
+})
+
+test('issue #9: a backend that never stops answering 57P03 gets the client a clean ErrorResponse at the budget, not a dropped socket', async () => {
+  const upstream = await startRecoveringUpstream(Infinity)
+  const activity = new ActivityTracker()
+  const deps = { ...runningDeps(upstream.port), activity }
+  const clients: net.Socket[] = []
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 500 })
+
+  try {
+    const client = await connectClient(proxy.port)
+    clients.push(client)
+    const started = Date.now()
+    client.write(buildStartupPacket({ user: 'bob', database: 'proj1' }))
+
+    const response = await readAll(client)
+    const elapsed = Date.now() - started
+
+    assert.equal(response[0], 0x45, 'an ErrorResponse, not an empty read')
+    assert.equal(extractSqlState(response), '57P03')
+    const message = extractMessage(response) ?? ''
+    // The proxy's own error, sent once the budget ran out, naming what the
+    // backend kept saying. Not the backend's refusal forwarded verbatim.
+    assert.match(message, /still not accepting connections after 500ms/)
+    assert.match(message, /the database system is starting up/)
+    assert.ok(elapsed >= 400, `gave up after ${elapsed}ms, well before the 500ms budget`)
+    assert.ok(elapsed < 3000, `took ${elapsed}ms, over the 3 second hard ceiling`)
+    assert.ok(upstream.connectionCount() > 1, 'the refusal was retried, not accepted on the first answer')
+    assert.equal(activity.count('resource-1'), 0, 'the activity handle held across retries was closed')
+  } finally {
+    for (const client of clients) client.destroy()
+    await proxy.close()
+    await upstream.close()
+  }
+})
+
+test('issue #9 regression: a healthy running target is dialed once and spliced with no added latency', async () => {
+  const upstream = await startRecoveringUpstream(0)
+  const clients: net.Socket[] = []
+  const proxy = await startPgProxy({ port: 0, deps: runningDeps(upstream.port), wakeTimeoutMs: 2000 })
+
+  try {
+    const client = await connectClient(proxy.port)
+    clients.push(client)
+    const started = Date.now()
+    client.write(buildStartupPacket({ user: 'bob', database: 'proj1' }))
+
+    const handshake = await readBytes(client, 9 + 13 + 6)
+    const elapsed = Date.now() - started
+
+    assert.equal(handshake[0], 0x52)
+    assert.equal(upstream.connectionCount(), 1, 'dialed exactly once')
+    // Under READY_RETRY_INTERVAL_MS (100ms): a loopback handshake takes a
+    // few milliseconds, so anything near 100 means the happy path slept.
+    assert.ok(elapsed < 100, `the happy path took ${elapsed}ms`)
+
+    client.destroy()
+  } finally {
+    for (const client of clients) client.destroy()
+    await proxy.close()
+    await upstream.close()
+  }
+})
+
+test('issue #9: a client that leaves while held stops the retries and releases its activity', async () => {
+  const upstream = await startRecoveringUpstream(Infinity)
+  const activity = new ActivityTracker()
+  const deps = { ...runningDeps(upstream.port), activity }
+  const clients: net.Socket[] = []
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 5000 })
+
+  try {
+    const client = await connectClient(proxy.port)
+    clients.push(client)
+    client.write(buildStartupPacket({ user: 'bob', database: 'proj1' }))
+    await sleep(250)
+    assert.equal(activity.count('resource-1'), 1, 'a held client counts as activity')
+
+    client.destroy()
+    await sleep(150)
+    const dialsAfterLeaving = upstream.connectionCount()
+    await sleep(300)
+
+    assert.equal(activity.count('resource-1'), 0)
+    assert.equal(upstream.connectionCount(), dialsAfterLeaving, 'no more dials once the client is gone')
+  } finally {
+    for (const client of clients) client.destroy()
+    await proxy.close()
+    await upstream.close()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Issue #10: a resource whose wake already failed is answered, not woken.
+// ---------------------------------------------------------------------------
+
+test('issue #10: a refused target gets an immediate ErrorResponse naming the way out, with no wake and no dial', async () => {
+  const upstream = await startRecoveringUpstream(0)
+  let wakeCalls = 0
+  const deps: ProxyDeps = {
+    resolve: async (): Promise<ProxyTarget> => ({
+      resourceId: 'resource-1',
+      host: '127.0.0.1',
+      port: upstream.port,
+      state: 'failed',
+      database: 'proj1',
+    }),
+    wake: async () => {
+      wakeCalls += 1
+    },
+    isWakeRefused: (resourceId) => resourceId === 'resource-1',
+    activity: new ActivityTracker(),
+  }
+  const clients: net.Socket[] = []
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 30000 })
+
+  try {
+    const client = await connectClient(proxy.port)
+    clients.push(client)
+    const started = Date.now()
+    client.write(buildStartupPacket({ user: 'bob', database: 'proj1' }))
+
+    const response = await readAll(client)
+    const elapsed = Date.now() - started
+
+    assert.equal(response[0], 0x45)
+    assert.equal(extractSqlState(response), '57P03')
+    assert.match(extractMessage(response) ?? '', /hobby wake/)
+    assert.equal(wakeCalls, 0, 'a refused resource is not woken')
+    assert.equal(upstream.connectionCount(), 0, 'and not dialed')
+    assert.ok(elapsed < 1000, `answered after ${elapsed}ms rather than immediately`)
+  } finally {
+    for (const client of clients) client.destroy()
+    await proxy.close()
+    await upstream.close()
+  }
+})
+
+// The regression the refusal must not cause: `failed` on its own is what
+// reconcile writes for a container that merely stopped (an unclean reboot),
+// and such a target wakes exactly as it always did.
+test('issue #10: a failed target that is not refused is woken and served as before', async () => {
+  const upstream = await startRecoveringUpstream(0)
+  let wakeCalls = 0
+  let state = 'failed'
+  const deps: ProxyDeps = {
+    resolve: async (): Promise<ProxyTarget> => ({
+      resourceId: 'resource-1',
+      host: '127.0.0.1',
+      port: upstream.port,
+      state,
+      database: 'proj1',
+    }),
+    wake: async () => {
+      wakeCalls += 1
+      state = 'running'
+    },
+    isWakeRefused: () => false,
+    activity: new ActivityTracker(),
+  }
+  const clients: net.Socket[] = []
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 2000 })
+
+  try {
+    const client = await connectClient(proxy.port)
+    clients.push(client)
+    client.write(buildStartupPacket({ user: 'bob', database: 'proj1' }))
+
+    const handshake = await readBytes(client, 9 + 13 + 6)
+    assert.equal(handshake[0], 0x52, 'AuthenticationOk, not an ErrorResponse')
+    assert.equal(wakeCalls, 1)
+    assert.equal(upstream.connectionCount(), 1)
+  } finally {
+    for (const client of clients) client.destroy()
+    await proxy.close()
+    await upstream.close()
+  }
+})
+
+// The shape measured against real Docker: the published port accepts while
+// nothing in the container listens, then closes. Held and redialed exactly
+// like a 57P03, for both a clean close and a reset.
+for (const refuseWith of ['close', 'reset'] as const) {
+  test(`issue #9: a running target whose port accepts then ${refuseWith === 'close' ? 'closes' : 'resets'} before answering holds the client until the backend serves`, async () => {
+    const upstream = await startRecoveringUpstream(3, refuseWith)
+    const activity = new ActivityTracker()
+    const deps = { ...runningDeps(upstream.port), activity }
+    const clients: net.Socket[] = []
+    const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 2000 })
+
+    try {
+      const client = await connectClient(proxy.port)
+      clients.push(client)
+      const started = Date.now()
+      const packet = buildStartupPacket({ user: 'bob', database: 'proj1' })
+      client.write(packet)
+
+      const handshake = await readBytes(client, 9 + 13 + 6)
+      const elapsed = Date.now() - started
+
+      assert.equal(handshake[0], 0x52, 'the client saw AuthenticationOk, not a closed socket or an error')
+      assert.ok(elapsed < 3000, `took ${elapsed}ms, over the 3 second hard ceiling`)
+      assert.equal(upstream.connectionCount(), 4, 'three early closes, then the one that was served')
+      for (const replayed of upstream.packets) {
+        assert.deepEqual(replayed, packet, 'every attempt replays the identical startup packet')
+      }
+      assert.equal(activity.count('resource-1'), 1)
+    } finally {
+      for (const client of clients) client.destroy()
+      await proxy.close()
+      await upstream.close()
+    }
+  })
+}
+
+test('issue #9: a port that keeps accepting and closing gets the client a clean ErrorResponse at the budget, not a dropped socket', async () => {
+  const upstream = await startRecoveringUpstream(Infinity, 'close')
+  const activity = new ActivityTracker()
+  const deps = { ...runningDeps(upstream.port), activity }
+  const clients: net.Socket[] = []
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 500 })
+
+  try {
+    const client = await connectClient(proxy.port)
+    clients.push(client)
+    const started = Date.now()
+    client.write(buildStartupPacket({ user: 'bob', database: 'proj1' }))
+
+    const response = await readAll(client)
+    const elapsed = Date.now() - started
+
+    assert.equal(response[0], 0x45, 'an ErrorResponse, not an empty read')
+    assert.equal(extractSqlState(response), '57P03')
+    const message = extractMessage(response) ?? ''
+    assert.match(message, /still not accepting connections after 500ms/)
+    assert.match(message, /closed it before Postgres answered/)
+    assert.ok(elapsed >= 400, `gave up after ${elapsed}ms, well before the 500ms budget`)
+    assert.ok(elapsed < 3000, `took ${elapsed}ms, over the 3 second hard ceiling`)
+    assert.ok(upstream.connectionCount() > 1, 'the early close was retried')
+    assert.equal(activity.count('resource-1'), 0)
+  } finally {
+    for (const client of clients) client.destroy()
+    await proxy.close()
+    await upstream.close()
+  }
+})
+
+// The line the hold draws: once the first backend message has arrived the
+// connection is spliced, and a close after that is the session's own end.
+// It reaches the client as a close and is never retried.
+test('issue #9: a close after the first backend message is spliced through, not retried', async () => {
+  let connections = 0
+  const server = net.createServer((socket) => {
+    connections += 1
+    socket.on('error', () => {})
+    socket.once('data', () => socket.end(Buffer.from([0x52, 0, 0, 0, 8, 0, 0, 0, 0])))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const port = (server.address() as net.AddressInfo).port
+  const clients: net.Socket[] = []
+  const proxy = await startPgProxy({ port: 0, deps: runningDeps(port), wakeTimeoutMs: 2000 })
+
+  try {
+    const client = await connectClient(proxy.port)
+    clients.push(client)
+    client.write(buildStartupPacket({ user: 'bob', database: 'proj1' }))
+    const response = await readAll(client)
+
+    assert.equal(response[0], 0x52, 'the backend message reached the client')
+    assert.equal(connections, 1, 'no redial after the session had started')
+  } finally {
+    for (const client of clients) client.destroy()
+    await proxy.close()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
   }
 })

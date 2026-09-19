@@ -35,7 +35,7 @@ import {
 import { startPostgres, stopPostgres, type ActivityGuardResult } from '@hobby.sh/pg'
 import { ActivityTracker, type ConnectionHandle } from '@hobby.sh/proxy'
 import { createApp, createProxyDeps, shouldSleep, startHibernator, type DaemonContext } from '../src/index.js'
-import { createDefaultKindRegistry } from '../src/daemon/context.js'
+import { clearWakeRefusal, createDefaultKindRegistry } from '../src/daemon/context.js'
 
 function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
   return {
@@ -190,11 +190,44 @@ test('wake: the in-flight map entry is cleared after a failed wake, so a later c
   await assert.rejects(deps.wake(resource.id))
   assert.equal(startCalls(), 1)
 
-  // If the map entry were not cleared on failure, this second, fully
-  // sequential call would resolve (or reject) the exact same stale promise
-  // rather than trying again, and startCalls would stay at 1.
+  // The failed wake is now also recorded as refused (issue #10, see the next
+  // test). clearWakeRefusal is exactly what an explicit start does first,
+  // and it isolates the property this test is about: if the map entry were
+  // not cleared on failure, this second, fully sequential call would resolve
+  // (or reject) the exact same stale promise rather than trying again, and
+  // startCalls would stay at 1.
+  clearWakeRefusal(ctx, resource.id)
   await assert.rejects(deps.wake(resource.id))
   assert.equal(startCalls(), 2, 'a wake after a prior failure must attempt startPostgres again, not reuse the failed promise')
+})
+
+// Issue #10. A resource whose start reliably fails used to get a fresh
+// container start from every implicit wake, so anything that retried turned
+// it into a crash loop driven by traffic. After one failed wake, every later
+// one is refused before the kind handler is reached, with an error that
+// names the way out.
+test('wake: a resource whose wake failed is refused on every later wake without touching the runtime', async () => {
+  const { runtime, startCalls } = countingRuntime(createFakeRuntime())
+  const ctx = buildContext(runtime)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig() })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+
+  const deps = createProxyDeps(ctx)
+
+  await assert.rejects(deps.wake(resource.id))
+  assert.equal(startCalls(), 1)
+  assert.equal(ctx.store.getResource(resource.id)?.state, 'failed')
+
+  for (let i = 0; i < 5; i++) {
+    await assert.rejects(deps.wake(resource.id), (err: unknown) => {
+      assert.equal((err as { code?: string }).code, 'wake_failed')
+      assert.match((err as Error).message, /hobby wake blog\/primary/)
+      assert.match((err as Error).message, /already failed since the daemon started/)
+      return true
+    })
+  }
+  assert.equal(startCalls(), 1, 'five more wakes of a failed resource must not start its container again')
 })
 
 test('wake: an unknown resourceId rejects with resource_not_found and never touches the runtime', async () => {

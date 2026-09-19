@@ -212,6 +212,71 @@ test('a wake that never finishes becomes a 504 rather than hanging forever', asy
   }
 })
 
+// Issue #10. A resource whose wake already failed used to be woken again by
+// every request, a fresh container start per request for something that
+// just failed to start. It is now answered at once, and the wake is never
+// called.
+test('a refused resource is a 503 naming the way out, with no wake', async () => {
+  const activity = new ActivityTracker()
+  let wakes = 0
+  const router = await startHttpRouter(
+    {
+      async resolve(): Promise<HttpTarget> {
+        return { resourceId: 'r1', host: '127.0.0.1', port: 1, state: 'failed' }
+      },
+      async wake(): Promise<void> {
+        wakes++
+      },
+      isWakeRefused: (resourceId) => resourceId === 'r1',
+      activity,
+    },
+    { port: 0, wakeTimeoutMs: 30_000 }
+  )
+  try {
+    const res = await fetchThrough(router.port, 'web.blog.localhost')
+    assert.equal(res.status, 503)
+    assert.match(res.body, /last wake failed/)
+    assert.match(res.body, /hobby wake/)
+    assert.equal(wakes, 0)
+    assert.equal(activity.count('r1'), 0)
+  } finally {
+    await router.close()
+  }
+})
+
+// And the label alone refuses nothing: reconcile writes `failed` for a
+// container that merely stopped, and that app must still wake on a request.
+test('a failed resource that is not refused is woken and served', async () => {
+  const activity = new ActivityTracker()
+  const upstream = sleepingUpstream('woken from failed')
+  const base = upstream.deps(activity)
+  let first = true
+  const router = await startHttpRouter(
+    {
+      ...base,
+      async resolve(hostname: string): Promise<HttpTarget | null> {
+        const target = await base.resolve(hostname)
+        if (target !== null && first) {
+          first = false
+          return { ...target, state: 'failed' }
+        }
+        return target
+      },
+      isWakeRefused: () => false,
+    },
+    { port: 0 }
+  )
+  try {
+    const res = await fetchThrough(router.port, 'web.blog.localhost')
+    assert.equal(res.status, 200)
+    assert.equal(res.body, 'woken from failed')
+    assert.equal(upstream.wakeCalls(), 1)
+  } finally {
+    await router.close()
+    await upstream.close()
+  }
+})
+
 // A resource the store calls running, with nothing actually listening. The
 // user should be told the app answered badly, not that it does not exist.
 test('a running resource with a dead upstream is a 502, not a 404', async () => {

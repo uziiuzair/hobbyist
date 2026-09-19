@@ -353,3 +353,73 @@ test('startPostgres marks the resource failed, not starting, when runtime.start 
     store.close()
   }
 })
+
+// Issue #10, the within-one-wake half. A probe that hears a server refuse it
+// with a real error concludes at once: polling a server that answered "wrong
+// password" for the rest of wakeTimeoutMs cannot change its answer.
+test('waitReady concludes on a broken probe outcome instead of polling to the timeout', async () => {
+  const clock = fakeClock()
+  let calls = 0
+
+  const result = await waitReady({
+    config: sampleConfig(),
+    pollMs: 25,
+    timeoutMs: 30_000,
+    probe: async () => {
+      calls++
+      return calls >= 2 ? { broken: 'password authentication failed for user "postgres" (SQLSTATE 28P01)' } : false
+    },
+    sleepFor: clock.sleepFor,
+    now: clock.now,
+  })
+
+  assert.deepEqual(result, {
+    ready: false,
+    attempts: 2,
+    waitedMs: 25,
+    broken: 'password authentication failed for user "postgres" (SQLSTATE 28P01)',
+  })
+  assert.equal(calls, 2, 'no poll after the broken answer')
+})
+
+test('startPostgres fails fast with wake_failed and the server message when the probe reports broken', async () => {
+  const store = openStore(':memory:')
+  try {
+    const project = store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+    const resource = store.createResource({
+      projectId: project.id,
+      kind: 'postgres',
+      name: 'primary',
+      config: { ...sampleConfig(), containerName: 'hobby-blog-primary' },
+    })
+    const runtime = createFakeRuntime()
+    await runtime.ensureCreated({ name: 'hobby-blog-primary', image: 'postgres:18-alpine', env: {}, ports: [], binds: [] })
+    const paths = resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-pg-test-${randomUUID()}`) })
+
+    const started = Date.now()
+    await assert.rejects(
+      () =>
+        startPostgres(
+          {
+            store,
+            runtime,
+            paths,
+            // A budget far longer than this test is allowed to take: the
+            // rejection has to come from the broken answer, not the timeout.
+            config: { ...testHobbyConfig(), wakeTimeoutMs: 30_000, readinessPollMs: 5 },
+            probeFactory: () => async () => ({ broken: 'no pg_hba.conf entry for host "172.17.0.1" (SQLSTATE 28000)' }),
+          },
+          expectKind(resource, 'postgres')
+        ),
+      (err: unknown) => {
+        assert.equal((err as { code?: string }).code, 'wake_failed')
+        assert.match((err as Error).message, /no pg_hba\.conf entry/)
+        return true
+      }
+    )
+    assert.ok(Date.now() - started < 1000, 'a broken answer must not wait out wakeTimeoutMs')
+    assert.equal(store.getResource(resource.id)?.state, 'failed')
+  } finally {
+    store.close()
+  }
+})

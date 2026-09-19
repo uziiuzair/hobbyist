@@ -28,7 +28,7 @@ import {
   type Store,
 } from '@hobby.sh/core'
 import { appKindHandler } from '@hobby.sh/app'
-import { postgresKindHandler } from '@hobby.sh/pg'
+import { postgresKindHandler, type ProbeOutcome } from '@hobby.sh/pg'
 import { queueKindHandler } from '@hobby.sh/queue'
 import { workerKindHandler } from '@hobby.sh/worker'
 import {
@@ -64,7 +64,7 @@ export interface DaemonContext {
   // wake run out its readiness timeout against a fake runtime with nothing
   // listening. reconcile.ts reads the same field for its own readiness
   // probe. Production never sets it and gets pgProbe, a real connection.
-  probeFactory?: (config: PostgresConfig) => () => Promise<boolean>
+  probeFactory?: (config: PostgresConfig) => () => Promise<ProbeOutcome>
   // Set by startDaemon once the queue endpoint is listening, so that creating
   // a project can bind that project's bridge gateway immediately rather than
   // leaving it until the next daemon restart. Optional because a test builds a
@@ -112,9 +112,42 @@ export function createDaemonContext(opts: {
 // sleeping resource into exactly one startPostgres call, with every caller
 // awaiting the same promise. The entry is removed in a `finally` on both
 // success and failure, so one failed wake does not permanently poison the
-// resource for every connection after it.
+// in-flight map for every connection after it.
+//
+// What does stop the next connection is the refusal set below. A wake
+// through this function whose kind handler throws (a container that will not
+// start, a readiness wait that timed out, a Postgres that refused its probe
+// with a real error) records the resource id there, and every later wake of
+// that id is refused before the kind handler is reached. Without it, a
+// resource whose boot reliably fails got a fresh container start per incoming
+// connection, forever: a monitoring check or an ORM pool retrying once a
+// second turned one broken database into a crash loop driven by traffic
+// (issue #10). The de-duplication above only bounds starts to one per
+// *concurrent* burst; this bounds them across bursts, including for the
+// implicit wakers with no front door (the alarm mirror, Studio's query route).
+//
+// Why a set of failed wakes and not the store's `failed` state: `failed` is
+// the label reconcile (packages/cli/src/daemon/reconcile.ts, correctedState)
+// writes for a resource recorded running whose container is found stopped,
+// which is every unclean host reboot, OOM kill or crash. Those databases are
+// perfectly wakeable (Postgres runs crash recovery on start), and refusing on
+// the label would leave every one of them down after a reboot until someone
+// ran `hobby wake` by hand. A failed stop or a failed deploy writes `failed`
+// too, and neither says anything about whether the next start would work.
+// So `failed` keeps meaning what reconcile and the handlers say it means, and
+// "refused" means something narrower: a wake failed since this daemon
+// started.
+//
+// The set is in memory on purpose. A daemon restart empties it, which allows
+// one fresh attempt per daemon lifetime: still bounded, and what an operator
+// expects after an upgrade. The explicit way out without a restart is POST
+// /v1/resources/:id/start (startResourceRoute in routes.ts, behind `hobby
+// wake`, the MCP wake tool and Studio's start button), which calls
+// clearWakeRefusal before invoking the kind handler directly, not this
+// function, so it is never refused.
 function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
   const inFlightWakes = new Map<string, Promise<void>>()
+  const refused = wakeRefusals(ctx)
 
   return function wake(resourceId: string): Promise<void> {
     const existing = inFlightWakes.get(resourceId)
@@ -126,6 +159,10 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
       let resource = ctx.store.getResource(resourceId)
       if (resource === null) {
         throw new HobbyError('resource_not_found', `no resource with id ${resourceId}`)
+      }
+      if (refused.has(resourceId)) {
+        const project = ctx.store.getProject(resource.projectId)
+        throw refusedWakeError(project === null ? resource.name : `${project.name}/${resource.name}`)
       }
       // A snapshot or an in-place restore holds this project asleep (see
       // holdProjectAsleep below). Waking a resource in the middle of one is
@@ -150,7 +187,12 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
       // is what makes this one wake path serve every kind: an app waking on
       // an HTTP request and a database waking on a connection are the same
       // call here, differing only in which handler answers it.
-      await ctx.kinds.get(resource.kind).start(ctx, resource)
+      try {
+        await ctx.kinds.get(resource.kind).start(ctx, resource)
+      } catch (err) {
+        refused.add(resourceId)
+        throw err
+      }
     })().finally(() => {
       inFlightWakes.delete(resourceId)
     })
@@ -158,6 +200,44 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
     inFlightWakes.set(resourceId, promise)
     return promise
   }
+}
+
+// The refusal buildWake throws for a resource in the refusal set. The command
+// is in the message and not only the hint because the HTTP router renders
+// err.message alone (http.ts's resolveAndWake; errorMessage in
+// packages/proxy/src/proxy.ts shows the hint too).
+function refusedWakeError(target: string): HobbyError {
+  return new HobbyError(
+    'wake_failed',
+    `a wake of ${target} already failed since the daemon started, so it is not woken automatically; fix the cause, then run \`hobby wake ${target}\` to retry it`,
+    `\`hobby logs ${target}\` shows what the last start printed`
+  )
+}
+
+const refusalRegistry = new WeakMap<DaemonContext, Set<string>>()
+
+// Resource ids whose last wake through buildWake failed, one set per
+// DaemonContext (so per daemon lifetime, and per test). See buildWake's
+// comment for why this, and not the store's `failed` state, is what refuses.
+function wakeRefusals(ctx: DaemonContext): Set<string> {
+  let set = refusalRegistry.get(ctx)
+  if (set === undefined) {
+    set = new Set()
+    refusalRegistry.set(ctx, set)
+  }
+  return set
+}
+
+// Read by both front doors (ProxyDeps.isWakeRefused, HttpProxyDeps.isWakeRefused)
+// so a refused client gets its answer with no wake call and no dial.
+export function isWakeRefused(ctx: DaemonContext, resourceId: string): boolean {
+  return wakeRefusals(ctx).has(resourceId)
+}
+
+// The explicit clear: called by startResourceRoute before it starts the
+// resource, which is what `hobby wake` means.
+export function clearWakeRefusal(ctx: DaemonContext, resourceId: string): void {
+  wakeRefusals(ctx).delete(resourceId)
 }
 
 const wakeRegistry = new WeakMap<DaemonContext, (resourceId: string) => Promise<void>>()
@@ -321,7 +401,12 @@ export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
     }
   }
 
-  return { resolve, wake: getOrCreateWake(ctx), activity: ctx.activity }
+  return {
+    resolve,
+    wake: getOrCreateWake(ctx),
+    isWakeRefused: (resourceId: string) => isWakeRefused(ctx, resourceId),
+    activity: ctx.activity,
+  }
 }
 
 // `<resource>.<project>.<domain>` split back into its two names.
@@ -443,5 +528,11 @@ export function createHttpProxyDeps(ctx: DaemonContext): HttpProxyDeps {
     }
   }
 
-  return { resolve, allowHostname, wake: getOrCreateWake(ctx), activity: ctx.activity }
+  return {
+    resolve,
+    allowHostname,
+    wake: getOrCreateWake(ctx),
+    isWakeRefused: (resourceId: string) => isWakeRefused(ctx, resourceId),
+    activity: ctx.activity,
+  }
 }
