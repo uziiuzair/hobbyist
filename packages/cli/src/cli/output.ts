@@ -15,7 +15,7 @@
 // would be more type-widening than the requirement is worth.
 
 import type { PreflightReport } from '../daemon/preflight.js'
-import type { WireResource } from '../daemon/wire.js'
+import type { WireResource, WireSnapshotManifest } from '../daemon/wire.js'
 import type { QueueListEntry, QueueMessage } from './client.js'
 
 export function formatBytes(bytes: number): string {
@@ -54,6 +54,16 @@ export function renderResourceLine(resource: WireResource): string {
   }
   const trailer = resource.state === 'undeployed' ? '  (no code yet)' : ''
   return `${resource.name}  ${resource.kind}  ${resource.state}  ${resource.config.hostname}${trailer}`
+}
+
+// One row of `hobby snapshot ls`. No date column, per this file's header:
+// the id already is the timestamp (snapshotId, packages/cli/src/daemon/snapshots.ts,
+// sortable and in UTC), so nothing is lost. The verification column prints
+// the tri-state as it is, `unverified` included, because a check that never
+// ran must never read as one that passed (the spec's "Verification").
+export function renderSnapshotLine(manifest: WireSnapshotManifest): string {
+  const count = manifest.resources.length
+  return `${manifest.snapshotId}  ${count} resource${count === 1 ? '' : 's'}  ${manifest.clone}  ${manifest.verification.status}`
 }
 
 // The consumer column of `hobby queue ls`. Deliberately the same wording
@@ -160,9 +170,10 @@ export function reflinkWarning(report: PreflightReport): string | null {
   if (report.filesystem.reflinkSupported) {
     return null
   }
-  // Deliberately "note" and not "warning". Branching works on this
-  // filesystem, it is just a real copy instead of an instant one, and that
-  // is a cost to know about rather than a fault. Alarming language in the
+  // Deliberately "note" and not "warning". Branching and snapshots both
+  // work on this filesystem; each is just a real copy instead of an instant
+  // one, which is what ADR 0016 means by ext4 users paying linearly. That is
+  // a cost to know about rather than a fault, and alarming language in the
   // first message most cheap-VPS users ever see spends credibility on
   // something that is not broken.
   //
@@ -170,8 +181,8 @@ export function reflinkWarning(report: PreflightReport): string | null {
   // one-liner has no checkout in front of them to open.
   return (
     'note: this filesystem has no reflink support, so copying a project will be a full copy ' +
-    'rather than an instant one. today that means `hobby branch`, which still works, at the cost ' +
-    'of the full size of the data and the time to copy it. ' +
+    'rather than an instant one. today that means `hobby branch` and `hobby snapshot`, which both ' +
+    'still work, each at the cost of the full size of the data and the time to copy it. ' +
     REFLINK_REMEDY
   )
 }

@@ -211,9 +211,11 @@ export async function createPostgres(
 
 // The second way a postgres resource comes into existence: around a data
 // directory that already holds a cluster, rather than one initdb is about to
-// make. Branching (packages/cli/src/daemon/branch.ts) is the caller; it has
-// already cloned the source's data directory to exactly the path this
-// function derives, and this function makes that directory a resource.
+// make. Two callers: branching (packages/cli/src/daemon/branch.ts) and a
+// snapshot restored into a new project (restoreSnapshot,
+// packages/cli/src/daemon/snapshots.ts). Each has already cloned a data
+// directory to exactly the path this function derives, and this function
+// makes that directory a resource.
 //
 // What is new and what is kept is decided by what the cloned PGDATA itself
 // contains, because the stored config is only worth anything while it

@@ -245,6 +245,90 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
 
+  /v1/projects/{name}/snapshots:
+    post:
+      summary: "Snapshot the whole project now (ADR 0016): quiesce, clone, write the manifest, resume what was running. 409 for a pinned project with something running unless allowPause, for a released project, or while another snapshot or restore of it is in progress."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                allowPause: { type: boolean, default: false, description: "Accept stopping a pinned project's running resources for the copy" }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  snapshot: { $ref: "#/components/schemas/SnapshotManifest" }
+                  dir: { type: string, description: "Where it landed, on the daemon's box" }
+                  resources: { type: array, items: { $ref: "#/components/schemas/WireResource" }, description: "The project's resources after resume, states as recorded" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+    get:
+      summary: "The project's snapshots, newest first. Answers for a project that has since been deleted: snapshots outlive it."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  snapshots: { type: array, items: { $ref: "#/components/schemas/SnapshotManifest" } }
+
+  /v1/snapshots/{id}/restore:
+    post:
+      summary: "Restore a snapshot. Default: into a new project (`as`, or `<project>-restored`), 201, original untouched. `inPlace: true`: over the project it was taken of, same resource ids, 200; quiesces, swaps the data directory, resumes, and keeps the replaced data until everything that was running is back."
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                as: { type: string }
+                inPlace: { type: boolean, default: false }
+                allowPause: { type: boolean, default: false }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RestoreResult" }
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RestoreResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/snapshots/{id}:
+    delete:
+      summary: Delete one snapshot.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+        "404": { $ref: "#/components/responses/Error" }
+
   /v1/resources/{id}:
     get:
       summary: One resource, wire-shaped.
@@ -464,6 +548,45 @@ components:
         sleepAfterSeconds: { type: [integer, "null"], description: "null pins the project awake forever" }
         createdAt: { type: string, format: date-time }
         releasedAt: { type: [string, "null"], format: date-time, description: "Set by eject --release; hobby stops acting on the project while set" }
+
+    SnapshotManifest:
+      description: "manifest.json as written by takeSnapshot, with each resource's config redacted the same way a WireResource's is (wire.ts, toWireSnapshotManifest). The file on disk is not redacted."
+      type: object
+      properties:
+        version: { type: integer, const: 1 }
+        snapshotId: { type: string, description: "Lowercase sortable timestamp plus a random suffix, e.g. 20260816t143000z-a1b2c3" }
+        createdAt: { type: string, format: date-time }
+        clone: { type: string, enum: [reflink, copy] }
+        project:
+          type: object
+          properties:
+            name: { type: string }
+            sleepAfterSeconds: { type: [integer, "null"] }
+        resources:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              kind: { type: string }
+              name: { type: string }
+              stateAtSnapshot: { type: string }
+              config: { type: object }
+              durableObjectClasses: { type: array, items: { type: string } }
+        verification:
+          type: object
+          properties:
+            status: { type: string, enum: [unverified, verified, failed] }
+            at: { type: [string, "null"] }
+            detail: { type: [string, "null"] }
+
+    RestoreResult:
+      type: object
+      properties:
+        project: { $ref: "#/components/schemas/Project" }
+        resources: { type: array, items: { $ref: "#/components/schemas/WireResource" } }
+        restartFailures: { type: array, items: { type: string }, description: "In place only: what was running before and did not come back" }
+        preRestoreDir: { type: [string, "null"], description: "In place only: where the replaced data still sits, null once removed" }
 
     WireResource:
       description: |

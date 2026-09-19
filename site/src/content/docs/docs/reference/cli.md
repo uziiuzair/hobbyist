@@ -305,6 +305,46 @@ loopback URL when one is configured through Caddy.
 
 Sets the operator password. The prompt never echoes.
 
+## Snapshots
+
+A snapshot is a copy of a whole project's data, taken on this box. It is local:
+it does not survive losing the disk, and the command reminds you of that. There
+is no point-in-time recovery (see ADR 0016).
+
+### `hobby snapshot <project> [--allow-pause]`
+
+Takes a snapshot. The project is held asleep for the length of the copy, so
+nothing can wake it halfway through, and whatever was running is started again
+afterwards. A pinned project that has something running is refused unless you
+pass `--allow-pause`, because pinning it said it must stay up. Prints the
+snapshot's id.
+
+Accepts `--json`.
+
+### `hobby snapshot ls <project>`
+
+The project's snapshots, newest first. Snapshots outlive their project, so this
+still works after the project is deleted. Accepts `--json`.
+
+### `hobby snapshot restore <project> <id> [--as <name> | --in-place] [--allow-pause] [--yes]`
+
+Without `--in-place`, restores into a new project, `<project>-restored` or the
+name given with `--as`, and leaves the original untouched.
+
+`--in-place` replaces the project's own data and keeps its connection strings.
+The snapshot is copied first while the project stays up, then the project is
+stopped, the data swapped, and whatever was running started again. The old data
+is kept until everything has come back, and its path is printed if anything did
+not. It asks you to type the project name unless `--yes` is given, and it
+refuses if the project's resources have changed since the snapshot. It restores
+data, not configuration.
+
+Accepts `--json`.
+
+### `hobby snapshot rm <project> <id> [--yes]`
+
+Deletes one snapshot, with confirmation. `--yes` skips the prompt.
+
 ## Leaving
 
 ### `hobby eject <project> [--release]`
