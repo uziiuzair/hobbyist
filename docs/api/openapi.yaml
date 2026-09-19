@@ -247,7 +247,7 @@ paths:
 
   /v1/projects/{name}/snapshots:
     post:
-      summary: "Snapshot the whole project now (ADR 0016): quiesce, clone, write the manifest, resume what was running. 409 for a pinned project with something running unless allowPause, for a released project, or while another snapshot or restore of it is in progress."
+      summary: "Snapshot the whole project now (ADR 0016): quiesce, clone, write the manifest, resume what was running. With `online: true`, nothing is paused: each running postgres is copied with pg_basebackup inside its own container and each sleeping one is cloned; only a project whose resources are all postgres qualifies (409 otherwise), and the pinned check does not apply. 400 for online and allowPause together. 409 for a pinned project with something running unless allowPause or online, for a released project, or while another snapshot or restore of it is in progress."
       parameters: [{ $ref: "#/components/parameters/projectName" }]
       requestBody:
         content:
@@ -256,6 +256,7 @@ paths:
               type: object
               properties:
                 allowPause: { type: boolean, default: false, description: "Accept stopping a pinned project's running resources for the copy" }
+                online: { type: boolean, default: false, description: "Take it with no pause (pg_basebackup for running postgres). Postgres-only projects; cannot be combined with allowPause" }
       responses:
         "201":
           content:
@@ -570,7 +571,8 @@ components:
               id: { type: string }
               kind: { type: string }
               name: { type: string }
-              stateAtSnapshot: { type: string }
+              stateAtSnapshot: { type: string, description: "After quiesce for a quiesced snapshot (so sleeping for anything it stopped); the state held throughout the capture for an online one" }
+              method: { type: string, enum: [clone, basebackup], description: "clone: cloneTree of data at rest. basebackup: pg_basebackup of a running postgres; its first start runs recovery from backup_label. Absent in manifests written before online snapshots, and reported as clone" }
               config: { type: object }
               durableObjectClasses: { type: array, items: { type: string } }
         verification:

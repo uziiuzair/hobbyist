@@ -155,6 +155,7 @@ function printHelp(io: Io): void {
   io.out('  hobby eject <project> --release       the same, and stop managing it')
   io.out('  hobby adopt <project>                 manage a released project again')
   io.out('  hobby snapshot <project> [--allow-pause]    a local snapshot, everything quiesced')
+  io.out('  hobby snapshot <project> --online     postgres-only projects: no pause, pg_basebackup')
   io.out('  hobby snapshot ls <project>           its snapshots, newest first')
   io.out('  hobby snapshot restore <project> <id> [--as <name>]   into a new project, original untouched')
   io.out('  hobby snapshot restore <project> <id> --in-place [--yes]   replace its data, old data kept until it works')
@@ -361,9 +362,11 @@ export async function run(argv: string[], io: Io): Promise<number> {
         // above: cmdSnapshot (commands.ts) reads the subcommand from the
         // positionals. --in-place and --allow-pause are separate gates on
         // purpose: one says "replace my data", the other says "stopping a
-        // pinned project is fine", and neither implies the other.
+        // pinned project is fine", and neither implies the other. --online
+        // says "stop nothing", which is why it and --allow-pause refuse each
+        // other (cmdSnapshotTake).
         const { positionals, flags } = parseArgs(rest, {
-          bool: ['json', 'yes', 'in-place', 'allow-pause'],
+          bool: ['json', 'yes', 'in-place', 'allow-pause', 'online'],
           value: ['as'],
         })
         return await cmdSnapshot(ctx, positionals, flags)
