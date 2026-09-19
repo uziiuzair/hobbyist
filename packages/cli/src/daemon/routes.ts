@@ -879,11 +879,15 @@ async function startResourceRoute(ctx: DaemonContext, id: string): Promise<Route
   // afterwards: the snapshot's own resume may have started it already.
   await waitForProjectAwakeable(ctx, resource.projectId)
   resource = getResourceOrThrow(ctx, id)
-  // An explicit start is the way out of a refused wake (issue #10, see
-  // buildWake in context.ts): someone looked and wants it tried again. The
-  // kind handler is called directly, never through buildWake, so the start
-  // itself cannot be refused; clearing first means the implicit wakes after
-  // it are not refused either.
+  // An explicit start is the way out of a refused wake that does not wait
+  // for its backoff (issue #10, see buildWake in context.ts): someone looked
+  // and wants it tried again now. The kind handler is called directly, never
+  // through buildWake, so the start itself cannot be refused; clearing first
+  // means the implicit wakes after it are not refused either, and that a
+  // later failure starts the backoff again from its first step. A failure of
+  // this start is deliberately not recorded as a refusal: the person who ran
+  // `hobby wake` has the error in front of them, and refusing the automatic
+  // wakes because of it would only undo what they asked for.
   clearWakeRefusal(ctx, resource.id)
   await ctx.kinds.get(resource.kind).start(ctx, resource)
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }

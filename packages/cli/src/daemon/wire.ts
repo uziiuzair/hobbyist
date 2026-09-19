@@ -30,6 +30,19 @@
 //     (and why a sleeping resource is never woken to answer it) and
 //     activity.ts's ActivityTracker (packages/proxy) for connectionCount,
 //     which is simply ctx.activity.count(resource.id), already free.
+//
+//   - wakeRefusal is added, from the daemon's in-memory record of a failed
+//     wake (getWakeRefusal, packages/cli/src/daemon/context.ts), null when
+//     there is none. Without it a refused resource was visible only as
+//     error text in some application's log: the store says `failed`, which
+//     it also says for a container that merely stopped, and nothing told a
+//     person that automatic wakes were being turned away, or until when.
+//     retryAt crosses as an ISO string, like every other time on the wire;
+//     a retryAt in the past means the next automatic wake will try again.
+//     lastError was already redacted when it was recorded (redactWakeError,
+//     packages/cli/src/daemon/wake-backoff.ts), because this file's rule,
+//     no secret leaves the process, applies to an error message as much as
+//     to a config.
 
 import type {
   AppConfig,
@@ -43,7 +56,7 @@ import type {
   WorkerConfig,
   WorkerResource,
 } from '@hobby.sh/core'
-import type { DaemonContext } from './context.js'
+import { getWakeRefusal, type DaemonContext } from './context.js'
 import { resourceSize } from './size.js'
 import type { SnapshotManifest, SnapshotResourceEntry } from './snapshots.js'
 
@@ -53,9 +66,19 @@ export type WireWorkerConfig = WorkerConfig
 export type WireQueueConfig = QueueConfig
 export type WireResourceConfig = WirePostgresConfig | WireAppConfig | WireWorkerConfig | WireQueueConfig
 
+export interface WireWakeRefusal {
+  failures: number
+  retryAt: string
+  lastError: string
+}
+
 interface WireExtras {
   sizeBytes: number | null
   connectionCount: number
+  // Optional in the type, always present in what toWireResource builds:
+  // optional so that the CLI's own tests, and any client talking to an older
+  // daemon, can hand a resource without it to renderResourceLine.
+  wakeRefusal?: WireWakeRefusal | null
 }
 
 // Discriminated on `kind`, exactly like Resource itself, rather than a single
@@ -148,10 +171,15 @@ export async function toWireResource(ctx: DaemonContext, resource: Resource): Pr
   const config = redactConfig(resource.kind, resource.config)
   const sizeBytes = await resourceSize(ctx, resource)
   const connectionCount = ctx.activity.count(resource.id)
+  const refusal = getWakeRefusal(ctx, resource.id)
+  const wakeRefusal =
+    refusal === null
+      ? null
+      : { failures: refusal.failures, retryAt: new Date(refusal.retryAt).toISOString(), lastError: refusal.lastError }
   // The one assertion, for the same reason store.ts's rowToResource has one:
   // redactConfig returns the union, and TypeScript cannot see that its result
   // corresponds to this resource's own kind.
-  return { ...resource, config, sizeBytes, connectionCount } as WireResource
+  return { ...resource, config, sizeBytes, connectionCount, wakeRefusal } as WireResource
 }
 
 export function toWireResources(ctx: DaemonContext, resources: Resource[]): Promise<WireResource[]> {
