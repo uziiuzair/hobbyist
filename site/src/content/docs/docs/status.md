@@ -31,8 +31,9 @@ Last reviewed 2026-08-21, against `main`.
 | Durable Object alarms | works, rough edges | An alarm armed 60s out fired 61s after the container was stopped, verified 2026-08-11. Can be up to one mirror tick (10s) late, plus a cold start |
 | `queue`, consuming | works, rough edges | A message arriving wakes a sleeping consumer. This is the first thing here where stored state, not a connection, starts a container |
 | Studio | alpha | Browsing, SQL and schema work. Network exposed by design |
-| MCP | works, postgres only | Fourteen tools over the daemon API |
+| MCP | works, postgres only | Fifteen tools over the daemon API |
 | Caddy and TLS | works, off by default | `caddyEnabled` defaults to `false`. Measured on Linux and OrbStack |
+| `hobby branch` | new, not yet run against Docker | A new project from a clone of a project's data. Postgres-only projects. Tested against a fake engine only; see [Unmeasured](#unmeasured) |
 
 ## Known broken
 
@@ -120,7 +121,6 @@ snapshot code as a backup story.
 
 | Thing | Notes |
 |---|---|
-| Copy-on-write branching | Phase 1.5. The `cloneTree` primitive it needs already exists |
 | Remote deploy, laptop to VPS | The CLI talks to a unix socket, so today it must run on the daemon's own box. Needs its own decision record first |
 | Creating an `app` or `worker` from Studio or MCP | Both hardcode `kind: 'postgres'`. The daemon side that makes it possible has landed (ADR 0014) |
 | Studio API tokens | Not designed beyond the label |
@@ -140,6 +140,13 @@ measured there. The published app and worker figures are still from a laptop.
 
 **Other providers.** One box, one provider, one region, one afternoon. Hetzner,
 Vultr and a Raspberry Pi are all still unmeasured.
+
+**`hobby branch` against real Docker, and its clone times.** The branch flow
+is covered by fake-engine tests, and nobody has yet run it against a real
+Postgres. Clone times on a reflink filesystem and on ext4 are unmeasured, and on
+Linux the daemon's own user may not be able to read a data directory the
+Postgres container owns, which would make every branch fail there until the
+copy moves into a container. Details in `docs/branching/CLAUDE.md`.
 
 **Caddy on Docker Desktop for macOS.** It needs host networking. Linux and
 OrbStack are both measured and fine. `hobby init` detects the absence and warns,

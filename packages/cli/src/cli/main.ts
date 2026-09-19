@@ -13,6 +13,7 @@ import {
   cmdConnect,
   cmdDaemon,
   cmdAdopt,
+  cmdBranch,
   cmdCreate,
   cmdDeploy,
   cmdEject,
@@ -136,6 +137,8 @@ function printHelp(io: Io): void {
   io.out('  hobby new <name> --empty             a project with nothing in it')
   io.out('  hobby new <name> --pin               born pinned: never auto-sleeps')
   io.out('  hobby ls                             everything, with sleep state')
+  io.out('  hobby branch <project> <name>        a new project from a copy of its data, unpinned')
+  io.out('  hobby branch ... --allow-pause        accept pausing a pinned, awake source')
   io.out('  hobby deploy [path]                  build a Dockerfile here and serve it')
   io.out('  hobby deploy [path] --database <r>   the same, bound to a sibling database')
   io.out('  hobby create <kind> <name> --project <p>  a resource with no code yet')
@@ -275,6 +278,10 @@ export async function run(argv: string[], io: Io): Promise<number> {
       case 'new': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json', 'empty', 'pin'] })
         return await cmdNew(ctx, positionals, flags)
+      }
+      case 'branch': {
+        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'allow-pause'] })
+        return await cmdBranch(ctx, positionals, flags)
       }
       case 'ls': {
         const { flags } = parseArgs(rest, { bool: ['json'] })

@@ -46,3 +46,19 @@ Benchmarks on real hardware showing the clone path is slower or less reliable
 than ZFS thin clones, or the quiesce requirement proving unworkable in daily use.
 Both are plausible. Benchmark before committing code, and file the results in
 `docs/branching/research/` with the hardware stated.
+
+## Amendment, 2026-09-19: the first branch path clones stopped instances
+
+The first built version of branching (`hobby branch`, issue #19) does not use
+Option 1. It clones a whole stopped data directory with `cloneTree`
+(`packages/core/src/copy.ts`), the path proposed in
+`docs/branching/research/2026-08-07-cloning-a-stopped-data-directory.md`,
+because that path needs no quiesce protocol of its own for a sleeping source,
+no PostgreSQL version floor, and no SQL. An awake source is stopped for the
+length of the clone and started again, the same quiesce and resume ADR 0016's
+snapshots use.
+
+Option 1 is not rejected by this. It remains the candidate for branching an
+awake database without a pause, and it still needs the benchmark the section
+above asks for before anything relies on it. Until then the consequences above
+that name PostgreSQL 18 as required describe Option 1, not what ships.

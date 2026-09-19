@@ -32,6 +32,7 @@ import { createRemoteClient, type Api } from './client.js'
 import { forgetRemote, listRemotes, saveRemote } from './remote.js'
 import { exitCodeForError } from './exit.js'
 import {
+  branchCopyNote,
   hostNetworkingWarning,
   proxyBindNote,
   reflinkWarning,
@@ -575,6 +576,48 @@ export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promi
   // exactly what it always was so `hobby new blog | pbcopy` keeps grabbing
   // one usable URI.
   if (tailnetConnectionString != null) c.io.out(`tailnet: ${tailnetConnectionString}`)
+  return 0
+}
+
+// `hobby branch <source> <name>`: a new project whose postgres resources
+// start from a clone of the source's data (POST /v1/projects/:name/branch;
+// packages/cli/src/daemon/branch.ts has the whole story). `branch` rather
+// than `clone` or `fork`, because it is the word Neon and the roadmap both
+// use, and the root CLAUDE.md names Phase 1.5 "copy-on-write branching".
+//
+// Unlike cmdNew, this prints no connection string. A branch keeps the
+// source's password (a clone of PGDATA carries its roles with it), so the
+// string is one the user already has, apart from the port, and `hobby
+// connect <name>` is the one place a credential is handed out on purpose.
+export async function cmdBranch(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const [source, name] = positionals
+  if (source === undefined || name === undefined || positionals.length > 2) {
+    throw new UsageError('usage: hobby branch <source-project> <new-project> [--allow-pause]')
+  }
+
+  const result = await c.api.branchProject(source, name, { allowPause: flags['allow-pause'] === true })
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+  } else {
+    c.io.out(`branched ${source} into ${result.project.name}: asleep until something connects, and not pinned`)
+    for (const resource of result.resources) {
+      c.io.out(`  ${renderResourceLine(resource)}`)
+    }
+    if (result.paused.length > 0 && result.pausedMs !== null) {
+      c.io.out(`${source} was paused for ${result.pausedMs}ms while ${result.paused.join(', ')} was cloned`)
+    }
+    c.io.out(`connect with: hobby connect ${result.project.name}`)
+  }
+
+  // stderr in both modes, so --json stays one parseable object on stdout
+  // and neither of these can be lost in it.
+  if (result.clone === 'copy') {
+    c.io.err(branchCopyNote())
+  }
+  for (const failure of result.resumeFailures) {
+    c.io.err(`${source} did not come back after the clone: ${failure}. try \`hobby wake ${source}\``)
+  }
   return 0
 }
 

@@ -74,6 +74,25 @@ The explicit form, for creating a second database. An alias for
 
 Accepts `--json`.
 
+### `hobby branch <project> <name> [--allow-pause]`
+
+Makes a new project, `<name>`, from a copy of `<project>`'s Postgres data, so
+you can experiment against real data without risking it. On a filesystem with
+reflinks (XFS, ZFS, APFS) the copy is instant; on ext4 it is a real copy, and
+the command says so.
+
+The branch gets its own container, port, network and data directory, and keeps
+the source's database user and password, which live inside the copied data. It
+starts asleep, like `hobby new`, and is never pinned, whatever the source was.
+
+An asleep source is copied as it is. An awake one is paused for the length of
+the copy and then resumed, and the command prints how long the pause was. A
+pinned source that is awake is refused unless you pass `--allow-pause`, because
+pinning it said it must stay up. A project holding apps, workers or queues
+cannot be branched yet. Remove a branch with `hobby rm`.
+
+Accepts `--json`.
+
 ### `hobby rm <target> [--yes]`
 
 Destroys a resource, or a project, with confirmation. `--yes` skips the prompt.

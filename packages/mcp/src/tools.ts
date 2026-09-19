@@ -65,6 +65,12 @@ export interface NewArgs {
   name: string
 }
 
+export interface BranchArgs {
+  source: string
+  name: string
+  allowPause?: boolean
+}
+
 export interface TargetArgs {
   target: string
 }
@@ -155,6 +161,16 @@ export async function newTool(api: Api, args: NewArgs): Promise<ToolResult> {
       hint: `call hobby_connection_string with target "${project.name}" to get the connection string`,
     }
   })
+}
+
+// Mirrors `hobby branch <source> <name> [--allow-pause]`: one call, the same
+// route the CLI uses (POST /v1/projects/:name/branch), so the pinned-project
+// guard and every refusal in packages/cli/src/daemon/branch.ts apply to an
+// agent exactly as they do to a person. allowPause is passed through only
+// when the agent set it, never defaulted to true: pausing a project someone
+// pinned awake is not a choice this layer gets to make for them.
+export async function branchTool(api: Api, args: BranchArgs): Promise<ToolResult> {
+  return run(async () => await api.branchProject(args.source, args.name, { allowPause: args.allowPause === true }))
 }
 
 // Mirrors `hobby connect <target>`'s data path (not its psql exec: an
