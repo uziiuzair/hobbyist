@@ -495,8 +495,23 @@ type HoldResult =
   | { kind: 'client_gone' }
 
 // Dials the backend and replays the startup packet, and keeps doing that for
-// as long as the backend answers "the database system is starting up" and
-// the budget allows. Issue #9.
+// as long as the backend is not serving yet and the budget allows. Issue #9.
+// "Not serving yet" has two shapes on the wire, and both are retried:
+//
+//   - FATAL 57P03 as the first backend message: Postgres is up, reading
+//     startup packets, and refusing sessions (starting up, crash recovery).
+//   - The connection closing or resetting before any complete backend
+//     message: the TCP dial was accepted by something that is not Postgres.
+//     This is the more common of the two in a real deployment, and it was
+//     measured, not assumed: against postgres:18-alpine on Docker Desktop,
+//     killed with `docker kill` and restarted with `docker start` during a
+//     3M-row crash recovery, 8 of 25 back-to-back connections through the
+//     proxy got exactly this and none got 57P03. Docker's published port
+//     (docker-proxy, the Docker Desktop forwarder, the Linux userland proxy
+//     alike) accepts on the host side while nothing inside the container is
+//     listening yet, then closes. It is the same lie reconcile.ts's file
+//     comment describes for readiness: an accepted TCP connection says
+//     nothing about Postgres.
 //
 // Why this is needed on top of the wake: the wake path already waits for a
 // real authenticated connection before it resolves (startPostgres waits on
@@ -508,9 +523,10 @@ type HoldResult =
 // this, that FATAL went straight to the client milliseconds after connect,
 // which is precisely the experience wake-on-connect exists to eliminate.
 //
-// Why a retry is safe: 57P03 is the backend's answer to the startup packet
-// itself, sent before any authentication exchange, and it is followed by the
-// backend closing the connection. Nothing has passed between this client and
+// Why a retry is safe: in both shapes the backend has said nothing but a
+// refusal, before any authentication exchange (57P03 is Postgres's answer
+// to the startup packet itself; an early close is no answer at all).
+// Nothing has passed between this client and
 // any backend except the startup packet, which this proxy holds a copy of
 // (the rebuilt `packet`), and nothing the backend said has been forwarded,
 // because awaitBackendAnswer forwards nothing. So the refused connection is
@@ -518,7 +534,11 @@ type HoldResult =
 // client, still waiting for its first reply, cannot tell the difference
 // between that and a backend that was slow to answer. The moment the answer
 // is anything else (an authentication request, a different error), it is
-// the backend's real answer and the client gets it untouched.
+// the backend's real answer and the client gets it untouched. The line is
+// the first complete backend message: once one has arrived the connection is
+// spliced, and a close after that is the session's business, never retried.
+// A refused dial never reaches this loop's retry at all; connectUpstream's
+// own bounded retry handles it.
 //
 // Bounded by `deadline`, the same wakeTimeoutMs budget a sleeping target's
 // wake gets, and ending in a real ErrorResponse naming what the backend last
@@ -585,19 +605,20 @@ async function holdUntilServing(
     if (answer.kind === 'client_gone') {
       return release({ kind: 'client_gone' })
     }
-    if (answer.kind === 'closed') {
-      // Not retried. A backend that accepts and then hangs up without a
-      // word is not saying "starting up", and nothing in this issue's
-      // evidence says waiting would change its mind. It used to reach the
-      // client as a dropped socket, and now reaches it as a real error.
-      return release({ kind: 'refused', message: `${target.resourceId} closed the connection without answering` })
-    }
     if (answer.kind === 'timeout') {
       const said = lastRefusal === null ? '' : ` (it last said: ${lastRefusal})`
       return release({ kind: 'refused', message: `${target.resourceId} accepted the connection but did not answer${said}` })
     }
 
-    lastRefusal = answer.message
+    // A close or reset before the first backend message (awaitBackendAnswer
+    // reports both as 'closed': a reset emits 'error' and then 'close') is
+    // retried exactly like a 57P03. See the comment above for the measured
+    // reason; before this it reached the client as "closed the connection
+    // without answering", and before the hold existed, as a dropped socket.
+    lastRefusal =
+      answer.kind === 'closed'
+        ? 'the port accepted the connection but closed it before Postgres answered'
+        : answer.message
     if (remainingMs(deadline) < READY_RETRY_INTERVAL_MS) {
       return release({
         kind: 'refused',

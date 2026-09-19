@@ -36,8 +36,9 @@ TCP accept
   not running (sleeping, starting, failed)?
             -> daemon.wake(resource), poll readiness, then as below
   running?  -> dial upstream, replay startup packet; while the backend
-               answers FATAL 57P03 (starting up), discard that connection
-               and dial again, within wakeTimeoutMs; then splice sockets
+               answers FATAL 57P03 (starting up), or the connection closes
+               or resets before any backend message, discard it and dial
+               again, within wakeTimeoutMs; then splice sockets
 ```
 
 **Routing key: the database name is the project.**
@@ -138,21 +139,37 @@ certificates, a real problem against Let's Encrypt rate limits on a busy
 box), and Docker Desktop for macOS is detected at `hobby init` and warned
 about but has never actually been run against.
 
-## Amendment, 2026-09-19: a `running` target is held through 57P03 (issue #9)
+## Amendment, 2026-09-19: a `running` target is held until it serves (issue #9)
 
-`running` is what the store recorded, not what the backend is doing: a
-container restarted outside the daemon, or one still in crash recovery,
-accepts the dial and then answers the startup packet with `FATAL 57P03`,
-which used to reach the client milliseconds after connect.
+`running` is what the store recorded, not what the backend is doing. A
+container restarted outside the daemon, or one still in crash recovery, is
+not serving yet, and that reached the client in one of two shapes:
+
+- **The connection closes or resets before any backend message.** This is
+  the common one, and it was measured, not assumed: postgres:18-alpine on
+  Docker Desktop with 3M rows, killed with `docker kill` and restarted with
+  `docker start` outside the daemon, then 25 back-to-back `psql` connections
+  through the proxy during recovery: 17 succeeded, 8 got a closed
+  connection, none got 57P03. The cause is Docker's published port
+  (docker-proxy, the Docker Desktop forwarder, and the Linux userland proxy
+  behave the same), which accepts the TCP connection on the host side while
+  nothing inside the container listens yet, then closes it.
+- **`FATAL 57P03`** ("the database system is starting up") as the answer to
+  the startup packet, once Postgres itself is listening but not yet taking
+  sessions.
+
 `holdUntilServing` (`packages/proxy/src/proxy.ts`) now reads the backend's
 first answer before anything is forwarded (`classifyBackendAnswer`,
-`packages/proxy/src/startup.ts`), and on 57P03 discards that connection and
-dials again with the same startup packet, every 100ms, until the backend
-serves or the connection's `wakeTimeoutMs` budget runs out, which ends in the
-proxy's own ErrorResponse naming what the backend kept saying. This is safe
-only because 57P03 arrives before any authentication exchange: the client has
-seen nothing yet. A healthy backend is still dialed once, with no probe and
-no sleep.
+`packages/proxy/src/startup.ts`). On either shape it discards that connection
+and dials again with the same startup packet, every 100ms, until the backend
+serves or the connection's `wakeTimeoutMs` budget runs out. When the budget
+runs out the proxy sends its own ErrorResponse, naming what the backend kept
+doing. This is safe only because both shapes come before any authentication
+exchange: the client has seen nothing yet. The line is the first complete
+backend message. After it, the connection is spliced and a close is the
+session's own business, never retried. A refused dial is still handled by
+the existing dial retry. A healthy backend is still dialed once, with no
+probe and no sleep.
 
 The HTTP router got no equivalent. A dead upstream there is an honest 502
 rather than a protocol-level lie, and replaying an HTTP request is not safe
