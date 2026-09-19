@@ -147,24 +147,44 @@ export function proxyBindNote(proxyHost: string): string {
   return `proxy: bound to ${setting}.`
 }
 
+// The half of the ext4 explanation both notes below share, so the reason and
+// the remedy are worded once: `hobby init` says it ahead of time and
+// `hobby branch` says it at the moment it applies, and two copies of the
+// advice would drift.
+const REFLINK_REMEDY =
+  'this is expected on ext4, the default on many cheap VPS images. ' +
+  'if you want cheap copies, put $HOBBY_HOME on XFS, ZFS or APFS. ' +
+  'https://hobbyist.sh/docs/reference/filesystems/'
+
 export function reflinkWarning(report: PreflightReport): string | null {
   if (report.filesystem.reflinkSupported) {
     return null
   }
-  // Deliberately "note" and not "warning", and deliberately not phrased as
-  // branching being degraded. Branching is not built and snapshots are not
-  // reachable from any command, so nothing a reader can run today is slower
-  // because of this. Warning about a feature that does not exist, in the first
-  // message most cheap-VPS users ever see, spends credibility for nothing.
+  // Deliberately "note" and not "warning". Branching works on this
+  // filesystem, it is just a real copy instead of an instant one, and that
+  // is a cost to know about rather than a fault. Alarming language in the
+  // first message most cheap-VPS users ever see spends credibility on
+  // something that is not broken.
   //
   // The link is a URL rather than a repo path, because someone who ran the
   // one-liner has no checkout in front of them to open.
   return (
     'note: this filesystem has no reflink support, so copying a project will be a full copy ' +
-    'rather than an instant one. nothing available today depends on it: snapshots and branching ' +
-    'are both still to come. this is expected on ext4, the default on many cheap VPS images. ' +
-    'if you want cheap copies later, put $HOBBY_HOME on XFS, ZFS or APFS. ' +
-    'https://hobbyist.sh/docs/reference/filesystems/'
+    'rather than an instant one. today that means `hobby branch`, which still works, at the cost ' +
+    'of the full size of the data and the time to copy it. ' +
+    REFLINK_REMEDY
+  )
+}
+
+// Printed by `hobby branch` when cloneTree (packages/core/src/copy.ts) had
+// to fall back to a byte copy. Said after the fact rather than refused up
+// front: the branch is correct either way, and the only difference is what
+// it cost, which the user should hear about the first time they pay it.
+export function branchCopyNote(): string {
+  return (
+    'note: this filesystem has no reflink support, so this branch is a full copy rather than an ' +
+    'instant one, and takes the full size of the data on disk. ' +
+    REFLINK_REMEDY
   )
 }
 
