@@ -30,6 +30,9 @@ hobby rm <target>                destroy, with a confirmation
 hobby eject <project>            emit docker-compose.yml plus data
 hobby eject <project> --release  the same, and hobby stops acting on it
 hobby adopt <project>            manage a released project again
+hobby snapshot <project>         a local, quiesced snapshot (ADR 0016)
+hobby snapshot ls <project>      its snapshots
+hobby snapshot restore <p> <id>  into a new project, or --in-place
 ```
 
 Verb-noun-target. No subcommand deeper than three levels.

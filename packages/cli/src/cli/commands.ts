@@ -39,6 +39,7 @@ import {
   renderQueueLine,
   renderQueueMessageLine,
   renderResourceLine,
+  renderSnapshotLine,
 } from './output.js'
 
 // Io is defined in main.ts, which owns run() and is the file the brief
@@ -1263,6 +1264,206 @@ export async function cmdAdopt(c: Ctx, positionals: string[], flags: Flags): Pro
       `${project}\` now.`
   )
   return 0
+}
+
+// ---------------------------------------------------------------------------
+// `hobby snapshot`. Thin clients of the snapshot routes in
+// packages/cli/src/daemon/routes.ts, which are thin themselves: the
+// machinery is packages/cli/src/daemon/snapshots.ts (ADR 0016).
+//
+//   hobby snapshot <project> [--allow-pause]
+//   hobby snapshot ls <project>
+//   hobby snapshot restore <project> <id> [--as <name> | --in-place] [--allow-pause] [--yes]
+//   hobby snapshot rm <project> <id> [--yes]
+//
+// The subcommand words are matched before a project name is, the same shape
+// `hobby queue` has, so a project literally named `ls`, `restore` or `rm`
+// cannot be snapshotted from this verb. validateName allows those names;
+// the API route takes any name and is the way round it.
+// ---------------------------------------------------------------------------
+
+// The id is resolved inside the project the caller named rather than taken
+// on trust. Ids are install-unique and the daemon could resolve one alone
+// (findSnapshot, snapshots.ts), but a restore over the wrong project is not
+// an error anyone should be able to make by pasting the wrong line from
+// `hobby snapshot ls`, and naming the project is also what gives the
+// in-place confirmation prompt something meaningful to ask for.
+async function snapshotOfProject(c: Ctx, project: string, id: string): Promise<void> {
+  const { snapshots } = await c.api.listSnapshots(project)
+  if (!snapshots.some((snapshot) => snapshot.snapshotId === id)) {
+    throw new HobbyError(
+      'resource_not_found',
+      `no snapshot ${id} of project ${project}`,
+      `run \`hobby snapshot ls ${project}\` to see what exists`
+    )
+  }
+}
+
+export async function cmdSnapshotTake(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const project = positionals[0]
+  if (project === undefined || positionals.length > 1) {
+    throw new UsageError('usage: hobby snapshot <project> [--allow-pause]')
+  }
+  const result = await c.api.takeSnapshot(project, { allowPause: flags['allow-pause'] === true })
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+    return 0
+  }
+
+  const count = result.snapshot.resources.length
+  c.io.out(
+    `snapshot ${result.snapshot.snapshotId} of ${project}: ${count} resource${count === 1 ? '' : 's'}, ` +
+      `${result.snapshot.clone === 'reflink' ? 'reflink clone' : 'full copy'}`
+  )
+  c.io.out(`  ${result.dir}`)
+  // Truthful about what resume did, from the store: a resource that did not
+  // come back is `failed` in this list, and the snapshot is still good.
+  for (const resource of result.resources) {
+    if (resource.state === 'failed') {
+      c.io.err(`${resource.name} did not start again after the snapshot. \`hobby logs ${project}/${resource.name}\` may say why`)
+    }
+  }
+  // ADR 0016, "Consequences accepted": the limits are stated where the
+  // snapshot is taken, not left for the worst day.
+  c.io.err(
+    'a local snapshot, on the same disk as the project: it covers a bad migration or a mistake, not losing this disk. ' +
+      `restore it with \`hobby snapshot restore ${project} ${result.snapshot.snapshotId}\``
+  )
+  return 0
+}
+
+export async function cmdSnapshotLs(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const project = positionals[0]
+  if (project === undefined) {
+    throw new UsageError('usage: hobby snapshot ls <project>')
+  }
+  const result = await c.api.listSnapshots(project)
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+    return 0
+  }
+  if (result.snapshots.length === 0) {
+    c.io.out(`no snapshots of ${project}. take one with \`hobby snapshot ${project}\``)
+    return 0
+  }
+  for (const snapshot of result.snapshots) {
+    c.io.out(renderSnapshotLine(snapshot))
+  }
+  return 0
+}
+
+// Restore semantics, in full, because this is the verb run on the worst day:
+//
+// - Default, and with --as <name>: into a NEW project (`<project>-restored`
+//   unless named). Nothing existing is touched and the original may keep
+//   running. The new project's resources are all asleep and wake on first
+//   use like anything else. Worker Durable Object state is carried across
+//   under the new resource ids (renameDurableObjectDirs, snapshots.ts).
+// - --in-place: REPLACES the project's data with the snapshot's, keeping its
+//   resource ids, ports and connection strings, so nothing pointed at it has
+//   to change. The project is stopped for the swap and whatever was running
+//   is started again on the restored data. The data it replaces is set aside,
+//   not deleted, until everything that was running has come back on the
+//   restored data; if something does not, it stays on disk and its path is
+//   printed. Refused when the project's resources have changed since the
+//   snapshot (restore with --as instead), and data only: code is whatever was
+//   last deployed, not what was deployed when the snapshot was taken.
+//   Asks for the project name to be typed unless --yes.
+// - --allow-pause: needed only to stop a pinned project that has something
+//   running (in place only; a restore into a new project stops nothing).
+export async function cmdSnapshotRestore(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const [project, id] = positionals
+  const usage = 'usage: hobby snapshot restore <project> <id> [--as <name> | --in-place] [--allow-pause] [--yes]'
+  if (project === undefined || id === undefined || positionals.length > 2) {
+    throw new UsageError(usage)
+  }
+  const as = flagString(flags, 'as')
+  const inPlace = flags['in-place'] === true
+  if (inPlace && as !== undefined) {
+    throw new UsageError(`--as and --in-place cannot be combined. ${usage}`)
+  }
+
+  await snapshotOfProject(c, project, id)
+
+  if (inPlace && !flags.yes) {
+    c.io.out(`type "${project}" to confirm replacing its data with snapshot ${id}:`)
+    const typed = await c.io.readLine()
+    if (typed.trim() !== project) {
+      c.io.err('confirmation did not match, aborted')
+      return 1
+    }
+  }
+
+  const result = await c.api.restoreSnapshot(id, {
+    ...(as !== undefined ? { as } : {}),
+    ...(inPlace ? { inPlace: true } : {}),
+    allowPause: flags['allow-pause'] === true,
+  })
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+    return result.restartFailures.length > 0 ? 1 : 0
+  }
+
+  if (inPlace) {
+    c.io.out(`restored ${project} in place from snapshot ${id}`)
+  } else {
+    c.io.out(`restored snapshot ${id} into new project ${result.project.name}. ${project} is untouched`)
+  }
+  for (const resource of result.resources) {
+    c.io.out(`  ${renderResourceLine(resource)}`)
+  }
+  for (const failure of result.restartFailures) {
+    c.io.err(`did not start on the restored data: ${failure}`)
+  }
+  if (result.preRestoreDir !== null) {
+    c.io.err(`the data this restore replaced is kept at ${result.preRestoreDir}. delete it once you are sure it is not needed`)
+  }
+  // Exit 1 when something that was running did not come back: the data is
+  // restored, but a script checking $? should not read this as all clear.
+  return result.restartFailures.length > 0 ? 1 : 0
+}
+
+export async function cmdSnapshotRm(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const [project, id] = positionals
+  if (project === undefined || id === undefined || positionals.length > 2) {
+    throw new UsageError('usage: hobby snapshot rm <project> <id> [--yes]')
+  }
+  await snapshotOfProject(c, project, id)
+
+  if (!flags.yes) {
+    c.io.out(`type "${id}" to confirm deleting this snapshot, this cannot be undone:`)
+    const typed = await c.io.readLine()
+    if (typed.trim() !== id) {
+      c.io.err('confirmation did not match, aborted')
+      return 1
+    }
+  }
+
+  const result = await c.api.deleteSnapshot(id)
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+  } else {
+    c.io.out(`deleted snapshot ${id}`)
+  }
+  return 0
+}
+
+export async function cmdSnapshot(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const [first, ...rest] = positionals
+  switch (first) {
+    case undefined:
+      throw new UsageError('usage: hobby snapshot <project> | ls <project> | restore <project> <id> | rm <project> <id>')
+    case 'ls':
+      return cmdSnapshotLs(c, rest, flags)
+    case 'restore':
+      return cmdSnapshotRestore(c, rest, flags)
+    case 'rm':
+      return cmdSnapshotRm(c, rest, flags)
+    default:
+      return cmdSnapshotTake(c, positionals, flags)
+  }
 }
 
 // `hobby studio passwd`: the only way the operator credential (ADR 0008,
