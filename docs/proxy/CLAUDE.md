@@ -30,8 +30,10 @@ TCP accept
   CancelRequest? -> route to the right upstream, do not treat as a wake
   read startup packet -> user, database, options
   resolve project from the database name
-  running?  -> dial upstream, replay startup packet, splice sockets
-  sleeping? -> daemon.wake(resource), poll readiness, then as above
+  sleeping? -> daemon.wake(resource), poll readiness, then as below
+  running?  -> dial upstream, replay startup packet; while the backend
+               answers FATAL 57P03 (starting up), discard that connection
+               and dial again, within wakeTimeoutMs; then splice sockets
   failed?   -> send a real Postgres ErrorResponse, never a dropped socket
 ```
 
@@ -132,3 +134,23 @@ is not persisted (the container has no volume, so replacing it re-issues
 certificates, a real problem against Let's Encrypt rate limits on a busy
 box), and Docker Desktop for macOS is detected at `hobby init` and warned
 about but has never actually been run against.
+
+## Amendment, 2026-09-19: a `running` target is held through 57P03 (issue #9)
+
+`running` is what the store recorded, not what the backend is doing: a
+container restarted outside the daemon, or one still in crash recovery,
+accepts the dial and then answers the startup packet with `FATAL 57P03`,
+which used to reach the client milliseconds after connect.
+`holdUntilServing` (`packages/proxy/src/proxy.ts`) now reads the backend's
+first answer before anything is forwarded (`classifyBackendAnswer`,
+`packages/proxy/src/startup.ts`), and on 57P03 discards that connection and
+dials again with the same startup packet, every 100ms, until the backend
+serves or the connection's `wakeTimeoutMs` budget runs out, which ends in the
+proxy's own ErrorResponse naming what the backend kept saying. This is safe
+only because 57P03 arrives before any authentication exchange: the client has
+seen nothing yet. A healthy backend is still dialed once, with no probe and
+no sleep.
+
+The HTTP router got no equivalent. A dead upstream there is an honest 502
+rather than a protocol-level lie, and replaying an HTTP request is not safe
+in general (a streamed POST body is gone once sent), so it stays as it was.
