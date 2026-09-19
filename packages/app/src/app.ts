@@ -51,6 +51,10 @@ export interface AppDeps {
 // at `docker ps` or `lsof` tells you which kind of thing owns a port.
 const PORT_RANGE_FROM = 25433
 const PORT_RANGE_TO = 35432
+// Exported for the one other place that allocates an app's port: a snapshot
+// restored into a new project (rewriteConfig, packages/cli/src/daemon/snapshots.ts),
+// which must land in the same range for the reason just above.
+export const APP_PORT_RANGE = { from: PORT_RANGE_FROM, to: PORT_RANGE_TO } as const
 
 // Shorter than the 30 seconds Postgres gets. A web process that has not bound
 // its port in ten seconds is not slow, it is broken or listening on the wrong

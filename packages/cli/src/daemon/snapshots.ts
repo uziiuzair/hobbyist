@@ -24,6 +24,9 @@ import {
   type ResourceKind,
   type ResourceState,
 } from '@hobby.sh/core'
+import { APP_PORT_RANGE } from '@hobby.sh/app'
+import { createPostgresFromClone } from '@hobby.sh/pg'
+import { WORKER_PORT_RANGE } from '@hobby.sh/worker'
 import { holdProjectAsleep, type DaemonContext } from './context.js'
 
 // Sortable, and lowercase because restore builds project names out of this and
@@ -417,16 +420,22 @@ export interface RestoreResult {
   preRestoreDir: string | null
 }
 
-// Ports the daemon hands out, so a restored copy must never inherit them: the
-// original may still be holding both. The range mirrors what createResource
-// paths already use; see store.allocatePort.
-const PORT_FROM = 15000
-const PORT_TO = 19999
-
 // Every field below either names the old project, embeds the old resource id,
 // or is unique per machine. Each one is a SILENT failure if missed: the restore
-// succeeds and the copy quietly shares something with the original. The
-// sharpest is dataDir, where the copy would write into the original's PGDATA.
+// succeeds and the copy quietly shares something with the original.
+//
+// Postgres does not come through here: createPostgresFromClone
+// (packages/pg/src/postgres.ts) builds its config and, unlike a row rewrite,
+// creates its container, which a postgres needs and an app or worker does
+// not (their start paths call ensureCreated themselves). A queue does not
+// either: it has no container and no port (its hostPort is the unused 0 that
+// createQueueResource in routes.ts writes), so it keeps its config verbatim
+// rather than being handed a port nothing will ever bind.
+//
+// Ports come from each kind's own range (APP_PORT_RANGE, WORKER_PORT_RANGE),
+// never a range of this file's own: an earlier version allocated every kind
+// from 15000 to 19999, which put a restored postgres below the range every
+// other postgres lives in, and an app or worker inside it.
 function rewriteConfig(
   ctx: DaemonContext,
   config: ResourceConfig,
@@ -434,31 +443,29 @@ function rewriteConfig(
   resourceName: string,
   newId: string
 ): ResourceConfig {
-  const base = {
-    ...config,
-    containerName: `hobby-${projectName}-${resourceName}`,
-    hostPort: ctx.store.allocatePort(PORT_FROM, PORT_TO),
-  }
-
-  if ('dataDir' in base) {
-    return { ...base, dataDir: ctx.paths.resourcePath(projectName, resourceName, 'pgdata') }
-  }
-
-  if ('queueToken' in base) {
+  if ('queueToken' in config) {
+    const hostPort = ctx.store.allocatePort(WORKER_PORT_RANGE.from, WORKER_PORT_RANGE.to)
     return {
-      ...base,
-      controlPort: ctx.store.allocatePort(PORT_FROM, PORT_TO, [base.hostPort]),
+      ...config,
+      containerName: `hobby-${projectName}-${resourceName}`,
+      hostPort,
+      controlPort: ctx.store.allocatePort(WORKER_PORT_RANGE.from, WORKER_PORT_RANGE.to, [hostPort]),
       queueToken: randomUUID(),
       hostname: `${resourceName}.${projectName}.${ctx.config.domain}`,
       durableObjectUniqueKeyModifier: newId,
     }
   }
 
-  if ('hostname' in base) {
-    return { ...base, hostname: `${resourceName}.${projectName}.${ctx.config.domain}` }
+  if ('hostname' in config) {
+    return {
+      ...config,
+      containerName: `hobby-${projectName}-${resourceName}`,
+      hostPort: ctx.store.allocatePort(APP_PORT_RANGE.from, APP_PORT_RANGE.to),
+      hostname: `${resourceName}.${projectName}.${ctx.config.domain}`,
+    }
   }
 
-  return base
+  return config
 }
 
 // worker.ts:174 builds a Durable Object's storage key from the RESOURCE ID
@@ -682,6 +689,19 @@ export async function restoreSnapshot(
 
   const resources: Resource[] = []
   for (const entry of found.manifest.resources) {
+    // A postgres is the one kind whose start needs a container to exist
+    // already (startPostgres calls runtime.start and nothing else), so it
+    // gets a real container, created and left stopped, bound to the cloned
+    // data directory above. Recording only a row was the first version of
+    // this, and every wake of the restored database then failed with "No
+    // such container". createPostgresFromClone's comment has the rest.
+    if (entry.kind === 'postgres' && 'dataDir' in entry.config) {
+      resources.push(
+        await createPostgresFromClone(ctx, { project, name: entry.name, source: entry.config })
+      )
+      continue
+    }
+
     // Created with the old config first so the row (and its id) exists before
     // the rewrite needs it: durableObjectUniqueKeyModifier is derived from the
     // new id, and the DO directory rename needs it too.
@@ -697,7 +717,13 @@ export async function restoreSnapshot(
 
     // Never `running`: nothing has been started, and a row claiming otherwise
     // is exactly the lie reconcile.ts exists to catch.
-    ctx.store.setResourceState(created.id, entry.kind === 'queue' ? entry.stateAtSnapshot : 'sleeping')
+    // A queue is `running` from creation and forever, and an app or worker
+    // that had never been deployed has no image to wake with: both keep the
+    // state they were snapshotted in. Anything else rests asleep and is
+    // created on its first wake (ensureCreated in the app and worker start
+    // paths).
+    const keepsState = entry.kind === 'queue' || entry.stateAtSnapshot === 'undeployed'
+    ctx.store.setResourceState(created.id, keepsState ? entry.stateAtSnapshot : 'sleeping')
 
     const reloaded = ctx.store.getResource(created.id)
     if (reloaded !== null) {
