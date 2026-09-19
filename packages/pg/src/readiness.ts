@@ -5,8 +5,24 @@
 // probe here opens a real `pg` connection instead: if `Client#connect()`
 // resolves, Postgres is genuinely ready to take queries.
 
-import { Client } from 'pg'
+import { Client, DatabaseError } from 'pg'
 import type { PostgresConfig } from '@hobby.sh/core'
+
+// What one probe learned. `true` and `false` are the two answers this probe
+// always gave: Postgres accepted a session, or nothing usable answered yet
+// (refused, reset, timed out, or a server saying it is still starting). The
+// third shape is the one a boolean could not carry: a server answered, with
+// an ErrorResponse, and the error is not one a boot in progress produces. A
+// wrong password, a pg_hba.conf with no entry for this host, a database that
+// does not exist. Polling a server that says that for the rest of
+// wakeTimeoutMs (30 seconds by default) cannot change its answer, it only
+// holds every waiting client that long before telling them the same thing,
+// so waitReady concludes on it at once. `broken` carries the server's own words so the
+// resulting error names the actual failure rather than "did not become
+// ready". A plain `() => Promise<boolean>` is still a valid probe (boolean is
+// a member of this union), which is what keeps every existing probeFactory
+// fake working unchanged.
+export type ProbeOutcome = boolean | { broken: string }
 
 // Short on purpose: this is a poll, called repeatedly by waitReady, not a
 // single long-lived connection attempt. A slow, still-booting Postgres just
@@ -35,8 +51,38 @@ function deadline(ms: number): Promise<void> {
   })
 }
 
-export function pgProbe(config: PostgresConfig): () => Promise<boolean> {
-  return async (): Promise<boolean> => {
+// SQLSTATE classes a server answers with while it is momentarily unable to
+// take a session, as opposed to unable to take this one ever. Class 57 is
+// operator intervention: 57P03 cannot_connect_now is exactly "the database
+// system is starting up" (also "is in recovery mode" and "is shutting down"),
+// and 57P01/57P02 are a server going down underneath the probe, which a
+// restart or the next poll resolves rather than a fault in this resource's
+// configuration. Class 53 is insufficient resources (53300
+// too_many_connections the obvious one), which clears on its own as sessions
+// end. Treating any of these as broken would fail a wake that was about to
+// succeed, which is the worse of the two mistakes: a cold database misread
+// as broken fails its wake, and the daemon then refuses to wake it again
+// until someone runs `hobby wake`, while a broken one misread as cold only
+// costs the timeout it always cost before.
+const TRANSIENT_SQLSTATE_CLASSES = new Set(['57', '53'])
+
+// The line between "nothing answered" and "a server answered badly".
+// DatabaseError is what the pg driver builds from a real ErrorResponse on the
+// wire and nothing else: a refused dial, a reset socket and the driver's own
+// connection timeout all arrive as plain Errors. Exported for its unit test.
+export function classifyProbeError(err: unknown): ProbeOutcome {
+  if (!(err instanceof DatabaseError)) {
+    return false
+  }
+  const code = typeof err.code === 'string' ? err.code : ''
+  if (TRANSIENT_SQLSTATE_CLASSES.has(code.slice(0, 2))) {
+    return false
+  }
+  return { broken: code === '' ? err.message : `${err.message} (SQLSTATE ${code})` }
+}
+
+export function pgProbe(config: PostgresConfig): () => Promise<ProbeOutcome> {
+  return async (): Promise<ProbeOutcome> => {
     const client = new Client({
       host: '127.0.0.1',
       port: config.hostPort,
@@ -48,8 +94,8 @@ export function pgProbe(config: PostgresConfig): () => Promise<boolean> {
     try {
       await client.connect()
       return true
-    } catch {
-      return false
+    } catch (err) {
+      return classifyProbeError(err)
     } finally {
       // client.end() can itself throw if connect() never succeeded (no
       // socket to close); that failure carries no information we need.
@@ -71,6 +117,10 @@ export interface WaitReadyResult {
   ready: boolean
   attempts: number
   waitedMs: number
+  // Set only when the wait ended early because a probe reported the server
+  // broken (see ProbeOutcome). Absent on success and on a plain timeout, so
+  // a caller can tell "gave up waiting" from "was told no".
+  broken?: string
 }
 
 // probe, sleepFor and now are all injectable so the poll loop itself is
@@ -81,7 +131,7 @@ export async function waitReady(opts: {
   config: PostgresConfig
   pollMs: number
   timeoutMs: number
-  probe?: () => Promise<boolean>
+  probe?: () => Promise<ProbeOutcome>
   sleepFor?: (ms: number) => Promise<void>
   now?: () => number
 }): Promise<WaitReadyResult> {
@@ -94,11 +144,16 @@ export async function waitReady(opts: {
 
   for (;;) {
     attempts++
-    const ready = await probe()
+    const outcome = await probe()
     const waitedMs = now() - start
 
-    if (ready) {
+    if (outcome === true) {
       return { ready: true, attempts, waitedMs }
+    }
+    // Before the timeout check, not after it: a broken answer on the last
+    // poll is still more useful to the caller than "timed out".
+    if (outcome !== false) {
+      return { ready: false, attempts, waitedMs, broken: outcome.broken }
     }
     if (waitedMs >= opts.timeoutMs) {
       return { ready: false, attempts, waitedMs }

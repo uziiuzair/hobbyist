@@ -51,7 +51,7 @@ import {
   findWranglerManifest,
   resolveWorkerSourcePath,
 } from '@hobby.sh/worker'
-import { getOrCreateWake, type DaemonContext } from './context.js'
+import { clearWakeRefusal, getOrCreateWake, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
 import { toWireResource, toWireResources, type WireResource } from './wire.js'
 
@@ -826,6 +826,12 @@ function refuseUndeployed(ctx: DaemonContext, resource: Resource): void {
 async function startResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
   refuseUndeployed(ctx, resource)
+  // An explicit start is the way out of a refused wake (issue #10, see
+  // buildWake in context.ts): someone looked and wants it tried again. The
+  // kind handler is called directly, never through buildWake, so the start
+  // itself cannot be refused; clearing first means the implicit wakes after
+  // it are not refused either.
+  clearWakeRefusal(ctx, resource.id)
   await ctx.kinds.get(resource.kind).start(ctx, resource)
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
