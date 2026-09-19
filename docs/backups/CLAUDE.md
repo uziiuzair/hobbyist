@@ -72,9 +72,13 @@ Restore, both shapes:
 
 - **Into a new project** (the default, named `<project>-restored` unless
   `--as` says otherwise). Non-destructive: the original is untouched and may
-  keep running. Ports, container names, hostnames, the data directory path and
-  the queue token are reallocated, and Durable Object storage is renamed to the
-  new resource ids (`rewriteConfig` and `renameDurableObjectDirs`).
+  keep running. Ports (from each kind's own range), container names,
+  hostnames, the data directory path and the queue token are reallocated, and
+  Durable Object storage is renamed to the new resource ids (`rewriteConfig`
+  and `renameDurableObjectDirs`). Each postgres gets a real container, created
+  stopped on the cloned data (`createPostgresFromClone`,
+  `packages/pg/src/postgres.ts`), because its start path only ever starts an
+  existing one; an app or worker is created on its first wake.
 - **In place** (`--in-place`). Replaces the project's data with the snapshot's
   and keeps its resource ids, so connection strings do not change. The snapshot
   is cloned into a staging directory first, with the project still up; then the
@@ -124,8 +128,9 @@ MCP tool, a Studio screen, and offsite copies.
 - On Linux a PGDATA is owned by the container's postgres uid, not the daemon's
   user (`createDefaultRemoveDataDir`'s comment, `packages/pg/src/postgres.ts`).
   Whether the clone can read it, and whether the in-place restore can delete
-  the set-aside copy, has not been run on Linux. Only the fake-runtime tests
-  and the machinery tests have run.
+  the set-aside copy, has not been run on Linux. On macOS (Docker Desktop
+  masks the uid) snapshot, both restores, the pinned refusal and the wake
+  fence have been run against real Docker.
 
 ## Answered, and where
 

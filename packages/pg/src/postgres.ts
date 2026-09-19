@@ -209,6 +209,81 @@ export async function createPostgres(
   return expectKind(final, 'postgres')
 }
 
+// A postgres resource whose data directory is already a clone of another
+// cluster's. Written for a snapshot restored into a new project
+// (restoreSnapshot, packages/cli/src/daemon/snapshots.ts), and deliberately
+// identical to the function of the same name on the branching branch
+// (feat/branch-a-project, PR #36), so that whichever of the two merges second
+// drops its copy rather than reconciling two.
+//
+// What is new and what is kept is decided by what the cloned PGDATA itself
+// contains, because the stored config is only worth anything while it
+// agrees with it:
+//
+//   - New: the container name, the host port and the data directory path.
+//     These are properties of the box, not of the cluster, and sharing any
+//     of them with the source is how the copy would end up writing into the
+//     source's data or refusing to start on a port the source holds. The
+//     port comes from this file's own range, like createPostgres's.
+//   - Kept: the superuser, the password and the database name. They live
+//     INSIDE the cluster (pg_authid and pg_database, copied byte for byte),
+//     and the image's POSTGRES_PASSWORD, POSTGRES_USER and POSTGRES_DB are
+//     read by its entrypoint only when it runs initdb on an empty directory,
+//     which this one is not. A freshly generated password stored here would
+//     be a password Postgres has never heard of, and every connection
+//     string built from it would fail authentication.
+//   - Kept: the image. The clone was written by the source's Postgres major
+//     version, and a different major cannot open it.
+//
+// The container is created and left stopped, never started here. The data
+// directory is already initialised, so there is no first boot to perform,
+// and sleeping is how every freshly made postgres rests (createPostgres
+// stops its own after initdb for the same reason). Creating it now rather
+// than on first wake matters: startPostgres only ever calls runtime.start,
+// which against Docker needs a container that already exists. A restore
+// that recorded only the row was exactly that bug, found on real Docker and
+// invisible to the fake runtime until a test asked it what was created.
+export async function createPostgresFromClone(
+  deps: PgDeps,
+  opts: { project: Project; name: string; source: PostgresConfig }
+): Promise<PostgresResource> {
+  validateName(opts.name)
+
+  const config: PostgresConfig = {
+    image: opts.source.image,
+    containerName: `hobby-${opts.project.name}-${opts.name}`,
+    dataDir: deps.paths.resourcePath(opts.project.name, opts.name, 'pgdata'),
+    hostPort: deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO),
+    superuser: opts.source.superuser,
+    password: opts.source.password,
+    database: opts.source.database,
+  }
+
+  const resource = deps.store.createResource({
+    projectId: opts.project.id,
+    kind: 'postgres',
+    name: opts.name,
+    config,
+  })
+
+  try {
+    await deps.runtime.ensureNetwork(opts.project.networkName)
+    await deps.runtime.ensureCreated(containerSpec(config, opts.project.networkName))
+  } catch (err) {
+    // Same reasoning as createPostgres's catch: a row left in `creating`
+    // reads as an operation still in flight, forever.
+    deps.store.setResourceState(resource.id, 'failed')
+    throw err
+  }
+  deps.store.setResourceState(resource.id, 'sleeping')
+
+  const final = deps.store.getResource(resource.id)
+  if (final === null) {
+    throw new HobbyError('internal', `resource ${resource.id} vanished immediately after creation`)
+  }
+  return expectKind(final, 'postgres')
+}
+
 export async function startPostgres(deps: PgDeps, resource: PostgresResource): Promise<void> {
   deps.store.setResourceState(resource.id, 'starting')
 

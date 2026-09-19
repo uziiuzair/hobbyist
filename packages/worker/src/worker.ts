@@ -55,6 +55,10 @@ export interface WorkerDeps {
 // to 35432), so a port tells you which kind owns it.
 const PORT_RANGE_FROM = 35433
 const PORT_RANGE_TO = 45432
+// Exported for a snapshot restored into a new project (rewriteConfig,
+// packages/cli/src/daemon/snapshots.ts), which reallocates both of a
+// worker's ports and must keep them in this range.
+export const WORKER_PORT_RANGE = { from: PORT_RANGE_FROM, to: PORT_RANGE_TO } as const
 
 // The port Miniflare listens on inside the container. Fixed rather than
 // allocated: nothing else is in this container, and a constant is one fewer

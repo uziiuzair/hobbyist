@@ -132,6 +132,48 @@ test('restore rewrites ports, container name and data directory', async () => {
   assert.equal(untouched.dataDir, ctx.paths.resourcePath('blog', 'primary', 'pgdata'))
 })
 
+// Found on real Docker, invisible here until this test: the first version
+// recorded a restored postgres's row and never created its container, so
+// every wake died with "No such container", while the fake runtime (whose
+// start() will start a container it has never heard of) reported success.
+// So this asks the fake what it was asked to create, not whether a row
+// exists, and checks the container is the one the row describes.
+test('restore into a new project creates each postgres container, stopped, on the cloned data and a postgres port', async () => {
+  const ctx = buildContext()
+  const runtime = createFakeRuntime()
+  ctx.runtime = runtime
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: postgresConfig(ctx.paths, 'blog', 'primary'),
+  })
+  await mkdir(ctx.paths.resourcePath('blog', 'primary', 'pgdata'), { recursive: true })
+
+  const taken = await takeSnapshot(ctx, 'blog', { now: () => Date.UTC(2026, 7, 16, 9, 0, 0), suffix: () => 'aaaaaa' })
+  const restored = await restoreSnapshot(ctx, taken.snapshotId, { as: 'blog-copy' })
+
+  const resource = restored.resources[0]
+  assert.ok(resource !== undefined && resource.kind === 'postgres')
+  assert.equal(resource.state, 'sleeping')
+
+  const spec = runtime._specs.get('hobby-blog-copy-primary')
+  assert.ok(spec !== undefined, 'the restored postgres has no container')
+  assert.equal(resource.config.containerName, 'hobby-blog-copy-primary')
+  assert.deepEqual(spec.binds.map((bind) => bind.host), [ctx.paths.resourcePath('blog-copy', 'primary', 'pgdata')])
+  assert.deepEqual(spec.ports.map((port) => port.host), [resource.config.hostPort])
+  assert.equal(spec.network, restored.project.networkName)
+  assert.ok(runtime._networks.has(restored.project.networkName))
+  // Created, and left stopped: sleeping is how every new postgres rests.
+  assert.equal(runtime._state.get('hobby-blog-copy-primary')?.running, false)
+  // pg's own range (PORT_RANGE_FROM/TO, packages/pg/src/postgres.ts), not
+  // the 15000 an earlier version handed out from a range of its own.
+  assert.ok(resource.config.hostPort >= 15432 && resource.config.hostPort <= 25432, `port ${resource.config.hostPort}`)
+  // The password lives inside the cloned cluster and must not change.
+  assert.equal(spec.env['POSTGRES_PASSWORD'], 'secret')
+})
+
 test('restore carries the bytes', async () => {
   const ctx = buildContext()
   const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
@@ -202,6 +244,12 @@ test('restore regenerates the queue token and re-derives the hostname', async ()
   assert.notEqual(config.queueToken, 'token-from-the-original')
   assert.equal(config.hostname, 'api.blog-copy.localhost')
   assert.equal(config.durableObjectUniqueKeyModifier, restored.resources[0]?.id)
+  // Both ports from the worker's own range (WORKER_PORT_RANGE,
+  // packages/worker/src/worker.ts), and distinct.
+  for (const port of [config.hostPort, config.controlPort]) {
+    assert.ok(port >= 35433 && port <= 45432, `port ${port}`)
+  }
+  assert.notEqual(config.hostPort, config.controlPort)
 })
 
 test('restore refuses a name that is already taken', async () => {
