@@ -42,8 +42,14 @@ export const postgresKindHandler: ResourceKindHandler<PostgresResource> = {
   // up`. Honouring probeFactory here matters for the same reason it matters
   // in startPostgres: without it, every daemon-level test against a fake
   // runtime would wait out a real connection timeout to nothing.
-  probe(deps: PgDeps, resource: PostgresResource): Promise<boolean> {
-    return (deps.probeFactory ?? pgProbe)(resource.config)()
+  //
+  // Only a clean `true` is ready. A server that answered with an error
+  // (ProbeOutcome's `broken`, see readiness.ts) is not ready by any reading,
+  // and reconcile, the one caller, needs no more detail than that: it
+  // buckets not-ready as `booting`, and the wake that follows reports the
+  // server's actual words.
+  async probe(deps: PgDeps, resource: PostgresResource): Promise<boolean> {
+    return (await (deps.probeFactory ?? pgProbe)(resource.config)()) === true
   },
 
   // The one kind with a real pre-sleep guard: a database mid-transaction
