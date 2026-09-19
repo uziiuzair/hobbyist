@@ -168,6 +168,16 @@ export interface ProjectDetailResponse {
 export interface ResourceResponse {
   resource: WireResource
 }
+// POST /v1/projects/:name/branch. See packages/cli/src/daemon/branch.ts's
+// BranchResult for what each field means; this is its wire shape.
+export interface BranchResponse {
+  project: Project
+  resources: WireResource[]
+  clone: 'reflink' | 'copy'
+  paused: string[]
+  pausedMs: number | null
+  resumeFailures: string[]
+}
 export interface DeletedResponse {
   deleted: true
 }
@@ -274,6 +284,9 @@ export interface Api {
   // The same value, changed after creation. POST /v1/projects/:name/sleep-policy.
   setSleepPolicy(project: string, sleepAfterSeconds: number | null): Promise<ProjectResponse>
   getProject(name: string): Promise<ProjectDetailResponse>
+  // A new project whose postgres resources start from a clone of the
+  // source's data. allowPause is the pinned-project guard's override.
+  branchProject(source: string, name: string, opts?: { allowPause?: boolean }): Promise<BranchResponse>
   deleteProject(name: string): Promise<DeletedResponse>
   createResource(
     project: string,
@@ -425,6 +438,13 @@ export function createApi(transport: string | DaemonClient): Api {
     setSleepPolicy: (project, sleepAfterSeconds) =>
       call(client, 'POST', `/v1/projects/${p(project)}/sleep-policy`, { sleepAfterSeconds }),
     getProject: (name) => call(client, 'GET', `/v1/projects/${p(name)}`),
+    branchProject: (source, name, opts) =>
+      call(
+        client,
+        'POST',
+        `/v1/projects/${p(source)}/branch`,
+        opts?.allowPause === true ? { name, allowPause: true } : { name }
+      ),
     deleteProject: (name) => call(client, 'DELETE', `/v1/projects/${p(name)}`),
     createResource: (project, input) => call(client, 'POST', `/v1/projects/${p(project)}/resources`, input),
     deployResource: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/deploy`, input ?? {}),
