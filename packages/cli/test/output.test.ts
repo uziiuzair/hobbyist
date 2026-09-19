@@ -416,3 +416,54 @@ test('renderResourceLine includes name, kind, state and port', () => {
   assert.match(line, /sleeping/)
   assert.match(line, /15432/)
 })
+
+// Issue #10's backoff made visible. `now` is injected so the countdown is
+// exact; the resource is otherwise the same sleeping postgres as above.
+function refusedPostgres(wakeRefusal: { failures: number; retryAt: string; lastError: string } | null) {
+  return {
+    id: randomUUID(),
+    projectId: randomUUID(),
+    kind: 'postgres' as const,
+    name: 'primary',
+    state: 'failed' as const,
+    config: {
+      image: 'postgres:18-alpine',
+      containerName: 'hobby-blog-primary',
+      dataDir: '/x',
+      hostPort: 15432,
+      superuser: 'postgres',
+      database: 'blog',
+    },
+    sizeBytes: null,
+    connectionCount: 0,
+    wakeRefusal,
+    lastActiveAt: null,
+    createdAt: new Date(),
+  }
+}
+
+test('renderResourceLine shows a refused wake with its countdown and a short last error', () => {
+  const now = Date.parse('2026-09-19T12:00:00.000Z')
+  const line = renderResourceLine(
+    refusedPostgres({ failures: 3, retryAt: '2026-09-19T12:03:12.000Z', lastError: 'docker start failed' }),
+    now
+  )
+  assert.equal(line, 'primary  postgres  failed  port 15432  (wake refused, retry in 3m 12s: docker start failed)')
+})
+
+test('renderResourceLine shortens a long last error and says when the retry time has passed', () => {
+  const now = Date.parse('2026-09-19T12:00:00.000Z')
+  const long = `postgres for resource abc did not become ready within 30000ms ${'x'.repeat(200)}`
+  const refusing = renderResourceLine(refusedPostgres({ failures: 1, retryAt: '2026-09-19T12:00:00.400Z', lastError: long }), now)
+  assert.match(refusing, /\(wake refused, retry in 1s: postgres for resource abc did not become ready within 300\.\.\.\)$/)
+
+  const due = renderResourceLine(
+    refusedPostgres({ failures: 2, retryAt: '2026-09-19T11:59:00.000Z', lastError: 'docker start failed' }),
+    now
+  )
+  assert.equal(due, 'primary  postgres  failed  port 15432  (last wake failed 2 times, retried on the next connection: docker start failed)')
+})
+
+test('renderResourceLine prints no refusal trailer when there is none', () => {
+  assert.equal(renderResourceLine(refusedPostgres(null)), 'primary  postgres  failed  port 15432')
+})

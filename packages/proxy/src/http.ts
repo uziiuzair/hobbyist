@@ -36,8 +36,9 @@ export interface HttpProxyDeps {
   // daemon's context.ts), exactly as it is for the Postgres proxy.
   wake(resourceId: string): Promise<void>
   // Same contract as ProxyDeps.isWakeRefused (packages/proxy/src/proxy.ts):
-  // true when a wake of this resource already failed and will not be retried
-  // until an explicit start. Optional; absent means nothing is refused here.
+  // true when a wake of this resource failed recently and will not be retried
+  // until its backoff runs out or an explicit start clears it. Optional;
+  // absent means nothing is refused here.
   isWakeRefused?(resourceId: string): boolean
   activity: ActivityTracker
   // Caddy's on-demand TLS ask check: "is this hostname one you serve?"
@@ -183,8 +184,8 @@ export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = 
     if (target.state === 'running') {
       return { kind: 'target', target }
     }
-    // A resource whose wake already failed since the daemon started is
-    // refused here, with no wake: the same rule, for the same reason, as the
+    // A resource whose last wake failed, and whose retry time has not come,
+    // is refused here, with no wake: the same rule, for the same reason, as the
     // Postgres proxy's handleStartup (packages/proxy/src/proxy.ts), issue
     // #10. Waking it was one fresh container start per request, so a health
     // check or a browser retrying kept a broken app in a crash loop, and a
@@ -192,11 +193,13 @@ export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = 
     // wakeTimeoutMs first. Keyed on the daemon's record of a failed wake,
     // never on `target.state === 'failed'`, which reconcile also writes for
     // a container that merely stopped. 503, not 504: nothing timed out, the
-    // answer is known now. `hobby wake` is the explicit way back.
+    // answer is known now. The daemon's own backoff is the way back, or
+    // `hobby wake` for someone who does not want to wait for it.
     if (deps.isWakeRefused?.(target.resourceId) === true) {
       return {
         kind: 'refused',
-        reason: 'Its last wake failed, so it is not woken by a request; `hobby logs` shows why, and `hobby wake` retries it once the cause is fixed.',
+        reason:
+          'Its last wake failed, so it is not woken by a request; the daemon retries it by itself on a backoff (`hobby ls` shows when), `hobby logs` shows why it failed, and `hobby wake` retries it now.',
       }
     }
     // The whole product, in one line: the client is not told the app is
