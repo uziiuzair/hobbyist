@@ -178,7 +178,7 @@ export const PROJECT_NAV: NavGroup[] = [
         blurb:
           "Whole project snapshots, taken with every resource quiesced, and restored into a new project.",
         today:
-          "The engine is built and tested (packages/cli/src/daemon/snapshots.ts, plus 28 tests) and ADR 0016 settles its shape, including that there is deliberately no point in time recovery. Nothing calls it: no daemon route, no CLI command, so it cannot be run from here or from the terminal yet. Export on the project page runs a `pg_dump` you drive yourself, and that keeps working whatever happens here.",
+          "Runs from the terminal: `hobby snapshot <project>` takes one, `hobby snapshot restore` brings one back into a new project or in place, over daemon routes Studio will use too. Not from here yet: there is no Studio screen for it. Local only, on the same disk, and deliberately no point in time recovery (ADR 0016). Export on the project page runs a `pg_dump` you drive yourself, and that keeps working whatever happens here.",
         phase: "Not phased",
       },
     ],

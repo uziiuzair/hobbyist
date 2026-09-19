@@ -15,7 +15,7 @@
 // would be more type-widening than the requirement is worth.
 
 import type { PreflightReport } from '../daemon/preflight.js'
-import type { WireResource } from '../daemon/wire.js'
+import type { WireResource, WireSnapshotManifest } from '../daemon/wire.js'
 import type { QueueListEntry, QueueMessage } from './client.js'
 
 export function formatBytes(bytes: number): string {
@@ -54,6 +54,16 @@ export function renderResourceLine(resource: WireResource): string {
   }
   const trailer = resource.state === 'undeployed' ? '  (no code yet)' : ''
   return `${resource.name}  ${resource.kind}  ${resource.state}  ${resource.config.hostname}${trailer}`
+}
+
+// One row of `hobby snapshot ls`. No date column, per this file's header:
+// the id already is the timestamp (snapshotId, packages/cli/src/daemon/snapshots.ts,
+// sortable and in UTC), so nothing is lost. The verification column prints
+// the tri-state as it is, `unverified` included, because a check that never
+// ran must never read as one that passed (the spec's "Verification").
+export function renderSnapshotLine(manifest: WireSnapshotManifest): string {
+  const count = manifest.resources.length
+  return `${manifest.snapshotId}  ${count} resource${count === 1 ? '' : 's'}  ${manifest.clone}  ${manifest.verification.status}`
 }
 
 // The consumer column of `hobby queue ls`. Deliberately the same wording
@@ -152,18 +162,23 @@ export function reflinkWarning(report: PreflightReport): string | null {
     return null
   }
   // Deliberately "note" and not "warning", and deliberately not phrased as
-  // branching being degraded. Branching is not built and snapshots are not
-  // reachable from any command, so nothing a reader can run today is slower
-  // because of this. Warning about a feature that does not exist, in the first
-  // message most cheap-VPS users ever see, spends credibility for nothing.
+  // branching being degraded: branching is not built, and warning about a
+  // feature that does not exist, in the first message most cheap-VPS users
+  // ever see, spends credibility for nothing. Snapshots are built (`hobby
+  // snapshot`, packages/cli/src/daemon/snapshots.ts), and they are the one
+  // thing a reader can run today that this makes slower and larger: each is a
+  // full copy of the project here, which is what ADR 0016 means by ext4
+  // users paying linearly. That is worth saying once, plainly, and it is
+  // still a note: snapshots work, they just cost more.
   //
   // The link is a URL rather than a repo path, because someone who ran the
   // one-liner has no checkout in front of them to open.
   return (
     'note: this filesystem has no reflink support, so copying a project will be a full copy ' +
-    'rather than an instant one. nothing available today depends on it: snapshots and branching ' +
-    'are both still to come. this is expected on ext4, the default on many cheap VPS images. ' +
-    'if you want cheap copies later, put $HOBBY_HOME on XFS, ZFS or APFS. ' +
+    'rather than an instant one. `hobby snapshot` works, but each snapshot costs the full size of ' +
+    'the project in time and disk rather than almost nothing. ' +
+    'this is expected on ext4, the default on many cheap VPS images. ' +
+    'if you want cheap copies, put $HOBBY_HOME on XFS, ZFS or APFS. ' +
     'https://hobbyist.sh/docs/reference/filesystems/'
   )
 }
