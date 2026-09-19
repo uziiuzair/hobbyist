@@ -52,9 +52,17 @@ import {
   resolveWorkerSourcePath,
 } from '@hobby.sh/worker'
 import { branchProject } from './branch.js'
-import { getOrCreateWake, type DaemonContext } from './context.js'
+import { getOrCreateWake, waitForProjectAwakeable, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
-import { toWireResource, toWireResources, type WireResource } from './wire.js'
+import {
+  deleteSnapshot,
+  findSnapshot,
+  listSnapshots,
+  restoreSnapshot,
+  snapshotDir,
+  takeSnapshot,
+} from './snapshots.js'
+import { toWireResource, toWireResources, toWireSnapshotManifest, type WireResource } from './wire.js'
 
 interface RouteResult {
   status: number
@@ -863,8 +871,14 @@ function refuseUndeployed(ctx: DaemonContext, resource: Resource): void {
 }
 
 async function startResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
-  const resource = getResourceOrThrow(ctx, id)
+  let resource = getResourceOrThrow(ctx, id)
   refuseUndeployed(ctx, resource)
+  // An explicit `hobby wake` in the middle of a snapshot is the same hot
+  // clone an automatic wake would cause (holdProjectAsleep's comment,
+  // packages/cli/src/daemon/context.ts), so it waits the same way. Re-read
+  // afterwards: the snapshot's own resume may have started it already.
+  await waitForProjectAwakeable(ctx, resource.projectId)
+  resource = getResourceOrThrow(ctx, id)
   await ctx.kinds.get(resource.kind).start(ctx, resource)
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
@@ -1599,6 +1613,163 @@ function adoptRoute(ctx: DaemonContext, name: string): RouteResult {
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot routes (ADR 0016, docs/backups/specs/2026-08-16-project-snapshots-design.md,
+// "Daemon API"). Thin on purpose: quiesce, clone, manifest, resume and both
+// restore shapes live in packages/cli/src/daemon/snapshots.ts and are tested
+// there. What lives here is the policy a request has to clear before any of
+// that runs, which is the part a caller can get wrong.
+// ---------------------------------------------------------------------------
+
+function readOptionalBoolean(fields: Record<string, unknown>, key: string, route: string): boolean {
+  const value = fields[key]
+  if (value === undefined) return false
+  if (typeof value === 'boolean') return value
+  throw new HobbyError('usage', `${key} must be true or false`, `${route} expects { "${key}": boolean }`)
+}
+
+// A pinned project (sleepAfterSeconds null: the hibernator skips it before
+// anything else, hibernator.ts, and resourcesToStopOnShutdown in server.ts
+// leaves it running across a daemon restart) is one whose operator said it
+// must stay awake. A snapshot of it, or an in-place restore over it, stops
+// whatever is running for the length of the copy. That is a real outage on
+// exactly the project someone asked never to have one, so it is refused
+// unless the request says, in so many words, that the pause is fine.
+//
+// Only resources that are running and would actually be stopped count. A
+// pinned project whose resources are all asleep loses nothing, and neither
+// does a queue: it holds no process, is `running` from creation, and its
+// stop is a no-op (queueKindHandler, packages/queue/src/kind.ts), the same
+// exemption the hibernator makes by kind. Counting it would demand the flag
+// of every pinned project that happens to hold a queue.
+function refusePausingPinned(ctx: DaemonContext, project: Project, allowPause: boolean, what: string): void {
+  if (project.sleepAfterSeconds !== null || allowPause) {
+    return
+  }
+  const awake = ctx.store
+    .listResources(project.id)
+    .filter((resource) => resource.state === 'running' && resource.kind !== 'queue')
+  if (awake.length === 0) {
+    return
+  }
+  throw new HobbyError(
+    'conflict',
+    `project ${project.name} is pinned awake, and ${what} would stop ${awake.map((r) => r.name).join(', ')} while it runs`,
+    'pass --allow-pause (API: "allowPause": true) to accept a few seconds of downtime, or put it to sleep first with `hobby sleep`'
+  )
+}
+
+// The same refusal ejectRoute's release and both proxies make: a released
+// project's data directory is open in the user's own compose stack, and a
+// clone of it taken here would be a hot copy hobby cannot quiesce, filed as
+// a good one.
+function refuseReleased(project: Project): void {
+  if (project.releasedAt != null) {
+    throw new HobbyError(
+      'conflict',
+      `project ${project.name} was released and is no longer managed by hobby`,
+      `run \`hobby adopt ${project.name}\` first, after stopping the stack it was released to`
+    )
+  }
+}
+
+async function takeSnapshotRoute(ctx: DaemonContext, req: IncomingMessage, name: string): Promise<RouteResult> {
+  const project = getProjectByNameOrThrow(ctx, name)
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const allowPause = readOptionalBoolean(fields, 'allowPause', 'POST /v1/projects/:name/snapshots')
+  refuseReleased(project)
+  refusePausingPinned(ctx, project, allowPause, 'a snapshot')
+
+  const snapshot = await takeSnapshot(ctx, project.name)
+  // Returned alongside the manifest so a caller can see that what was
+  // running is running again, from the store rather than from a claim: a
+  // resource that failed to restart is `failed` here (resume, snapshots.ts),
+  // and the snapshot on disk is still good.
+  const resources = await toWireResources(ctx, ctx.store.listResources(project.id))
+  return {
+    status: 201,
+    body: {
+      snapshot: toWireSnapshotManifest(snapshot),
+      dir: snapshotDir(ctx.paths, project.name, snapshot.snapshotId),
+      resources,
+    },
+  }
+}
+
+// Deliberately not a 404 for a project that no longer exists. Snapshots live
+// under snapshots/<name>/, outside the project's own directory, precisely so
+// they outlive it, and "I deleted the project, what can I get back" is the
+// question this route is most needed for. validateName still runs, because
+// the name is joined into a path.
+async function listSnapshotsRoute(ctx: DaemonContext, name: string): Promise<RouteResult> {
+  validateName(name)
+  const snapshots = await listSnapshots(ctx, name)
+  return { status: 200, body: { snapshots: snapshots.map(toWireSnapshotManifest) } }
+}
+
+// Two shapes, one route, and the destructive one is never what a bare
+// request gets (the same rule ejectRoute's ?release follows):
+//
+// - Default: into a NEW project, `as` or `<project>-restored`. Non-destructive,
+//   the original is untouched and may keep running, so there is nothing to
+//   pause and no pinned check.
+// - `inPlace: true`: over the project the snapshot was taken of, replacing
+//   its data (restoreInPlace, snapshots.ts, has the order and the reasons).
+//   It stops that project for the swap, so a pinned one needs allowPause.
+//
+// The spec's first draft of --in-place (docs/backups/specs/, "Restore")
+// refused a project that was not already fully stopped. This quiesces it
+// instead, with the same guard a snapshot uses, because "stop everything by
+// hand, then restore" is a manual quiesce with no activity guard and no
+// resume, which is strictly worse than the one the daemon already has.
+async function restoreSnapshotRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
+  const route = 'POST /v1/snapshots/:id/restore'
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const inPlace = readOptionalBoolean(fields, 'inPlace', route)
+  const allowPause = readOptionalBoolean(fields, 'allowPause', route)
+  const as = fields['as']
+  if (as !== undefined && typeof as !== 'string') {
+    throw new HobbyError('usage', 'as must be a project name', `${route} expects { "as": string }`)
+  }
+  if (inPlace && as !== undefined) {
+    throw new HobbyError(
+      'usage',
+      'as and inPlace cannot be combined',
+      'inPlace restores over the project the snapshot was taken of; as names a new project to restore into'
+    )
+  }
+
+  const found = await findSnapshot(ctx, id)
+  if (found === null) {
+    throw new HobbyError('resource_not_found', `no snapshot ${id}`, 'run `hobby snapshot ls <project>`')
+  }
+  if (inPlace) {
+    // restoreInPlace makes its own, fuller refusal for a project that is gone.
+    const project = ctx.store.getProjectByName(found.manifest.project.name)
+    if (project !== null) {
+      refusePausingPinned(ctx, project, allowPause, 'an in-place restore')
+    }
+  }
+
+  const result = await restoreSnapshot(ctx, id, inPlace ? { inPlace: true } : { as })
+  return {
+    status: inPlace ? 200 : 201,
+    body: {
+      project: ctx.store.getProject(result.project.id),
+      resources: await toWireResources(ctx, result.resources),
+      restartFailures: result.restartFailures,
+      preRestoreDir: result.preRestoreDir,
+    },
+  }
+}
+
+async function deleteSnapshotRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
+  await deleteSnapshot(ctx, id)
+  return { status: 200, body: { deleted: true } }
+}
+
+// ---------------------------------------------------------------------------
 // Queue routes. This file is the only one that ever opens a queue's sqlite
 // database (root CLAUDE.md: the daemon API is the only control surface, and
 // keeping every open() call in one file is what stops the CLI and MCP from
@@ -1885,6 +2056,24 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
     if (segments.length === 4 && method === 'GET' && segments[3] === 'queues') {
       const name = decodeURIComponent(segments[2] as string)
       return await listQueuesRoute(ctx, name)
+    }
+
+    if (segments.length === 4 && segments[3] === 'snapshots') {
+      const name = decodeURIComponent(segments[2] as string)
+      if (method === 'POST') return await takeSnapshotRoute(ctx, req, name)
+      if (method === 'GET') return await listSnapshotsRoute(ctx, name)
+    }
+  }
+
+  // /v1/snapshots/:id, addressed by id alone: ids are unique across the
+  // install (snapshotId, snapshots.ts), and a snapshot must stay reachable
+  // after the project it was taken of has been deleted.
+  if (segments[1] === 'snapshots') {
+    if (segments.length === 3 && method === 'DELETE') {
+      return await deleteSnapshotRoute(ctx, decodeURIComponent(segments[2] as string))
+    }
+    if (segments.length === 4 && method === 'POST' && segments[3] === 'restore') {
+      return await restoreSnapshotRoute(ctx, req, decodeURIComponent(segments[2] as string))
     }
   }
 

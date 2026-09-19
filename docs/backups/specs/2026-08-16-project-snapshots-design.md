@@ -1,7 +1,11 @@
 # Project snapshots: quiesce, clone, and a restore that runs weekly
 
-Status: PROPOSED. Nothing in this document is built. Approved in design on
-2026-08-16; implementation has not started.
+Status: PARTLY BUILT. Approved in design on 2026-08-16. Quiesce, clone,
+manifest, restore (both shapes) and the four daemon routes are built, with the
+CLI verb spelled `hobby snapshot` / `ls` / `restore <project> <id>` / `rm`;
+schedule, retention, the free-space floor and verification are not.
+`docs/backups/CLAUDE.md`, "What is built", is current; where it and this
+document disagree (in-place restore quiesces rather than refusing), it wins.
 Date:   2026-08-16
 
 Implements `docs/decisions/0016`. The scope cut it makes (no point-in-time

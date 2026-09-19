@@ -76,6 +76,10 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     sendMessage: notWired('sendMessage'),
     purgeQueue: notWired('purgeQueue'),
     setRetention: notWired('setRetention'),
+    takeSnapshot: notWired('takeSnapshot'),
+    listSnapshots: notWired('listSnapshots'),
+    restoreSnapshot: notWired('restoreSnapshot'),
+    deleteSnapshot: notWired('deleteSnapshot'),
   }
   const api = { ...base } as unknown as Record<string, unknown>
   for (const [key, fn] of Object.entries(overrides)) {

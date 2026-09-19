@@ -13,7 +13,7 @@
 import http from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { HobbyError, type ErrorCode, type Project } from '@hobby.sh/core'
-import type { WireResource } from '../daemon/wire.js'
+import type { WireResource, WireSnapshotManifest } from '../daemon/wire.js'
 
 // Thrown when the socket does not exist, or exists but nothing answers on
 // it (a stale file, or the daemon crashed). Deliberately not a HobbyError:
@@ -250,6 +250,31 @@ export interface EjectResponse {
   queues?: Array<{ name: string; jsonl: string; count: number }>
 }
 
+// Snapshot routes (ADR 0016). The manifest type is the daemon's own wire
+// shape (wire.ts's toWireSnapshotManifest, secrets redacted), imported as a
+// type only, the same way WireResource is: one definition of what a snapshot
+// records, never a second, drifting copy of it on this side.
+export interface SnapshotTakeResponse {
+  snapshot: WireSnapshotManifest
+  // Where it landed, on the box the daemon runs on (not necessarily this
+  // machine, ADR 0018).
+  dir: string
+  // Every resource in the project after resume, so a caller sees from the
+  // store, not from a claim, that what was running is running again.
+  resources: WireResource[]
+}
+export interface SnapshotListResponse {
+  snapshots: WireSnapshotManifest[]
+}
+export interface SnapshotRestoreResponse {
+  project: Project
+  resources: WireResource[]
+  // In-place only: resources that were running before and did not come back.
+  restartFailures: string[]
+  // In-place only: where the replaced data still sits, or null once removed.
+  preRestoreDir: string | null
+}
+
 export interface Api {
   health(): Promise<HealthResponse>
   listProjects(): Promise<ProjectsResponse>
@@ -311,6 +336,16 @@ export interface Api {
   sendMessage(id: string, input: { body: unknown; delaySeconds?: number }): Promise<QueueSendResponse>
   purgeQueue(id: string): Promise<QueuePurgeResponse>
   setRetention(id: string, retentionSeconds: number): Promise<ResourceResponse>
+  // allowPause is the pinned-project override (routes.ts's
+  // refusePausingPinned); it is sent only when true, so a request never
+  // carries the override by accident of serialization.
+  takeSnapshot(project: string, opts?: { allowPause?: boolean }): Promise<SnapshotTakeResponse>
+  listSnapshots(project: string): Promise<SnapshotListResponse>
+  restoreSnapshot(
+    id: string,
+    opts?: { as?: string; inPlace?: boolean; allowPause?: boolean }
+  ): Promise<SnapshotRestoreResponse>
+  deleteSnapshot(id: string): Promise<DeletedResponse>
 }
 
 // Accepts a transport rather than only a socket path (ADR 0018). Every verb
@@ -431,5 +466,15 @@ export function createApi(transport: string | DaemonClient): Api {
     purgeQueue: (id) => call(client, 'DELETE', `/v1/resources/${p(id)}/queue/messages`),
     setRetention: (id, retentionSeconds) =>
       call(client, 'POST', `/v1/resources/${p(id)}/queue/retention`, { retentionSeconds }),
+    takeSnapshot: (project, opts) =>
+      call(client, 'POST', `/v1/projects/${p(project)}/snapshots`, opts?.allowPause === true ? { allowPause: true } : {}),
+    listSnapshots: (project) => call(client, 'GET', `/v1/projects/${p(project)}/snapshots`),
+    restoreSnapshot: (id, opts) =>
+      call(client, 'POST', `/v1/snapshots/${p(id)}/restore`, {
+        ...(opts?.as !== undefined ? { as: opts.as } : {}),
+        ...(opts?.inPlace === true ? { inPlace: true } : {}),
+        ...(opts?.allowPause === true ? { allowPause: true } : {}),
+      }),
+    deleteSnapshot: (id) => call(client, 'DELETE', `/v1/snapshots/${p(id)}`),
   }
 }
