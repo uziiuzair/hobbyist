@@ -48,6 +48,13 @@ export interface ProxyDeps {
   // tenth container start) is the daemon's responsibility, not the
   // proxy's. See the task report for why that split is deliberate.
   wake(resourceId: string): Promise<void>
+  // True when a wake of this resource already failed and the daemon will not
+  // try again until an explicit start (issue #10; buildWake in
+  // packages/cli/src/daemon/context.ts owns the set). Asked before calling
+  // wake so a refused client gets its ErrorResponse at once, with no wake
+  // and no dial. Optional: absent means nothing is ever refused here, and
+  // wake itself stays the authority.
+  isWakeRefused?(resourceId: string): boolean
   activity: ActivityTracker
 }
 
@@ -679,6 +686,34 @@ async function handleStartup(
     // The client may already be gone by the time we would even start a
     // multi-second wake; no point pinning a resource awake for nobody.
     if (socket.destroyed) {
+      return
+    }
+
+    // A resource whose wake already failed since the daemon started is
+    // answered immediately and not woken: docs/proxy/CLAUDE.md's `failed? ->
+    // send a real Postgres ErrorResponse`, which the code did not implement
+    // before issue #10. Waking it here was one fresh container start per
+    // incoming connection, so anything that retries (an uptime check, an ORM
+    // pool) drove a broken resource through an endless crash loop, and a
+    // start that failed by timing out made every one of those clients wait
+    // out the whole wakeTimeoutMs again to learn what the first one already
+    // had.
+    //
+    // Keyed on the daemon's record of a failed wake, not on
+    // `target.state === 'failed'`: reconcile writes `failed` for every
+    // container found stopped after an unclean reboot, and those wake fine,
+    // so a `failed` target that is not refused is woken exactly as before.
+    // Only a running target skips this, because being served needs no wake.
+    // The daemon refuses the same ids again inside wake itself (buildWake in
+    // packages/cli/src/daemon/context.ts); this check is what keeps the
+    // client off the wake path and off the dial entirely.
+    if (deps.isWakeRefused?.(target.resourceId) === true) {
+      sendErrorAndClose(
+        socket,
+        'FATAL',
+        CANNOT_CONNECT_NOW,
+        `${database} is not woken by a connection because its last wake failed; \`hobby logs\` shows why, and \`hobby wake\` retries it once the cause is fixed`
+      )
       return
     }
 

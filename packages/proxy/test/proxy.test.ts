@@ -1033,3 +1033,90 @@ test('issue #9: a client that leaves while held stops the retries and releases i
     await upstream.close()
   }
 })
+
+// ---------------------------------------------------------------------------
+// Issue #10: a resource whose wake already failed is answered, not woken.
+// ---------------------------------------------------------------------------
+
+test('issue #10: a refused target gets an immediate ErrorResponse naming the way out, with no wake and no dial', async () => {
+  const upstream = await startRecoveringUpstream(0)
+  let wakeCalls = 0
+  const deps: ProxyDeps = {
+    resolve: async (): Promise<ProxyTarget> => ({
+      resourceId: 'resource-1',
+      host: '127.0.0.1',
+      port: upstream.port,
+      state: 'failed',
+      database: 'proj1',
+    }),
+    wake: async () => {
+      wakeCalls += 1
+    },
+    isWakeRefused: (resourceId) => resourceId === 'resource-1',
+    activity: new ActivityTracker(),
+  }
+  const clients: net.Socket[] = []
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 30000 })
+
+  try {
+    const client = await connectClient(proxy.port)
+    clients.push(client)
+    const started = Date.now()
+    client.write(buildStartupPacket({ user: 'bob', database: 'proj1' }))
+
+    const response = await readAll(client)
+    const elapsed = Date.now() - started
+
+    assert.equal(response[0], 0x45)
+    assert.equal(extractSqlState(response), '57P03')
+    assert.match(extractMessage(response) ?? '', /hobby wake/)
+    assert.equal(wakeCalls, 0, 'a refused resource is not woken')
+    assert.equal(upstream.connectionCount(), 0, 'and not dialed')
+    assert.ok(elapsed < 1000, `answered after ${elapsed}ms rather than immediately`)
+  } finally {
+    for (const client of clients) client.destroy()
+    await proxy.close()
+    await upstream.close()
+  }
+})
+
+// The regression the refusal must not cause: `failed` on its own is what
+// reconcile writes for a container that merely stopped (an unclean reboot),
+// and such a target wakes exactly as it always did.
+test('issue #10: a failed target that is not refused is woken and served as before', async () => {
+  const upstream = await startRecoveringUpstream(0)
+  let wakeCalls = 0
+  let state = 'failed'
+  const deps: ProxyDeps = {
+    resolve: async (): Promise<ProxyTarget> => ({
+      resourceId: 'resource-1',
+      host: '127.0.0.1',
+      port: upstream.port,
+      state,
+      database: 'proj1',
+    }),
+    wake: async () => {
+      wakeCalls += 1
+      state = 'running'
+    },
+    isWakeRefused: () => false,
+    activity: new ActivityTracker(),
+  }
+  const clients: net.Socket[] = []
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 2000 })
+
+  try {
+    const client = await connectClient(proxy.port)
+    clients.push(client)
+    client.write(buildStartupPacket({ user: 'bob', database: 'proj1' }))
+
+    const handshake = await readBytes(client, 9 + 13 + 6)
+    assert.equal(handshake[0], 0x52, 'AuthenticationOk, not an ErrorResponse')
+    assert.equal(wakeCalls, 1)
+    assert.equal(upstream.connectionCount(), 1)
+  } finally {
+    for (const client of clients) client.destroy()
+    await proxy.close()
+    await upstream.close()
+  }
+})

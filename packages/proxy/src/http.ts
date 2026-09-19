@@ -35,6 +35,10 @@ export interface HttpProxyDeps {
   // start is the daemon's responsibility (see getOrCreateWake in the
   // daemon's context.ts), exactly as it is for the Postgres proxy.
   wake(resourceId: string): Promise<void>
+  // Same contract as ProxyDeps.isWakeRefused (packages/proxy/src/proxy.ts):
+  // true when a wake of this resource already failed and will not be retried
+  // until an explicit start. Optional; absent means nothing is refused here.
+  isWakeRefused?(resourceId: string): boolean
   activity: ActivityTracker
   // Caddy's on-demand TLS ask check: "is this hostname one you serve?"
   // Answered before a certificate is issued for a name nobody configured
@@ -178,6 +182,22 @@ export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = 
     }
     if (target.state === 'running') {
       return { kind: 'target', target }
+    }
+    // A resource whose wake already failed since the daemon started is
+    // refused here, with no wake: the same rule, for the same reason, as the
+    // Postgres proxy's handleStartup (packages/proxy/src/proxy.ts), issue
+    // #10. Waking it was one fresh container start per request, so a health
+    // check or a browser retrying kept a broken app in a crash loop, and a
+    // start that failed by timing out made every request wait out the whole
+    // wakeTimeoutMs first. Keyed on the daemon's record of a failed wake,
+    // never on `target.state === 'failed'`, which reconcile also writes for
+    // a container that merely stopped. 503, not 504: nothing timed out, the
+    // answer is known now. `hobby wake` is the explicit way back.
+    if (deps.isWakeRefused?.(target.resourceId) === true) {
+      return {
+        kind: 'refused',
+        reason: 'Its last wake failed, so it is not woken by a request; `hobby logs` shows why, and `hobby wake` retries it once the cause is fixed.',
+      }
     }
     // The whole product, in one line: the client is not told the app is
     // asleep, it is made to wait. wake() must not resolve until the upstream

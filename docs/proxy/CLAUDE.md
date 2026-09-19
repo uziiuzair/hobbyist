@@ -30,11 +30,14 @@ TCP accept
   CancelRequest? -> route to the right upstream, do not treat as a wake
   read startup packet -> user, database, options
   resolve project from the database name
-  sleeping? -> daemon.wake(resource), poll readiness, then as below
+  refused?  -> (not running, and a wake of it already failed since the daemon started)
+               send a real Postgres ErrorResponse, never a dropped socket,
+               and never a wake: only `hobby wake` or a restart clears it
+  not running (sleeping, starting, failed)?
+            -> daemon.wake(resource), poll readiness, then as below
   running?  -> dial upstream, replay startup packet; while the backend
                answers FATAL 57P03 (starting up), discard that connection
                and dial again, within wakeTimeoutMs; then splice sockets
-  failed?   -> send a real Postgres ErrorResponse, never a dropped socket
 ```
 
 **Routing key: the database name is the project.**
@@ -154,3 +157,31 @@ no sleep.
 The HTTP router got no equivalent. A dead upstream there is an honest 502
 rather than a protocol-level lie, and replaying an HTTP request is not safe
 in general (a streamed POST body is gone once sent), so it stays as it was.
+
+## Amendment, 2026-09-19: a failed wake is not repeated (issue #10)
+
+A resource whose start reliably fails used to be restarted by every incoming
+connection, so a retrying client drove a crash loop. Now a wake through the
+daemon's `buildWake` (`packages/cli/src/daemon/context.ts`) that throws
+records the resource id in an in-memory refusal set, and every later implicit
+wake of it is refused with `wake_failed` before the kind handler runs. Both
+front doors ask first, through the optional `isWakeRefused` on `ProxyDeps`
+and `HttpProxyDeps`: the wire proxy answers a refused target at once with an
+ErrorResponse, the HTTP router with a 503, with no wake and no dial.
+
+"Refused" is deliberately not the store's `failed`. `failed` keeps meaning
+what reconcile and the kind handlers say: reconcile's `correctedState`
+(`packages/cli/src/daemon/reconcile.ts`) writes it for every container found
+stopped after an unclean reboot, OOM kill or crash, and a failed stop or a
+failed deploy writes it too, and all of those are woken on the next
+connection exactly as before. "Refused" means only that a wake failed since
+this daemon started. Two things clear it: `POST /v1/resources/:id/start`
+(`hobby wake`, the MCP wake tool, Studio's start button), which removes the
+id before starting the resource, and a daemon restart, which empties the set
+and so allows one fresh attempt per daemon lifetime.
+
+Within a single wake, `pgProbe` (`packages/pg/src/readiness.ts`) now tells a
+server that answered with an error (wrong password, no `pg_hba.conf` entry)
+from one that has not answered, and `waitReady` concludes on the first
+instead of polling out the whole timeout. 57P03 and the rest of SQLSTATE
+classes 57 and 53 still read as "not yet", never as broken.
