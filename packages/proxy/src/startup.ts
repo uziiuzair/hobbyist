@@ -23,9 +23,11 @@
 //   ReadyForQuery:   Byte1('Z') Int32(5)  Byte1(status)
 //   ErrorResponse:   Byte1('E') Int32(length) { Byte1(field) CString }* Byte1(0)
 //
-// Only two of those are read here. BackendKeyData is the pair a client must
-// present to cancel, and ReadyForQuery is the marker that the startup phase
-// is over and there is nothing left to look at.
+// BackendKeyData is the pair a client must present to cancel, and
+// ReadyForQuery is the marker that the startup phase is over and there is
+// nothing left to look at. ErrorResponse is read in exactly one place,
+// classifyBackendAnswer, and only as the backend's very first answer, to
+// tell a Postgres that is still starting up from one that is serving.
 
 export const PROTOCOL_3_0 = 196608
 export const SSL_REQUEST_CODE = 80877103
@@ -35,6 +37,16 @@ export const CANCEL_REQUEST_CODE = 80877102
 // Backend message type bytes, as ASCII codes.
 const BACKEND_KEY_DATA = 0x4b // 'K'
 const READY_FOR_QUERY = 0x5a // 'Z'
+const ERROR_RESPONSE = 0x45 // 'E'
+const NEGOTIATE_PROTOCOL_VERSION = 0x76 // 'v'
+
+// SQLSTATE cannot_connect_now. Postgres answers a startup packet with a
+// FATAL carrying this code while it cannot take sessions yet: "the database
+// system is starting up", "is in recovery mode", "is not yet accepting
+// connections". It is also what this proxy itself sends when it cannot hand
+// a client a backend, so a client sees one code for "not now" whichever side
+// said it.
+export const CANNOT_CONNECT_NOW = '57P03'
 
 // BackendKeyData's length field, which is fixed: 4 for the length itself
 // plus two Int32s. Checked rather than assumed, so a message that merely
@@ -327,4 +339,88 @@ export function errorResponse(severity: string, code: string, message: string): 
   header.writeInt32BE(length, 1)
 
   return Buffer.concat([header, body])
+}
+
+export type BackendAnswer =
+  // Not one whole message yet. Read more and ask again.
+  | { kind: 'incomplete' }
+  // The backend refused the session because it cannot take sessions yet
+  // (SQLSTATE 57P03). Nothing it sent is worth showing the client: the right
+  // response is a fresh connection a moment later, see proxy.ts.
+  | { kind: 'not_ready'; message: string }
+  // Anything else: an authentication request, a different error, or bytes
+  // that do not frame as a message at all. Every one of those is the
+  // backend's real answer and goes to the client untouched.
+  | { kind: 'answered' }
+
+// Classifies a backend's first answer to a startup packet, from the bytes
+// received so far on that connection.
+//
+// This exists because a TCP connection Postgres accepts is not a session
+// Postgres will serve. During startup and crash recovery the postmaster
+// accepts the connection, reads the startup packet, and only then refuses,
+// with ErrorResponse FATAL 57P03 as its first and only message. That arrives
+// before any authentication exchange, so at that point nothing has been
+// agreed with this client and the connection can be thrown away and replaced
+// without the client ever knowing. See handleStartup in proxy.ts, the only
+// caller.
+//
+// NegotiateProtocolVersion is skipped over rather than treated as the
+// answer: Postgres sends it ahead of everything else when the client asked
+// for a newer minor protocol version or an unknown `_pq_.` option, and its
+// cannot-connect check can run after that, so a 57P03 may be the second
+// message rather than the first.
+//
+// Pure, like everything in this file: the caller owns buffering across
+// socket reads and simply calls again with the longer buffer.
+export function classifyBackendAnswer(buf: Buffer): BackendAnswer {
+  let offset = 0
+  for (;;) {
+    if (offset + 5 > buf.length) {
+      return { kind: 'incomplete' }
+    }
+    const type = buf[offset]
+    const length = buf.readInt32BE(offset + 1)
+    // Same sanity bound as scanBackendStartup. Framing that does not make
+    // sense is not a "not ready" the proxy could act on, so it is handed on
+    // as an answer and the splice deals with it exactly as it did before.
+    if (length < 4 || length > MAX_BACKEND_STARTUP_MESSAGE) {
+      return { kind: 'answered' }
+    }
+    const total = 1 + length
+    if (offset + total > buf.length) {
+      return { kind: 'incomplete' }
+    }
+    if (type === NEGOTIATE_PROTOCOL_VERSION) {
+      offset += total
+      continue
+    }
+    if (type !== ERROR_RESPONSE) {
+      return { kind: 'answered' }
+    }
+    const fields = errorResponseFields(buf.subarray(offset + 5, offset + total))
+    if (fields['C'] !== CANNOT_CONNECT_NOW) {
+      return { kind: 'answered' }
+    }
+    return { kind: 'not_ready', message: fields['M'] ?? 'the database system cannot accept connections now' }
+  }
+}
+
+// The body of an ErrorResponse (everything after the type byte and length),
+// as field code to value. The inverse of errorResponse below, tolerant of a
+// truncated body because it only ever reads bytes a backend sent: a missing
+// terminator ends the read rather than throwing.
+function errorResponseFields(body: Buffer): Record<string, string> {
+  const fields: Record<string, string> = {}
+  let offset = 0
+  while (offset < body.length && body[offset] !== 0) {
+    const code = String.fromCharCode(body[offset] as number)
+    const end = body.indexOf(0, offset + 1)
+    if (end === -1) {
+      break
+    }
+    fields[code] = body.toString('utf8', offset + 1, end)
+    offset = end + 1
+  }
+  return fields
 }
