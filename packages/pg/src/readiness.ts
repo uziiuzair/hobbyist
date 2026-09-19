@@ -62,8 +62,9 @@ function deadline(ms: number): Promise<void> {
 // end. Treating any of these as broken would fail a wake that was about to
 // succeed, which is the worse of the two mistakes: a cold database misread
 // as broken fails its wake, and the daemon then refuses to wake it again
-// until someone runs `hobby wake`, while a broken one misread as cold only
-// costs the timeout it always cost before.
+// for at least 30 seconds (buildWake's backoff, packages/cli/src/daemon/context.ts),
+// while a broken one misread as cold only costs the timeout it always cost
+// before.
 const TRANSIENT_SQLSTATE_CLASSES = new Set(['57', '53'])
 
 // The line between "nothing answered" and "a server answered badly".

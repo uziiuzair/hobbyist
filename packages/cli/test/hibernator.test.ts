@@ -204,8 +204,10 @@ test('wake: the in-flight map entry is cleared after a failed wake, so a later c
 // Issue #10. A resource whose start reliably fails used to get a fresh
 // container start from every implicit wake, so anything that retried turned
 // it into a crash loop driven by traffic. After one failed wake, every later
-// one is refused before the kind handler is reached, with an error that
-// names the way out.
+// one inside its backoff window (30 seconds for a first failure, see
+// wake-failed.test.ts for the schedule, which these five wakes, run on the
+// real clock in milliseconds, cannot reach) is refused before the kind
+// handler is reached, with an error that names the way out.
 test('wake: a resource whose wake failed is refused on every later wake without touching the runtime', async () => {
   const { runtime, startCalls } = countingRuntime(createFakeRuntime())
   const ctx = buildContext(runtime)
@@ -223,7 +225,7 @@ test('wake: a resource whose wake failed is refused on every later wake without 
     await assert.rejects(deps.wake(resource.id), (err: unknown) => {
       assert.equal((err as { code?: string }).code, 'wake_failed')
       assert.match((err as Error).message, /hobby wake blog\/primary/)
-      assert.match((err as Error).message, /already failed since the daemon started/)
+      assert.match((err as Error).message, /is not woken automatically for another \d+s/)
       return true
     })
   }

@@ -51,11 +51,22 @@ Every project, with every resource and its sleep state. A released project is
 still listed, marked `(released, not managed)`. An `undeployed` app or worker is
 marked `(no code yet)`.
 
+A resource whose last automatic wake failed is marked with when the daemon
+will try it again and a short form of the error. Until then a connection or
+request is answered with an error instead of starting it again. The wait
+starts at 30 seconds and doubles with each failure in a row, up to 15 minutes.
+A successful wake resets it. `hobby wake` retries at once, and `hobby logs`
+shows why the start failed.
+
 ```
 blog
   primary  postgres  running  port 15000
   site     app       sleeping  site.blog.example.com
+  api      app       failed  api.blog.example.com  (wake refused, retry in 3m 12s: docker start failed)
 ```
+
+With `--json`, the same thing is the resource's `wakeRefusal` field:
+`{ failures, retryAt, lastError }`, or `null`.
 
 Accepts `--json`.
 
@@ -135,7 +146,9 @@ Stops the resource now, rather than waiting for it to go idle. Accepts `--json`.
 
 Starts it now. Rarely necessary: a resource wakes by itself when something
 connects, which is the whole point. `wake` is for when you want it warm before
-something else needs it. Accepts `--json`.
+something else needs it, or when its last wake failed, you have fixed the cause,
+and you do not want to wait for the daemon's own retry (see `hobby ls`). Accepts
+`--json`.
 
 ### `hobby pin <project>`
 
