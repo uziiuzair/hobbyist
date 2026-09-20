@@ -121,3 +121,44 @@ is used, not about the design, and it is expected to arrive before PITR does.
 **Hot snapshots become worth building** if quiesce downtime is ever measured as
 disruptive in practice, which on a platform built around stopping things is not
 expected.
+
+## 2026-09-19: online snapshots, additive, and still no PITR
+
+The last paragraph above said hot snapshots would earn their way in if
+quiesce downtime were measured as disruptive. What arrived first was the
+refusal that stands in for that downtime: `refusePausingPinned`
+(`packages/cli/src/daemon/routes.ts`) refuses a pinned project with anything
+running unless `--allow-pause`, and pinned is exactly how a database that
+must stay up is marked. On ext4, where the clone is a full copy, the pause is
+the length of the copy. So in practice the database that most needs a
+snapshot was the one that never got one.
+
+`hobby snapshot <project> --online` is the answer, and it is additive: the
+quiesced snapshot is unchanged and remains the default. It does not
+contradict "Quiesce, do not snapshot hot", because it never byte-copies a
+running data directory. A running postgres is copied with `pg_basebackup`,
+Postgres's own online backup, which yields a consistent PGDATA plus the WAL
+to reach consistency; a sleeping one is cloned as before. That keeps the
+principle this folder started from, not reimplementing what Postgres
+already does correctly, rather than bending it.
+
+What it is, briefly (`docs/backups/CLAUDE.md` has the rest):
+
+- **Postgres-only projects.** App, worker and queue state has no online copy
+  mechanism hobby can drive, and quiescing those while copying postgres
+  online would break the promise the flag makes. They are refused.
+- **pg_basebackup runs inside the resource's own container**, over the local
+  socket, because the image's `pg_hba.conf` admits replication connections
+  there and nowhere else. Nothing in the cluster is changed to allow it.
+- **A restored online snapshot runs recovery from `backup_label` on its
+  first start.** That is the one visible difference, and it is Postgres
+  working as designed.
+- **Each database is consistent on its own**, not the project at one
+  instant; a quiesced snapshot remains the way to get that.
+
+**Still no point-in-time recovery.** pg_basebackup here is a one-off copy
+with the WAL needed for that copy and no more. There is no WAL archive, no
+replication slot left behind, nothing that keeps an idle database awake, and
+nothing to replay past the backup's end point. Everything the section "No
+point-in-time recovery" says still stands, including what would have to be
+true for PITR to earn its way back.

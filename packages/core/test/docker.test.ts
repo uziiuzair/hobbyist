@@ -4,7 +4,9 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createDockerRuntime, createFakeRuntime, type ExecFn } from '../src/index.js'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+import { createDockerRuntime, createFakeRuntime, type ExecFn, type SpawnedProcess } from '../src/index.js'
 import type { ContainerSpec } from '../src/index.js'
 
 interface RecordedCall {
@@ -303,4 +305,74 @@ test('unexpected inspect failures become a runtime_unavailable HobbyError', asyn
       return true
     }
   )
+})
+
+// execStream's contract against the real adapter, through the injectable
+// SpawnFn: the argv docker exec gets (no -t, no shell, the command as
+// separate arguments), stdout handed through untouched, and a non-zero exit
+// turned into a rejection that carries stderr.
+function fakeSpawned(): { process: SpawnedProcess; stdout: PassThrough; stderr: PassThrough; emitter: EventEmitter; killed: () => boolean } {
+  const stdout = new PassThrough()
+  const stderr = new PassThrough()
+  const emitter = new EventEmitter()
+  let killed = false
+  const process: SpawnedProcess = {
+    stdout,
+    stderr,
+    kill: () => {
+      killed = true
+    },
+    once(event: 'close' | 'error', listener: ((code: number | null) => void) | ((err: Error) => void)): unknown {
+      return emitter.once(event, listener)
+    },
+  }
+  return { process, stdout, stderr, emitter, killed: () => killed }
+}
+
+test('execStream runs docker exec with the command as separate arguments and streams stdout', async () => {
+  const calls: RecordedCall[] = []
+  const spawned = fakeSpawned()
+  const runtime = createDockerRuntime(
+    async () => ({ stdout: '', stderr: '' }),
+    (cmd, args) => {
+      calls.push({ cmd, args })
+      return spawned.process
+    }
+  )
+  assert.ok(runtime.execStream)
+  const exec = runtime.execStream('hobby-blog-primary', ['pg_basebackup', '--username=a b; c'])
+
+  assert.deepEqual(calls, [{ cmd: 'docker', args: ['exec', 'hobby-blog-primary', 'pg_basebackup', '--username=a b; c'] }])
+  const chunks: Buffer[] = []
+  exec.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
+  spawned.stdout.end(Buffer.from([0, 1, 2, 255]))
+  await new Promise((resolve) => exec.stdout.once('end', resolve))
+  spawned.emitter.emit('close', 0)
+  await exec.done
+  assert.deepEqual([...Buffer.concat(chunks)], [0, 1, 2, 255])
+})
+
+test('execStream rejects a non-zero exit with stderr, and cancel kills the process', async () => {
+  const spawned = fakeSpawned()
+  const runtime = createDockerRuntime(async () => ({ stdout: '', stderr: '' }), () => spawned.process)
+  assert.ok(runtime.execStream)
+  const exec = runtime.execStream('hobby-blog-primary', ['pg_basebackup'])
+  spawned.stderr.write('Error response from daemon: container abc is not running\n')
+  await new Promise((resolve) => setImmediate(resolve))
+  exec.cancel()
+  assert.equal(spawned.killed(), true)
+  spawned.emitter.emit('close', 1)
+  await assert.rejects(exec.done, (err: unknown) => {
+    assert.equal((err as { code?: string }).code, 'runtime_unavailable')
+    assert.match((err as { hint?: string }).hint ?? '', /is not running/)
+    return true
+  })
+})
+
+test('the fake runtime refuses to exec into a container that is not running, as docker exec does', async () => {
+  const runtime = createFakeRuntime()
+  runtime._exec.handler = () => ({ stdout: Buffer.from('never read') })
+  const exec = runtime.execStream('hobby-blog-primary', ['true'])
+  await assert.rejects(exec.done, /docker exec failed/)
+  assert.equal(runtime._exec.calls.length, 1)
 })

@@ -211,7 +211,7 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
       // promise, a first query that is slow rather than one that errors, and
       // the snapshot's own resume has usually started the resource again by
       // the time the wait ends, which is why the row is read a second time.
-      const fence = projectFences.get(ctx)?.get(resource.projectId)
+      const fence = wakeFence(ctx, resource.projectId)
       if (fence !== undefined) {
         await fence
         resource = ctx.store.getResource(resourceId)
@@ -332,13 +332,61 @@ export function clearWakeRefusal(ctx: DaemonContext, resourceId: string): void {
 
 const wakeRegistry = new WeakMap<DaemonContext, (resourceId: string) => Promise<void>>()
 
-// Per-context, keyed by project id: a promise that settles when the project
-// may be woken again. Same WeakMap-per-context shape as wakeRegistry above,
-// for the same reason (one daemon, one map; every test's fresh ctx gets its
-// own). A module value rather than a DaemonContext field so that the dozens
-// of hand-built contexts across the test suites do not all have to learn
-// about it.
-const projectFences = new WeakMap<DaemonContext, Map<string, Promise<void>>>()
+// Per-context, keyed by project id: a hold on the project by a snapshot or
+// restore, with a promise that settles when it is released. Same
+// WeakMap-per-context shape as wakeRegistry above, for the same reason (one
+// daemon, one map; every test's fresh ctx gets its own). A module value
+// rather than a DaemonContext field so that the dozens of hand-built contexts
+// across the test suites do not all have to learn about it.
+//
+// `blocksWake` is what separates the two kinds of hold. Both are the same
+// mutual exclusion, and both live in this one map for exactly that reason:
+// an online snapshot (holdProjectExclusive) and a quiescing snapshot or an
+// in-place restore (holdProjectAsleep) of the same project must refuse each
+// other, and two maps would be two locks that each think they are the only
+// one. Only a hold that stopped something has anything to fence the wake
+// path against.
+interface ProjectHold {
+  fence: Promise<void>
+  blocksWake: boolean
+}
+
+const projectHolds = new WeakMap<DaemonContext, Map<string, ProjectHold>>()
+
+// A second hold on the same project is refused outright rather than queued:
+// two snapshots, or a snapshot and a restore, interleaving on one project
+// means the first to finish resumes resources while the second is still
+// copying them, and there is no ordering of the two that is safe. That holds
+// for an online snapshot too, even though it resumes nothing: an in-place
+// restore swapping the data directory out from under a pg_basebackup, or a
+// quiesce stopping the database it is reading, would each fail it at best.
+function holdProject(ctx: DaemonContext, projectId: string, projectName: string, blocksWake: boolean): () => void {
+  let holds = projectHolds.get(ctx)
+  if (holds === undefined) {
+    holds = new Map()
+    projectHolds.set(ctx, holds)
+  }
+  if (holds.has(projectId)) {
+    throw new HobbyError(
+      'conflict',
+      `a snapshot or restore of ${projectName} is already in progress`,
+      'wait for it to finish, then try again'
+    )
+  }
+  let release: () => void = () => {}
+  const fence = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const hold: ProjectHold = { fence, blocksWake }
+  holds.set(projectId, hold)
+  const held = holds
+  return () => {
+    if (held.get(projectId) === hold) {
+      held.delete(projectId)
+    }
+    release()
+  }
+}
 
 // Holds every resource in a project asleep against the wake path until the
 // returned release function is called. quiesce
@@ -350,10 +398,7 @@ const projectFences = new WeakMap<DaemonContext, Map<string, Promise<void>>>()
 // its database) would otherwise get its database woken back up in the middle
 // of the clone that was meant to be of a stopped one.
 //
-// A second hold on the same project is refused outright rather than queued:
-// two snapshots, or a snapshot and a restore, interleaving on one project
-// means the first to finish resumes resources while the second is still
-// copying them, and there is no ordering of the two that is safe.
+// Refused while any other hold on the project exists (holdProject above).
 //
 // Covers getOrCreateWake (the Postgres proxy, the HTTP router and the query
 // route all go through it) and startResourceRoute's explicit wake
@@ -362,36 +407,31 @@ const projectFences = new WeakMap<DaemonContext, Map<string, Promise<void>>>()
 // which write messages.sqlite without waking anything; docs/backups/CLAUDE.md
 // records that gap.
 export function holdProjectAsleep(ctx: DaemonContext, projectId: string, projectName: string): () => void {
-  let fences = projectFences.get(ctx)
-  if (fences === undefined) {
-    fences = new Map()
-    projectFences.set(ctx, fences)
-  }
-  if (fences.has(projectId)) {
-    throw new HobbyError(
-      'conflict',
-      `a snapshot or restore of ${projectName} is already in progress`,
-      'wait for it to finish, then try again'
-    )
-  }
-  let release: () => void = () => {}
-  const fence = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  fences.set(projectId, fence)
-  const held = fences
-  return () => {
-    if (held.get(projectId) === fence) {
-      held.delete(projectId)
-    }
-    release()
-  }
+  return holdProject(ctx, projectId, projectName, true)
+}
+
+// The same mutual exclusion as holdProjectAsleep, and nothing else: wakes
+// pass straight through. Taken by an online snapshot (takeOnlineSnapshot,
+// packages/cli/src/daemon/snapshots.ts), which stops nothing and copies a
+// running database with pg_basebackup, so a wake arriving meanwhile is
+// ordinary traffic rather than a hot copy in the making. Holding wakes there
+// would turn "a snapshot with no pause" into a snapshot that pauses every
+// sleeping resource in the project for the length of the copy.
+export function holdProjectExclusive(ctx: DaemonContext, projectId: string, projectName: string): () => void {
+  return holdProject(ctx, projectId, projectName, false)
+}
+
+// What a wake of a resource in this project must wait for, if anything:
+// only a hold that blocks wakes.
+function wakeFence(ctx: DaemonContext, projectId: string): Promise<void> | undefined {
+  const hold = projectHolds.get(ctx)?.get(projectId)
+  return hold?.blocksWake === true ? hold.fence : undefined
 }
 
 // For a caller that starts a resource without going through the wake
 // function above (startResourceRoute): the same wait, and nothing else.
 export async function waitForProjectAwakeable(ctx: DaemonContext, projectId: string): Promise<void> {
-  const fence = projectFences.get(ctx)?.get(projectId)
+  const fence = wakeFence(ctx, projectId)
   if (fence !== undefined) {
     await fence
   }

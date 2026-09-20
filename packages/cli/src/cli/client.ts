@@ -338,8 +338,9 @@ export interface Api {
   setRetention(id: string, retentionSeconds: number): Promise<ResourceResponse>
   // allowPause is the pinned-project override (routes.ts's
   // refusePausingPinned); it is sent only when true, so a request never
-  // carries the override by accident of serialization.
-  takeSnapshot(project: string, opts?: { allowPause?: boolean }): Promise<SnapshotTakeResponse>
+  // carries the override by accident of serialization. online is sent the
+  // same way; the daemon refuses the two together.
+  takeSnapshot(project: string, opts?: { allowPause?: boolean; online?: boolean }): Promise<SnapshotTakeResponse>
   listSnapshots(project: string): Promise<SnapshotListResponse>
   restoreSnapshot(
     id: string,
@@ -467,7 +468,10 @@ export function createApi(transport: string | DaemonClient): Api {
     setRetention: (id, retentionSeconds) =>
       call(client, 'POST', `/v1/resources/${p(id)}/queue/retention`, { retentionSeconds }),
     takeSnapshot: (project, opts) =>
-      call(client, 'POST', `/v1/projects/${p(project)}/snapshots`, opts?.allowPause === true ? { allowPause: true } : {}),
+      call(client, 'POST', `/v1/projects/${p(project)}/snapshots`, {
+        ...(opts?.allowPause === true ? { allowPause: true } : {}),
+        ...(opts?.online === true ? { online: true } : {}),
+      }),
     listSnapshots: (project) => call(client, 'GET', `/v1/projects/${p(project)}/snapshots`),
     restoreSnapshot: (id, opts) =>
       call(client, 'POST', `/v1/snapshots/${p(id)}/restore`, {

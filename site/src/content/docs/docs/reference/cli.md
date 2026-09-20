@@ -329,8 +329,26 @@ is no point-in-time recovery (see ADR 0016).
 Takes a snapshot. The project is held asleep for the length of the copy, so
 nothing can wake it halfway through, and whatever was running is started again
 afterwards. A pinned project that has something running is refused unless you
-pass `--allow-pause`, because pinning it said it must stay up. Prints the
+pass `--allow-pause`, because pinning it said it must stay up; if it holds only
+Postgres, `--online` (below) snapshots it without stopping anything. Prints the
 snapshot's id.
+
+Accepts `--json`.
+
+### `hobby snapshot <project> --online`
+
+Takes a snapshot with no pause at all, for a project whose resources are all
+Postgres; a project with an app, worker or queue is refused, because their
+state has no online copy mechanism. A running database is copied with
+Postgres's own online backup, `pg_basebackup`, run inside its container, and a
+sleeping one is copied as it rests. Nothing is stopped, so a pinned project
+needs no `--allow-pause`, and the two flags cannot be combined.
+
+A database restored from an online snapshot runs recovery on its first start,
+replaying the write-ahead log that came with the backup, before it accepts
+connections. Each database is consistent on its own; two databases in one
+project are copied one after the other rather than at one instant. There is
+still no point-in-time recovery.
 
 Accepts `--json`.
 
