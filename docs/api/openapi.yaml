@@ -591,9 +591,11 @@ components:
     WireResource:
       description: |
         A resource as it crosses the wire (wire.ts). Discriminated on `kind`.
-        Two computed fields ride along on every response: `sizeBytes`
-        (null when unknown; a sleeping database is never woken to answer)
-        and `connectionCount` (live, from the proxy's activity tracker).
+        Three computed fields ride along on every response: `sizeBytes`
+        (null when unknown; a sleeping database is never woken to answer),
+        `connectionCount` (live, from the proxy's activity tracker) and
+        `wakeRefusal` (the daemon's in-memory record of a failed automatic
+        wake, null when there is none).
         Redaction by kind: postgres config omits `password` entirely; app
         `env` and worker `vars` values read as `<redacted>`.
       oneOf:
@@ -616,6 +618,20 @@ components:
         createdAt: { type: string, format: date-time }
         sizeBytes: { type: [integer, "null"] }
         connectionCount: { type: integer }
+        wakeRefusal:
+          type: [object, "null"]
+          description: |
+            Set when the most recent automatic wake of this resource failed
+            (issue #10). Automatic wakes (a proxy connection, an HTTP request,
+            the alarm mirror, Studio's query route) are refused until
+            `retryAt`, which moves out on a backoff of 30s, 1m, 2m, 4m, 8m,
+            then 15m per consecutive failure. A `retryAt` in the past means
+            the next automatic wake tries again. Cleared by a successful wake,
+            by POST /v1/resources/{id}/start, and by a daemon restart.
+          properties:
+            failures: { type: integer, description: "Consecutive failed automatic wakes" }
+            retryAt: { type: string, format: date-time }
+            lastError: { type: string, description: "The failed start's message, with URL credentials and password= values redacted, at most 300 characters" }
 
     WirePostgresResource:
       allOf:

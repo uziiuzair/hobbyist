@@ -30,9 +30,10 @@ TCP accept
   CancelRequest? -> route to the right upstream, do not treat as a wake
   read startup packet -> user, database, options
   resolve project from the database name
-  refused?  -> (not running, and a wake of it already failed since the daemon started)
+  refused?  -> (not running, its last wake failed, and its backoff has not run out)
                send a real Postgres ErrorResponse, never a dropped socket,
-               and never a wake: only `hobby wake` or a restart clears it
+               and never a wake: the backoff running out, `hobby wake` or a
+               restart clears it
   not running (sleeping, starting, failed)?
             -> daemon.wake(resource), poll readiness, then as below
   running?  -> dial upstream, replay startup packet; while the backend
@@ -195,10 +196,65 @@ connection exactly as before. "Refused" means only that a wake failed since
 this daemon started. Two things clear it: `POST /v1/resources/:id/start`
 (`hobby wake`, the MCP wake tool, Studio's start button), which removes the
 id before starting the resource, and a daemon restart, which empties the set
-and so allows one fresh attempt per daemon lifetime.
+and so allows one fresh attempt per daemon lifetime. (The next amendment
+replaced "until an explicit start" with a backoff.)
 
 Within a single wake, `pgProbe` (`packages/pg/src/readiness.ts`) now tells a
 server that answered with an error (wrong password, no `pg_hba.conf` entry)
 from one that has not answered, and `waitReady` concludes on the first
 instead of polling out the whole timeout. 57P03 and the rest of SQLSTATE
 classes 57 and 53 still read as "not yet", never as broken.
+
+## Amendment, 2026-09-19 (later the same day): the refusal is a backoff, and it is visible
+
+The refusal above had no automatic way out, and that was the wrong default
+for the failures a small box actually has. A disk briefly full, the Docker
+daemon restarting, a slow first boot after a host reboot: each clears on its
+own, and each left a database refused until a human noticed and ran `hobby
+wake`, with nothing to notice it by but error text in some application's log.
+Issue #10 itself left the door open for "a bounded automatic retry policy if
+one is ever designed". This is that policy.
+
+The set became a map from resource id to `{ failures, retryAt, lastError }`
+(`WakeRefusal`, `packages/cli/src/daemon/context.ts`). After the Nth
+consecutive failed wake through `buildWake`, automatic wakes are refused until
+the failure time plus `wakeRetryDelayMs(N)`
+(`packages/cli/src/daemon/wake-backoff.ts`): 30 seconds, then 1, 2, 4 and 8
+minutes, then 15 minutes for every failure after that. Once `retryAt` passes,
+`isWakeRefused` answers false, so the next connection or request is let
+through to make one attempt; every caller arriving while it runs joins the
+same in-flight wake, so a crowd waiting for the retry time costs one start. A
+failure moves `retryAt` one step further along the schedule, and a success
+deletes the entry, so the next failure starts at 30 seconds again. `POST
+/v1/resources/:id/start` and a daemon restart still clear it at once. The
+clock is `DaemonContext.wakeClock`, unset in production (so `Date.now`), and
+named that rather than `now` because `AppDeps` and `WorkerDeps` already read a
+`now` off the same structurally shared context.
+
+The bound issue #10 needed is still there, as a rate instead of a stop: a
+resource that never boots costs five starts in its first quarter of an hour
+and four an hour after that, however many clients keep connecting.
+
+It is also visible now. `toWireResource` (`packages/cli/src/daemon/wire.ts`)
+adds `wakeRefusal: { failures, retryAt, lastError } | null` to every resource
+on the wire, so `hobby ls --json`, Studio and MCP see it, and `hobby ls`
+prints it after the resource (`renderResourceLine`,
+`packages/cli/src/cli/output.ts`):
+
+```
+primary  postgres  failed  port 15432  (wake refused, retry in 3m 12s: docker start failed)
+```
+
+`lastError` is the failed start's message passed through `redactWakeError`,
+which replaces the userinfo of any URL with credentials and the value of any
+`password=`, and caps it at 300 characters. No start error is known to carry a
+secret today (the Docker runtime's errors keep stderr in the hint, which is
+never read here), but a kind handler may throw anything, and the wire is where
+secrets leak from.
+
+The refusal `buildWake` throws names the retry time, relative and absolute,
+and still names `hobby logs`. The front doors' own refusal text
+(`handleStartup` in `packages/proxy/src/proxy.ts`, `resolveAndWake` in
+`packages/proxy/src/http.ts`) says the daemon retries by itself and points at
+`hobby ls` for when, because `isWakeRefused` answers a boolean and carries no
+time.

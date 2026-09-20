@@ -48,9 +48,11 @@ export interface ProxyDeps {
   // tenth container start) is the daemon's responsibility, not the
   // proxy's. See the task report for why that split is deliberate.
   wake(resourceId: string): Promise<void>
-  // True when a wake of this resource already failed and the daemon will not
-  // try again until an explicit start (issue #10; buildWake in
-  // packages/cli/src/daemon/context.ts owns the set). Asked before calling
+  // True when a wake of this resource failed recently and the daemon will
+  // not try again until its backoff runs out or an explicit start clears it
+  // (issue #10; buildWake in packages/cli/src/daemon/context.ts owns the
+  // schedule, and answers false again once the retry time passes, which is
+  // what lets the next connection make the retry). Asked before calling
   // wake so a refused client gets its ErrorResponse at once, with no wake
   // and no dial. Optional: absent means nothing is ever refused here, and
   // wake itself stays the authority.
@@ -710,8 +712,8 @@ async function handleStartup(
       return
     }
 
-    // A resource whose wake already failed since the daemon started is
-    // answered immediately and not woken: docs/proxy/CLAUDE.md's `failed? ->
+    // A resource whose last wake failed, and whose retry time has not come,
+    // is answered immediately and not woken: docs/proxy/CLAUDE.md's `failed? ->
     // send a real Postgres ErrorResponse`, which the code did not implement
     // before issue #10. Waking it here was one fresh container start per
     // incoming connection, so anything that retries (an uptime check, an ORM
@@ -733,7 +735,7 @@ async function handleStartup(
         socket,
         'FATAL',
         CANNOT_CONNECT_NOW,
-        `${database} is not woken by a connection because its last wake failed; \`hobby logs\` shows why, and \`hobby wake\` retries it once the cause is fixed`
+        `${database} is not woken by a connection because its last wake failed; the daemon retries it by itself on a backoff (\`hobby ls\` shows when), \`hobby logs\` shows why it failed, and \`hobby wake\` retries it now`
       )
       return
     }
