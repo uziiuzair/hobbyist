@@ -4,12 +4,48 @@
 // every call goes through execFile with an argv array, never through a
 // shell string: that is what keeps this free of command injection.
 
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
+import type { Readable } from 'node:stream'
 import { HobbyError } from './errors.js'
 import { DEFAULT_PORT_BIND } from './runtime.js'
-import type { BuildSpec, ComputeRuntime, ContainerId, ContainerSpec, ContainerStatus } from './runtime.js'
+import type { BuildSpec, ComputeRuntime, ContainerId, ContainerSpec, ContainerStatus, ExecStream } from './runtime.js'
 
 export type ExecFn = (cmd: string, args: string[]) => Promise<{ stdout: string; stderr: string }>
+
+// The streaming counterpart of ExecFn, used only by execStream below. A
+// separate seam because ExecFn's contract is "run to completion and hand me
+// the buffered output", which is exactly what a whole-cluster tar must not
+// be. Injectable for the same reason ExecFn is: docker.test.ts asserts the
+// argv without Docker present.
+export interface SpawnedProcess {
+  stdout: Readable
+  stderr: Readable
+  kill(): void
+  once(event: 'close', listener: (code: number | null) => void): unknown
+  once(event: 'error', listener: (err: Error) => void): unknown
+}
+
+export type SpawnFn = (cmd: string, args: string[]) => SpawnedProcess
+
+function defaultSpawn(cmd: string, args: string[]): SpawnedProcess {
+  // stdin ignored: nothing is ever sent to the process, and an inherited
+  // stdin would hand it the daemon's own.
+  const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+  return {
+    stdout: child.stdout,
+    stderr: child.stderr,
+    kill: () => {
+      child.kill()
+    },
+    once(event: 'close' | 'error', listener: ((code: number | null) => void) | ((err: Error) => void)): unknown {
+      return child.once(event, listener)
+    },
+  }
+}
+
+// Enough of stderr to explain a failure, and no more: a process that writes
+// without end to stderr must not grow the daemon's memory without end.
+const STDERR_LIMIT_BYTES = 64 * 1024
 
 // The shape an ExecFn is expected to throw on a non-zero exit. Node's own
 // execFile callback hands the error, stdout and stderr separately; the
@@ -124,7 +160,7 @@ function buildCreateArgs(spec: ContainerSpec): string[] {
   return args
 }
 
-export function createDockerRuntime(exec: ExecFn = defaultExec): ComputeRuntime {
+export function createDockerRuntime(exec: ExecFn = defaultExec, spawnFn: SpawnFn = defaultSpawn): ComputeRuntime {
   async function run(args: string[]): Promise<{ stdout: string; stderr: string }> {
     try {
       return await exec('docker', args)
@@ -248,6 +284,52 @@ export function createDockerRuntime(exec: ExecFn = defaultExec): ComputeRuntime 
         }
         throw toRuntimeUnavailable('docker image rm', err)
       }
+    },
+
+    // `docker exec <name> <command...>`, with stdout streamed. No -t: a
+    // pseudo-terminal would rewrite the byte stream (ExecStream's comment,
+    // runtime.ts). No -i either: nothing is ever written to the process, and
+    // -i would only attach an stdin that is immediately at EOF. No --user:
+    // the one caller (basebackup.ts) connects over the container's local
+    // socket, where pg_hba's `local ... trust` does not care which OS user
+    // asks, and the image's default user is what every other exec against
+    // it would get too.
+    //
+    // docker exec exits with the command's own status, and with 1 plus a
+    // message on stderr when the container is not running, so one non-zero
+    // check covers both. cancel() kills the docker CLI; the process inside
+    // the container then fails its next write to the closed stream and
+    // exits, which for pg_basebackup also ends its walsender session.
+    execStream(name: string, command: string[]): ExecStream {
+      const child = spawnFn('docker', ['exec', name, ...command])
+      let stderr = ''
+      child.stderr.on('data', (chunk: Buffer) => {
+        if (stderr.length < STDERR_LIMIT_BYTES) {
+          stderr += chunk.toString('utf8')
+        }
+      })
+      const done = new Promise<void>((resolve, reject) => {
+        child.once('error', (err) => {
+          reject(new HobbyError('runtime_unavailable', 'docker exec failed', err.message))
+        })
+        child.once('close', (code) => {
+          if (code === 0) {
+            resolve()
+            return
+          }
+          reject(
+            new HobbyError(
+              'runtime_unavailable',
+              `docker exec failed (exit ${code === null ? 'by signal' : code})`,
+              stderr.trim() || 'no output on stderr'
+            )
+          )
+        })
+      })
+      // Awaited by the caller only after stdout is drained, so a rejection
+      // that lands first must not count as unhandled.
+      done.catch(() => {})
+      return { stdout: child.stdout, done, cancel: () => child.kill() }
     },
 
     // Idempotent: the daemon calls this on every project start, so

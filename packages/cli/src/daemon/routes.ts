@@ -58,8 +58,10 @@ import {
   deleteSnapshot,
   findSnapshot,
   listSnapshots,
+  onlineSnapshotRefusal,
   restoreSnapshot,
   snapshotDir,
+  takeOnlineSnapshot,
   takeSnapshot,
 } from './snapshots.js'
 import { toWireResource, toWireResources, toWireSnapshotManifest, type WireResource } from './wire.js'
@@ -1651,7 +1653,19 @@ function readOptionalBoolean(fields: Record<string, unknown>, key: string, route
 // stop is a no-op (queueKindHandler, packages/queue/src/kind.ts), the same
 // exemption the hibernator makes by kind. Counting it would demand the flag
 // of every pinned project that happens to hold a queue.
-function refusePausingPinned(ctx: DaemonContext, project: Project, allowPause: boolean, what: string): void {
+//
+// `online` is set only by the snapshot route, and only for a project that
+// onlineSnapshotRefusal (snapshots.ts) accepts: then the refusal also names
+// --online, the way to take the snapshot with no pause at all, which on a
+// pinned production database is the answer rather than a flag that accepts
+// an outage. An in-place restore has no online form, so it never says so.
+function refusePausingPinned(
+  ctx: DaemonContext,
+  project: Project,
+  allowPause: boolean,
+  what: string,
+  online: 'suggest' | 'never' = 'never'
+): void {
   if (project.sleepAfterSeconds !== null || allowPause) {
     return
   }
@@ -1661,10 +1675,16 @@ function refusePausingPinned(ctx: DaemonContext, project: Project, allowPause: b
   if (awake.length === 0) {
     return
   }
+  const pause =
+    'pass --allow-pause (API: "allowPause": true) to accept a few seconds of downtime, or put it to sleep first with `hobby sleep`'
+  const hint =
+    online === 'suggest' && onlineSnapshotRefusal(ctx, project) === null
+      ? `pass --online (API: "online": true) to snapshot it with no pause at all, or ${pause}`
+      : pause
   throw new HobbyError(
     'conflict',
     `project ${project.name} is pinned awake, and ${what} would stop ${awake.map((r) => r.name).join(', ')} while it runs`,
-    'pass --allow-pause (API: "allowPause": true) to accept a few seconds of downtime, or put it to sleep first with `hobby sleep`'
+    hint
   )
 }
 
@@ -1686,11 +1706,27 @@ async function takeSnapshotRoute(ctx: DaemonContext, req: IncomingMessage, name:
   const project = getProjectByNameOrThrow(ctx, name)
   const body = await readJsonBody(req)
   const fields = isRecord(body) ? body : {}
-  const allowPause = readOptionalBoolean(fields, 'allowPause', 'POST /v1/projects/:name/snapshots')
+  const route = 'POST /v1/projects/:name/snapshots'
+  const allowPause = readOptionalBoolean(fields, 'allowPause', route)
+  const online = readOptionalBoolean(fields, 'online', route)
+  // Contradictory rather than redundant: allowPause accepts the pause an
+  // online snapshot exists to avoid. Refusing the pair says so, where
+  // quietly ignoring one would leave a caller believing whichever it meant.
+  if (online && allowPause) {
+    throw new HobbyError(
+      'usage',
+      'online and allowPause cannot be combined',
+      'online takes the snapshot without pausing anything, so there is no pause to allow'
+    )
+  }
   refuseReleased(project)
-  refusePausingPinned(ctx, project, allowPause, 'a snapshot')
+  // No pinned check for online: nothing is stopped, so pinning has nothing
+  // to protect (takeOnlineSnapshot, snapshots.ts).
+  if (!online) {
+    refusePausingPinned(ctx, project, allowPause, 'a snapshot', 'suggest')
+  }
 
-  const snapshot = await takeSnapshot(ctx, project.name)
+  const snapshot = online ? await takeOnlineSnapshot(ctx, project.name) : await takeSnapshot(ctx, project.name)
   // Returned alongside the manifest so a caller can see that what was
   // running is running again, from the store rather than from a claim: a
   // resource that failed to restart is `failed` here (resume, snapshots.ts),
