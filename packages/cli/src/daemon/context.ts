@@ -39,6 +39,7 @@ import {
   type ProxyTarget,
 } from '@hobby.sh/proxy'
 import { createTailnetDetector } from './tailnet.js'
+import { formatRetryDelay, redactWakeError, wakeRetryDelayMs } from './wake-backoff.js'
 
 // Every kind this daemon knows how to run. One list, built here, read by
 // every dispatch site (routes, hibernator, reconcile, the wake path). Adding
@@ -80,6 +81,18 @@ export interface DaemonContext {
   // deterministic null with no binary executed, or set a fake. Returns the
   // box's MagicDNS name when a tailnet is up, null otherwise.
   detectTailnet?: () => Promise<string | null>
+  // The clock the wake refusal reads (buildWake below): when a failed wake
+  // happened, and whether its retry time has passed. A test seam of the same
+  // kind as probeFactory, so the backoff schedule is tested by moving a
+  // number instead of sleeping through 30 seconds, then a minute, then two.
+  // Production leaves it unset and gets Date.now.
+  //
+  // Named wakeClock and not `now`, for the reason AppDeps.appProbeFactory
+  // (packages/app/src/app.ts) gives for its own name: a DaemonContext is
+  // passed structurally as every kind's deps, and AppDeps and WorkerDeps
+  // already read a field called `now`, to name an image tag. A fake clock
+  // set here for the refusal must not also rename every image a test builds.
+  wakeClock?: () => number
 }
 
 // A convenience factory for the real, production wiring: opens the real
@@ -114,19 +127,39 @@ export function createDaemonContext(opts: {
 // success and failure, so one failed wake does not permanently poison the
 // in-flight map for every connection after it.
 //
-// What does stop the next connection is the refusal set below. A wake
+// What does stop the next connection is the refusal map below. A wake
 // through this function whose kind handler throws (a container that will not
 // start, a readiness wait that timed out, a Postgres that refused its probe
-// with a real error) records the resource id there, and every later wake of
-// that id is refused before the kind handler is reached. Without it, a
-// resource whose boot reliably fails got a fresh container start per incoming
-// connection, forever: a monitoring check or an ORM pool retrying once a
-// second turned one broken database into a crash loop driven by traffic
-// (issue #10). The de-duplication above only bounds starts to one per
-// *concurrent* burst; this bounds them across bursts, including for the
-// implicit wakers with no front door (the alarm mirror, Studio's query route).
+// with a real error) records the resource id there with a retry time, and
+// every automatic wake of that id before the retry time is refused before
+// the kind handler is reached. Without it, a resource whose boot reliably
+// fails got a fresh container start per incoming connection, forever: a
+// monitoring check or an ORM pool retrying once a second turned one broken
+// database into a crash loop driven by traffic (issue #10). The
+// de-duplication above only bounds starts to one per *concurrent* burst;
+// this bounds them across bursts, including for the implicit wakers with no
+// front door (the alarm mirror, Studio's query route).
 //
-// Why a set of failed wakes and not the store's `failed` state: `failed` is
+// The refusal ends by itself. After the Nth consecutive failure the retry
+// time is the failure plus wakeRetryDelayMs(N) (packages/cli/src/daemon/wake-backoff.ts):
+// 30 seconds, doubling to a 15 minute cap. Once it passes, the next
+// automatic wake is let through to the kind handler, exactly once: every
+// caller arriving while that attempt runs joins it through inFlightWakes
+// above, so a crowd of clients that were all waiting for the retry time
+// costs one start, not one each. A failure there moves the retry time out
+// again, one step further along the schedule; a success deletes the entry,
+// so the next failure, whenever it comes, starts again at 30 seconds. The
+// first cut of issue #10 refused until someone ran `hobby wake`, and that
+// was the wrong default for the failures a small box actually has: a disk
+// briefly full, Docker restarting, a slow first boot after a host reboot.
+// Each of those clears on its own, and each left a database refused for as
+// long as it took a human to notice, with nothing but error text in some
+// application's log to notice it by. The bound issue #10 needed is still
+// here, it is just a rate now rather than a stop: a resource that never
+// boots costs a few starts in its first quarter of an hour and four an hour
+// after that, however many clients keep connecting.
+//
+// Why a map of failed wakes and not the store's `failed` state: `failed` is
 // the label reconcile (packages/cli/src/daemon/reconcile.ts, correctedState)
 // writes for a resource recorded running whose container is found stopped,
 // which is every unclean host reboot, OOM kill or crash. Those databases are
@@ -135,19 +168,23 @@ export function createDaemonContext(opts: {
 // ran `hobby wake` by hand. A failed stop or a failed deploy writes `failed`
 // too, and neither says anything about whether the next start would work.
 // So `failed` keeps meaning what reconcile and the handlers say it means, and
-// "refused" means something narrower: a wake failed since this daemon
-// started.
+// "refused" means something narrower: a wake failed recently, since this
+// daemon started, and its retry time has not come yet.
 //
-// The set is in memory on purpose. A daemon restart empties it, which allows
-// one fresh attempt per daemon lifetime: still bounded, and what an operator
-// expects after an upgrade. The explicit way out without a restart is POST
-// /v1/resources/:id/start (startResourceRoute in routes.ts, behind `hobby
-// wake`, the MCP wake tool and Studio's start button), which calls
-// clearWakeRefusal before invoking the kind handler directly, not this
-// function, so it is never refused.
+// The map is in memory on purpose. A daemon restart empties it, which allows
+// one fresh attempt per daemon lifetime on top of the schedule: still
+// bounded, and what an operator expects after an upgrade. The explicit way
+// to retry now is POST /v1/resources/:id/start (startResourceRoute in
+// routes.ts, behind `hobby wake`, the MCP wake tool and Studio's start
+// button), which calls clearWakeRefusal before invoking the kind handler
+// directly, not this function, so it is never refused. What is refused, and
+// until when, is readable through getWakeRefusal, which is how `hobby ls`
+// and every other client of toWireResource (packages/cli/src/daemon/wire.ts)
+// show it.
 function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
   const inFlightWakes = new Map<string, Promise<void>>()
-  const refused = wakeRefusals(ctx)
+  const refusals = wakeRefusals(ctx)
+  const now = ctx.wakeClock ?? Date.now
 
   return function wake(resourceId: string): Promise<void> {
     const existing = inFlightWakes.get(resourceId)
@@ -160,9 +197,11 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
       if (resource === null) {
         throw new HobbyError('resource_not_found', `no resource with id ${resourceId}`)
       }
-      if (refused.has(resourceId)) {
+      const refusal = refusals.get(resourceId)
+      const checkedAt = now()
+      if (refusal !== undefined && checkedAt < refusal.retryAt) {
         const project = ctx.store.getProject(resource.projectId)
-        throw refusedWakeError(project === null ? resource.name : `${project.name}/${resource.name}`)
+        throw refusedWakeError(project === null ? resource.name : `${project.name}/${resource.name}`, refusal, checkedAt)
       }
       // A snapshot or an in-place restore holds this project asleep (see
       // holdProjectAsleep below). Waking a resource in the middle of one is
@@ -180,6 +219,9 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
           throw new HobbyError('resource_not_found', `no resource with id ${resourceId}`)
         }
         if (resource.state === 'running') {
+          // Running is as good as a successful wake for the refusal's
+          // purposes: whatever failed before evidently no longer does.
+          refusals.delete(resourceId)
           return
         }
       }
@@ -190,9 +232,23 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
       try {
         await ctx.kinds.get(resource.kind).start(ctx, resource)
       } catch (err) {
-        refused.add(resourceId)
+        // Counted from the entry as it stands now, not the one read above:
+        // an explicit start may have cleared it while this attempt ran, and
+        // a failure after someone deliberately reset the count is the first
+        // of a new run, not the next of the old one. The retry time is
+        // measured from the failure, not from when the attempt began,
+        // because a start that failed by timing out has already spent
+        // wakeTimeoutMs, and measuring from its beginning would give it a
+        // shorter rest than a start that failed at once.
+        const failures = (refusals.get(resourceId)?.failures ?? 0) + 1
+        refusals.set(resourceId, {
+          failures,
+          retryAt: now() + wakeRetryDelayMs(failures),
+          lastError: redactWakeError(err instanceof Error ? err.message : String(err)),
+        })
         throw err
       }
+      refusals.delete(resourceId)
     })().finally(() => {
       inFlightWakes.delete(resourceId)
     })
@@ -202,40 +258,74 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
   }
 }
 
-// The refusal buildWake throws for a resource in the refusal set. The command
-// is in the message and not only the hint because the HTTP router renders
-// err.message alone (http.ts's resolveAndWake; errorMessage in
-// packages/proxy/src/proxy.ts shows the hint too).
-function refusedWakeError(target: string): HobbyError {
+// The refusal buildWake throws for a resource whose retry time has not come.
+// The command is in the message and not only the hint because the HTTP
+// router renders err.message alone (http.ts's resolveAndWake; errorMessage in
+// packages/proxy/src/proxy.ts shows the hint too). The retry time is in the
+// message for the same reason: whoever reads this in an application's log
+// needs to know whether waiting is enough, and it is, if the cause was
+// transient. Both the relative and the absolute time are given because a log
+// line is often read long after it was written, when "another 4m 0s" alone
+// no longer means anything.
+function refusedWakeError(target: string, refusal: WakeRefusal, now: number): HobbyError {
+  const times = refusal.failures === 1 ? 'failed' : `failed ${refusal.failures} times in a row`
   return new HobbyError(
     'wake_failed',
-    `a wake of ${target} already failed since the daemon started, so it is not woken automatically; fix the cause, then run \`hobby wake ${target}\` to retry it`,
-    `\`hobby logs ${target}\` shows what the last start printed`
+    `a wake of ${target} ${times}, so it is not woken automatically for another ${formatRetryDelay(refusal.retryAt - now)} (until ${new Date(refusal.retryAt).toISOString()}); fix the cause and wait, or run \`hobby wake ${target}\` to retry it now`,
+    `the last start failed with: ${refusal.lastError}; \`hobby logs ${target}\` shows what it printed`
   )
 }
 
-const refusalRegistry = new WeakMap<DaemonContext, Set<string>>()
+// One entry per resource whose most recent wake through buildWake failed.
+// failures counts consecutive failed wakes (a success deletes the entry, so
+// the count restarts); retryAt is epoch milliseconds, the first moment an
+// automatic wake is let through again; lastError is the failed start's own
+// message, passed through redactWakeError (packages/cli/src/daemon/wake-backoff.ts)
+// because it is repeated on the wire for as long as the entry lives.
+export interface WakeRefusal {
+  failures: number
+  retryAt: number
+  lastError: string
+}
 
-// Resource ids whose last wake through buildWake failed, one set per
-// DaemonContext (so per daemon lifetime, and per test). See buildWake's
-// comment for why this, and not the store's `failed` state, is what refuses.
-function wakeRefusals(ctx: DaemonContext): Set<string> {
-  let set = refusalRegistry.get(ctx)
-  if (set === undefined) {
-    set = new Set()
-    refusalRegistry.set(ctx, set)
+const refusalRegistry = new WeakMap<DaemonContext, Map<string, WakeRefusal>>()
+
+// One map per DaemonContext (so per daemon lifetime, and per test). See
+// buildWake's comment for why this, and not the store's `failed` state, is
+// what refuses.
+function wakeRefusals(ctx: DaemonContext): Map<string, WakeRefusal> {
+  let map = refusalRegistry.get(ctx)
+  if (map === undefined) {
+    map = new Map()
+    refusalRegistry.set(ctx, map)
   }
-  return set
+  return map
 }
 
 // Read by both front doors (ProxyDeps.isWakeRefused, HttpProxyDeps.isWakeRefused)
-// so a refused client gets its answer with no wake call and no dial.
+// so a refused client gets its answer with no wake call and no dial. False
+// once the retry time has passed, even though the entry is still there: that
+// is what lets the next connection through to make the one retry attempt,
+// and buildWake applies the same comparison, against the same clock, when it
+// is reached.
 export function isWakeRefused(ctx: DaemonContext, resourceId: string): boolean {
-  return wakeRefusals(ctx).has(resourceId)
+  const refusal = wakeRefusals(ctx).get(resourceId)
+  return refusal !== undefined && (ctx.wakeClock ?? Date.now)() < refusal.retryAt
+}
+
+// The entry itself, for display (toWireResource in packages/cli/src/daemon/wire.ts).
+// Returned whether or not its retry time has passed: a resource that failed
+// three times and is waiting for its next connection to be retried is worth
+// showing, and a retryAt in the past is how a reader tells that apart from
+// one that is still refusing. A copy, so a caller cannot edit the schedule.
+export function getWakeRefusal(ctx: DaemonContext, resourceId: string): WakeRefusal | null {
+  const refusal = wakeRefusals(ctx).get(resourceId)
+  return refusal === undefined ? null : { ...refusal }
 }
 
 // The explicit clear: called by startResourceRoute before it starts the
-// resource, which is what `hobby wake` means.
+// resource, which is what `hobby wake` means. Resets the count as well as
+// the retry time, so a failure after it starts the schedule from 30 seconds.
 export function clearWakeRefusal(ctx: DaemonContext, resourceId: string): void {
   wakeRefusals(ctx).delete(resourceId)
 }

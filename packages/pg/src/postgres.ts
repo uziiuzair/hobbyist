@@ -321,9 +321,9 @@ export async function startPostgres(deps: PgDeps, resource: PostgresResource): P
   // probe instead of after the whole wakeTimeoutMs. Both record `failed`
   // and throw; the throw is what the daemon's buildWake
   // (packages/cli/src/daemon/context.ts) records as a failed wake and
-  // refuses to repeat until an explicit start, which is what keeps a
-  // resource whose boot reliably fails from getting a fresh container start
-  // per incoming connection.
+  // refuses to repeat until a backoff runs out or an explicit start clears
+  // it, which is what keeps a resource whose boot reliably fails from
+  // getting a fresh container start per incoming connection.
   if (!result.ready && result.broken !== undefined) {
     deps.store.setResourceState(resource.id, 'failed')
     throw new HobbyError(

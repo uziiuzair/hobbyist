@@ -15,6 +15,7 @@
 // would be more type-widening than the requirement is worth.
 
 import type { PreflightReport } from '../daemon/preflight.js'
+import { formatRetryDelay } from '../daemon/wake-backoff.js'
 import type { WireResource, WireSnapshotManifest } from '../daemon/wire.js'
 import type { QueueListEntry, QueueMessage } from './client.js'
 
@@ -38,7 +39,20 @@ export function formatBytes(bytes: number): string {
 // in packages/app/src/app.ts:434-438 and packages/worker/src/worker.ts's
 // matching throw, and this is deliberately shorter, since a listing is read
 // many times and a usage command is not needed until the user acts on it.
-export function renderResourceLine(resource: WireResource): string {
+//
+// A resource whose automatic wakes the daemon is currently turning away
+// (issue #10's refusal, now a backoff: buildWake in
+// packages/cli/src/daemon/context.ts) gets a second trailer saying so, when
+// it is retried, and a short form of why. This line is the one place a
+// person routinely looks, and before it said this the refusal was visible
+// only as error text in whichever application happened to connect. `now` is
+// a parameter so the countdown is testable; it is a relative time rather
+// than a date, which is what this file's header asks of human output.
+export function renderResourceLine(resource: WireResource, now: number = Date.now()): string {
+  return `${renderResourceColumns(resource)}${wakeRefusalTrailer(resource, now)}`
+}
+
+function renderResourceColumns(resource: WireResource): string {
   if (resource.kind === 'postgres') {
     return `${resource.name}  ${resource.kind}  ${resource.state}  port ${resource.config.hostPort}`
   }
@@ -54,6 +68,31 @@ export function renderResourceLine(resource: WireResource): string {
   }
   const trailer = resource.state === 'undeployed' ? '  (no code yet)' : ''
   return `${resource.name}  ${resource.kind}  ${resource.state}  ${resource.config.hostname}${trailer}`
+}
+
+// Long enough to recognise the failure ("exec format error", "did not become
+// ready within 30000ms"), short enough to keep a listing a listing. The full
+// message is in `hobby ls --json`, and the full story in `hobby logs`.
+const REFUSAL_ERROR_PREVIEW = 60
+
+function wakeRefusalTrailer(resource: WireResource, now: number): string {
+  const refusal = resource.wakeRefusal
+  if (refusal === undefined || refusal === null) {
+    return ''
+  }
+  const error =
+    refusal.lastError.length > REFUSAL_ERROR_PREVIEW
+      ? `${refusal.lastError.slice(0, REFUSAL_ERROR_PREVIEW - 3)}...`
+      : refusal.lastError
+  const remaining = Date.parse(refusal.retryAt) - now
+  // Past its retry time the entry is still there until the next automatic
+  // wake tries (see getWakeRefusal's comment): nothing is refused any more,
+  // and saying "retry in 0s" forever would read as a stuck countdown.
+  if (!(remaining > 0)) {
+    const times = refusal.failures === 1 ? '' : ` ${refusal.failures} times`
+    return `  (last wake failed${times}, retried on the next connection: ${error})`
+  }
+  return `  (wake refused, retry in ${formatRetryDelay(remaining)}: ${error})`
 }
 
 // One row of `hobby snapshot ls`. No date column, per this file's header:

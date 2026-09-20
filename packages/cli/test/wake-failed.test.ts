@@ -9,8 +9,12 @@
 // number of times no matter how many clients connect, every one of those
 // clients gets a real ErrorResponse, well inside the 3 second ceiling, and
 // `hobby wake` (POST /v1/resources/:id/start) or a daemon restart is the way
-// back. And, just as important, what it must not do: refuse a resource only
-// because the store labels it `failed`, which reconcile does for every
+// back. Since the refusal became a backoff, also that the backoff runs out
+// by itself: after 30 seconds, doubling to 15 minutes, the next wake is let
+// through for exactly one attempt, and a success resets it. Every one of
+// those tests moves an injected clock (DaemonContext.wakeClock) instead of
+// sleeping. And, just as important, what it must not do: refuse a resource
+// only because the store labels it `failed`, which reconcile does for every
 // container an unclean reboot left stopped.
 
 import assert from 'node:assert/strict'
@@ -18,6 +22,7 @@ import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
 import net from 'node:net'
 import type { AddressInfo } from 'node:net'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -30,8 +35,9 @@ import {
   type PostgresConfig,
 } from '@hobby.sh/core'
 import { ActivityTracker, buildStartupPacket, startPgProxy } from '@hobby.sh/proxy'
-import { createDefaultKindRegistry, isWakeRefused } from '../src/daemon/context.js'
+import { createDefaultKindRegistry, getWakeRefusal, holdProjectAsleep, isWakeRefused } from '../src/daemon/context.js'
 import { createApp, createProxyDeps, reconcile, type DaemonContext } from '../src/index.js'
+import { run, type Io } from '../src/cli/main.js'
 
 function testConfig(): HobbyConfig {
   return {
@@ -73,6 +79,7 @@ function breakableRuntime(): {
   startCalls: () => number
   fix: () => void
   breakStop: () => void
+  breakAgain: () => void
 } {
   const base = createFakeRuntime()
   let calls = 0
@@ -99,11 +106,24 @@ function breakableRuntime(): {
     startCalls: () => calls,
     fix: () => (broken = false),
     breakStop: () => (stopBroken = true),
+    breakAgain: () => (broken = true),
   }
 }
 
-function buildContext(runtime: ComputeRuntime, store = openStore(':memory:')): DaemonContext {
+// A clock the test moves by hand. Starts well away from zero so that no
+// arithmetic can accidentally pass by treating 0 as "no time at all".
+function fakeClock(): { now: () => number; advance: (ms: number) => void; set: (ms: number) => void } {
+  let current = 1_800_000_000_000
   return {
+    now: () => current,
+    advance: (ms: number) => (current += ms),
+    set: (ms: number) => (current = ms),
+  }
+}
+
+function buildContext(runtime: ComputeRuntime, store = openStore(':memory:'), clock?: () => number): DaemonContext {
+  return {
+    wakeClock: clock,
     store,
     runtime,
     paths: resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-wake-failed-test-${randomUUID()}`) }),
@@ -199,7 +219,8 @@ function connectAndRead(port: number, database: string): Promise<Buffer> {
 
 test('issue #10: a resource whose start always fails is started a bounded number of times, however many clients connect', async () => {
   const { runtime, startCalls } = breakableRuntime()
-  const ctx = buildContext(runtime)
+  const clock = fakeClock()
+  const ctx = buildContext(runtime, openStore(':memory:'), clock.now)
   const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
   const resource = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig() })
   ctx.store.setResourceState(resource.id, 'sleeping')
@@ -218,9 +239,10 @@ test('issue #10: a resource whose start always fails is started a bounded number
     }
     // The client whose wake ran the failing start is told what failed. A
     // client that reached the front door after the wake had already failed
-    // is refused there, and told how to retry: the reason itself is not
-    // stored anywhere the proxy could read, which is why that message points
-    // at `hobby logs` instead.
+    // is refused there, and told how to retry: the proxy's isWakeRefused
+    // answers a boolean and carries neither the reason nor the retry time,
+    // which is why that message points at `hobby logs` and `hobby ls`
+    // instead.
     const messages = burst.map((response) => extractField(response, 'M') ?? '')
     assert.ok(
       messages.some((message) => /exec format error/.test(message)),
@@ -239,8 +261,29 @@ test('issue #10: a resource whose start always fails is started a bounded number
       assert.ok(Date.now() - before < 1000, 'a failed resource is answered immediately, not after a wake')
       assert.equal(response[0], 0x45)
       assert.match(extractField(response, 'M') ?? '', /hobby wake/)
+      assert.match(extractField(response, 'M') ?? '', /retries it by itself/)
+      clock.advance(5_000)
     }
-    assert.equal(startCalls(), 1, 'six more connections, zero more container starts')
+    assert.equal(startCalls(), 1, 'five more connections inside the window, zero more container starts')
+
+    // The window runs out (30 seconds after the failure, and 25 of them have
+    // passed above). The same shape again, two at once and then five in a
+    // row, costs exactly one more start: the pair share the one retry
+    // attempt, it fails, and the five after it are inside the next window,
+    // now a minute long.
+    clock.advance(5_000)
+    const retryBurst = await Promise.all([connectAndRead(proxy.port, 'blog'), connectAndRead(proxy.port, 'blog')])
+    for (const response of retryBurst) {
+      assert.equal(response[0], 0x45)
+    }
+    assert.equal(startCalls(), 2, 'two concurrent clients at the retry time cost one start between them')
+    assert.equal(getWakeRefusal(ctx, resource.id)?.failures, 2)
+    for (let i = 0; i < 5; i++) {
+      const response = await connectAndRead(proxy.port, 'blog')
+      assert.equal(response[0], 0x45)
+      clock.advance(10_000)
+    }
+    assert.equal(startCalls(), 2, 'and the five after it, inside the new one minute window, cost none')
   } finally {
     await proxy.close()
     ctx.store.close()
@@ -380,3 +423,319 @@ test('issue #10: a failed stop, or failed written outside a wake, does not refus
   assert.equal(ctx.store.getResource(labelled.id)?.state, 'running')
   ctx.store.close()
 })
+
+// The schedule itself, driven through the real wake path: after the Nth
+// failure in a row the next automatic attempt is 30s * 2^(N-1) later, capped
+// at 15 minutes. Each step moves the clock to exactly retryAt, which must be
+// let through (the boundary is "retry time has come", not "has passed by a
+// millisecond"), and one millisecond before it, which must not.
+test('issue #10 backoff: the retry delay is 30s, 1m, 2m, 4m, 8m, then capped at 15m', async () => {
+  const { runtime, startCalls } = breakableRuntime()
+  const clock = fakeClock()
+  const ctx = buildContext(runtime, openStore(':memory:'), clock.now)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig() })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+  const deps = createProxyDeps(ctx)
+
+  const expected = [30_000, 60_000, 120_000, 240_000, 480_000, 900_000, 900_000, 900_000]
+  for (const [index, delay] of expected.entries()) {
+    const failedAt = clock.now()
+    await assert.rejects(deps.wake(resource.id))
+    assert.equal(startCalls(), index + 1)
+    const refusal = getWakeRefusal(ctx, resource.id)
+    assert.equal(refusal?.failures, index + 1)
+    assert.equal(refusal?.retryAt, failedAt + delay, `failure ${index + 1} should rest ${delay}ms`)
+
+    clock.set(failedAt + delay - 1)
+    assert.equal(isWakeRefused(ctx, resource.id), true, 'one millisecond early is still refused')
+    await assert.rejects(deps.wake(resource.id), /not woken automatically for another 1s/)
+    assert.equal(startCalls(), index + 1, 'a refused wake does not start the container')
+
+    clock.set(failedAt + delay)
+    assert.equal(isWakeRefused(ctx, resource.id), false, 'at retryAt the next wake is let through')
+  }
+  ctx.store.close()
+})
+
+// At the retry time the front door stops refusing, so every client arriving
+// then calls wake. They must still cost one start: buildWake's in-flight map
+// hands every one of them the single attempt. This is the crowd that has
+// been waiting the whole window, so it is the likeliest case there is.
+test('issue #10 backoff: many concurrent wakes at the retry time share one attempt', async () => {
+  const { runtime, startCalls } = breakableRuntime()
+  const clock = fakeClock()
+  const ctx = buildContext(runtime, openStore(':memory:'), clock.now)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig() })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+  const deps = createProxyDeps(ctx)
+
+  await assert.rejects(deps.wake(resource.id))
+  assert.equal(startCalls(), 1)
+  clock.advance(30_000)
+  const results = await Promise.allSettled(Array.from({ length: 10 }, () => deps.wake(resource.id)))
+  for (const result of results) {
+    assert.equal(result.status, 'rejected')
+  }
+  assert.equal(startCalls(), 2, 'ten wakes at the retry time, one start')
+  assert.equal(getWakeRefusal(ctx, resource.id)?.failures, 2)
+  ctx.store.close()
+})
+
+// The whole point of the backoff: the transient failure. The cause goes away
+// while the resource is refused, nobody runs `hobby wake`, and the first
+// wake after the retry time succeeds and wipes the record, so a later,
+// unrelated failure starts again at 30 seconds rather than at 4 minutes.
+test('issue #10 backoff: a transient failure recovers with no `hobby wake`, and success resets the schedule', async () => {
+  const { runtime, startCalls, fix, breakAgain } = breakableRuntime()
+  const clock = fakeClock()
+  const ctx = buildContext(runtime, openStore(':memory:'), clock.now)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig() })
+  await runtime.ensureCreated({ name: resource.config.containerName, image: 'postgres:18-alpine', env: {}, ports: [], binds: [] })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+  const deps = createProxyDeps(ctx)
+
+  await assert.rejects(deps.wake(resource.id))
+  clock.advance(30_000)
+  await assert.rejects(deps.wake(resource.id))
+  clock.advance(60_000)
+  await assert.rejects(deps.wake(resource.id))
+  assert.equal(getWakeRefusal(ctx, resource.id)?.failures, 3)
+  assert.equal(startCalls(), 3)
+
+  // The disk was freed, Docker came back, whatever it was.
+  fix()
+  await assert.rejects(deps.wake(resource.id), /not woken automatically for another 2m 0s/, 'still refused until the window ends')
+  clock.advance(120_000)
+  await deps.wake(resource.id)
+  assert.equal(startCalls(), 4)
+  assert.equal(ctx.store.getResource(resource.id)?.state, 'running')
+  assert.equal(getWakeRefusal(ctx, resource.id), null, 'a successful wake deletes the record')
+  assert.equal(isWakeRefused(ctx, resource.id), false)
+
+  // Much later, something breaks again. One failure, one 30 second rest.
+  breakAgain()
+  ctx.store.setResourceState(resource.id, 'sleeping')
+  const failedAt = clock.now()
+  await assert.rejects(deps.wake(resource.id))
+  assert.deepEqual(
+    { failures: getWakeRefusal(ctx, resource.id)?.failures, retryAt: getWakeRefusal(ctx, resource.id)?.retryAt },
+    { failures: 1, retryAt: failedAt + 30_000 }
+  )
+  ctx.store.close()
+})
+
+// `hobby wake` resets the count as well as the window: someone looked, so a
+// failure after it is the first of a new run.
+test('issue #10 backoff: an explicit start clears the count as well as the window', async () => {
+  const { runtime, startCalls } = breakableRuntime()
+  const clock = fakeClock()
+  const ctx = buildContext(runtime, openStore(':memory:'), clock.now)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig() })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+  const deps = createProxyDeps(ctx)
+
+  await assert.rejects(deps.wake(resource.id))
+  clock.advance(30_000)
+  await assert.rejects(deps.wake(resource.id))
+  assert.equal(getWakeRefusal(ctx, resource.id)?.failures, 2)
+
+  // Still broken: the explicit start itself fails, and says so to whoever
+  // ran it. It is not recorded as a refusal (routes.ts, startResourceRoute).
+  await withApi(ctx, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/v1/resources/${resource.id}/start`, { method: 'POST' })
+    assert.notEqual(res.status, 200)
+  })
+  assert.equal(startCalls(), 3)
+  assert.equal(getWakeRefusal(ctx, resource.id), null, 'the explicit start cleared the record')
+
+  const failedAt = clock.now()
+  await assert.rejects(deps.wake(resource.id))
+  assert.equal(startCalls(), 4, 'the next automatic wake is not refused')
+  assert.equal(getWakeRefusal(ctx, resource.id)?.failures, 1)
+  assert.equal(getWakeRefusal(ctx, resource.id)?.retryAt, failedAt + 30_000)
+  ctx.store.close()
+})
+
+// Studio's query route, the alarm mirror and a queue delivery wake through
+// buildWake with no front door in the way, so the error it throws is all
+// their caller sees. It has to say when the automatic retry is, how to skip
+// it, and where the reason is.
+test('issue #10 backoff: the refusal names the retry time, `hobby wake` and `hobby logs`', async () => {
+  const { runtime } = breakableRuntime()
+  const clock = fakeClock()
+  const ctx = buildContext(runtime, openStore(':memory:'), clock.now)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig() })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+  const deps = createProxyDeps(ctx)
+
+  await assert.rejects(deps.wake(resource.id))
+  clock.advance(30_000)
+  await assert.rejects(deps.wake(resource.id))
+  clock.advance(60_000)
+  await assert.rejects(deps.wake(resource.id))
+  // Third failure: a 2 minute rest. 47.5 seconds into it, 72.5 remain,
+  // which reads as 1m 13s (rounded up, never down to a time already gone).
+  clock.advance(47_500)
+  const retryAt = getWakeRefusal(ctx, resource.id)?.retryAt ?? 0
+  await assert.rejects(deps.wake(resource.id), (err: unknown) => {
+    const message = (err as Error).message
+    assert.equal((err as { code?: string }).code, 'wake_failed')
+    assert.match(message, /failed 3 times in a row/)
+    assert.match(message, /for another 1m 13s/)
+    assert.ok(message.includes(new Date(retryAt).toISOString()), `the absolute retry time is missing: ${message}`)
+    assert.match(message, /`hobby wake blog\/primary` to retry it now/)
+    const hint = (err as { hint?: string }).hint ?? ''
+    assert.match(hint, /hobby logs blog\/primary/)
+    assert.match(hint, /exec format error/, 'the hint carries the last start error')
+    return true
+  })
+  ctx.store.close()
+})
+
+// `hobby ls` end to end: the real CLI (run, packages/cli/src/cli/main.ts)
+// against the real daemon API (createApp) on a unix socket, over a context
+// with a refused resource in it. The human line shows the countdown and the
+// error; --json carries the same record as wakeRefusal, with retryAt as an
+// ISO string; a resource with no refusal says null, not nothing.
+test('issue #10 backoff: `hobby ls` and --json show a refused resource and when it is retried', async () => {
+  const { runtime } = breakableRuntime()
+  const clock = fakeClock()
+  // mkdtemp's short suffix, not a UUID: a unix socket path has a length
+  // limit (104 bytes on macOS), and a UUID under macOS's tmpdir is past it.
+  const home = mkdtempSync(join(tmpdir(), 'hobby-wl-'))
+  const ctx = buildContext(runtime, openStore(':memory:'), clock.now)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const refused = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig() })
+  ctx.store.setResourceState(refused.id, 'sleeping')
+  const healthy = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'other', config: samplePostgresConfig() })
+  ctx.store.setResourceState(healthy.id, 'sleeping')
+  // The CLI renders the countdown against the real clock, so for this test
+  // the daemon's fake clock starts at the real time and simply never moves.
+  clock.set(Date.now())
+  const failedAt = clock.now()
+  await assert.rejects(createProxyDeps(ctx).wake(refused.id))
+
+  const server = createServer(createApp(ctx))
+  await new Promise<void>((resolve) => server.listen(join(home, 'hobby.sock'), () => resolve()))
+  try {
+    const human = makeIo(home)
+    assert.equal(await run(['ls'], human.io), 0)
+    const line = human.out.find((l) => l.includes('primary')) ?? ''
+    // 30s, or 29s if a second boundary passed since the failure; never more.
+    assert.match(
+      line,
+      /^\s+primary {2}postgres {2}failed {2}port 25559 {2}\(wake refused, retry in (29|30)s: container exited immediately: exec format error\)$/
+    )
+    const other = human.out.find((l) => l.includes('other')) ?? ''
+    assert.doesNotMatch(other, /wake refused|last wake failed/)
+
+    const json = makeIo(home)
+    assert.equal(await run(['ls', '--json'], json.io), 0)
+    const body = JSON.parse(json.out.join('\n')) as unknown
+    const resources = collectResources(body)
+    const wire = resources.find((r) => r.id === refused.id)
+    assert.deepEqual(wire?.wakeRefusal, {
+      failures: 1,
+      retryAt: new Date(failedAt + 30_000).toISOString(),
+      lastError: 'container exited immediately: exec format error',
+    })
+    assert.equal(resources.find((r) => r.id === healthy.id)?.wakeRefusal, null)
+  } finally {
+    const closed = new Promise<void>((resolve) => server.close(() => resolve()))
+    server.closeAllConnections()
+    await closed
+    ctx.store.close()
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// A kind handler may throw anything, and lastError goes out on the wire to
+// every listing for up to 15 minutes. A connection string in a start error
+// must not survive the trip.
+test('issue #10 backoff: a credential in the start error is redacted before it reaches the wire', async () => {
+  const base = createFakeRuntime()
+  const runtime: ComputeRuntime = {
+    ...base,
+    async start(): Promise<void> {
+      throw new Error('app exited: could not reach postgres://postgres:hunter2@10.0.0.5:5432/blog?password=hunter2')
+    },
+  }
+  const clock = fakeClock()
+  const ctx = buildContext(runtime, openStore(':memory:'), clock.now)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig() })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+  await assert.rejects(createProxyDeps(ctx).wake(resource.id))
+
+  await withApi(ctx, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/v1/projects/blog`)
+    const text = await res.text()
+    assert.ok(!text.includes('hunter2'), 'the password crossed the wire')
+    const body = JSON.parse(text) as { resources: Array<{ wakeRefusal: { lastError: string } | null }> }
+    assert.equal(
+      body.resources[0]?.wakeRefusal?.lastError,
+      'app exited: could not reach postgres://<redacted>@10.0.0.5:5432/blog?password=<redacted>'
+    )
+  })
+  ctx.store.close()
+})
+
+// A wake that waited on a snapshot's fence and found the resource running
+// afterwards (the snapshot's resume started it) never calls the kind handler,
+// but it is as good as a successful one for the record: whatever failed
+// before no longer does, and leaving the record would refuse the next wake
+// after this resource sleeps again for a failure that has been fixed.
+test('issue #10 backoff: a wake that finds the resource running after a snapshot fence clears the record', async () => {
+  const { runtime, startCalls } = breakableRuntime()
+  const clock = fakeClock()
+  const ctx = buildContext(runtime, openStore(':memory:'), clock.now)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig() })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+  const deps = createProxyDeps(ctx)
+
+  await assert.rejects(deps.wake(resource.id))
+  clock.advance(30_000)
+  const release = holdProjectAsleep(ctx, project.id, project.name)
+  const waking = deps.wake(resource.id)
+  ctx.store.setResourceState(resource.id, 'running')
+  release()
+  await waking
+  assert.equal(startCalls(), 1, 'the fenced wake found it running and started nothing')
+  assert.equal(getWakeRefusal(ctx, resource.id), null)
+  ctx.store.close()
+})
+
+function makeIo(home: string): { io: Io; out: string[] } {
+  const out: string[] = []
+  return {
+    io: { out: (s) => out.push(s), err: () => {}, env: { HOBBY_HOME: home }, cwd: home, readLine: async () => '' },
+    out,
+  }
+}
+
+// `hobby ls --json` prints whatever shape the command assembled; find every
+// object with an id and a kind in it rather than depending on that shape.
+function collectResources(value: unknown): Array<{ id: string; wakeRefusal?: unknown }> {
+  const found: Array<{ id: string; wakeRefusal?: unknown }> = []
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) {
+      for (const item of v) walk(item)
+      return
+    }
+    if (v !== null && typeof v === 'object') {
+      const record = v as Record<string, unknown>
+      if (typeof record['id'] === 'string' && typeof record['kind'] === 'string') {
+        found.push(record as { id: string; wakeRefusal?: unknown })
+      }
+      for (const child of Object.values(record)) walk(child)
+    }
+  }
+  walk(value)
+  return found
+}
