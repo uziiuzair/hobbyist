@@ -69,6 +69,12 @@ export function resolvePgdataPath(hostDataDir: string): string {
   return join(hostDataDir, POSTGRES_MAJOR_VERSION, 'docker')
 }
 
+export interface ProxyTlsConfig {
+  certFile: string
+  keyFile: string
+  hostname: string
+}
+
 export interface HobbyConfig {
   image: string
   proxyPort: number
@@ -78,11 +84,20 @@ export interface HobbyConfig {
   //   "tailnet"   loopback plus this machine's Tailscale address
   //   "all"       every interface, the pre-0.1 behaviour, spelled out
   //
-  // Defaults to loopback because the proxy speaks no TLS: it answers an
-  // SSLRequest with N, so anything reaching it over a network sends its
-  // password in cleartext. Two boxes installed from hobby.sh/install were
-  // measured reachable from the open internet before this existed.
+  // Defaults to loopback because, without proxyTls below, the proxy speaks
+  // no TLS: it answers an SSLRequest with N, so anything reaching it over a
+  // network sends its password in cleartext. Two boxes installed from
+  // hobby.sh/install were measured reachable from the open internet before
+  // this existed.
   proxyHost: string
+  // TLS for the Postgres proxy. ADR 0019. The certificate and key are files
+  // the operator provides (certbot's /etc/letsencrypt/live/<name>/ pair is
+  // the expected case) and are re-read when they change, so a renewal needs
+  // no restart. `hostname` is the name the certificate is for, and the host
+  // the daemon puts in the public connection string. With this set, a
+  // plaintext connection from another machine is refused, which is what
+  // makes `proxyHost: "all"` safe to use. Null means no TLS, as before.
+  proxyTls: ProxyTlsConfig | null
   studioPort: number
   apiPort: number
   // Where the HTTP wake router listens, on loopback. Caddy's catch-all route
@@ -138,6 +153,7 @@ const DEFAULT_CONFIG: HobbyConfig = {
   image: 'postgres:18-alpine',
   proxyPort: 5432,
   proxyHost: '127.0.0.1',
+  proxyTls: null,
   studioPort: 8443,
   apiPort: 7432,
   httpPort: 7433,
@@ -195,6 +211,15 @@ function readEnvConfig(env: NodeJS.ProcessEnv): Partial<HobbyConfig> {
   if (env.HOBBY_IMAGE !== undefined) config.image = env.HOBBY_IMAGE
   if (env.HOBBY_PROXY_PORT !== undefined) config.proxyPort = Number(env.HOBBY_PROXY_PORT)
   if (env.HOBBY_PROXY_HOST !== undefined) config.proxyHost = env.HOBBY_PROXY_HOST
+  // All three or none. A partial set is kept partial (empty strings) rather
+  // than dropped, so the daemon refuses to start and names what is missing,
+  // instead of starting without TLS because one variable had a typo.
+  const tlsCert = env.HOBBY_PROXY_TLS_CERT
+  const tlsKey = env.HOBBY_PROXY_TLS_KEY
+  const tlsHostname = env.HOBBY_PROXY_TLS_HOSTNAME
+  if (tlsCert !== undefined || tlsKey !== undefined || tlsHostname !== undefined) {
+    config.proxyTls = { certFile: tlsCert ?? '', keyFile: tlsKey ?? '', hostname: tlsHostname ?? '' }
+  }
   if (env.HOBBY_STUDIO_PORT !== undefined) config.studioPort = Number(env.HOBBY_STUDIO_PORT)
   if (env.HOBBY_API_PORT !== undefined) config.apiPort = Number(env.HOBBY_API_PORT)
   if (env.HOBBY_HTTP_PORT !== undefined) config.httpPort = Number(env.HOBBY_HTTP_PORT)

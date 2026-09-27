@@ -216,7 +216,7 @@ export async function cmdInit(io: Io, paths: Paths, config: HobbyConfig, json: b
     io.err(hostNetworkingIssue)
   }
 
-  io.err(proxyBindNote(config.proxyHost))
+  io.err(proxyBindNote(config.proxyHost, config.proxyTls?.hostname ?? null))
 
   if (!report.runtimeAvailable) {
     io.err('the container runtime is not reachable; hobby refuses to continue until it is')
@@ -561,14 +561,22 @@ export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promi
     }
     throw err
   }
-  const { connectionString, tailnetConnectionString } = await c.api.getConnection(resource.id)
+  const { connectionString, tailnetConnectionString, publicConnectionString } = await c.api.getConnection(resource.id)
 
   if (flags.json) {
     // Not one raw API response (no single route did all of this), but a
     // composite object whose every field is exactly what its own call
     // returned. Human output below reads only connectionString off this
     // same object, never a second source.
-    c.io.out(JSON.stringify({ project, resource, connectionString, tailnetConnectionString: tailnetConnectionString ?? null }))
+    c.io.out(
+      JSON.stringify({
+        project,
+        resource,
+        connectionString,
+        tailnetConnectionString: tailnetConnectionString ?? null,
+        publicConnectionString: publicConnectionString ?? null,
+      })
+    )
     return 0
   }
 
@@ -577,6 +585,7 @@ export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promi
   // exactly what it always was so `hobby new blog | pbcopy` keeps grabbing
   // one usable URI.
   if (tailnetConnectionString != null) c.io.out(`tailnet: ${tailnetConnectionString}`)
+  if (publicConnectionString != null) c.io.out(`public: ${publicConnectionString}`)
   return 0
 }
 
@@ -773,10 +782,16 @@ export async function cmdConnect(c: Ctx, positionals: string[], flags: Flags): P
     throw new UsageError('usage: hobby connect <target>')
   }
   const { resource } = await resolveTarget(c.api, target)
-  const { connectionString, tailnetConnectionString } = await c.api.getConnection(resource.id)
+  const { connectionString, tailnetConnectionString, publicConnectionString } = await c.api.getConnection(resource.id)
 
   if (flags.json) {
-    c.io.out(JSON.stringify({ connectionString, tailnetConnectionString: tailnetConnectionString ?? null }))
+    c.io.out(
+      JSON.stringify({
+        connectionString,
+        tailnetConnectionString: tailnetConnectionString ?? null,
+        publicConnectionString: publicConnectionString ?? null,
+      })
+    )
     return 0
   }
 
