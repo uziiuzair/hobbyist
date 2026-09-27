@@ -94,3 +94,15 @@ run under `node --test`, which would have passed either broken version, so
 - **Rate limiting or blocking scanners.** A public Postgres port attracts
   password guessing. SCRAM makes each guess expensive, and the generated
   passwords are long and random, but nothing here throttles attempts.
+
+## What would reopen this
+
+- **Bun fixes in-place server TLS upgrades.** Then the loopback relay can go,
+  replaced by wrapping the accepted socket. The relay is a workaround, not a
+  design preference, and `tls.test.ts` passing under `bun test` against a
+  direct upgrade is the signal.
+- **Caddy's certificate store becomes persistent and Caddy becomes the
+  default.** Then pointing `proxyTls` at Caddy's files by default would save
+  the operator a certbot setup.
+- **Password guessing against a public 5432 shows up in real use.** Then
+  throttling at the proxy earns its place.
