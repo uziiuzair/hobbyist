@@ -931,15 +931,21 @@ async function connectionRoute(ctx: DaemonContext, id: string): Promise<RouteRes
   // 2026-08-13-postgres-over-tailnet.md). Null when no detector is wired
   // (tests, and any future caller of createApp that opts out) or when the
   // box has no running tailscaled.
+  //
+  // With proxyTls on, a tailnet peer is another machine like any other and
+  // must use TLS (ADR 0019), so its string carries sslmode=require too.
+  // `require`, not `verify-full`: the certificate is for proxyTls.hostname,
+  // not the MagicDNS name, so full verification over this string would fail.
   const tailnetHost = ctx.detectTailnet === undefined ? null : await ctx.detectTailnet()
+  const tlsSuffix = ctx.config.proxyTls === null ? '' : '?sslmode=require'
   const tailnetValue =
     tailnetHost === null
       ? null
-      : connectionString(project, resource, {
+      : `${connectionString(project, resource, {
           host: tailnetHost,
           proxyPort: ctx.config.proxyPort,
           viaProxy: true,
-        })
+        })}${tlsSuffix}`
   // The public variant exists only when the proxy has a certificate (ADR
   // 0019): the hostname the certificate is for, and sslmode=require, since
   // the proxy refuses plaintext from other machines and a string that fails

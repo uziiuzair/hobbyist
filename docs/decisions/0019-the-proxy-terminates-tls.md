@@ -43,7 +43,9 @@ startups from other machines once it is.**
   `sslmode=require` connection.
 - **The daemon reports a third connection string**, `publicConnectionString`,
   built from `hostname` with `?sslmode=require`, and `hobby new` prints it as
-  `public:`.
+  `public:`. The tailnet string gains `?sslmode=require` too, since a tailnet
+  peer is another machine. `require` rather than `verify-full` there, because
+  the certificate names `hostname`, not the MagicDNS name.
 
 With `proxyTls` set, `proxyHost: "all"` is the intended setup rather than the
 footgun ADR 0017 warned about, and `hobby init` says so instead of warning.
@@ -71,7 +73,8 @@ to the ordinary connection handler. Measured working under both runtimes.
 `server.setSecureContext()`, the documented way to swap a certificate, is
 **a no-op under Bun** as well (same version, measured: the old certificate is
 still served). So a changed certificate starts a new inner server and closes
-the old one.
+the old one. A pair that fails to load (certbot caught with one file replaced)
+leaves the old server in service, and the next connection tries again.
 
 Both were found by spiking under Bun before writing any code. The unit tests
 run under `node --test`, which would have passed either broken version, so

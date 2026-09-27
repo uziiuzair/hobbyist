@@ -124,3 +124,9 @@ test('a partial HOBBY_PROXY_TLS_* set is kept partial, for the daemon to refuse,
   const config = resolveConfig({ env: { HOBBY_PROXY_TLS_CERT: '/c.pem' }, cwd })
   assert.deepEqual(config.proxyTls, { certFile: '/c.pem', keyFile: '', hostname: '' })
 })
+
+test('a malformed proxyTls in hobby.json becomes a partial config, never a silent null', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-config-test-'))
+  writeFileSync(join(dir, 'hobby.json'), JSON.stringify({ proxyTls: 'yes' }))
+  assert.deepEqual(resolveConfig({ env: {}, cwd: dir }).proxyTls, { certFile: '', keyFile: '', hostname: '' })
+})

@@ -243,6 +243,38 @@ test('a replaced certificate is served to the next connection without a restart'
   }
 })
 
+test('a renewal caught halfway keeps serving the old certificate, then swaps once both files are in place', async () => {
+  const dir = join(tmpdir(), `hobby-tls-test-${randomUUID()}`)
+  mkdirSync(dir, { recursive: true })
+  const files = { certFile: join(dir, 'cert.pem'), keyFile: join(dir, 'key.pem') }
+  copyFileSync(fixtureFiles('first').certFile, files.certFile)
+  copyFileSync(fixtureFiles('first').keyFile, files.keyFile)
+
+  const proxy = await startPgProxy({ port: 0, deps: depsFor(1), wakeTimeoutMs: 1000, tls: files })
+  try {
+    // The new certificate is on disk, its key is not yet: a pair that does
+    // not match, which tls.createServer refuses.
+    copyFileSync(fixtureFiles('second').certFile, files.certFile)
+    const later = new Date(Date.now() + 5000)
+    utimesSync(files.certFile, later, later)
+
+    const during = await negotiateTls(proxy.port)
+    assert.equal(during.commonName, 'first.test')
+    during.socket.destroy()
+
+    copyFileSync(fixtureFiles('second').keyFile, files.keyFile)
+    const evenLater = new Date(Date.now() + 10000)
+    utimesSync(files.certFile, evenLater, evenLater)
+    utimesSync(files.keyFile, evenLater, evenLater)
+
+    const after = await negotiateTls(proxy.port)
+    assert.equal(after.commonName, 'second.test')
+    after.socket.destroy()
+  } finally {
+    await proxy.close()
+  }
+})
+
 test('a certificate that cannot be read fails startPgProxy instead of serving plaintext', async () => {
   await assert.rejects(
     startPgProxy({

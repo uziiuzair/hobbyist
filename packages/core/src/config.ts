@@ -199,11 +199,24 @@ function readFileConfig(cwd: string): Partial<HobbyConfig> {
 // same one-line treatment here, at the boundary, rather than at whichever
 // use site happens to read it first.
 function sanitizeFileConfig(fileConfig: Partial<HobbyConfig>): Partial<HobbyConfig> {
-  if (!('caddyEnabled' in fileConfig)) {
-    return fileConfig
+  let sanitized = fileConfig
+  if ('caddyEnabled' in sanitized) {
+    const raw: unknown = sanitized.caddyEnabled
+    sanitized = { ...sanitized, caddyEnabled: raw === true }
   }
-  const raw: unknown = fileConfig.caddyEnabled
-  return { ...fileConfig, caddyEnabled: raw === true }
+  // proxyTls: anything but null or an object is normalized to an object of
+  // whatever string fields it has, so a malformed value ("proxyTls": "yes")
+  // reaches the daemon's proxyTlsFiles as a partial config it refuses by
+  // name, rather than as a TypeError, and never as "no TLS".
+  if ('proxyTls' in sanitized && sanitized.proxyTls !== null) {
+    const raw: unknown = sanitized.proxyTls
+    const field = (key: string): string => {
+      const value: unknown = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)[key] : undefined
+      return typeof value === 'string' ? value : ''
+    }
+    sanitized = { ...sanitized, proxyTls: { certFile: field('certFile'), keyFile: field('keyFile'), hostname: field('hostname') } }
+  }
+  return sanitized
 }
 
 function readEnvConfig(env: NodeJS.ProcessEnv): Partial<HobbyConfig> {

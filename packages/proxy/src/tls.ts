@@ -27,6 +27,9 @@ import { statSync, readFileSync } from 'node:fs'
 import net from 'node:net'
 import tls from 'node:tls'
 
+// Matches proxy.ts's grace for the same purpose.
+const FORCE_CLOSE_GRACE_MS = 1000
+
 export interface ProxyTlsFiles {
   certFile: string
   keyFile: string
@@ -44,7 +47,12 @@ function stampOf(files: ProxyTlsFiles): string {
   return `${statSync(files.certFile).mtimeMs}:${statSync(files.keyFile).mtimeMs}`
 }
 
-function startInner(files: ProxyTlsFiles, onConnection: (socket: tls.TLSSocket) => void): Promise<Inner> {
+// Async so every failure is a rejection. The stat, the reads and
+// tls.createServer all throw synchronously (a key that does not match its
+// certificate throws from createServer), and a synchronous throw here would
+// escape refresh's .catch and reach the client as an internal error instead
+// of leaving the old certificate in service.
+async function startInner(files: ProxyTlsFiles, onConnection: (socket: tls.TLSSocket) => void): Promise<Inner> {
   // Stamp before reading, so a renewal landing between the two reads makes
   // the stamp look stale and the next check rebuilds, rather than the
   // reverse, which would serve an old certificate under a new stamp forever.
@@ -56,7 +64,7 @@ function startInner(files: ProxyTlsFiles, onConnection: (socket: tls.TLSSocket) 
     { cert: readFileSync(files.certFile), key: readFileSync(files.keyFile), minVersion: 'TLSv1.2' },
     onConnection
   )
-  return new Promise((resolve, reject) => {
+  return await new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(0, '127.0.0.1', () => {
       server.off('error', reject)
@@ -132,8 +140,15 @@ export async function startTlsTerminator(
         }
         client.on('error', finish)
         upstream.on('error', finish)
-        client.on('close', () => upstream.end())
-        upstream.on('close', () => client.end())
+        client.on('close', () => upstream.destroy())
+        // end() then a forced destroy, for the same reason proxy.ts's
+        // sendErrorAndClose has one: a peer that never acknowledges the FIN
+        // would hold this socket half-open and keep server.close() from
+        // resolving.
+        upstream.on('close', () => {
+          client.end()
+          setTimeout(() => client.destroy(), FORCE_CLOSE_GRACE_MS).unref()
+        })
         client.pipe(upstream)
         upstream.pipe(client)
       })
