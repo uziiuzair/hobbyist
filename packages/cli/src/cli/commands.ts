@@ -1884,7 +1884,12 @@ export async function cmdUpdate(io: Io, paths: Paths, flags: Flags): Promise<num
     throw new HobbyError('internal', 'no release tags found', 'the remote has no v* tags to update to')
   }
 
-  const current = git(['describe', '--tags', '--exact-match']).length > 0 ? git(['describe', '--tags', '--exact-match']) : null
+  // Not through git(): --exact-match exits nonzero on any commit that is not a
+  // tag, which is a normal state (a box moved to main by hand), not an error.
+  // Throwing here made update unusable from exactly the checkouts that most
+  // needed moving back onto a release.
+  const described = spawnSync('git', ['-C', src, 'describe', '--tags', '--exact-match'], { encoding: 'utf8' })
+  const current = described.status === 0 ? (described.stdout || '').trim() : null
   if (current === latest) {
     io.out(`already on ${latest}`)
     return 0
