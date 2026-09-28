@@ -40,6 +40,7 @@ Start the daemon from the directory holding your `hobby.json`.
 | `image` | | `postgres:18-alpine` | The Postgres image |
 | `proxyPort` | `HOBBY_PROXY_PORT` | `5432` | Where the wire-protocol proxy listens |
 | `proxyHost` | `HOBBY_PROXY_HOST` | `127.0.0.1` | Which addresses it binds. An address, `"tailnet"`, or `"all"`. See below |
+| `proxyTls` | `HOBBY_PROXY_TLS_CERT`, `HOBBY_PROXY_TLS_KEY`, `HOBBY_PROXY_TLS_HOSTNAME` | `null` | TLS for the proxy: `{ certFile, keyFile, hostname }`. See below |
 | `project` | | `null` | Which project this directory belongs to. Written by `hobby link` |
 | `studioPort` | `HOBBY_STUDIO_PORT` | `8443` | **Nothing listens on this.** Studio is served by the daemon on `apiPort`. The value is only used by a preflight port check |
 | `apiPort` | | `7432` | The daemon API, loopback only |
@@ -78,15 +79,47 @@ A minimal `hobby.json`:
 laptop. It binds loopback as well, because `hobby connect` builds its string
 against `127.0.0.1` and would otherwise stop working on the box itself.
 
-:::danger[`"all"` puts Postgres on the internet]
-The proxy speaks no TLS. It answers an `SSLRequest` with `N`, so anything
-connecting across a network sends its password in cleartext. On a cloud VM with
+:::danger[`"all"` without `proxyTls` puts Postgres on the internet]
+Without `proxyTls`, the proxy speaks no TLS. It answers an `SSLRequest` with
+`N`, so anything connecting across a network sends its password in cleartext. On a cloud VM with
 a public address and no firewall, `"all"` means anyone can reach your database.
 
 Two boxes installed from `hobby.sh/install` were measured in exactly that state
 on 2026-08-22, which is why the default changed.
 [ADR 0017](/docs/decisions/0017-the-proxy-binds-loopback-by-default/).
 :::
+
+### From an app host that is not on your tailnet
+
+Give the proxy a certificate. With `proxyTls` set, it answers an `SSLRequest`
+with `S`, terminates TLS itself, and **refuses a plaintext connection from any
+other machine** with `FATAL 28000`. Loopback stays plaintext. That is what
+makes `"all"` safe.
+
+On the box, with a DNS name pointing at it (DNS only, not proxied: Cloudflare's
+proxy cannot carry the Postgres protocol) and port 80 free:
+
+```sh
+certbot certonly --standalone -d db.example.com
+```
+
+Then set all three, for example in a systemd drop-in, since the daemon does not
+read `/root/hobby.json` when started by systemd:
+
+```ini
+# /etc/systemd/system/hobby.service.d/tls.conf
+[Service]
+Environment=HOBBY_PROXY_HOST=all
+Environment=HOBBY_PROXY_TLS_CERT=/etc/letsencrypt/live/db.example.com/fullchain.pem
+Environment=HOBBY_PROXY_TLS_KEY=/etc/letsencrypt/live/db.example.com/privkey.pem
+Environment=HOBBY_PROXY_TLS_HOSTNAME=db.example.com
+```
+
+`hobby new` then prints a third line, `public:`, a connection string for that
+hostname ending in `?sslmode=require`. The certificate files are re-read when
+they change, so certbot's renewals need no restart. All three settings or none:
+a partial set stops the daemon from starting.
+[ADR 0019](/docs/decisions/0019-the-proxy-terminates-tls/).
 
 ## Paths
 

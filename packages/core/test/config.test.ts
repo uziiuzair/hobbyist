@@ -99,3 +99,34 @@ test('a hobby.json holding the real boolean true for caddyEnabled still turns ca
   const config = resolveConfig({ env: {}, cwd: fileCwd })
   assert.equal(config.caddyEnabled, true)
 })
+
+test('proxyTls is off by default', () => {
+  assert.equal(resolveConfig({ env: {}, cwd }).proxyTls, null)
+})
+
+test('the three HOBBY_PROXY_TLS_* variables set proxyTls', () => {
+  const config = resolveConfig({
+    env: {
+      HOBBY_PROXY_TLS_CERT: '/etc/letsencrypt/live/db.example.com/fullchain.pem',
+      HOBBY_PROXY_TLS_KEY: '/etc/letsencrypt/live/db.example.com/privkey.pem',
+      HOBBY_PROXY_TLS_HOSTNAME: 'db.example.com',
+    },
+    cwd,
+  })
+  assert.deepEqual(config.proxyTls, {
+    certFile: '/etc/letsencrypt/live/db.example.com/fullchain.pem',
+    keyFile: '/etc/letsencrypt/live/db.example.com/privkey.pem',
+    hostname: 'db.example.com',
+  })
+})
+
+test('a partial HOBBY_PROXY_TLS_* set is kept partial, for the daemon to refuse, not dropped', () => {
+  const config = resolveConfig({ env: { HOBBY_PROXY_TLS_CERT: '/c.pem' }, cwd })
+  assert.deepEqual(config.proxyTls, { certFile: '/c.pem', keyFile: '', hostname: '' })
+})
+
+test('a malformed proxyTls in hobby.json becomes a partial config, never a silent null', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-config-test-'))
+  writeFileSync(join(dir, 'hobby.json'), JSON.stringify({ proxyTls: 'yes' }))
+  assert.deepEqual(resolveConfig({ env: {}, cwd: dir }).proxyTls, { certFile: '', keyFile: '', hostname: '' })
+})

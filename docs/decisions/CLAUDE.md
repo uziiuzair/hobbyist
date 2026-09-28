@@ -61,6 +61,7 @@ that matters, because it is the difference between a decision and a dogma.
 | [0011](0011-workerd-via-miniflare-as-the-worker-runtime.md) | workerd, via Miniflare, as the `worker` runtime |
 | [0012](0012-durable-objects-and-the-alarm-mirror.md) | Durable Objects as a resource kind, and the alarm mirror that lets them sleep |
 | [0013](0013-queues-and-the-broker-outside-the-runtime.md) | Queues as a resource kind, with the broker held outside the runtime |
+| [0019](0019-the-proxy-terminates-tls.md) | The proxy terminates TLS from operator-provided certificate files, and refuses plaintext from other machines once it does |
 
 0007 supersedes the scope section of the original root `CLAUDE.md` and is the one
 to read first if you are wondering why this is bigger than a database tool. 0001
