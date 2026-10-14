@@ -263,7 +263,7 @@ test('hobby new prints the tailnet connection string on its own labelled line', 
   ])
 })
 
-test('hobby connect --json passes tailnetConnectionString through', async () => {
+test('hobby connect --json passes tailnetConnectionString and publicConnectionString through', async () => {
   const out: string[] = []
   const api = {
     async getProject(_name: string) {
@@ -276,6 +276,7 @@ test('hobby connect --json passes tailnetConnectionString through', async () => 
       return {
         connectionString: 'postgres://postgres:secret@127.0.0.1:5432/blog',
         tailnetConnectionString: 'postgres://postgres:secret@box.tail1234.ts.net:5432/blog',
+        publicConnectionString: 'postgres://postgres:secret@db.example.com:5432/blog?sslmode=require',
       }
     },
   }
@@ -292,6 +293,7 @@ test('hobby connect --json passes tailnetConnectionString through', async () => 
   assert.deepEqual(JSON.parse(out[0] as string), {
     connectionString: 'postgres://postgres:secret@127.0.0.1:5432/blog',
     tailnetConnectionString: 'postgres://postgres:secret@box.tail1234.ts.net:5432/blog',
+    publicConnectionString: 'postgres://postgres:secret@db.example.com:5432/blog?sslmode=require',
   })
 })
 

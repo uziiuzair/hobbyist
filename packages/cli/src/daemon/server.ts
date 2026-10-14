@@ -18,9 +18,9 @@ import { chmod, rm } from 'node:fs/promises'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import net from 'node:net'
 import { promisify } from 'node:util'
-import { HobbyError, type Resource } from '@hobby.sh/core'
+import { HobbyError, type ProxyTlsConfig, type Resource } from '@hobby.sh/core'
 import { startAlarmMirror } from '@hobby.sh/do'
-import { startHttpRouter, startPgProxy, TLS_ASK_PATH } from '@hobby.sh/proxy'
+import { startHttpRouter, startPgProxy, TLS_ASK_PATH, type ProxyTlsFiles } from '@hobby.sh/proxy'
 import { startQueueTick } from '@hobby.sh/queue'
 import { durableObjectNamespaces } from './alarms.js'
 import { createCaddyManager, type CaddyManager } from './caddy.js'
@@ -163,6 +163,24 @@ export async function resolveProxyHosts(ctx: DaemonContext): Promise<string[]> {
   }
 
   return ['127.0.0.1', ip]
+}
+
+// ADR 0019. Refuses a half-configured proxyTls rather than starting without
+// TLS: an operator who set two of the three variables meant to have TLS, and
+// a daemon that quietly serves plaintext instead is the failure this whole
+// setting exists to prevent. A missing or unreadable file fails later, in
+// startPgProxy, with the filesystem's own error, before the port is bound.
+export function proxyTlsFiles(tls: ProxyTlsConfig | null): ProxyTlsFiles | undefined {
+  if (tls === null) return undefined
+  const missing = (['certFile', 'keyFile', 'hostname'] as const).filter((k) => tls[k].trim() === '')
+  if (missing.length > 0) {
+    throw new HobbyError(
+      'usage',
+      `proxyTls is missing ${missing.join(', ')}`,
+      'Set all three (HOBBY_PROXY_TLS_CERT, HOBBY_PROXY_TLS_KEY, HOBBY_PROXY_TLS_HOSTNAME), or none.'
+    )
+  }
+  return { certFile: tls.certFile, keyFile: tls.keyFile }
 }
 
 // The bridge gateway of a docker network, or null if it has none or docker
@@ -451,6 +469,7 @@ export async function startDaemon(
   // against 127.0.0.1 and would otherwise stop working on the very box the
   // database lives on.
   const proxyHosts = await resolveProxyHosts(ctx)
+  const proxyTls = proxyTlsFiles(ctx.config.proxyTls)
   const proxies: Array<{ port: number; close: () => Promise<void> }> = []
   for (const host of proxyHosts) {
     proxies.push(
@@ -459,6 +478,7 @@ export async function startDaemon(
         host,
         deps: createProxyDeps(ctx),
         wakeTimeoutMs: ctx.config.wakeTimeoutMs,
+        ...(proxyTls === undefined ? {} : { tls: proxyTls }),
       })
     )
   }

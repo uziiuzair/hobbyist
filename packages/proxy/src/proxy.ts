@@ -12,6 +12,7 @@
 import net from 'node:net'
 import { HobbyError, parseRoutingKey } from '@hobby.sh/core'
 import type { ActivityTracker, ConnectionHandle } from './activity.js'
+import { isLoopbackAddress, startTlsTerminator, type ProxyTlsFiles, type TlsTerminator } from './tls.js'
 import { CancelRegistry, type CancelRoute } from './cancel.js'
 import {
   buildCancelRequest,
@@ -61,6 +62,10 @@ export interface ProxyDeps {
 }
 
 const PROTOCOL_VIOLATION = '08P01'
+// What Postgres itself answers when pg_hba.conf rejects a connection, which
+// is exactly what a plaintext connection from another machine is here once
+// TLS is configured.
+const INVALID_AUTHORIZATION = '28000'
 const UNKNOWN_DATABASE = '3D000'
 
 // A client that never sends a complete startup packet (connects and goes
@@ -797,11 +802,25 @@ async function handleStartup(
   spliceAndTrackActivity(socket, held.upstream, deps.activity, held.handle, cancels, target, held.initial)
 }
 
+// How a connection arrived, for the encryption negotiation below. `tls` is
+// the terminator when the proxy has a certificate, null when it does not.
+// `encrypted` is true for a connection handed back by that terminator, which
+// is already inside TLS and must never be asked to negotiate it again.
+interface ConnectionMode {
+  tls: TlsTerminator | null
+  encrypted: boolean
+  // Whether a peer may send its startup in plaintext while TLS is on.
+  // isLoopbackAddress in production; a parameter so a test can play a
+  // remote client without a second machine.
+  plaintextAllowed: (address: string | undefined) => boolean
+}
+
 async function handleConnectionInner(
   socket: net.Socket,
   deps: ProxyDeps,
   cancels: CancelRegistry,
-  wakeTimeoutMs: number
+  wakeTimeoutMs: number,
+  mode: ConnectionMode
 ): Promise<void> {
   // A permanent safety net for the life of this function. readMessage
   // attaches and detaches its own 'error' listener around each read, and
@@ -824,17 +843,22 @@ async function handleConnectionInner(
     return
   }
 
-  // TLS/GSS termination is required eventually: the startup packet is
-  // unreadable inside a TLS session otherwise, and this is recorded as the
-  // explicit next step in docs/proxy/, not built here. For now every
-  // client is told plaintext is the only option for both encryption
-  // negotiation requests; a well-behaved client retries on the same
-  // connection after seeing the single 'N'. Looping (bounded) rather than
-  // handling only one is what makes a real libpq default (gssencmode and
-  // sslmode both "prefer": GSSENCRequest, then SSLRequest, then the real
-  // startup packet) actually work end to end.
+  // Encryption negotiation. GSSENCRequest is always answered 'N': there is
+  // no Kerberos here. SSLRequest is answered 'S' when a certificate is
+  // configured and this connection is not already inside TLS, and the socket
+  // is then handed to the terminator (tls.ts), which returns the decrypted
+  // connection to this same function with `encrypted` set. Otherwise 'N',
+  // and a well-behaved client retries on the same connection. Looping
+  // (bounded) rather than handling only one is what makes a real libpq
+  // default (gssencmode and sslmode both "prefer": GSSENCRequest, then
+  // SSLRequest, then the real startup packet) work end to end.
   for (let i = 0; i < MAX_ENCRYPTION_NEGOTIATIONS && (read.type === 'ssl_request' || read.type === 'gss_enc_request'); i++) {
     if (!socket.writable) return
+    if (read.type === 'ssl_request' && mode.tls !== null && !mode.encrypted) {
+      socket.write(Buffer.from('S', 'ascii'))
+      mode.tls.relay(socket)
+      return
+    }
     socket.write(Buffer.from('N', 'ascii'))
     try {
       read = await readMessage(socket, remainingMs(deadline))
@@ -858,34 +882,76 @@ async function handleConnectionInner(
     return
   }
 
+  // With a certificate configured, a password never crosses the network in
+  // the clear: a plaintext startup from another machine is refused before
+  // anything is resolved or woken. Checked here, after cancel routing, on
+  // purpose: a CancelRequest carries no credentials, and libpq before 17
+  // sends it in plaintext even on a connection that used sslmode=require, so
+  // refusing it would break query cancellation for exactly the clients
+  // doing the right thing. Loopback stays plaintext, see isLoopbackAddress.
+  if (mode.tls !== null && !mode.encrypted && !mode.plaintextAllowed(socket.remoteAddress)) {
+    sendErrorAndClose(
+      socket,
+      'FATAL',
+      INVALID_AUTHORIZATION,
+      'this server requires TLS for connections from other machines; add sslmode=require to the connection string'
+    )
+    return
+  }
+
   await handleStartup(socket, deps, cancels, wakeTimeoutMs, read)
 }
 
-export function startPgProxy(opts: { port: number; host?: string; deps: ProxyDeps; wakeTimeoutMs: number }): Promise<{
+export async function startPgProxy(opts: {
+  port: number
+  host?: string
+  deps: ProxyDeps
+  wakeTimeoutMs: number
+  // Certificate and key files. When set, SSLRequest is answered 'S' and
+  // plaintext startups from other machines are refused. ADR 0019.
+  tls?: ProxyTlsFiles
+  // Tests only. Defaults to isLoopbackAddress, see ConnectionMode.
+  plaintextAllowed?: (address: string | undefined) => boolean
+}): Promise<{
   close(): Promise<void>
   port: number
 }> {
-  return new Promise((resolve, reject) => {
-    // One registry per server, holding one entry per spliced connection. It
-    // is deliberately not part of ProxyDeps: the daemon supplies the world
-    // this proxy cannot see for itself, and this is the opposite, state that
-    // only exists because connections pass through here.
-    const cancels = new CancelRegistry()
+  // One registry per server, holding one entry per spliced connection. It
+  // is deliberately not part of ProxyDeps: the daemon supplies the world
+  // this proxy cannot see for itself, and this is the opposite, state that
+  // only exists because connections pass through here.
+  const cancels = new CancelRegistry()
 
-    const server = net.createServer((socket) => {
-      handleConnectionInner(socket, opts.deps, cancels, opts.wakeTimeoutMs).catch((err) => {
-        // Belt and suspenders: everything above already converts failures
-        // into a real ErrorResponse. If something still throws past that
-        // (a bug, not an expected failure mode), the socket must still not
-        // be dropped silently.
-        sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, `internal proxy error: ${errorMessage(err)}`)
-      })
+  const plaintextAllowed = opts.plaintextAllowed ?? isLoopbackAddress
+  const handle = (socket: net.Socket, mode: Omit<ConnectionMode, 'plaintextAllowed'>): void => {
+    handleConnectionInner(socket, opts.deps, cancels, opts.wakeTimeoutMs, { ...mode, plaintextAllowed }).catch((err) => {
+      // Belt and suspenders: everything above already converts failures
+      // into a real ErrorResponse. If something still throws past that
+      // (a bug, not an expected failure mode), the socket must still not
+      // be dropped silently.
+      sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, `internal proxy error: ${errorMessage(err)}`)
     })
+  }
 
-    server.once('error', reject)
+  // Started first so a certificate that cannot be loaded fails startup
+  // before the port is bound, instead of a proxy that is listening and
+  // cannot do what it was configured to do.
+  const terminator =
+    opts.tls === undefined
+      ? null
+      : await startTlsTerminator(opts.tls, (socket) => handle(socket, { tls: null, encrypted: true }))
+
+  return new Promise((resolve, reject) => {
+    const server = net.createServer((socket) => handle(socket, { tls: terminator, encrypted: false }))
+
+    const onStartError = (err: Error): void => {
+      void terminator?.close()
+      reject(err)
+    }
+    server.once('error', onStartError)
 
     server.listen(opts.port, opts.host ?? '0.0.0.0', () => {
-      server.off('error', reject)
+      server.off('error', onStartError)
       // A listener must stay attached for the life of the server: an
       // unhandled 'error' event on an EventEmitter throws and takes the
       // whole process down. Accept-level errors after startup (EMFILE, a
@@ -897,10 +963,14 @@ export function startPgProxy(opts: { port: number; host?: string; deps: ProxyDep
 
       resolve({
         port,
-        close: () =>
-          new Promise((res, rej) => {
-            server.close((err) => (err ? rej(err) : res()))
-          }),
+        close: async () => {
+          await Promise.all([
+            new Promise<void>((res, rej) => {
+              server.close((err) => (err ? rej(err) : res()))
+            }),
+            terminator?.close(),
+          ])
+        },
       })
     })
   })

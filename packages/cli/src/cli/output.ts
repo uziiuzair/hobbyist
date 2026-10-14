@@ -175,8 +175,21 @@ export function renderPreflight(report: PreflightReport): string[] {
 // differently depending on a setting they have never seen. This states what
 // was bound and how to change it, rather than leaving them to discover it from
 // a refused connection.
-export function proxyBindNote(proxyHost: string): string {
+//
+// `tlsHostname` is proxyTls's hostname when TLS is configured (ADR 0019).
+// With it, a wide bind is the intended setup rather than an accident, since
+// plaintext from other machines is refused, so the cleartext warning would
+// be false.
+export function proxyBindNote(proxyHost: string, tlsHostname: string | null = null): string {
   const setting = proxyHost.trim()
+
+  if (tlsHostname !== null) {
+    const where = setting === 'all' ? 'every interface' : setting === 'tailnet' ? "loopback and this machine's tailnet address" : setting
+    return (
+      `proxy: bound to ${where}, with TLS for ${tlsHostname}. ` +
+      'Connections from other machines must use sslmode=require; plaintext is refused.'
+    )
+  }
 
   if (setting === 'all') {
     return (

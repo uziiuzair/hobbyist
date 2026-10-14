@@ -186,6 +186,9 @@ export interface ConnectionResponse {
   // Null when the box has no running tailscaled; absent entirely from a
   // daemon older than this field, so callers treat undefined as null.
   tailnetConnectionString?: string | null
+  // Null when the proxy has no TLS certificate (ADR 0019); absent from a
+  // daemon older than this field, treated the same.
+  publicConnectionString?: string | null
 }
 export interface LogsResponse {
   logs: string

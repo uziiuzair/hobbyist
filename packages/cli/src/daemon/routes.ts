@@ -931,16 +931,41 @@ async function connectionRoute(ctx: DaemonContext, id: string): Promise<RouteRes
   // 2026-08-13-postgres-over-tailnet.md). Null when no detector is wired
   // (tests, and any future caller of createApp that opts out) or when the
   // box has no running tailscaled.
+  //
+  // With proxyTls on, a tailnet peer is another machine like any other and
+  // must use TLS (ADR 0019), so its string carries sslmode=require too.
+  // `require`, not `verify-full`: the certificate is for proxyTls.hostname,
+  // not the MagicDNS name, so full verification over this string would fail.
   const tailnetHost = ctx.detectTailnet === undefined ? null : await ctx.detectTailnet()
+  const tlsSuffix = ctx.config.proxyTls === null ? '' : '?sslmode=require'
   const tailnetValue =
     tailnetHost === null
       ? null
-      : connectionString(project, resource, {
+      : `${connectionString(project, resource, {
           host: tailnetHost,
           proxyPort: ctx.config.proxyPort,
           viaProxy: true,
-        })
-  return { status: 200, body: { connectionString: value, tailnetConnectionString: tailnetValue } }
+        })}${tlsSuffix}`
+  // The public variant exists only when the proxy has a certificate (ADR
+  // 0019): the hostname the certificate is for, and sslmode=require, since
+  // the proxy refuses plaintext from other machines and a string that fails
+  // on first use is worse than none. `require` rather than `verify-full`
+  // because libpq's verify-full wants a root certificate file on the client,
+  // and the certificate is publicly trusted anyway, so node-postgres, which
+  // verifies by default, checks it regardless.
+  const tls = ctx.config.proxyTls
+  const publicValue =
+    tls === null
+      ? null
+      : `${connectionString(project, resource, {
+          host: tls.hostname,
+          proxyPort: ctx.config.proxyPort,
+          viaProxy: true,
+        })}?sslmode=require`
+  return {
+    status: 200,
+    body: { connectionString: value, tailnetConnectionString: tailnetValue, publicConnectionString: publicValue },
+  }
 }
 
 async function logsRoute(ctx: DaemonContext, id: string, url: URL): Promise<RouteResult> {
