@@ -52,7 +52,7 @@ import {
   resolveWorkerSourcePath,
 } from '@hobby.sh/worker'
 import { branchProject } from './branch.js'
-import { clearWakeRefusal, getOrCreateWake, waitForProjectAwakeable, type DaemonContext } from './context.js'
+import { clearWakeRefusal, getOrCreateWake, waitForProjectAwakeable, wakeBoundDatabase, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
 import {
   deleteSnapshot,
@@ -721,7 +721,13 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
   const source = isRecord(body) ? readAppSource(body) : null
 
   if (resource.kind === 'app') {
-    const result = await deployApp(ctx, resource, source === null ? {} : { source })
+    // Only a present field replaces the app's env. An absent one keeps it,
+    // so a plain redeploy never wipes variables set on an earlier one.
+    const env = isRecord(body) && 'env' in body ? readStringMap(body['env']) : undefined
+    const result = await deployApp(ctx, resource, {
+      ...(source === null ? {} : { source }),
+      ...(env === undefined ? {} : { env }),
+    })
     return {
       status: 200,
       body: {
@@ -891,6 +897,12 @@ async function startResourceRoute(ctx: DaemonContext, id: string): Promise<Route
   // `hobby wake` has the error in front of them, and refusing the automatic
   // wakes because of it would only undo what they asked for.
   clearWakeRefusal(ctx, resource.id)
+  // Same as an automatic wake (buildWake): an app or worker's bound database
+  // comes up first. Only the app's own refusal is cleared above, not the
+  // database's: `hobby wake web` asks for web, and a database still inside
+  // its backoff answers with its own refusal, which names `hobby wake` for
+  // the database itself.
+  await wakeBoundDatabase(ctx, resource)
   await ctx.kinds.get(resource.kind).start(ctx, resource)
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
@@ -931,16 +943,41 @@ async function connectionRoute(ctx: DaemonContext, id: string): Promise<RouteRes
   // 2026-08-13-postgres-over-tailnet.md). Null when no detector is wired
   // (tests, and any future caller of createApp that opts out) or when the
   // box has no running tailscaled.
+  //
+  // With proxyTls on, a tailnet peer is another machine like any other and
+  // must use TLS (ADR 0019), so its string carries sslmode=require too.
+  // `require`, not `verify-full`: the certificate is for proxyTls.hostname,
+  // not the MagicDNS name, so full verification over this string would fail.
   const tailnetHost = ctx.detectTailnet === undefined ? null : await ctx.detectTailnet()
+  const tlsSuffix = ctx.config.proxyTls === null ? '' : '?sslmode=require'
   const tailnetValue =
     tailnetHost === null
       ? null
-      : connectionString(project, resource, {
+      : `${connectionString(project, resource, {
           host: tailnetHost,
           proxyPort: ctx.config.proxyPort,
           viaProxy: true,
-        })
-  return { status: 200, body: { connectionString: value, tailnetConnectionString: tailnetValue } }
+        })}${tlsSuffix}`
+  // The public variant exists only when the proxy has a certificate (ADR
+  // 0019): the hostname the certificate is for, and sslmode=require, since
+  // the proxy refuses plaintext from other machines and a string that fails
+  // on first use is worse than none. `require` rather than `verify-full`
+  // because libpq's verify-full wants a root certificate file on the client,
+  // and the certificate is publicly trusted anyway, so node-postgres, which
+  // verifies by default, checks it regardless.
+  const tls = ctx.config.proxyTls
+  const publicValue =
+    tls === null
+      ? null
+      : `${connectionString(project, resource, {
+          host: tls.hostname,
+          proxyPort: ctx.config.proxyPort,
+          viaProxy: true,
+        })}?sslmode=require`
+  return {
+    status: 200,
+    body: { connectionString: value, tailnetConnectionString: tailnetValue, publicConnectionString: publicValue },
+  }
 }
 
 async function logsRoute(ctx: DaemonContext, id: string, url: URL): Promise<RouteResult> {

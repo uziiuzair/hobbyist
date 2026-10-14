@@ -142,6 +142,7 @@ function printHelp(io: Io): void {
   io.out('  hobby branch ... --allow-pause        accept pausing a pinned, awake source')
   io.out('  hobby deploy [path]                  build a Dockerfile here and serve it')
   io.out('  hobby deploy [path] --database <r>   the same, bound to a sibling database')
+  io.out('  hobby deploy [path] --env-file <f>   the same, with variables from a dotenv file')
   io.out('  hobby create <kind> <name> --project <p>  a resource with no code yet')
   io.out('  hobby pg create --project <p> <name> the explicit form, for a second database')
   io.out('  hobby connect <target>                open psql against it')
@@ -333,7 +334,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
       case 'deploy': {
         const { positionals, flags } = parseArgs(rest, {
           bool: ['json'],
-          value: ['project', 'name', 'port', 'kind', 'database'],
+          value: ['project', 'name', 'port', 'kind', 'database', 'env-file'],
         })
         return await cmdDeploy(ctx, positionals, flags)
       }

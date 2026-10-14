@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { parseTarget, type ErrorCode } from '@hobby.sh/core'
-import { parseDeploy } from '../src/cli/commands.js'
+import { parseDeploy, parseEnvFile } from '../src/cli/commands.js'
 import { exitCodeForError } from '../src/cli/exit.js'
 import { parseArgs, UsageError } from '../src/cli/main.js'
 
@@ -111,6 +111,48 @@ test('parseDeploy: one positional path, --name overrides the basename default, "
     name: 'web',
   })
   assert.deepEqual(parseDeploy([], { project: 'blog' }), { path: '.', project: 'blog', name: undefined })
+})
+
+// The dotenv subset `hobby deploy --env-file` reads. No interpolation and
+// no escapes: what is written is what the container gets.
+test('parseEnvFile: comments, blanks, export, quotes and = inside a value', () => {
+  const text = [
+    '# a comment',
+    '',
+    'PLAIN=value',
+    'export EXPORTED=yes',
+    'DOUBLE="has spaces"',
+    "SINGLE='single'",
+    'MISMATCHED="open',
+    'URL=postgres://u:p@h/db?sslmode=require&x=y',
+    'PADDED=abc==',
+    'EMPTY=',
+    'REF=$PLAIN',
+    '  INDENTED = trimmed  ',
+  ].join('\n')
+  assert.deepEqual(parseEnvFile(text), {
+    PLAIN: 'value',
+    EXPORTED: 'yes',
+    DOUBLE: 'has spaces',
+    SINGLE: 'single',
+    MISMATCHED: '"open',
+    URL: 'postgres://u:p@h/db?sslmode=require&x=y',
+    PADDED: 'abc==',
+    EMPTY: '',
+    REF: '$PLAIN',
+    INDENTED: 'trimmed',
+  })
+})
+
+test('parseEnvFile: an invalid key is a UsageError naming its line', () => {
+  assert.throws(
+    () => parseEnvFile('GOOD=1\n# comment\n1BAD=2\n'),
+    (err: unknown) => err instanceof UsageError && err.message.includes('line 3')
+  )
+  assert.throws(
+    () => parseEnvFile('GOOD=1\nno equals sign\n'),
+    (err: unknown) => err instanceof UsageError && err.message.includes('line 2')
+  )
 })
 
 test('parseTarget: a bare project has no resource segment', () => {

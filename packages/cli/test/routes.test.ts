@@ -39,6 +39,7 @@ function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
     image: 'postgres:18-alpine',
     proxyPort: 5432,
   proxyHost: '127.0.0.1',
+  proxyTls: null,
     studioPort: 8443,
     apiPort: 7432,
     httpPort: 7433,
@@ -795,6 +796,49 @@ test('GET /v1/resources/:id/connection renders a tailnet string when a tailnet i
     // Same proxyPort: the tailnet path terminates at the same wake proxy,
     // only the host differs.
     assert.equal(body.tailnetConnectionString, 'postgres://postgres:secret@box.tail1234.ts.net:5432/blog')
+  })
+})
+
+test('GET /v1/resources/:id/connection with proxyTls renders a public string, and requires TLS on the tailnet one', async () => {
+  const ctx = buildContext()
+  ctx.config = { ...ctx.config, proxyTls: { certFile: '/c.pem', keyFile: '/k.pem', hostname: 'db.example.com' } }
+  ctx.detectTailnet = async () => 'box.tail1234.ts.net'
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig({ superuser: 'postgres', password: 'secret', database: 'blog' }),
+  })
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'GET', `/v1/resources/${resource.id}/connection`)
+    assert.equal(res.status, 200)
+    const body = res.body as {
+      connectionString: string
+      tailnetConnectionString: string | null
+      publicConnectionString: string | null
+    }
+    // Loopback stays plaintext, see ADR 0019.
+    assert.equal(body.connectionString, 'postgres://postgres:secret@127.0.0.1:5432/blog')
+    assert.equal(body.tailnetConnectionString, 'postgres://postgres:secret@box.tail1234.ts.net:5432/blog?sslmode=require')
+    assert.equal(body.publicConnectionString, 'postgres://postgres:secret@db.example.com:5432/blog?sslmode=require')
+  })
+})
+
+test('GET /v1/resources/:id/connection without proxyTls renders publicConnectionString null', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig(),
+  })
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'GET', `/v1/resources/${resource.id}/connection`)
+    assert.equal((res.body as { publicConnectionString: string | null }).publicConnectionString, null)
   })
 })
 

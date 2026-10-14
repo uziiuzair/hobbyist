@@ -122,6 +122,7 @@ Both present is an error rather than a guess.
 | `--project <p>` | Which project it belongs to |
 | `--name <n>` | The resource name |
 | `--port <n>` | The port your process listens on inside the container. Apps only |
+| `--env-file <f>` | Variables from a dotenv file, replacing the app's current set. Apps only |
 | `--kind app\|worker` | Only needed when the directory is ambiguous |
 | `--json` | Machine-readable output |
 

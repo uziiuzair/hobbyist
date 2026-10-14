@@ -186,6 +186,9 @@ export interface ConnectionResponse {
   // Null when the box has no running tailscaled; absent entirely from a
   // daemon older than this field, so callers treat undefined as null.
   tailnetConnectionString?: string | null
+  // Null when the proxy has no TLS certificate (ADR 0019); absent from a
+  // daemon older than this field, treated the same.
+  publicConnectionString?: string | null
 }
 export interface LogsResponse {
   logs: string
@@ -316,7 +319,9 @@ export interface Api {
   ): Promise<ResourceResponse>
   deployResource(
     id: string,
-    input?: { source?: { path: string; dockerfile?: string } }
+    // `env` is apps only. Omitted keeps the app's current variables; sent,
+    // it replaces them wholesale (deployApp, packages/app/src/app.ts).
+    input?: { source?: { path: string; dockerfile?: string }; env?: Record<string, string> }
   ): Promise<ResourceResponse & { image: string; logs: string }>
   getResource(id: string): Promise<ResourceResponse>
   deleteResource(id: string): Promise<DeletedResponse>

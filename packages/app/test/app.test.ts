@@ -27,6 +27,7 @@ function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
     image: 'postgres:18-alpine',
     proxyPort: 5432,
   proxyHost: '127.0.0.1',
+  proxyTls: null,
     studioPort: 8443,
     apiPort: 7432,
     httpPort: 7433,
@@ -539,4 +540,67 @@ test('resolveSource reports a missing Dockerfile before Docker is involved', () 
     () => resolveSource({ path: join(dir, 'nope'), dockerfile: 'Dockerfile' }),
     /build context does not exist/
   )
+})
+
+// `hobby deploy --env-file`'s contract on a redeploy: a given env replaces
+// the stored one wholesale, so a key removed from the file is gone, and an
+// omitted env keeps what the app already had.
+test('deploy with env replaces the stored env, and without it keeps it', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const app = await createAppResource(deps, {
+    project,
+    name: 'web',
+    source: sourceDir(),
+    image: null,
+    containerPort: 3000,
+    env: { OLD_KEY: 'old', SHARED: 'before' },
+    databaseResourceId: null,
+  })
+
+  deps.now = () => 1_754_870_500_000
+  const replaced = await deployApp(deps, app, { env: { SHARED: 'after', NEW_KEY: 'new' } })
+  assert.deepEqual(replaced.resource.config.env, { SHARED: 'after', NEW_KEY: 'new' })
+  const spec = runtime._specs.get(app.config.containerName)
+  assert.ok(spec !== undefined)
+  assert.equal(spec.env['OLD_KEY'], undefined)
+  assert.equal(spec.env['NEW_KEY'], 'new')
+
+  deps.now = () => 1_754_870_600_000
+  const kept = await deployApp(deps, replaced.resource)
+  assert.deepEqual(kept.resource.config.env, { SHARED: 'after', NEW_KEY: 'new' })
+})
+
+// A bound database is the authoritative DATABASE_URL. An env file copied
+// from a laptop that still says localhost must not override it.
+test('a bound database wins over a DATABASE_URL in the app env', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const pgConfig: PostgresConfig = {
+    image: 'postgres:18-alpine',
+    containerName: 'hobby-blog-primary',
+    hostPort: 15432,
+    dataDir: '/tmp/pgdata',
+    superuser: 'postgres',
+    password: 'secret-password',
+    database: 'blog',
+  }
+  const db = deps.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: pgConfig })
+
+  const app = await createAppResource(deps, {
+    project,
+    name: 'web',
+    source: null,
+    image: 'nginx:alpine',
+    containerPort: 3000,
+    env: { DATABASE_URL: 'postgres://localhost:5432/dev', OTHER: 'x' },
+    databaseResourceId: db.id,
+  })
+
+  const spec = runtime._specs.get(app.config.containerName)
+  assert.ok(spec !== undefined)
+  assert.equal(spec.env['DATABASE_URL'], 'postgres://postgres:secret-password@hobby-blog-primary:5432/blog')
+  assert.equal(spec.env['OTHER'], 'x')
 })

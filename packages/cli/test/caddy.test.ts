@@ -46,6 +46,7 @@ function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
     image: 'postgres:18-alpine',
     proxyPort: 0,
     proxyHost: '127.0.0.1',
+    proxyTls: null,
     studioPort: 8443,
     apiPort: 0,
     httpPort: 0,

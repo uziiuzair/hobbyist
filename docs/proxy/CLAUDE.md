@@ -1,7 +1,8 @@
 # `docs/proxy/` wake-on-connect wire proxy
 
 **Status:** BUILT, in `packages/proxy/`. **This is the keystone.** The open
-questions at the bottom are still open, and TLS termination is still not built.
+questions at the bottom are still open. TLS termination is built, behind
+`proxyTls` (ADR 0019).
 
 A Postgres wire-protocol proxy that makes a sleeping database indistinguishable
 from a slow one.
@@ -106,9 +107,9 @@ whether to fork one or start clean.
   psql, node-postgres, Prisma, Drizzle and a GUI client all get tested against a
   sleeping database, and that matrix is an M2 release gate rather than a
   nice-to-have. This remains the likeliest source of "it does not work" reports.
-- Where does the proxy get its TLS certificate? Caddy already manages an ACME
-  store on the box (`docs/decisions/0009`), and sharing it is tempting but
-  couples two components that are otherwise independent.
+- ~~Where does the proxy get its TLS certificate?~~ Answered 2026-09-28 by
+  ADR 0019: from files the operator provides, re-read when they change. Not
+  Caddy's store.
 - Connection pooling, or an honest decision to delegate it to a pooler behind us.
   Not needed to prove the keystone, so it does not block M2.
 
@@ -258,3 +259,15 @@ and still names `hobby logs`. The front doors' own refusal text
 `packages/proxy/src/http.ts`) says the daemon retries by itself and points at
 `hobby ls` for when, because `isWakeRefused` answers a boolean and carries no
 time.
+
+## Amendment, 2026-09-28: TLS termination (ADR 0019)
+
+`proxyTls` (`packages/core/src/config.ts`) gives the proxy a certificate.
+`handleConnectionInner` (`packages/proxy/src/proxy.ts`) answers `SSLRequest`
+with `S` and hands the socket to `startTlsTerminator`
+(`packages/proxy/src/tls.ts`), which pipes it to a loopback `tls.createServer`
+and returns the decrypted connection to the same handler. A plaintext startup
+from a non-loopback peer is refused with 28000; a plaintext CancelRequest is
+not. Two Bun gaps shaped this, both measured on Bun 1.3.14 and both passing
+under Node: an in-place `tls.TLSSocket` upgrade hangs, and
+`setSecureContext` is a no-op. The ADR has the detail.
