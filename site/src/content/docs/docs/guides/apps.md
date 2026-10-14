@@ -34,8 +34,29 @@ hobby deploy ./my-app --project blog --name site --port 8080
 | `--project <p>` | Which project it belongs to |
 | `--name <n>` | The resource name |
 | `--port <n>` | The port your process listens on inside the container |
+| `--env-file <f>` | Variables from a dotenv file, see below |
 | `--kind app\|worker` | Only needed when the directory is ambiguous |
 | `--json` | Machine-readable output |
+
+## Environment variables
+
+```sh
+hobby deploy ./my-app --project blog --env-file .env.production
+```
+
+The file is read on the machine you run `hobby` from and sent to the daemon, so
+it never has to exist on a [remote box](/docs/guides/remote/). One `KEY=VALUE`
+per line. Blank lines and `#` comments are skipped, an `export ` prefix is
+allowed, and one pair of matching quotes around a value is stripped. Nothing is
+interpolated: `$OTHER` arrives as written.
+
+On a redeploy the file replaces the app's variables as a whole, so a key you
+delete from it is gone afterwards. A redeploy without `--env-file` keeps what the
+app already has. Values are never printed, only a count.
+
+A database bound with `--database` always supplies `DATABASE_URL`, even if the
+file sets one too. Workers take their variables from `[vars]` in their wrangler
+config instead, and `--env-file` refuses them.
 
 ## Your Dockerfile
 

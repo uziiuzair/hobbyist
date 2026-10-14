@@ -114,8 +114,11 @@ function containerSpec(deps: AppDeps, config: AppConfig, network: string): Conta
       // The one thing we ask of the user's image, and the readiness failure
       // below says so in those words when it is not honoured.
       PORT: String(config.containerPort),
-      ...(databaseUrl === null ? {} : { DATABASE_URL: databaseUrl }),
       ...config.env,
+      // After config.env, not before: a bound database is the authoritative
+      // DATABASE_URL, and an env file copied from a laptop that still says
+      // localhost must not quietly point the app somewhere else.
+      ...(databaseUrl === null ? {} : { DATABASE_URL: databaseUrl }),
     },
     ports: [{ host: config.hostPort, container: config.containerPort }],
     binds: [],
@@ -419,7 +422,7 @@ export interface DeployAppResult {
 export async function deployApp(
   deps: AppDeps,
   resource: AppResource,
-  opts: { source?: AppSource } = {}
+  opts: { source?: AppSource; env?: Record<string, string> } = {}
 ): Promise<DeployAppResult> {
   const project = deps.store.getProject(resource.projectId)
   if (project === null) {
@@ -463,7 +466,15 @@ export async function deployApp(
       tag: buildTag(project.name, resource.name, now()),
     })
 
-    const config: AppConfig = { ...resource.config, image: built.tag, source }
+    // A given env REPLACES the stored one rather than merging into it, so a
+    // key deleted from the env file is gone from the container after the
+    // deploy. Omitted, the app keeps exactly what it had.
+    const config: AppConfig = {
+      ...resource.config,
+      image: built.tag,
+      source,
+      ...(opts.env === undefined ? {} : { env: opts.env }),
+    }
     deps.store.updateResourceConfig(resource.id, config)
 
     deps.store.setResourceState(resource.id, 'starting')

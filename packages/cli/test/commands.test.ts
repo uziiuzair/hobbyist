@@ -5,6 +5,9 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { HobbyError } from '@hobby.sh/core'
 import {
   cmdConnect,
@@ -42,6 +45,8 @@ interface Recorded {
   createSleepPolicies: Array<number | null | undefined>
   // Every setSleepPolicy call, in order.
   sleepPolicies: Array<{ project: string; sleepAfterSeconds: number | null }>
+  // Every deployResource call: the redeploy path of cmdDeploy.
+  deploys: Array<{ id: string; input: unknown }>
 }
 
 // Only the methods cmdNew, cmdCreate and cmdDeploy reach for. Casting a
@@ -73,6 +78,7 @@ function fakeCtx(
     deleted: [],
     createSleepPolicies: [],
     sleepPolicies: [],
+    deploys: [],
   }
   const out: string[] = []
   const err: string[] = []
@@ -99,7 +105,23 @@ function fakeCtx(
       recorded.resources.push(`${projectName}/${body.name}`)
       recorded.resourceBodies.push({ project: projectName, body })
       if (opts.failResource !== undefined) throw opts.failResource
-      return { resource: { id: 'r1', kind: body.kind, name: body.name, state: 'undeployed' } }
+      return {
+        resource: {
+          id: 'r1',
+          kind: body.kind,
+          name: body.name,
+          state: 'undeployed',
+          config: { image: null, hostname: `${body.name}.${projectName}.localhost` },
+        },
+      }
+    },
+    async deployResource(id: string, input: unknown) {
+      recorded.deploys.push({ id, input })
+      return {
+        resource: { id, kind: 'app', name: 'site', state: 'sleeping', config: { image: 'img:2', hostname: 'site.blog.localhost' } },
+        image: 'img:2',
+        logs: '',
+      }
     },
     async getProject(name: string) {
       return {
@@ -354,6 +376,73 @@ test('deploying onto a name held by another kind refuses rather than replacing',
   const { ctx } = fakeCtx({ existingResources: [{ id: 'x1', name: 'site', kind: 'postgres' }] })
 
   await assert.rejects(() => cmdDeploy(ctx, ['./site'], { project: 'blog' }), /is a postgres/)
+})
+
+// `hobby deploy --env-file`. The file is read on the client and sent as a
+// JSON map, so these need a real file on disk and nothing else: `--kind app`
+// skips Dockerfile detection, and the fake Api records what was sent.
+function envFileDir(contents: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-env-'))
+  writeFileSync(join(dir, '.env.production'), contents)
+  return dir
+}
+
+test('hobby deploy --env-file sends env on first deploy and prints only a count', async () => {
+  const dir = envFileDir('API_KEY=sk-very-secret\nNODE_ENV=production\n')
+  const { ctx, recorded, out } = fakeCtx({ cwd: dir })
+
+  const code = await cmdDeploy(ctx, ['./site'], { project: 'blog', kind: 'app', 'env-file': '.env.production' })
+
+  assert.equal(code, 0)
+  const body = recorded.resourceBodies[0]?.body as { env?: Record<string, string> }
+  assert.deepEqual(body.env, { API_KEY: 'sk-very-secret', NODE_ENV: 'production' })
+  assert.ok(out.includes('  env       2 variables'))
+  assert.ok(!out.some((line) => line.includes('sk-very-secret')), 'a value is never printed')
+})
+
+test('hobby deploy --env-file on an existing app sends env with the redeploy', async () => {
+  const dir = envFileDir('ONLY=one\n')
+  const { ctx, recorded, out } = fakeCtx({ cwd: dir, existingResources: [{ id: 'a1', name: 'site', kind: 'app' }] })
+
+  const code = await cmdDeploy(ctx, ['./site'], { project: 'blog', kind: 'app', 'env-file': '.env.production' })
+
+  assert.equal(code, 0)
+  assert.deepEqual(recorded.deploys, [{ id: 'a1', input: { source: { path: join(dir, 'site') }, env: { ONLY: 'one' } } }])
+  assert.ok(out.includes('  env       1 variable'))
+})
+
+// No flag, no field: the daemon keeps the app's current env rather than
+// replacing it with nothing.
+test('hobby deploy without --env-file sends no env on a redeploy', async () => {
+  const { ctx, recorded } = fakeCtx({ existingResources: [{ id: 'a1', name: 'site', kind: 'app' }] })
+
+  await cmdDeploy(ctx, ['./site'], { project: 'blog', kind: 'app' })
+
+  assert.equal(recorded.deploys.length, 1)
+  assert.equal('env' in (recorded.deploys[0]?.input as object), false)
+})
+
+test('hobby deploy --env-file refuses a worker and creates nothing', async () => {
+  const dir = envFileDir('A=1\n')
+  const { ctx, recorded } = fakeCtx({ cwd: dir })
+
+  await assert.rejects(
+    () => cmdDeploy(ctx, ['./api'], { project: 'blog', kind: 'worker', 'env-file': '.env.production' }),
+    (err: unknown) => err instanceof UsageError && /wrangler/.test(err.message)
+  )
+  assert.deepEqual(recorded.created, [])
+  assert.deepEqual(recorded.resources, [])
+})
+
+test('hobby deploy --env-file with a missing file is a usage error', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-env-'))
+  const { ctx, recorded } = fakeCtx({ cwd: dir })
+
+  await assert.rejects(
+    () => cmdDeploy(ctx, ['./site'], { project: 'blog', kind: 'app', 'env-file': 'nope.env' }),
+    (err: unknown) => err instanceof UsageError && err.message.includes(join(dir, 'nope.env'))
+  )
+  assert.deepEqual(recorded.created, [])
 })
 
 // `hobby pg create` is an alias for cmdCreate's general form, not a second

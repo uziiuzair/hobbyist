@@ -367,10 +367,64 @@ export function parseDeploy(positionals: string[], flags: Flags): DeployTarget {
   }
 }
 
+const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+// The dotenv subset `hobby deploy --env-file` reads: `KEY=VALUE` per line,
+// blank lines and `#` comments skipped, an optional `export ` prefix, and
+// one matching pair of surrounding quotes stripped from the value. Only the
+// first `=` splits, so a value may contain more of them (a connection string
+// with query parameters, a base64 secret with padding). No interpolation and
+// no escape handling: `$OTHER` and `\n` arrive in the container exactly as
+// written, which is the least surprising thing a file of secrets can do.
+//
+// Exported and pure (text in, a map out, no filesystem) so the format is
+// directly testable; see packages/cli/test/parse.test.ts. A bad key names
+// its line, because a 28-line file with one typo is otherwise a hunt.
+export function parseEnvFile(text: string): Record<string, string> {
+  const env: Record<string, string> = {}
+  const lines = text.split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const line = (lines[i] as string).trim()
+    if (line.length === 0 || line.startsWith('#')) {
+      continue
+    }
+    const body = line.startsWith('export ') ? line.slice('export '.length).trimStart() : line
+    const eq = body.indexOf('=')
+    if (eq === -1) {
+      throw new UsageError(`env file line ${i + 1}: expected KEY=VALUE`)
+    }
+    const key = body.slice(0, eq).trim()
+    if (!ENV_KEY.test(key)) {
+      throw new UsageError(
+        `env file line ${i + 1}: ${JSON.stringify(key)} is not a valid variable name (letters, digits and _, not starting with a digit)`
+      )
+    }
+    let value = body.slice(eq + 1).trim()
+    if (value.length >= 2) {
+      const first = value[0]
+      if ((first === '"' || first === "'") && value[value.length - 1] === first) {
+        value = value.slice(1, -1)
+      }
+    }
+    env[key] = value
+  }
+  return env
+}
+
 function deployKindConflict(project: string, name: string, existingKind: string): UsageError {
   return new UsageError(
     `${project}/${name} is a ${existingKind}, and a deploy would replace it. Pick another name with --name, or remove it first.`
   )
+}
+
+// A count and never the values: an env file is where the secrets live, and
+// terminal scrollback and CI logs are where they leak.
+function printEnvCount(c: Ctx, env: Record<string, string> | undefined): void {
+  if (env === undefined) {
+    return
+  }
+  const count = Object.keys(env).length
+  c.io.out(`  env       ${count} ${count === 1 ? 'variable' : 'variables'}`)
 }
 
 export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
@@ -414,6 +468,20 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     throw deployKindConflict(projectName, name, existing.kind)
   }
 
+  // Read on this machine and sent as a JSON map, so it behaves the same
+  // against a remote daemon (ADR 0018) as against a local one: the file
+  // never has to exist on the box. Read before anything below mutates, so a
+  // missing or malformed file leaves no empty project behind.
+  let env: Record<string, string> | undefined
+  const envFileFlag = flagString(flags, 'env-file')
+  if (envFileFlag !== undefined) {
+    const envPath = resolvePath(c.io.cwd, envFileFlag)
+    if (!existsSync(envPath)) {
+      throw new UsageError(`--env-file: no such file ${envPath}`)
+    }
+    env = parseEnvFile(await readFile(envPath, 'utf8'))
+  }
+
   const kindFlag = typeof flags['kind'] === 'string' ? flags['kind'] : undefined
   if (kindFlag !== undefined && kindFlag !== 'app' && kindFlag !== 'worker') {
     throw new UsageError(`unknown --kind: ${kindFlag}. Expected app or worker.`)
@@ -432,6 +500,14 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     throw deployKindConflict(projectName, name, existing.kind)
   }
 
+  // A worker's variables are its wrangler config's `vars`, the same file
+  // Cloudflare reads, so a second source here would only drift from it.
+  if (env !== undefined && kind === 'worker') {
+    throw new UsageError(
+      '--env-file is for apps. A worker takes its variables from [vars] in its wrangler config.'
+    )
+  }
+
   // A project is created on first deploy rather than required up front. The
   // alternative, making the user run `hobby new` first, means two commands
   // for the thing CLAUDE.md promises takes one.
@@ -440,7 +516,12 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
   }
 
   if (existing !== undefined) {
-    const result = await c.api.deployResource(existing.id, { source: { path } })
+    // `env` omitted keeps whatever the app already has; sent, it replaces
+    // the whole set (deployApp, packages/app/src/app.ts).
+    const result = await c.api.deployResource(existing.id, {
+      source: { path },
+      ...(env === undefined ? {} : { env }),
+    })
     if (flags.json) {
       c.io.out(JSON.stringify({ resource: result.resource, image: result.image }, null, 2))
       return 0
@@ -448,6 +529,7 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     c.io.out(`deployed ${projectName}/${name}`)
     c.io.out(`  image     ${result.image}`)
     c.io.out(`  url       https://${hostnameOf(result.resource)}`)
+    printEnvCount(c, env)
     c.io.out('')
     c.io.out('It is asleep. The first request wakes it.')
     return 0
@@ -481,6 +563,7 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
           source: { path },
           ...(portFlag === undefined ? {} : { port: portFlag }),
           ...(databaseResourceId === undefined ? {} : { databaseResourceId }),
+          ...(env === undefined ? {} : { env }),
         }
   )
 
@@ -491,6 +574,7 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
   c.io.out(`deployed ${projectName}/${name}`)
   c.io.out(`  image     ${imageLine(resource.config.image)}`)
   c.io.out(`  url       https://${hostnameOf(resource)}`)
+  printEnvCount(c, env)
   c.io.out('')
   c.io.out('It is asleep. The first request wakes it.')
   return 0

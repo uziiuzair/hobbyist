@@ -319,7 +319,9 @@ export interface Api {
   ): Promise<ResourceResponse>
   deployResource(
     id: string,
-    input?: { source?: { path: string; dockerfile?: string } }
+    // `env` is apps only. Omitted keeps the app's current variables; sent,
+    // it replaces them wholesale (deployApp, packages/app/src/app.ts).
+    input?: { source?: { path: string; dockerfile?: string }; env?: Record<string, string> }
   ): Promise<ResourceResponse & { image: string; logs: string }>
   getResource(id: string): Promise<ResourceResponse>
   deleteResource(id: string): Promise<DeletedResponse>

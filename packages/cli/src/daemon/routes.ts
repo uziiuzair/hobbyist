@@ -721,7 +721,13 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
   const source = isRecord(body) ? readAppSource(body) : null
 
   if (resource.kind === 'app') {
-    const result = await deployApp(ctx, resource, source === null ? {} : { source })
+    // Only a present field replaces the app's env. An absent one keeps it,
+    // so a plain redeploy never wipes variables set on an earlier one.
+    const env = isRecord(body) && 'env' in body ? readStringMap(body['env']) : undefined
+    const result = await deployApp(ctx, resource, {
+      ...(source === null ? {} : { source }),
+      ...(env === undefined ? {} : { env }),
+    })
     return {
       status: 200,
       body: {
