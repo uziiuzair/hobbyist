@@ -52,7 +52,7 @@ import {
   resolveWorkerSourcePath,
 } from '@hobby.sh/worker'
 import { branchProject } from './branch.js'
-import { clearWakeRefusal, getOrCreateWake, waitForProjectAwakeable, type DaemonContext } from './context.js'
+import { clearWakeRefusal, getOrCreateWake, waitForProjectAwakeable, wakeBoundDatabase, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
 import {
   deleteSnapshot,
@@ -897,6 +897,12 @@ async function startResourceRoute(ctx: DaemonContext, id: string): Promise<Route
   // `hobby wake` has the error in front of them, and refusing the automatic
   // wakes because of it would only undo what they asked for.
   clearWakeRefusal(ctx, resource.id)
+  // Same as an automatic wake (buildWake): an app or worker's bound database
+  // comes up first. Only the app's own refusal is cleared above, not the
+  // database's: `hobby wake web` asks for web, and a database still inside
+  // its backoff answers with its own refusal, which names `hobby wake` for
+  // the database itself.
+  await wakeBoundDatabase(ctx, resource)
   await ctx.kinds.get(resource.kind).start(ctx, resource)
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }

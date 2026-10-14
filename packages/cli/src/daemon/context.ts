@@ -25,6 +25,7 @@ import {
   type Paths,
   type PostgresConfig,
   type PostgresResource,
+  type Resource,
   type Store,
 } from '@hobby.sh/core'
 import { appKindHandler } from '@hobby.sh/app'
@@ -225,6 +226,14 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
           return
         }
       }
+      // An app or worker bound to a database is no use awake with the
+      // database asleep under it, and nothing else would wake the database:
+      // the app reaches it by container name, not through the proxy. Outside
+      // the try below on purpose. A database that will not wake is the
+      // database's failure, recorded against the database by the nested wake,
+      // and charging it to the app as well would leave the app refused after
+      // `hobby wake` has fixed the database.
+      await wakeBoundDatabase(ctx, resource)
       // Dispatched by kind rather than calling startPostgres directly, which
       // is what makes this one wake path serve every kind: an app waking on
       // an HTTP request and a database waking on a connection are the same
@@ -255,6 +264,70 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
 
     inFlightWakes.set(resourceId, promise)
     return promise
+  }
+}
+
+// The postgres resource an app or worker reaches directly, or null. Both
+// kinds hand their process the database's CONTAINER name on the project
+// network (databaseUrlFor in packages/app/src/app.ts, hyperdriveUrl in
+// packages/worker/src/worker.ts), deliberately bypassing the wake proxy, so
+// the proxy can neither wake that database for them nor see their pool as
+// activity. The daemon keeps the pair together instead, in two places that
+// both read this: wakeBoundDatabase below, and the hibernator's
+// hasAwakeDependent (packages/cli/src/daemon/hibernator.ts).
+//
+// A binding to an id that is gone or is not a postgres counts as no binding,
+// the same reading resolveDatabaseUrl gives it when it decides whether the
+// app gets a DATABASE_URL at all.
+export function boundDatabase(ctx: DaemonContext, resource: Resource): PostgresResource | null {
+  if (resource.kind !== 'app' && resource.kind !== 'worker') {
+    return null
+  }
+  const id = resource.config.databaseResourceId
+  if (id === null) {
+    return null
+  }
+  const database = ctx.store.getResource(id)
+  return database !== null && database.kind === 'postgres' ? database : null
+}
+
+// Wakes the database an app or worker is bound to, if it is not already
+// running, through the one wake function: so a concurrent connection to the
+// same database shares the start, a database that has been failing is
+// refused on its own backoff schedule rather than started once per app wake,
+// and a snapshot fence on the project is honoured. Called by buildWake above
+// and by startResourceRoute (packages/cli/src/daemon/routes.ts), the two
+// paths that start a resource on demand; a deploy starts its container
+// through the kind's deploy function and does not come through here.
+//
+// A database already `running` is left alone rather than handed to the wake
+// function, which would flip it through `starting` and re-probe it for
+// nothing on every app wake.
+//
+// A failure is rethrown naming both resources, because the person reading it
+// asked for the app and would otherwise be shown an error about a container
+// they never mentioned. A HobbyError's message is kept whole, since the
+// router would have sent it on the wire as it is anyway. Anything else goes
+// through redactWakeError first, for the reason that function exists: a
+// plain Error from the runtime would otherwise have been hidden as
+// `internal` by the router, and wrapping it is what puts it on the wire.
+export async function wakeBoundDatabase(ctx: DaemonContext, resource: Resource): Promise<void> {
+  const database = boundDatabase(ctx, resource)
+  if (database === null || database.state === 'running') {
+    return
+  }
+  try {
+    await getOrCreateWake(ctx)(database.id)
+  } catch (err) {
+    const project = ctx.store.getProject(resource.projectId)
+    const prefix = project === null ? '' : `${project.name}/`
+    const message =
+      err instanceof HobbyError ? err.message : redactWakeError(err instanceof Error ? err.message : String(err))
+    throw new HobbyError(
+      err instanceof HobbyError ? err.code : 'wake_failed',
+      `${prefix}${resource.name} was not started because its database ${prefix}${database.name} did not wake: ${message}`,
+      err instanceof HobbyError ? err.hint : `\`hobby logs ${prefix}${database.name}\` shows what it printed`
+    )
   }
 }
 

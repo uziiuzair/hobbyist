@@ -6,7 +6,7 @@
 // the only place in this file that touches real time or a real resource.
 
 import { createStopSignal, guardFor, type ActivityGuardResult, type Resource, type ResourceState } from '@hobby.sh/core'
-import type { DaemonContext } from './context.js'
+import { boundDatabase, type DaemonContext } from './context.js'
 
 export interface ShouldSleepInput {
   state: ResourceState
@@ -52,6 +52,38 @@ export function shouldSleep(input: ShouldSleepInput): boolean {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+// Whether any app or worker bound to this database (boundDatabase,
+// packages/cli/src/daemon/context.ts) is awake or on its way up. Such an app
+// holds its connections to the database directly, by container name, so the
+// proxy never counts them, and an idle pool reads as nothing at all to the
+// pg_stat_activity guard, which counts only non-idle rows. Without this the
+// database is stopped under a running app once sleepAfterSeconds passes, and
+// the app's next query fails against a container that is gone, with nothing
+// in its path that could wake it.
+//
+// `starting` counts as well as `running`: an app wake brings its database up
+// first and only then starts the app, so an app in `starting` is one that has
+// just been promised a database.
+//
+// A predicate rather than a handler hook, for the reason the queue exemption
+// in tick() gives about when a seam is earned. This is not a kind opting out
+// of hibernation: a postgres with no dependents sleeps exactly as it always
+// did. It is one relationship between resources, read here, the one place
+// that decides sleep. A linear scan of the store per candidate, which is
+// cheap for a box that holds tens of resources and only runs for a database
+// that already passed every other in-memory check.
+export function hasAwakeDependent(ctx: DaemonContext, resource: Resource): boolean {
+  if (resource.kind !== 'postgres') {
+    return false
+  }
+  return ctx.store
+    .listResources()
+    .some(
+      (other) =>
+        (other.state === 'running' || other.state === 'starting') && boundDatabase(ctx, other)?.id === resource.id
+    )
 }
 
 export interface StartHibernatorOptions {
@@ -148,6 +180,10 @@ async function tick(
       continue
     }
 
+    if (hasAwakeDependent(ctx, resource)) {
+      continue
+    }
+
     // Every cheap check passed: this resource is a real sleep candidate.
     // Only now does the one pg_stat_activity round trip happen, exactly
     // once, immediately before a possible stop.
@@ -187,10 +223,18 @@ async function tick(
     // immediately before the one irreversible step, and the sleep is
     // aborted if either has moved: a connection landed, or the resource
     // left `running` (a manual stop, a wake racing this same tick) while
-    // the guard was in flight.
+    // the guard was in flight. The dependents are re-read for the same
+    // reason: an app wake landing during the guard finds its database
+    // running, skips waking it, and goes straight to starting the app, which
+    // is only safe if this tick then leaves that database alone.
     const freshConnections = ctx.activity.count(resource.id)
     const freshResource = ctx.store.getResource(resource.id)
-    if (freshConnections !== 0 || freshResource === null || freshResource.state !== 'running') {
+    if (
+      freshConnections !== 0 ||
+      freshResource === null ||
+      freshResource.state !== 'running' ||
+      hasAwakeDependent(ctx, freshResource)
+    ) {
       continue
     }
 
