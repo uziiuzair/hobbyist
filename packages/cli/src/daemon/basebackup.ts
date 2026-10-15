@@ -93,6 +93,13 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+// A pipeline() rejection meaning only "the destination finished before the
+// source did". Matched on the code rather than the message because that is
+// what both node and bun set, and the message is not stable across either.
+function isPrematureClose(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | null)?.code === 'ERR_STREAM_PREMATURE_CLOSE'
+}
+
 function detailOf(err: unknown): string {
   if (err instanceof HobbyError && err.hint !== undefined) {
     return err.hint
@@ -177,21 +184,50 @@ export async function unpackExecTar(exec: ExecStream, dest: string, opts: Unpack
     exec.cancel()
     tar.kill()
   }
+  const stopAndRethrow = (err: unknown): never => {
+    stopAll()
+    throw err
+  }
   const piped = pipeline(exec.stdout as Readable, tar.stdin)
-  const [produced, extracted, pipedResult] = await Promise.allSettled(
-    [exec.done, tar.done, piped].map((promise) =>
-      promise.catch((err: unknown) => {
+  const [produced, extracted, pipedResult] = await Promise.allSettled([
+    exec.done.catch(stopAndRethrow),
+    tar.done.catch(stopAndRethrow),
+    // A premature close is the end-of-archive race described below, and
+    // cancelling on it would kill a producer that is about to exit 0 by
+    // itself -- turning the benign case into a real failure. An extractor
+    // that genuinely died still cancels the producer, because that arrives
+    // as a tar.done rejection above, which is what the cancel is for.
+    piped.catch((err: unknown) => {
+      if (!isPrematureClose(err)) {
         stopAll()
-        throw err
-      })
-    )
-  )
+      }
+      throw err
+    }),
+  ])
   // The producer's own error first: it carries pg_basebackup's stderr, which
   // says why, where a broken pipe or a tar complaint only says that.
-  for (const result of [produced, extracted, pipedResult]) {
+  for (const result of [produced, extracted]) {
     if (result?.status === 'rejected') {
       throw result.reason
     }
+  }
+  // Both children exited 0 by the time this is reached, so the pipe is the
+  // only one left with an opinion -- and on a small enough archive it has a
+  // wrong one. tar stops reading at the end-of-archive marker and exits,
+  // which can happen before the producer's trailing padding has been read
+  // out of the pipe; pipeline() calls the destination finishing first a
+  // premature close even though both parties are done. The race is won by
+  // whichever side is quicker, so it bites the smallest database most
+  // reliably and leaves the big ones alone.
+  //
+  // Tolerating it here costs nothing, because the pipe was never what stood
+  // between a short stream and a snapshot filed as good: basebackupPostgres
+  // checks for backup_label and global/pg_control afterwards, and
+  // pg_basebackup writes pg_control last precisely so that check can tell a
+  // finished stream from a clean-looking prefix of one. Every other pipe
+  // error is still fatal.
+  if (pipedResult?.status === 'rejected' && !isPrematureClose(pipedResult.reason)) {
+    throw pipedResult.reason
   }
 }
 

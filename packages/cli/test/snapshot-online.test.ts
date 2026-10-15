@@ -535,6 +535,76 @@ test('an extractor that dies cancels the producer rather than leaving it blocked
   assert.equal(killed, true)
 })
 
+// A producer whose bytes are still in the pipe when the extractor is already
+// satisfied and gone: pipeline() reports ERR_STREAM_PREMATURE_CLOSE with
+// nothing actually wrong. `failExtractor` makes the extractor also report a
+// real failure, after the producer has exited 0, so the tolerance can be
+// shown to be narrow without racing the two against each other.
+async function raceEndOfArchive(failExtractor = false): Promise<'resolved' | 'rejected' | 'hung'> {
+  const { runtime } = buildContext()
+  await runtime.ensureCreated({ name: 'c', image: 'i', env: {}, ports: [], binds: [] })
+  await runtime.start('c')
+  const stdout = new PassThrough()
+  runtime._exec.handler = serve(() => ({ stdout }))
+  const exec = runtime.execStream('c', ['pg_basebackup'])
+  const dest = join(tmpdir(), `hobby-unpack-${randomUUID()}`)
+  homes.push(dest)
+
+  let failTar = (): void => {}
+  const tarDone = new Promise<void>((resolve, reject) => {
+    failTar = (): void => reject(new Error('tar: unexpected EOF'))
+    if (!failExtractor) {
+      resolve()
+    }
+  })
+  tarDone.catch(() => {})
+
+  const stdin = new PassThrough()
+  stdin.resume()
+  const unpacking = unpackExecTar(exec, dest, {
+    spawnTar: () => ({ stdin, done: tarDone, kill: () => {} }),
+  })
+  const tick = async (): Promise<void> => {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+  stdout.write(Buffer.alloc(512, 1))
+  await tick()
+  // The extractor read the end-of-archive marker, exited and closed its
+  // stdin, while the producer still has padding to write.
+  stdin.end()
+  await tick()
+  stdout.write(Buffer.alloc(512, 0))
+  stdout.end()
+  await tick()
+  // Only now, with the producer already exited 0, does the extractor report
+  // its own failure: the cancel path never gets to rewrite the error.
+  failTar()
+
+  return await Promise.race([
+    unpacking.then(
+      (): 'resolved' => 'resolved',
+      (): 'rejected' => 'rejected'
+    ),
+    new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 1000)),
+  ])
+}
+
+test('the end-of-archive race does not fail a backup both processes finished cleanly', async () => {
+  // How this surfaced: one project failed `hobby snapshot --online` every
+  // night while four larger ones on the same box never did. The producer
+  // exited 0, tar exited 0 and all 1536 files extracted correctly -- only
+  // the pipe disagreed. The race is won by whichever side is quicker, so
+  // the smallest database loses it most reliably. Before the fix this
+  // rejected with ERR_STREAM_PREMATURE_CLOSE.
+  assert.equal(await raceEndOfArchive(), 'resolved')
+})
+
+test('a premature close is still fatal when the extractor really failed', async () => {
+  // The tolerance is for the pipe alone: a premature close must not become a
+  // way for a genuinely failed extractor to pass.
+  assert.equal(await raceEndOfArchive(true), 'rejected')
+})
+
 // ---------------------------------------------------------------------------
 // No pause, and still exclusive.
 // ---------------------------------------------------------------------------
