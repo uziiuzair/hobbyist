@@ -4,17 +4,20 @@
 
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { rmSync } from 'node:fs'
+import { existsSync, rmSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 import {
   createFakeRuntime,
+  HobbyError,
   openStore,
   resolvePaths,
+  type AppConfig,
   type HobbyConfig,
   type PostgresConfig,
+  type ResourceId,
   type Store,
   type WorkerConfig,
 } from '@hobby.sh/core'
@@ -76,6 +79,19 @@ function postgresConfig(paths: DaemonContext['paths'], project: string, name: st
     superuser: 'postgres',
     password: 'secret',
     database: 'app',
+  }
+}
+
+function appConfig(project: string, name: string, databaseResourceId: ResourceId): AppConfig {
+  return {
+    image: `hobby-${project}-${name}:latest`,
+    containerName: `hobby-${project}-${name}`,
+    hostPort: 25500,
+    containerPort: 8080,
+    hostname: `${name}.${project}.localhost`,
+    source: null,
+    env: {},
+    databaseResourceId,
   }
 }
 
@@ -196,7 +212,11 @@ test('restore carries the bytes', async () => {
   )
 })
 
-test('restore renames Durable Object storage to the new resource id', async () => {
+// Inverted from its first version, which asserted a rename to the new id.
+// That rename kept the directory and orphaned every object file inside it
+// (issue #175): workerd derives the per-object file name from the unique key
+// too, so the only restore that keeps objects is one that keeps the key.
+test('restore keeps Durable Object storage under the original unique key', async () => {
   const ctx = buildContext()
   const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
   const placeholder = ctx.store.createResource({
@@ -219,10 +239,10 @@ test('restore renames Durable Object storage to the new resource id', async () =
   const newId = restored.resources[0]?.id
   assert.ok(newId !== undefined)
   assert.notEqual(newId, placeholder.id)
-  assert.equal(
-    await readFile(join(ctx.paths.resourcePath('blog-copy', 'api', 'do'), `${newId}-Counter`, 'obj.sqlite'), 'utf8'),
-    'state'
-  )
+  const restoredDo = ctx.paths.resourcePath('blog-copy', 'api', 'do')
+  assert.equal(await readFile(join(restoredDo, oldKey, 'obj.sqlite'), 'utf8'), 'state')
+  assert.equal(await readFile(join(restoredDo, oldKey, 'metadata.sqlite'), 'utf8'), 'meta')
+  assert.equal(existsSync(join(restoredDo, `${newId}-Counter`)), false, 'nothing is renamed to the new id')
 })
 
 test('restore regenerates the queue token and re-derives the hostname', async () => {
@@ -235,7 +255,11 @@ test('restore regenerates the queue token and re-derives the hostname', async ()
     config: workerConfig('blog', 'api', 'placeholder'),
   })
   ctx.store.updateResourceConfig(worker.id, workerConfig('blog', 'api', worker.id))
-  await mkdir(ctx.paths.resourcePath('blog', 'api', 'do'), { recursive: true })
+  // One addressed object, stored where workerd puts it: under the unique key
+  // directory, in a file named after the object id that the key feeds into.
+  const namespaceDir = join(ctx.paths.resourcePath('blog', 'api', 'do'), `${worker.id}-Counter`)
+  await mkdir(namespaceDir, { recursive: true })
+  await writeFile(join(namespaceDir, 'b90dbd3f00000000000000000000000000000000000000000000000000000000.sqlite'), 'state', 'utf8')
 
   const taken = await takeSnapshot(ctx, 'blog', { now: () => Date.UTC(2026, 7, 16, 9, 0, 0), suffix: () => 'aaaaaa' })
   const restored = await restoreSnapshot(ctx, taken.snapshotId, { as: 'blog-copy' })
@@ -244,13 +268,79 @@ test('restore regenerates the queue token and re-derives the hostname', async ()
   assert.ok(config !== undefined && 'queueToken' in config)
   assert.notEqual(config.queueToken, 'token-from-the-original')
   assert.equal(config.hostname, 'api.blog-copy.localhost')
-  assert.equal(config.durableObjectUniqueKeyModifier, restored.resources[0]?.id)
+  // Issue #175: the key the restored worker will ask workerd for must be the
+  // key the files on disk were written under. A new modifier plus a renamed
+  // directory kept the directory and orphaned every object file inside it.
+  assert.equal(config.durableObjectUniqueKeyModifier, worker.id, 'the unique key modifier is the original, not the new id')
+  assert.notEqual(config.durableObjectUniqueKeyModifier, restored.resources[0]?.id)
+  const restoredObject = join(
+    ctx.paths.resourcePath('blog-copy', 'api', 'do'),
+    `${worker.id}-Counter`,
+    'b90dbd3f00000000000000000000000000000000000000000000000000000000.sqlite'
+  )
+  assert.equal(await readFile(restoredObject, 'utf8'), 'state', 'the object file is where the kept key points')
   // Both ports from the worker's own range (WORKER_PORT_RANGE,
   // packages/worker/src/worker.ts), and distinct.
   for (const port of [config.hostPort, config.controlPort]) {
     assert.ok(port >= 35433 && port <= 45432, `port ${port}`)
   }
   assert.notEqual(config.hostPort, config.controlPort)
+})
+
+test('restore rebinds an app to the restored database, not the original', async () => {
+  // Issue #176: the restored app's DATABASE_URL named the source project's
+  // container, so a "non-destructive" restore wrote into the original.
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  // The app is listed before the database on purpose: the remap must not
+  // depend on manifest order.
+  const app = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'app',
+    name: 'web',
+    config: appConfig('blog', 'web', 'placeholder' as ResourceId),
+  })
+  const primary = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: postgresConfig(ctx.paths, 'blog', 'primary'),
+  })
+  ctx.store.updateResourceConfig(app.id, appConfig('blog', 'web', primary.id))
+  await mkdir(ctx.paths.resourcePath('blog', 'primary', 'pgdata'), { recursive: true })
+
+  const taken = await takeSnapshot(ctx, 'blog', { now: () => Date.UTC(2026, 7, 16, 9, 0, 0), suffix: () => 'aaaaaa' })
+  const restored = await restoreSnapshot(ctx, taken.snapshotId, { as: 'blog-copy' })
+
+  const restoredDb = restored.resources.find((r) => r.kind === 'postgres')
+  const restoredApp = restored.resources.find((r) => r.kind === 'app')
+  assert.ok(restoredDb !== undefined && restoredApp !== undefined && 'databaseResourceId' in restoredApp.config)
+  assert.equal(restoredApp.config.databaseResourceId, restoredDb.id)
+  assert.notEqual(restoredApp.config.databaseResourceId, primary.id)
+})
+
+test('restore refuses a leftover directory at the target path with a conflict, not an internal error', async () => {
+  // Issue #178: what rm left under projects/<name> made cloneTree throw a
+  // plain Error, which reached the CLI as "internal error".
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: postgresConfig(ctx.paths, 'blog', 'primary'),
+  })
+  await mkdir(ctx.paths.resourcePath('blog', 'primary', 'pgdata'), { recursive: true })
+  await mkdir(ctx.paths.resourcePath('leftover', 'primary', 'pgdata'), { recursive: true })
+
+  const taken = await takeSnapshot(ctx, 'blog', { now: () => Date.UTC(2026, 7, 16, 9, 0, 0), suffix: () => 'aaaaaa' })
+
+  await assert.rejects(restoreSnapshot(ctx, taken.snapshotId, { as: 'leftover' }), (err: unknown) => {
+    assert.ok(err instanceof HobbyError)
+    assert.equal(err.code, 'conflict')
+    assert.match(err.message, /leftover already exists, but no project named leftover does/)
+    return true
+  })
 })
 
 test('restore refuses a name that is already taken', async () => {
