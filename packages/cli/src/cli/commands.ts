@@ -1379,8 +1379,10 @@ export async function cmdEject(c: Ctx, positionals: string[], flags: Flags): Pro
     )
   } else {
     c.io.err(
-      'this is a snapshot of current state; hobby is still managing this project. pass --release to hand ' +
-        'it over: databases stopped and hobby out of the way, with every record and every byte kept.'
+      `this is a preview: hobby is still managing ${project}, and the file mounts its live data directories ` +
+        'in place, so every service is behind the compose profile "hobby-released" and `docker compose up` ' +
+        'starts nothing from it. pass --release to hand the project over: databases stopped, hobby out of the ' +
+        'way, every record and every byte kept, and a file that is meant to be started.'
     )
   }
   return 0
