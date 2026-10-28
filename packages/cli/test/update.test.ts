@@ -20,7 +20,7 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 // A remote with v0.0.1 and v0.0.2, and a checkout of it under <home>/src.
-function fixture(): { home: string; src: string; remote: string } {
+function fixture(tags: string[] = ['v0.0.1', 'v0.0.2']): { home: string; src: string; remote: string } {
   const root = join(tmpdir(), `hobby-update-test-${randomUUID()}`)
   const remote = join(root, 'remote.git')
   const work = join(root, 'work')
@@ -30,7 +30,7 @@ function fixture(): { home: string; src: string; remote: string } {
   mkdirSync(home, { recursive: true })
   git(root, 'init', '--quiet', '--bare', remote)
   git(root, 'init', '--quiet', work)
-  for (const v of ['v0.0.1', 'v0.0.2']) {
+  for (const v of tags) {
     writeFileSync(join(work, 'VERSION'), v)
     git(work, 'add', 'VERSION')
     git(work, 'commit', '--quiet', '-m', v)
@@ -78,4 +78,23 @@ test('update says already on the newest tag when it is', async () => {
 
   assert.equal(code, 0)
   assert.deepEqual(out, ['already on v0.0.2'])
+})
+
+test('a final release outranks every pre-release of the same version, whatever order they were tagged in', async () => {
+  // Issue #134: `--sort=v:refname` alone puts v0.1.0-alpha.10 after v0.1.0,
+  // so a box on the final release would have been "updated" onto an alpha.
+  const { home, src } = fixture(['v0.1.0-alpha.3', 'v0.1.0-alpha.4', 'v0.1.0', 'v0.1.0-alpha.10'])
+  git(src, 'checkout', '--quiet', 'v0.1.0-alpha.4')
+
+  const { io, out } = captureIo()
+  const code = await cmdUpdate(io, resolvePaths({ HOBBY_HOME: home }), { check: true })
+
+  assert.equal(code, 0)
+  assert.deepEqual(out, ['v0.1.0'])
+
+  // And a box already on the final is left there, not moved onto alpha.10.
+  git(src, 'checkout', '--quiet', 'v0.1.0')
+  const again = captureIo()
+  assert.equal(await cmdUpdate(again.io, resolvePaths({ HOBBY_HOME: home }), {}), 0)
+  assert.deepEqual(again.out, ['already on v0.1.0'])
 })
