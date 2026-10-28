@@ -180,6 +180,9 @@ export interface BranchResponse {
 }
 export interface DeletedResponse {
   deleted: true
+  // Set when the project was released: the directory hobby left untouched,
+  // because the compose stack it was handed over to is running on it.
+  kept?: string
 }
 export interface ConnectionResponse {
   connectionString: string

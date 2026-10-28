@@ -1045,6 +1045,8 @@ export async function cmdRm(c: Ctx, positionals: string[], flags: Flags): Promis
 
   if (flags.json) {
     c.io.out(JSON.stringify(result))
+  } else if (result.kept !== undefined) {
+    c.io.out(`deleted ${target} from hobby. it was released, so nothing on disk was touched: ${result.kept} is still there`)
   } else {
     c.io.out(`deleted ${target}`)
   }

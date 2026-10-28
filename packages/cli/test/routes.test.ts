@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -22,6 +22,7 @@ import {
   type ComputeRuntime,
   type HobbyConfig,
   type PostgresConfig,
+  type Resource,
   type Store,
   type WorkerConfig,
   type WorkerManifest,
@@ -1364,6 +1365,82 @@ test('a released project is refused by the wake path rather than woken', async (
     return true
   })
   ctx.store.close()
+})
+
+test('DELETE on a released project forgets it and leaves every file on disk', async () => {
+  // Issue #172: `hobby rm` after `hobby eject --release` deleted the data
+  // directory the user's compose stack was running on.
+  const runtime = createFakeRuntime()
+  const ctx = buildContext(runtime)
+  const dataDir = ctx.paths.resourcePath('blog', 'primary', 'pgdata')
+  mkdirSync(dataDir, { recursive: true })
+  writeFileSync(join(dataDir, 'PG_VERSION'), '18\n')
+  const { projectId, config } = await seedProject(ctx)
+  ctx.store.updateResourceConfig(ctx.store.listResources(projectId)[0]?.id as string, { ...config, dataDir })
+  await ctx.runtime.stop(config.containerName, { timeoutSec: 1 })
+  ctx.store.setProjectReleased(projectId, new Date())
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'DELETE', '/v1/projects/blog')
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.body, { deleted: true, kept: join(ctx.paths.projectsDir, 'blog') })
+    assert.equal((await call(baseUrl, 'GET', '/v1/projects/blog')).status, 404)
+    assert.equal(existsSync(join(dataDir, 'PG_VERSION')), true, 'the data directory is untouched')
+    assert.equal((await runtime.inspect(config.containerName)).exists, false, "hobby's own stopped container is gone")
+  })
+})
+
+test('DELETE on one resource of a released project is refused', async () => {
+  const ctx = buildContext()
+  const { projectId } = await seedProject(ctx)
+  const resource = ctx.store.listResources(projectId)[0] as Resource
+  ctx.store.setProjectReleased(projectId, new Date())
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'DELETE', `/v1/resources/${resource.id}`)
+    assert.equal(res.status, 409)
+    assert.match(JSON.stringify(res.body), /hobby rm blog/)
+    assert.notEqual(ctx.store.getResource(resource.id), null)
+  })
+})
+
+test('POST start on a released project is refused like the proxies refuse it', async () => {
+  // Issue #173: an explicit `hobby wake` started hobby's container on a
+  // PGDATA the ejected compose stack was already serving.
+  const runtime = createFakeRuntime()
+  const ctx = buildContext(runtime)
+  const { projectId, config } = await seedProject(ctx)
+  const resource = ctx.store.listResources(projectId)[0] as Resource
+  await ctx.runtime.stop(config.containerName, { timeoutSec: 1 })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+  ctx.store.setProjectReleased(projectId, new Date())
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/start`)
+    assert.equal(res.status, 409)
+    assert.match(JSON.stringify(res.body), /hobby adopt blog/)
+    assert.equal(runtime._state.get(config.containerName)?.running, false, 'nothing was started')
+  })
+})
+
+test('DELETE on a managed project removes what the kinds left under projects/<name>', async () => {
+  // Issue #178: an empty projects/<name>/primary/ and a worker's do/ survived
+  // rm, and restoring or branching to that name then failed on "destination
+  // already exists".
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig() })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+  const doDir = ctx.paths.resourcePath('blog', 'wk', 'do')
+  mkdirSync(doDir, { recursive: true })
+  writeFileSync(join(doDir, 'counter.sqlite'), '')
+  mkdirSync(ctx.paths.resourcePath('blog', 'primary', 'pgdata'), { recursive: true })
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'DELETE', '/v1/projects/blog')
+    assert.equal(res.status, 200)
+    assert.equal(existsSync(join(ctx.paths.projectsDir, 'blog')), false, 'the whole project tree is gone')
+  })
 })
 
 test('POST /v1/projects/:name/adopt takes a released project back', async () => {

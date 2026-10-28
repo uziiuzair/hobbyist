@@ -11,6 +11,8 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
+import { join } from 'node:path'
 import {
   DEFAULT_PORT_BIND,
   HobbyError,
@@ -260,6 +262,15 @@ async function getProjectRoute(ctx: DaemonContext, name: string): Promise<RouteR
 async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<RouteResult> {
   const project = getProjectByNameOrThrow(ctx, name)
   const resources = ctx.store.listResources(project.id)
+  // A released project's data directory is open in the user's own compose
+  // stack (issue #172): deleting it here destroyed the cluster they had just
+  // ejected to, from under a running postgres. "I have left, now clean hobby
+  // up" is the obvious next step after `hobby eject --release`, so it is
+  // answered by forgetting the rows and hobby's own stopped containers, and
+  // never by touching anything on disk.
+  if (project.releasedAt != null) {
+    return forgetReleasedProject(ctx, project, resources)
+  }
   const failures: string[] = []
 
   for (const resource of resources) {
@@ -284,6 +295,25 @@ async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<Rou
     failures.push(`remove network ${project.networkName}: ${errorMessage(err)}`)
   }
 
+  // Each kind removes what it owns (a postgres its data directory, a queue
+  // its sqlite), and a worker deliberately leaves its Durable Object and
+  // state directories behind on a single-resource rm (destroyWorker's
+  // comment, packages/worker/src/worker.ts). Deleting the whole project is a
+  // different instruction: the user typed the project's name to confirm
+  // losing it, and what the kinds left under projects/<name> (empty parent
+  // directories, a worker's do/ and state/, a bundle/) made restoring or
+  // branching to that name fail with "destination already exists" (issue
+  // #178). Only attempted once every kind succeeded: a failed teardown
+  // leaves its data where it is for the manual cleanup the error names.
+  const projectDir = join(ctx.paths.projectsDir, project.name)
+  if (failures.length === 0) {
+    try {
+      await rm(projectDir, { recursive: true, force: true })
+    } catch (err) {
+      failures.push(`remove ${projectDir}: ${errorMessage(err)}`)
+    }
+  }
+
   ctx.store.deleteProject(project.id)
 
   if (failures.length > 0) {
@@ -295,6 +325,53 @@ async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<Rou
   }
 
   return { status: 200, body: { deleted: true } }
+}
+
+// The released half of deleteProjectRoute. Hobby's own containers were
+// stopped by the release and are removed here because nothing else ever
+// will; the rows go; the network goes if it can. The data directories, a
+// worker's do/ and state/, a queue's backlog: all of it stays exactly where
+// the compose file hobby handed over expects to find it, and the response
+// says so, so `hobby rm` can print it.
+async function forgetReleasedProject(
+  ctx: DaemonContext,
+  project: Project,
+  resources: Resource[]
+): Promise<RouteResult> {
+  const failures: string[] = []
+  for (const resource of resources) {
+    ctx.store.setResourceState(resource.id, 'destroying')
+    if ('containerName' in resource.config) {
+      const containerName = resource.config.containerName
+      try {
+        if ((await ctx.runtime.inspect(containerName)).exists) {
+          await ctx.runtime.stop(containerName, { timeoutSec: 10 })
+          await ctx.runtime.remove(containerName)
+        }
+      } catch (err) {
+        failures.push(`${resource.name}: ${errorMessage(err)}`)
+      }
+    }
+    ctx.store.deleteResource(resource.id)
+    ctx.activity.reset(resource.id)
+  }
+  try {
+    await ctx.runtime.removeNetwork(project.networkName)
+  } catch (err) {
+    failures.push(`remove network ${project.networkName}: ${errorMessage(err)}`)
+  }
+  ctx.store.deleteProject(project.id)
+
+  const kept = join(ctx.paths.projectsDir, project.name)
+  if (failures.length > 0) {
+    throw new HobbyError(
+      'internal',
+      `project ${project.name} is no longer managed and nothing under ${kept} was touched, but ${failures.length} ` +
+        `cleanup step(s) did not complete cleanly: ${failures.join('; ')}`,
+      'a container or network may still remain and may need manual cleanup'
+    )
+  }
+  return { status: 200, body: { deleted: true, kept } }
 }
 
 // POST /v1/projects/:name/branch, the one route behind `hobby branch`, so
@@ -820,6 +897,18 @@ function findBindingWorker(ctx: DaemonContext, queue: QueueResource): WorkerReso
 
 async function destroyResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
+  // Same reason as deleteProjectRoute's released branch: a single resource's
+  // destroy removes its data directory, which a released project's compose
+  // stack is running on. Forgetting the whole project keeps the data;
+  // adopting it first makes this an ordinary delete again.
+  const owner = getOwningProjectOrThrow(ctx, resource)
+  if (owner.releasedAt != null) {
+    throw new HobbyError(
+      'conflict',
+      `${resource.name} belongs to ${owner.name}, which was released and is no longer managed by hobby`,
+      `run \`hobby rm ${owner.name}\` to forget the whole project (its data stays on disk), or \`hobby adopt ${owner.name}\` first`
+    )
+  }
   // Refused before anything is torn down, and before state ever moves to
   // `destroying`: deleting a queue out from under a worker that still binds
   // it turns a working `env.X.send()`/`queue()` handler into a silent
@@ -881,6 +970,12 @@ function refuseUndeployed(ctx: DaemonContext, resource: Resource): void {
 async function startResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   let resource = getResourceOrThrow(ctx, id)
   refuseUndeployed(ctx, resource)
+  // The same refusal the proxies make (issue #173): an explicit `hobby wake`
+  // of a released project started hobby's container on a data directory the
+  // user's compose stack was already serving, two postmasters on one PGDATA.
+  // Checked here, before clearWakeRefusal below, so a refused release cannot
+  // be worked around by asking twice.
+  refuseReleased(getOwningProjectOrThrow(ctx, resource))
   // An explicit `hobby wake` in the middle of a snapshot is the same hot
   // clone an automatic wake would cause (holdProjectAsleep's comment,
   // packages/cli/src/daemon/context.ts), so it waits the same way. Re-read
