@@ -12,7 +12,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { resolveConfig } from '../src/index.js'
+import { HobbyError, resolveConfig } from '../src/index.js'
 
 const cwd = mkdtempSync(join(tmpdir(), 'hobby-config-test-'))
 
@@ -129,4 +129,32 @@ test('a malformed proxyTls in hobby.json becomes a partial config, never a silen
   const dir = mkdtempSync(join(tmpdir(), 'hobby-config-test-'))
   writeFileSync(join(dir, 'hobby.json'), JSON.stringify({ proxyTls: 'yes' }))
   assert.deepEqual(resolveConfig({ env: {}, cwd: dir }).proxyTls, { certFile: '', keyFile: '', hostname: '' })
+})
+
+// Issue #71: Number('5m') is NaN, and a NaN sleepAfterSeconds was stored as
+// null, which means pinned, so a typo quietly turned hibernation off.
+test('a non-numeric HOBBY_SLEEP_AFTER_SECONDS is refused by name rather than pinning every project', () => {
+  assert.throws(
+    () => resolveConfig({ env: { HOBBY_SLEEP_AFTER_SECONDS: '5m' }, cwd }),
+    (err: unknown) => {
+      assert.ok(err instanceof HobbyError)
+      assert.equal(err.code, 'usage')
+      assert.match(err.message, /HOBBY_SLEEP_AFTER_SECONDS/)
+      assert.match(err.message, /"5m"/)
+      return true
+    }
+  )
+})
+
+test('HOBBY_SLEEP_AFTER_SECONDS accepts a positive whole number, and the word null for pinned', () => {
+  assert.equal(resolveConfig({ env: { HOBBY_SLEEP_AFTER_SECONDS: '300' }, cwd }).sleepAfterSeconds, 300)
+  assert.equal(resolveConfig({ env: { HOBBY_SLEEP_AFTER_SECONDS: 'null' }, cwd }).sleepAfterSeconds, null)
+  assert.throws(() => resolveConfig({ env: { HOBBY_SLEEP_AFTER_SECONDS: '0' }, cwd }), /HOBBY_SLEEP_AFTER_SECONDS/)
+  assert.throws(() => resolveConfig({ env: { HOBBY_SLEEP_AFTER_SECONDS: '1.5' }, cwd }), /HOBBY_SLEEP_AFTER_SECONDS/)
+})
+
+test('a non-numeric port variable is refused by name instead of reaching Node as NaN', () => {
+  assert.throws(() => resolveConfig({ env: { HOBBY_PROXY_PORT: 'abc' }, cwd }), /HOBBY_PROXY_PORT must be a whole number/)
+  assert.throws(() => resolveConfig({ env: { HOBBY_API_PORT: '70000' }, cwd }), /HOBBY_API_PORT/)
+  assert.equal(resolveConfig({ env: { HOBBY_PROXY_PORT: '15432' }, cwd }).proxyPort, 15432)
 })
