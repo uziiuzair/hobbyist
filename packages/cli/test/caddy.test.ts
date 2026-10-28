@@ -286,15 +286,40 @@ test('addRoute prints the first-exposure warning exactly once, not on every call
   assert.equal(warnings.length, 1)
 })
 
-test('a failed admin API response surfaces as a HobbyError instead of throwing an unrelated error', async () => {
+test('a failed admin API response surfaces as a HobbyError carrying what Caddy said', async () => {
   const runtime = createFakeRuntime()
-  const fetchFn = (async () => new Response('bad config', { status: 400 })) as typeof fetch
+  const fetchFn = (async () => new Response('tls: json: unknown field "on_demand"', { status: 400 })) as typeof fetch
   const manager = createCaddyManager(runtime, { adminPort: 2019, fetchFn })
 
   await assert.rejects(
     manager.addRoute({ id: 'studio', host: 'studio.local', upstream: '127.0.0.1:7432' }),
-    (err: unknown) => err instanceof Error && err.name === 'HobbyError'
+    (err: unknown) => {
+      assert.ok(err instanceof Error && err.name === 'HobbyError')
+      // In the message itself: the daemon prints only the message at
+      // startup, and "rejected the config" alone is not a diagnosis.
+      assert.match(err.message, /unknown field "on_demand"/)
+      return true
+    }
   )
+})
+
+test('the catch-all alone prints no exposure warning, since it publishes no studio route', async () => {
+  const runtime = createFakeRuntime()
+  const { fetchFn } = fakeFetch()
+  const manager = createCaddyManager(runtime, { adminPort: 2019, fetchFn })
+
+  const original = console.error
+  const messages: string[] = []
+  console.error = (...args: unknown[]) => {
+    messages.push(args.map(String).join(' '))
+  }
+  try {
+    await manager.setFallback({ upstream: '127.0.0.1:7433', askUrl: 'http://127.0.0.1:7433/.hobby/tls-ask' })
+  } finally {
+    console.error = original
+  }
+
+  assert.equal(messages.filter((m) => m.includes('exposes the daemon to the network')).length, 0)
 })
 
 test('with caddy disabled, the daemon touches neither the runtime nor the admin API', async () => {

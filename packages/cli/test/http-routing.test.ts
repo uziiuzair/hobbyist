@@ -279,7 +279,7 @@ function fakeFetch(): { fetchFn: typeof fetch; calls: RecordedCall[] } {
 function lastConfig(calls: RecordedCall[]): {
   apps: {
     http: { servers: { hobby: { routes: Array<{ '@id'?: string; match?: unknown }> } } }
-    tls?: { on_demand?: { permission?: { endpoint?: string } } }
+    tls?: { automation?: { policies?: unknown[]; on_demand?: { permission?: { endpoint?: string } } }; on_demand?: unknown }
   }
 } {
   const call = calls[calls.length - 1]
@@ -313,10 +313,14 @@ test('on-demand TLS is configured only when an ask endpoint is given', async () 
   assert.equal(lastConfig(calls).apps.tls, undefined, 'no ask endpoint means no on-demand issuance')
 
   await manager.setFallback({ upstream: '127.0.0.1:7433', askUrl: 'http://127.0.0.1:7433/.hobby/tls-ask' })
-  assert.equal(
-    lastConfig(calls).apps.tls?.on_demand?.permission?.endpoint,
-    'http://127.0.0.1:7433/.hobby/tls-ask'
-  )
+  // Where Caddy's schema wants it: apps.tls.automation.on_demand. As a
+  // sibling of `automation` Caddy rejects the whole config and HTTPS never
+  // comes up (issue #131), and the earlier version of this test pinned that
+  // wrong shape against the fake.
+  const tls = lastConfig(calls).apps.tls
+  assert.equal(tls?.automation?.on_demand?.permission?.endpoint, 'http://127.0.0.1:7433/.hobby/tls-ask')
+  assert.deepEqual(tls?.automation?.policies, [{ on_demand: true }])
+  assert.equal(tls?.on_demand, undefined, 'nothing at the sibling position Caddy rejects')
 })
 
 test('clearing the fallback removes the catch-all route', async () => {

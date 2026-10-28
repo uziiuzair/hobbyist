@@ -149,10 +149,15 @@ function buildConfig(routes: Map<string, CaddyRoute>, fallback: CaddyFallback | 
     ;(config['apps'] as Record<string, unknown>)['tls'] = {
       automation: {
         policies: [{ on_demand: true }],
+        // Inside `automation`, beside `policies`, not inside a policy and
+        // not a sibling of `automation`: Caddy's JSON schema places the
+        // global permission check at apps.tls.automation.on_demand, and the
+        // earlier sibling placement made Caddy v2.11 reject the whole config
+        // with `tls: json: unknown field "on_demand"`, so HTTPS never came
+        // up at all (issue #131). Verified by posting both shapes to a real
+        // Caddy admin API.
+        on_demand: { permission: { module: 'http', endpoint: fallback.askUrl } },
       },
-      // Sibling of `automation`, not inside a policy: this is the global
-      // permission check every on-demand issuance passes through.
-      on_demand: { permission: { module: 'http', endpoint: fallback.askUrl } },
     }
   }
 
@@ -197,8 +202,15 @@ export function createCaddyManager(runtime: ComputeRuntime, opts: CreateCaddyMan
       throw new HobbyError('runtime_unavailable', 'could not reach the caddy admin API', detail)
     }
     if (!res.ok) {
-      const detail = await res.text().catch(() => '')
-      throw new HobbyError('runtime_unavailable', 'caddy admin API rejected the config', detail)
+      // Caddy says exactly which field it rejected, and that text is the
+      // whole diagnosis. In the message, not only the hint: the daemon's
+      // startup path prints errorMessage(err) and nothing else, so a detail
+      // kept on the hint was never seen (issue #131).
+      const detail = (await res.text().catch(() => '')).trim()
+      throw new HobbyError(
+        'runtime_unavailable',
+        detail === '' ? 'caddy admin API rejected the config' : `caddy admin API rejected the config: ${detail}`
+      )
     }
   }
 
@@ -238,10 +250,12 @@ export function createCaddyManager(runtime: ComputeRuntime, opts: CreateCaddyMan
       await push()
     },
 
+    // No exposure warning here: the catch-all routes to the HTTP router,
+    // which serves apps and the tls-ask endpoint, not the daemon's auth
+    // path. Warning from here printed the studio warning on every start of
+    // a daemon that had no studio route at all (issue #131); addRoute,
+    // which is what publishes the studio hostname, keeps it.
     async setFallback(next: CaddyFallback | null): Promise<void> {
-      if (next !== null) {
-        warnOnFirstExposure()
-      }
       fallback = next
       await push()
     },
