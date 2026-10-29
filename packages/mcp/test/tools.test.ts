@@ -56,6 +56,7 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     health: notWired('health'),
     version: notWired('version'),
     setEnv: notWired('setEnv'),
+    listCrons: notWired('listCrons'),
     listProjects: notWired('listProjects'),
     createProject: notWired('createProject'),
     setSleepPolicy: notWired('setSleepPolicy'),

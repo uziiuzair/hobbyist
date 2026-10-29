@@ -184,6 +184,18 @@ export interface ResourceResponse {
   resource: WireResource
   ignored?: IgnoredKey[]
 }
+// GET /v1/projects/:name/crons (packages/cli/src/daemon/crons.ts, listCrons).
+export interface CronListEntry {
+  worker: string
+  resourceId: string
+  cron: string
+  nextAt: string
+  lastAt: string | null
+  lastOutcome: { outcome: string; detail?: string } | null
+}
+export interface CronListResponse {
+  crons: CronListEntry[]
+}
 export interface EnvResponse {
   resource: WireResource
   keys: string[]
@@ -374,6 +386,7 @@ export interface Api {
   // target into one before any of these are called, the same resolution
   // sleep/wake/logs already go through for every other kind.
   listQueues(project: string): Promise<QueueListResponse>
+  listCrons(project: string): Promise<CronListResponse>
   createQueue(project: string, name: string): Promise<ResourceResponse>
   peekQueue(id: string, limit?: number): Promise<QueuePeekResponse>
   sendMessage(id: string, input: { body: unknown; delaySeconds?: number }): Promise<QueueSendResponse>
@@ -505,6 +518,7 @@ export function createApi(transport: string | DaemonClient): Api {
       call(client, 'POST', `/v1/projects/${p(project)}/eject${opts?.release === true ? '?release=true' : ''}`),
     adopt: (project) => call(client, 'POST', `/v1/projects/${p(project)}/adopt`),
     listQueues: (project) => call(client, 'GET', `/v1/projects/${p(project)}/queues`),
+    listCrons: (project) => call(client, 'GET', `/v1/projects/${p(project)}/crons`),
     createQueue: (project, name) => call(client, 'POST', `/v1/projects/${p(project)}/resources`, { kind: 'queue', name }),
     peekQueue: (id, limit) =>
       call(client, 'GET', `/v1/resources/${p(id)}/queue/messages${limit === undefined ? '' : `?limit=${limit}`}`),
