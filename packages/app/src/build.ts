@@ -36,6 +36,7 @@ export function withBuildLock<T>(fn: () => Promise<T>): Promise<T> {
 export interface AppSource {
   path: string
   dockerfile: string
+  buildArgs?: Record<string, string>
 }
 
 // Resolves the Dockerfile the user meant and proves it exists before Docker
@@ -82,6 +83,9 @@ export async function buildAppImage(
     tag: opts.tag,
     memory: BUILD_MEMORY,
     cpuShares: BUILD_CPU_SHARES,
+    ...(opts.source.buildArgs === undefined || Object.keys(opts.source.buildArgs).length === 0
+      ? {}
+      : { buildArgs: opts.source.buildArgs }),
   }
   const build = runtime.build.bind(runtime)
   const logs = await withBuildLock(() => build(spec))
