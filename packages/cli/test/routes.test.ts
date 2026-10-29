@@ -1372,7 +1372,7 @@ test('a released project is refused by the wake path rather than woken', async (
   // Two postgres processes on one PGDATA is corruption, not a conflict the
   // user gets an error about, so this refuses before anything starts.
   const deps = createProxyDeps(ctx)
-  await assert.rejects(deps.resolve('blog'), (err: unknown) => {
+  await assert.rejects(deps.resolve('blog', null), (err: unknown) => {
     assert.ok(err instanceof HobbyError)
     assert.equal(err.code, 'conflict')
     assert.match(err.hint ?? '', /hobby adopt blog/)

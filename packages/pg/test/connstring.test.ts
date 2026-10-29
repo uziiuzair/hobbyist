@@ -100,3 +100,27 @@ test('connectionString renders the database from resource.config.database', () =
   })
   assert.equal(result, 'postgres://postgres:abc123@127.0.0.1:15432/blog_renamed')
 })
+
+// Issue #66: a second postgres in a project rendered the same string as the
+// first, which the proxy could not route. Through the proxy the database
+// segment is the routing key: the project for the default resource, and
+// `project.resource` for any other. Direct strings still name the database
+// Postgres actually holds.
+test('connectionString renders project.resource through the proxy for a non-default resource', () => {
+  const resource = { ...sampleResource(), name: 'analytics' }
+  assert.equal(
+    connectionString(sampleProject(), resource, { host: '127.0.0.1', proxyPort: 5432, viaProxy: true }),
+    'postgres://postgres:abc123@127.0.0.1:5432/blog.analytics'
+  )
+  assert.equal(
+    connectionString(sampleProject(), resource, { host: '127.0.0.1', proxyPort: 5432, viaProxy: false }),
+    'postgres://postgres:abc123@127.0.0.1:15432/blog'
+  )
+})
+
+test('connectionString renders the bare project through the proxy for the default resource', () => {
+  assert.equal(
+    connectionString(sampleProject(), sampleResource(), { host: '127.0.0.1', proxyPort: 5432, viaProxy: true }),
+    'postgres://postgres:abc123@127.0.0.1:5432/blog'
+  )
+})

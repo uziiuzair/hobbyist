@@ -17,6 +17,7 @@
 import {
   createDockerRuntime,
   createKindRegistry,
+  DEFAULT_POSTGRES_NAME,
   HobbyError,
   openStore,
   type ComputeRuntime,
@@ -542,7 +543,7 @@ export function getOrCreateWake(ctx: DaemonContext): (resourceId: string) => Pro
 // contract that it must not resolve until Postgres is actually accepting
 // connections.
 export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
-  async function resolve(projectName: string): Promise<ProxyTarget | null> {
+  async function resolve(projectName: string, databaseSegment: string | null = null): Promise<ProxyTarget | null> {
     const project = ctx.store.getProjectByName(projectName)
     if (project === null) {
       return null
@@ -572,35 +573,57 @@ export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
     // deploying an app to a project would have broken psql against its
     // database, which is exactly the kind of cross-phase breakage ADR 0007
     // guard 1 exists to prevent.
-    const resources = ctx.store.listResources(project.id).filter((r) => r.kind === 'postgres')
+    const resources = ctx.store.listResources(project.id).filter((r) => r.kind === 'postgres') as PostgresResource[]
     if (resources.length === 0) {
       return null
     }
-    if (resources.length > 1) {
-      // The wire protocol's routing key (core's parseRoutingKey) carries a
-      // project and, optionally, a database, never a resource name: there
-      // is nothing in a Postgres startup packet that can disambiguate which
-      // of several resources under one project a client means. The CLI's
-      // own resolveTarget (packages/cli/src/cli/commands.ts) hits the same
-      // ambiguity for `project/resource` targets and throws the same code;
-      // matching it here keeps one error identity for "this project needs a
-      // specific resource named" across both surfaces. proxy.ts's own
-      // try/catch around deps.resolve turns this into a FATAL error on the
-      // wire rather than crashing the connection handler.
-      throw new HobbyError(
-        'ambiguous_target',
-        `project ${projectName} has more than one postgres resource: ${resources.map((r) => r.name).join(', ')}`,
-        'the wake-on-connect proxy cannot disambiguate resources by database name alone; connect to a project with exactly one postgres resource'
-      )
+
+    // The routing key's dotted segment names a RESOURCE first (issue #66):
+    // `blog.analytics` reaches the postgres called analytics, whatever
+    // database it holds inside, and that is the string `hobby connect
+    // blog/analytics` prints (core's routingKeyFor, the inverse of this
+    // match). Only when no resource has that name does the segment keep its
+    // older meaning, a database inside the default resource, substituted on
+    // the wire by the proxy. A resource and a database sharing a name is
+    // therefore resolved as the resource; name the database through the
+    // resource's own direct string if both are wanted.
+    const byName = databaseSegment === null ? undefined : resources.find((r) => r.name === databaseSegment)
+    if (byName !== undefined) {
+      return targetFor(byName, true)
     }
 
-    const resource = resources[0] as PostgresResource
+    if (resources.length === 1) {
+      return targetFor(resources[0] as PostgresResource, false)
+    }
+
+    // Several, and the key did not name one. The default resource is what a
+    // bare project name has always meant, and `hobby new` creates exactly
+    // it, so a project that grew a second postgres keeps its first string
+    // working, which is what #66 was about: before this, `pg create` cut
+    // off the existing database's connection string the moment it ran.
+    const primary = resources.find((r) => r.name === DEFAULT_POSTGRES_NAME)
+    if (primary !== undefined) {
+      return targetFor(primary, false)
+    }
+    // No default to fall back on: the same error identity the CLI's
+    // resolveTarget (packages/cli/src/cli/commands.ts) uses for a
+    // `project/resource` target it cannot pick, and proxy.ts's try/catch
+    // around deps.resolve turns it into a FATAL on the wire.
+    throw new HobbyError(
+      'ambiguous_target',
+      `project ${projectName} has more than one postgres resource and none is named ${DEFAULT_POSTGRES_NAME}: ${resources.map((r) => r.name).join(', ')}`,
+      `name one as the database: ${resources.map((r) => `${projectName}.${r.name}`).join(' or ')} (\`hobby connect ${projectName}/<name>\` prints the string)`
+    )
+  }
+
+  function targetFor(resource: PostgresResource, databaseSegmentIsResource: boolean): ProxyTarget {
     return {
       resourceId: resource.id,
       host: '127.0.0.1',
       port: resource.config.hostPort,
       state: resource.state,
       database: resource.config.database,
+      databaseSegmentIsResource,
     }
   }
 

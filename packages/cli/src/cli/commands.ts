@@ -13,6 +13,7 @@ import { existsSync } from 'node:fs'
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, join as joinPath, resolve as resolvePath } from 'node:path'
 import {
+  DEFAULT_POSTGRES_NAME,
   HobbyError,
   parseTarget,
   resolvePgdataPath,
@@ -629,7 +630,7 @@ export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promi
   // moments ago.
   let resource
   try {
-    ;({ resource } = await c.api.createResource(project.name, { kind: 'postgres', name: 'primary' }))
+    ;({ resource } = await c.api.createResource(project.name, { kind: 'postgres', name: DEFAULT_POSTGRES_NAME }))
   } catch (err) {
     try {
       await c.api.deleteProject(project.name)

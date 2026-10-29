@@ -1345,3 +1345,40 @@ test('issue #54: a running target whose wake is refused by the daemon is not wok
     await proxy.close()
   }
 })
+
+// Issue #66: resolve is handed the dotted segment and may answer that it
+// named a resource, in which case the resource's own database goes on the
+// wire, not the segment.
+test('a routing key whose segment names a resource is sent that resource database, and resolve sees the segment', async () => {
+  const upstream = await startFakeUpstream()
+  const seen: Array<[string, string | null]> = []
+  const deps: ProxyDeps = {
+    resolve: async (project: string, database: string | null): Promise<ProxyTarget> => {
+      seen.push([project, database])
+      return {
+        resourceId: 'resource-analytics',
+        host: '127.0.0.1',
+        port: upstream.port,
+        state: 'running',
+        database: 'blog',
+        databaseSegmentIsResource: true,
+      }
+    },
+    wake: async () => {},
+    activity: new ActivityTracker(),
+  }
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 1_000 })
+  try {
+    const client = await connectClient(proxy.port)
+    client.write(buildStartupPacket({ user: 'bob', database: 'blog.analytics' }))
+    const received = await upstream.receivedFirstBytes()
+    // The resource's own database on the wire, not the segment: byte-equal
+    // to a startup packet that named `blog` directly.
+    assert.deepEqual(received, buildStartupPacket({ user: 'bob', database: 'blog' }))
+    assert.deepEqual(seen, [['blog', 'analytics']])
+    client.destroy()
+  } finally {
+    await proxy.close()
+    await upstream.close()
+  }
+})

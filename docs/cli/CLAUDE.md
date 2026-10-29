@@ -41,7 +41,10 @@ Verb-noun-target. No subcommand deeper than three levels.
 you a Postgres, and that has to survive Projects existing. `hobby new blog`
 creates the project, creates the `postgres` resource in it, and prints the
 connection string. Everything else is the explicit form for when you want
-something other than the common case.
+something other than the common case. A second postgres in the same project
+(`hobby pg create --project blog analytics`) is reached through the proxy as
+`blog.analytics`, which is the string `hobby connect blog/analytics` prints;
+the first one's string keeps working (issue #66, `docs/proxy/CLAUDE.md`).
 
 ## In scope
 
