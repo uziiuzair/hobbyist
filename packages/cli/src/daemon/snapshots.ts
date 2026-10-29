@@ -25,6 +25,7 @@ import {
   type ResourceId,
   type ResourceKind,
   type ResourceState,
+  allocateHostPort,
 } from '@hobby.sh/core'
 import { APP_PORT_RANGE } from '@hobby.sh/app'
 import { createPostgresFromClone } from '@hobby.sh/pg'
@@ -687,20 +688,20 @@ export interface RestoreResult {
 //   ids to the restored rows' ids, rather than kept. Kept, a restored app
 //   stayed bound to the SOURCE project's database (issue #176), writing into
 //   the original from a project that claims to be a copy of it.
-function rewriteConfig(
+async function rewriteConfig(
   ctx: DaemonContext,
   config: ResourceConfig,
   projectName: string,
   resourceName: string,
   idMap: ReadonlyMap<string, string>
-): ResourceConfig {
+): Promise<ResourceConfig> {
   if ('queueToken' in config) {
-    const hostPort = ctx.store.allocatePort(WORKER_PORT_RANGE.from, WORKER_PORT_RANGE.to)
+    const hostPort = await allocateHostPort(ctx.store, WORKER_PORT_RANGE.from, WORKER_PORT_RANGE.to)
     return {
       ...config,
       containerName: `hobby-${projectName}-${resourceName}`,
       hostPort,
-      controlPort: ctx.store.allocatePort(WORKER_PORT_RANGE.from, WORKER_PORT_RANGE.to, [hostPort]),
+      controlPort: await allocateHostPort(ctx.store, WORKER_PORT_RANGE.from, WORKER_PORT_RANGE.to, [hostPort]),
       queueToken: randomUUID(),
       hostname: `${resourceName}.${projectName}.${ctx.config.domain}`,
       databaseResourceId: remapDatabase(config.databaseResourceId, idMap, resourceName),
@@ -711,7 +712,7 @@ function rewriteConfig(
     return {
       ...config,
       containerName: `hobby-${projectName}-${resourceName}`,
-      hostPort: ctx.store.allocatePort(APP_PORT_RANGE.from, APP_PORT_RANGE.to),
+      hostPort: await allocateHostPort(ctx.store, APP_PORT_RANGE.from, APP_PORT_RANGE.to),
       hostname: `${resourceName}.${projectName}.${ctx.config.domain}`,
       databaseResourceId: remapDatabase(config.databaseResourceId, idMap, resourceName),
     }
@@ -987,7 +988,7 @@ export async function restoreSnapshot(
   }
 
   for (const { entry, id } of pending) {
-    ctx.store.updateResourceConfig(id, rewriteConfig(ctx, entry.config, target, entry.name, idMap))
+    ctx.store.updateResourceConfig(id, await rewriteConfig(ctx, entry.config, target, entry.name, idMap))
 
     // Never `running`: nothing has been started, and a row claiming otherwise
     // is exactly the lie reconcile.ts exists to catch.

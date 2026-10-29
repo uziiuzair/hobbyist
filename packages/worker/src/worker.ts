@@ -27,6 +27,7 @@ import {
   type Store,
   type WorkerConfig,
   type WorkerResource,
+  allocateHostPort,
 } from '@hobby.sh/core'
 import { assertWorkerConfig } from './assert-config.js'
 import { findWranglerManifest, type WranglerManifest } from './manifest.js'
@@ -470,14 +471,14 @@ export async function createWorkerResource(
   // The modifier is still written in two steps, because it is derived from
   // the id the store assigns, but there is no build between them any more.
   if (opts.sourcePath === null) {
-    const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
+    const hostPort = await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO)
     // Both allocated here rather than at first deploy, which is the whole
     // point of them living above the manifest split (WorkerConfig, core's
     // types.ts): a worker created from Studio has a stable control port and
     // a stable producer token from the moment the row exists, and a redeploy
     // never moves either. Excludes hostPort for the same reason the deployed
     // path below does: the store cannot yet see a port it has not written.
-    const controlPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO, [hostPort])
+    const controlPort = await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO, [hostPort])
     const containerName = `hobby-${opts.project.name}-${opts.name}`
     const config: WorkerConfig = {
       image: null,
@@ -517,10 +518,10 @@ export async function createWorkerResource(
   const found = findWranglerManifest(opts.sourcePath)
   const manifest = found.manifest
 
-  const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
+  const hostPort = await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO)
   // Excludes hostPort: both come from the store before this resource has a
   // row, so the store cannot yet see hostPort's own answer to skip it.
-  const controlPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO, [hostPort])
+  const controlPort = await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO, [hostPort])
   const containerName = `hobby-${opts.project.name}-${opts.name}`
 
   const dockerfilePath = await writeGeneratedDockerfile(deps, opts.project.name, opts.name, manifest)

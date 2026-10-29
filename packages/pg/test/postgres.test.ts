@@ -13,6 +13,7 @@ import {
   type HobbyConfig,
   type PostgresConfig,
   expectKind,
+  HobbyError,
 } from '@hobby.sh/core'
 import { createPostgres, destroyPostgres, startPostgres } from '../src/index.js'
 import { waitReady } from '../src/readiness.js'
@@ -420,6 +421,64 @@ test('startPostgres fails fast with wake_failed and the server message when the 
     )
     assert.ok(Date.now() - started < 1000, 'a broken answer must not wait out wakeTimeoutMs')
     assert.equal(store.getResource(resource.id)?.state, 'failed')
+  } finally {
+    store.close()
+  }
+})
+
+// Issue #59: a wake that failed readiness left its container running, so
+// the next wake's `docker start` did nothing and timed out all over again.
+test('startPostgres stops the container it started when readiness never arrives, and names a held port', async () => {
+  const store = openStore(':memory:')
+  try {
+    const project = store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+    const runtime = createFakeRuntime()
+    const paths = resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-pg-test-${randomUUID()}`) })
+    const resource = store.createResource({
+      projectId: project.id,
+      kind: 'postgres',
+      name: 'primary',
+      config: {
+        image: 'postgres:18-alpine',
+        containerName: 'hobby-blog-primary',
+        dataDir: paths.resourcePath('blog', 'primary', 'pgdata'),
+        hostPort: 15432,
+        superuser: 'postgres',
+        password: 'secret',
+        database: 'blog',
+      },
+    })
+    await runtime.ensureCreated({
+      name: 'hobby-blog-primary',
+      image: 'postgres:18-alpine',
+      env: {},
+      ports: [],
+      binds: [],
+      network: 'hobby-blog',
+    })
+
+    await assert.rejects(
+      () =>
+        startPostgres(
+          {
+            store,
+            runtime,
+            paths,
+            config: { ...testHobbyConfig(), wakeTimeoutMs: 10, readinessPollMs: 5 },
+            probeFactory: () => async () => false,
+            isHostPortFree: async () => false,
+          },
+          expectKind(resource, 'postgres')
+        ),
+      (err: unknown) => {
+        assert.ok(err instanceof HobbyError)
+        assert.equal(err.code, 'wake_timeout')
+        assert.match(err.hint ?? '', /host port 15432 is held by another process/)
+        return true
+      }
+    )
+    assert.equal(store.getResource(resource.id)?.state, 'failed')
+    assert.equal((await runtime.inspect('hobby-blog-primary')).running, false)
   } finally {
     store.close()
   }

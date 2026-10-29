@@ -22,6 +22,7 @@ import {
   type Resource,
   type ResourceId,
   type Store,
+  allocateHostPort,
 } from '@hobby.sh/core'
 import { buildAppImage, buildTag, type AppSource } from './build.js'
 import { tcpProbe, waitListening } from './readiness.js'
@@ -193,7 +194,7 @@ export async function createAppResource(deps: AppDeps, opts: CreateAppOptions): 
   }
 
   const now = deps.now ?? Date.now
-  const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
+  const hostPort = await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO)
   const containerName = `hobby-${opts.project.name}-${opts.name}`
 
   // A record with no code: allocate its identity, write the row, do nothing

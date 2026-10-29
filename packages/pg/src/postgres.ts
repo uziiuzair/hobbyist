@@ -21,6 +21,8 @@ import {
   type Project,
   type Resource,
   type Store,
+  allocateHostPort,
+  isHostPortFree,
 } from '@hobby.sh/core'
 import { pgProbe, waitReady, type ProbeOutcome } from './readiness.js'
 
@@ -29,6 +31,10 @@ export interface PgDeps {
   runtime: ComputeRuntime
   paths: Paths
   config: HobbyConfig
+  // Whether a host port is free, asked after a failed start to tell "another
+  // process holds this port" from "not ready yet". Optional; tests inject
+  // an answer, production uses core's isHostPortFree.
+  isHostPortFree?: (port: number) => Promise<boolean>
   // Where "this resource just became usable / stopped being usable" is
   // reported. Optional so a caller building a PgDeps from just
   // { store, runtime, paths, config } still satisfies this interface; the
@@ -116,7 +122,7 @@ export async function createPostgres(
 ): Promise<PostgresResource> {
   validateName(opts.name)
 
-  const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
+  const hostPort = await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO)
   const password = randomBytes(PASSWORD_BYTES).toString('hex')
   const containerName = `hobby-${opts.project.name}-${opts.name}`
   const dataDir = deps.paths.resourcePath(opts.project.name, opts.name, 'pgdata')
@@ -262,7 +268,7 @@ export async function createPostgresFromClone(
     image: opts.source.image,
     containerName: `hobby-${opts.project.name}-${opts.name}`,
     dataDir: deps.paths.resourcePath(opts.project.name, opts.name, 'pgdata'),
-    hostPort: deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO),
+    hostPort: await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO),
     superuser: opts.source.superuser,
     password: opts.source.password,
     database: opts.source.database,
@@ -291,6 +297,30 @@ export async function createPostgresFromClone(
     throw new HobbyError('internal', `resource ${resource.id} vanished immediately after creation`)
   }
   return expectKind(final, 'postgres')
+}
+
+// A start that failed readiness used to leave its container running (issue
+// #59): the next wake's `docker start` was then a no-op on an already
+// running container, and every attempt after the first waited out the whole
+// wakeTimeoutMs again until someone ran `hobby sleep` by hand. Stopping
+// here is what makes the next attempt a real start. Best effort: a stop that
+// fails must not replace the readiness error, which is the one that says
+// why the start failed.
+//
+// Then one diagnosis the readiness probe cannot make on its own. With the
+// container stopped, docker has let go of the published port, so a port
+// still held now is held by some other process (#60's second half), and
+// that is a different fix from "look at the logs". Checked after the stop
+// on purpose: before it, docker itself holds the port and the answer would
+// be a false alarm on every failed start.
+async function stopAfterFailedStart(deps: PgDeps, config: PostgresConfig): Promise<string> {
+  try {
+    await deps.runtime.stop(config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+  } catch {
+    // Deliberately swallowed, see above.
+  }
+  const free = await (deps.isHostPortFree ?? isHostPortFree)(config.hostPort)
+  return free ? '' : `; host port ${config.hostPort} is held by another process, free it and try again`
 }
 
 export async function startPostgres(deps: PgDeps, resource: PostgresResource): Promise<void> {
@@ -325,20 +355,22 @@ export async function startPostgres(deps: PgDeps, resource: PostgresResource): P
   // it, which is what keeps a resource whose boot reliably fails from
   // getting a fresh container start per incoming connection.
   if (!result.ready && result.broken !== undefined) {
+    const portNote = await stopAfterFailedStart(deps, resource.config)
     deps.store.setResourceState(resource.id, 'failed')
     throw new HobbyError(
       'wake_failed',
       `postgres for resource ${resource.id} is up but refused its readiness probe: ${result.broken}`,
-      `answered after ${result.waitedMs}ms across ${result.attempts} attempts; fix the cause, then \`hobby wake\` retries it`
+      `answered after ${result.waitedMs}ms across ${result.attempts} attempts; fix the cause, then \`hobby wake\` retries it${portNote}`
     )
   }
 
   if (!result.ready) {
+    const portNote = await stopAfterFailedStart(deps, resource.config)
     deps.store.setResourceState(resource.id, 'failed')
     throw new HobbyError(
       'wake_timeout',
       `postgres for resource ${resource.id} did not become ready within ${deps.config.wakeTimeoutMs}ms`,
-      `waited ${result.waitedMs}ms across ${result.attempts} attempts`
+      `waited ${result.waitedMs}ms across ${result.attempts} attempts${portNote}`
     )
   }
 
