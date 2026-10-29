@@ -254,7 +254,11 @@ test('creating an app without a source builds nothing and starts nothing', async
 // database by container name inside that network, which means it does not
 // depend on the database's published host port and keeps working if that
 // port is ever reallocated.
-test('a bound database becomes DATABASE_URL against the container, not loopback', async () => {
+// Issue #53: the URL used to point straight at the database container, so
+// the app bypassed the wake-on-connect proxy and could neither wake its
+// database nor keep it awake. It now goes through the proxy by the host's
+// container-facing name, with the routing key `hobby connect` would print.
+test('a bound database becomes DATABASE_URL through the proxy, by the host name a container can reach', async () => {
   const deps = buildDeps()
   const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
   const project = makeProject(deps.store)
@@ -282,11 +286,53 @@ test('a bound database becomes DATABASE_URL against the container, not loopback'
 
   const spec = runtime._specs.get(app.config.containerName)
   assert.ok(spec !== undefined)
-  assert.equal(spec.env['DATABASE_URL'], 'postgres://postgres:secret-password@hobby-blog-primary:5432/blog')
+  assert.equal(spec.env['DATABASE_URL'], 'postgres://postgres:secret-password@host.docker.internal:5432/blog')
   assert.equal(spec.env['PORT'], '3000')
   assert.equal(spec.env['NODE_ENV'], 'production')
-  // On the project network, which is what makes the container name resolve.
   assert.equal(spec.network, project.networkName)
+  // What makes the host name resolve inside a container on Linux.
+  assert.deepEqual(spec.extraHosts, [{ name: 'host.docker.internal', address: 'host-gateway' }])
+})
+
+test('a bound non-default database gets the dotted routing key, and an unbound app maps no extra host', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const pgConfig: PostgresConfig = {
+    image: 'postgres:18-alpine',
+    containerName: 'hobby-blog-analytics',
+    hostPort: 15433,
+    dataDir: '/tmp/pgdata2',
+    superuser: 'postgres',
+    password: 'secret-password',
+    database: 'blog',
+  }
+  const db = deps.store.createResource({ projectId: project.id, kind: 'postgres', name: 'analytics', config: pgConfig })
+
+  const bound = await createAppResource(deps, {
+    project,
+    name: 'web',
+    source: null,
+    image: 'nginx:alpine',
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: db.id,
+  })
+  assert.equal(
+    runtime._specs.get(bound.config.containerName)?.env['DATABASE_URL'],
+    'postgres://postgres:secret-password@host.docker.internal:5432/blog.analytics'
+  )
+
+  const unbound = await createAppResource(deps, {
+    project,
+    name: 'static',
+    source: null,
+    image: 'nginx:alpine',
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+  assert.deepEqual(runtime._specs.get(unbound.config.containerName)?.extraHosts, [])
 })
 
 test('an app publishes only on loopback', async () => {
@@ -678,6 +724,6 @@ test('a bound database wins over a DATABASE_URL in the app env', async () => {
 
   const spec = runtime._specs.get(app.config.containerName)
   assert.ok(spec !== undefined)
-  assert.equal(spec.env['DATABASE_URL'], 'postgres://postgres:secret-password@hobby-blog-primary:5432/blog')
+  assert.equal(spec.env['DATABASE_URL'], 'postgres://postgres:secret-password@host.docker.internal:5432/blog')
   assert.equal(spec.env['OTHER'], 'x')
 })

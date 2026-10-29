@@ -856,7 +856,7 @@ async function handleStartup(
     }
     woken = true
     try {
-      target = await deps.resolve(routingKey.project)
+      target = await deps.resolve(routingKey.project, routingKey.database)
     } catch (err) {
       sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, `failed to resolve ${database} after restart: ${errorMessage(err)}`)
       return

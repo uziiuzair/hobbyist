@@ -14,13 +14,14 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   HobbyError,
+  routingKeyFor,
   validateName,
   type ActivitySink,
   type ComputeRuntime,
   type ContainerSpec,
   type HobbyConfig,
   type Paths,
-  type PostgresConfig,
+  type PostgresResource,
   type Project,
   type Resource,
   type ResourceId,
@@ -142,14 +143,20 @@ export interface RunnerManifest {
   hyperdrives?: Record<string, string>
 }
 
-function hyperdriveUrl(config: PostgresConfig): string {
-  const user = encodeURIComponent(config.superuser)
-  const password = encodeURIComponent(config.password)
-  // The container name on the project's docker network, not a published
-  // loopback port, for the same reason the app kind does it: the worker then
-  // does not depend on the database's host port and keeps working if it is
-  // reallocated.
-  return `postgres://${user}:${password}@${config.containerName}:5432/${config.database}`
+// Aimed at the wake-on-connect proxy, through the hostname a container uses
+// to reach its host, for the same reason the app kind's DATABASE_URL is
+// (packages/app/src/app.ts's databaseUrlFor, issue #53): a Worker that went
+// straight to the database container could neither wake it nor keep it
+// awake, because the proxy is both the wake trigger and the activity
+// sensor. On Linux the hostname resolves only because containerSpec maps
+// it to the project network's bridge gateway, where the daemon also binds
+// a proxy listener.
+const HOST_FROM_CONTAINER = 'host.docker.internal'
+
+function hyperdriveUrl(deps: WorkerDeps, project: Project, sibling: PostgresResource): string {
+  const user = encodeURIComponent(sibling.config.superuser)
+  const password = encodeURIComponent(sibling.config.password)
+  return `postgres://${user}:${password}@${HOST_FROM_CONTAINER}:${deps.config.proxyPort}/${routingKeyFor(project.name, sibling.name)}`
 }
 
 export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource): RunnerManifest {
@@ -247,8 +254,9 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
   // connection string in the user's source and no secret in their repository.
   if (config.databaseResourceId !== null) {
     const sibling = deps.store.getResource(config.databaseResourceId)
-    if (sibling !== null && sibling.kind === 'postgres') {
-      runnerManifest.hyperdrives = { DB: hyperdriveUrl(sibling.config) }
+    const project = sibling === null ? null : deps.store.getProject(sibling.projectId)
+    if (sibling !== null && sibling.kind === 'postgres' && project !== null) {
+      runnerManifest.hyperdrives = { DB: hyperdriveUrl(deps, project, sibling) }
     }
   }
 
@@ -309,7 +317,12 @@ function containerSpec(deps: WorkerDeps, resource: WorkerResource, project: Proj
     // inside a container unless it is mapped. Harmless on macOS, where docker
     // provides it already and this simply restates the same address.
     // docs/queues/research/2026-08-22-the-producer-path-on-real-linux.md
-    extraHosts: producesToQueues(config) ? [{ name: 'host.docker.internal', address: 'host-gateway' }] : [],
+    // A bound database needs the same mapping: its Hyperdrive string reaches
+    // the proxy through this name (hyperdriveUrl above, #53).
+    extraHosts:
+      producesToQueues(config) || config.databaseResourceId !== null
+        ? [{ name: HOST_FROM_CONTAINER, address: 'host-gateway' }]
+        : [],
   }
 }
 

@@ -314,3 +314,53 @@ about a socket handed to `'upgrade'`. Either side's `'end'` now tears both
 down, the pair carries TCP keepalive so a peer that vanished without a FIN
 is noticed by the kernel, and `HttpRouter.closeUpgraded` destroys every
 detached socket on shutdown.
+
+## Amendment, 2026-10-29: a second postgres, and apps through the proxy (issues #66, #53)
+
+**The dotted segment names a resource first (#66).** `hobby pg create` on a
+project that already had a postgres used to cut off both: `resolve` threw
+`ambiguous_target` for the bare project name, and the second resource's
+connection string was identical to the first's (every resource's
+`config.database` is the project name), so nothing routed anywhere. Now
+`ProxyDeps.resolve(project, segment)` is handed the segment after the first
+dot, and the daemon's `createProxyDeps` (`packages/cli/src/daemon/context.ts`)
+resolves it in this order: a resource with that name, then, for a bare key,
+the project's only postgres or the one named `primary`
+(`DEFAULT_POSTGRES_NAME`, what `hobby new` creates). A segment that matches
+no resource keeps its older meaning, a database inside the default resource,
+substituted on the wire as before; the target's `databaseSegmentIsResource`
+tells the proxy which happened, and a resource match puts the resource's own
+database on the wire. A project with several postgres resources and no
+`primary` is still ambiguous for the bare key, and the error now lists the
+dotted forms. `connectionString` (`packages/pg/src/connstring.ts`) renders
+the matching key through the proxy: `blog` for `primary`, `blog.analytics`
+for anything else (`routingKeyFor`, `packages/core/src/names.ts`). A resource
+and an inner database sharing a name resolve as the resource.
+
+The "Routing key" paragraph above still holds for the bare form. The cost it
+names, that database names are unique across the box, now also applies to
+resource names within a project's dotted keys.
+
+**Apps and workers connect through the proxy (#53).** An app's `DATABASE_URL`
+and a worker's Hyperdrive string pointed straight at the database container
+on the project network, so neither passed through here: an app could not
+wake its own database (its queries failed with ENOTFOUND while Postgres
+slept) and could not keep it awake (nothing counted traffic that bypassed
+the activity sensor, so the database slept under an app querying it every
+eight seconds). Both now carry
+`host.docker.internal:<proxyPort>/<routing key>`, the host's own
+container-facing name. On macOS docker routes that name to the host's
+loopback, where the proxy already listens. On Linux it resolves, via the
+container's `--add-host ...:host-gateway`, to the bridge gateway of the
+project's network, and `server.ts` now binds a proxy listener on every
+project network's gateway (`proxyGatewayHosts`, and one more on each
+network created while the daemon runs), the same addresses and the same
+best-effort rule the enqueue listener already used. Those gateway listeners
+allow plaintext with TLS configured, as loopback does: the traffic never
+leaves the box, and the app's string carries no `sslmode`. A `proxyHost`
+set to a single non-loopback literal on macOS leaves loopback unbound, and
+an app on that box cannot reach its database; `tailnet` and `all` both
+include it.
+
+The compose file `hobby eject` emits still points apps at the database
+service by name, since there is no proxy in an ejected stack.

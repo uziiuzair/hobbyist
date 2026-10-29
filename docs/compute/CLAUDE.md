@@ -154,3 +154,18 @@ which happened.
 **A start that fails readiness stops its container.** All three container
 kinds now do what `startPostgres` does (engine amendment of the same date,
 #59), so the next start is a real one.
+
+## Amendment, 2026-10-29: `DATABASE_URL` goes through the proxy (issue #53)
+
+`databaseUrlFor` (`packages/app/src/app.ts`) and the worker kind's
+`hyperdriveUrl` used to build `postgres://...@hobby-blog-primary:5432/blog`,
+straight at the container, on the reasoning that an app just woken should
+not wake the proxy in turn. That reasoning was wrong in both directions: the
+app could not wake a sleeping database at all, and its traffic never counted
+as activity, so the database slept under it. Both strings now go through the
+wake-on-connect proxy by `host.docker.internal:<proxyPort>` with the routing
+key `hobby connect` prints, and the container spec maps that name to the
+host gateway on Linux. The proxy half, including the Linux listener, is in
+`docs/proxy/CLAUDE.md`'s amendment of the same date. Eject is unchanged: an
+ejected stack has no proxy, so its compose file names the database service
+directly, as before.

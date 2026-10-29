@@ -9,6 +9,7 @@
 
 import {
   HobbyError,
+  routingKeyFor,
   validateName,
   type ActivitySink,
   type AppConfig,
@@ -17,7 +18,7 @@ import {
   type ContainerSpec,
   type HobbyConfig,
   type Paths,
-  type PostgresConfig,
+  type PostgresResource,
   type Project,
   type Resource,
   type ResourceId,
@@ -66,22 +67,31 @@ function appHostname(project: string, resource: string, domain: string): string 
   return `${resource}.${project}.${domain}`.toLowerCase()
 }
 
-// The connection string an app gets for its sibling database, built against
-// the CONTAINER name rather than a loopback host port. Both containers share
-// the project's docker network, so `hobby-blog-primary:5432` resolves inside
-// it, which means the app does not depend on the database's published host
-// port at all and keeps working if that port is ever reallocated.
-//
-// Deliberately not importing @hobby.sh/pg's connectionString: that renders a
-// psql-facing string aimed at the proxy, which is the opposite of what is
-// wanted here. An app must reach its database directly, because the
-// wake-on-connect proxy would otherwise be woken by an app that was itself
-// only just woken, and the app's own liveness is already the thing keeping
-// the pair awake.
-function databaseUrlFor(config: PostgresConfig): string {
-  const user = encodeURIComponent(config.superuser)
-  const password = encodeURIComponent(config.password)
-  return `postgres://${user}:${password}@${config.containerName}:5432/${config.database}`
+// The hostname a container uses to reach the host it runs on. Docker Desktop
+// and OrbStack provide it and route it to the host's loopback; on Linux it
+// exists only because containerSpec maps it with `--add-host ...:host-gateway`
+// to the bridge gateway of the project's network, which is also where the
+// daemon binds a proxy listener (server.ts). The worker kind's producer
+// shim reaches the enqueue listener the same way, and the research behind
+// both is docs/queues/research/2026-08-22-the-producer-path-on-real-linux.md.
+export const HOST_FROM_CONTAINER = 'host.docker.internal'
+
+// The connection string an app gets for its sibling database, aimed at the
+// wake-on-connect PROXY, not at the database container (issue #53). The
+// previous shape, `hobby-blog-primary:5432` on the project network, went
+// straight to the container, so the app could neither wake its own
+// database (its queries failed with ENOTFOUND while Postgres slept) nor
+// keep it awake (the proxy is the activity sensor, and traffic that does
+// not pass through it is never counted, so the database slept under an app
+// that was querying it every eight seconds). Through the proxy, the app's
+// connection is a connection like any other: it wakes the database, and
+// its open pool keeps it awake for as long as the app is awake. The
+// routing key is the same one `hobby connect` prints (core's
+// routingKeyFor), so a second postgres in the project is reached too.
+function databaseUrlFor(deps: AppDeps, project: Project, sibling: PostgresResource): string {
+  const user = encodeURIComponent(sibling.config.superuser)
+  const password = encodeURIComponent(sibling.config.password)
+  return `postgres://${user}:${password}@${HOST_FROM_CONTAINER}:${deps.config.proxyPort}/${routingKeyFor(project.name, sibling.name)}`
 }
 
 function resolveDatabaseUrl(deps: AppDeps, databaseResourceId: ResourceId | null): string | null {
@@ -92,7 +102,11 @@ function resolveDatabaseUrl(deps: AppDeps, databaseResourceId: ResourceId | null
   if (sibling === null || sibling.kind !== 'postgres') {
     return null
   }
-  return databaseUrlFor(sibling.config)
+  const project = deps.store.getProject(sibling.projectId)
+  if (project === null) {
+    return null
+  }
+  return databaseUrlFor(deps, project, sibling)
 }
 
 // Built fresh on every start rather than stored, so a password rotation or a
@@ -124,6 +138,10 @@ function containerSpec(deps: AppDeps, config: AppConfig, network: string): Conta
     ports: [{ host: config.hostPort, container: config.containerPort }],
     binds: [],
     network,
+    // What makes DATABASE_URL's hostname resolve on Linux. See
+    // HOST_FROM_CONTAINER; harmless on macOS, where docker already provides
+    // the name and this restates the same address.
+    extraHosts: databaseUrl === null ? [] : [{ name: HOST_FROM_CONTAINER, address: 'host-gateway' }],
   }
 }
 
