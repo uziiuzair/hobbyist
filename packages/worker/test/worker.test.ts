@@ -1239,3 +1239,30 @@ test('a redeploy that fails readiness rolls the worker back to the previous imag
   assert.equal(runtime._specs.get(created.resource.config.containerName)?.image, firstImage)
   assert.equal((await runtime.inspect(created.resource.config.containerName)).running, false)
 })
+
+// Issue #74: secrets set outside the manifest (WorkerConfig.env) reach the
+// runner as vars, over the manifest's own, and survive a redeploy that
+// does not mention them.
+test('config.env is merged over the manifest vars at start and kept across a redeploy', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const source = workerSource(
+    'name = "api"\nmain = "src/index.ts"\ncompatibility_date = "2026-08-01"\n[vars]\nMODE = "file"\nSHARED = "file"\n'
+  )
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: source,
+    databaseResourceId: null,
+    env: { SHARED: 'secret', TOKEN: 't' },
+  })
+  const vars = buildRunnerManifest(deps, created.resource).vars
+  assert.deepEqual(vars, { MODE: 'file', SHARED: 'secret', TOKEN: 't' })
+
+  const redeployed = await deployWorker(deps, created.resource, {})
+  assert.deepEqual(redeployed.resource.config.env, { SHARED: 'secret', TOKEN: 't' })
+
+  const replaced = await deployWorker(deps, redeployed.resource, { env: { ONLY: '1' } })
+  assert.deepEqual(replaced.resource.config.env, { ONLY: '1' })
+  assert.deepEqual(buildRunnerManifest(deps, replaced.resource).vars, { MODE: 'file', SHARED: 'file', ONLY: '1' })
+})

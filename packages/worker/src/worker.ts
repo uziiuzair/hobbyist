@@ -215,7 +215,10 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
     controlPort: config.controlPort,
     compatibilityDate: config.manifest.compatibilityDate,
     compatibilityFlags: config.manifest.compatibilityFlags,
-    vars: config.manifest.vars,
+    // Secrets over vars, the precedence Cloudflare itself applies between
+    // `wrangler secret put` and `[vars]`. Read at every start, never frozen
+    // into the image, so `hobby env set` applies on the next wake.
+    vars: { ...config.manifest.vars, ...(config.env ?? {}) },
     kvNamespaces: config.manifest.kvNamespaces,
     r2Buckets: config.manifest.r2Buckets,
     d1Databases: config.manifest.d1Databases,
@@ -443,6 +446,8 @@ export interface CreateWorkerOptions {
   name: string
   sourcePath: string | null
   databaseResourceId: ResourceId | null
+  // See WorkerConfig.env. Absent means none yet.
+  env?: Record<string, string>
 }
 
 export interface CreateWorkerResult {
@@ -485,6 +490,7 @@ export async function createWorkerResource(
       hostname: workerHostname(opts.project.name, opts.name, deps.config.domain),
       durableObjectUniqueKeyModifier: '',
       databaseResourceId: opts.databaseResourceId,
+      env: opts.env ?? {},
       manifest: null,
     }
     const created = deps.store.createResource({
@@ -545,6 +551,7 @@ export async function createWorkerResource(
     // resource id, which the store assigns. Rewritten immediately below.
     durableObjectUniqueKeyModifier: '',
     databaseResourceId: opts.databaseResourceId,
+    env: opts.env ?? {},
     manifest: {
       source: { path: opts.sourcePath, manifest: found.file },
       compatibilityDate: manifest.compatibilityDate,
@@ -750,10 +757,13 @@ export function resolveWorkerSourcePath(resource: WorkerResource, projectName: s
   return resource.config.manifest.source.path
 }
 
+// `env` present replaces the worker's whole set (WorkerConfig.env); absent
+// keeps it, the same contract deployApp has for an app, so a plain redeploy
+// never wipes a secret set earlier.
 export async function deployWorker(
   deps: WorkerDeps,
   resource: WorkerResource,
-  opts: { sourcePath?: string } = {}
+  opts: { sourcePath?: string; env?: Record<string, string> } = {}
 ): Promise<DeployWorkerResult> {
   const project = deps.store.getProject(resource.projectId)
   if (project === null) {
@@ -807,6 +817,7 @@ export async function deployWorker(
       // rather than as a token that changed underneath it.
       controlPort: resource.config.controlPort,
       queueToken: resource.config.queueToken,
+      ...(opts.env === undefined ? {} : { env: opts.env }),
       manifest: {
         source: { path: sourcePath, manifest: found.file },
         compatibilityDate: manifest.compatibilityDate,
