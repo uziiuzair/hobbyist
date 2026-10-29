@@ -600,6 +600,7 @@ export async function createWorkerResource(
       d1Databases: manifest.d1Databases,
       queues: manifest.queues,
       durableObjects: manifest.durableObjects,
+      crons: manifest.crons,
     },
   }
 
@@ -870,6 +871,7 @@ export async function deployWorker(
         d1Databases: manifest.d1Databases,
         queues: manifest.queues,
         durableObjects: manifest.durableObjects,
+        crons: manifest.crons,
       },
     }
     replaced = true

@@ -11,7 +11,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { parse as parseToml } from 'smol-toml'
-import { HobbyError } from '@hobby.sh/core'
+import { HobbyError, parseCron } from '@hobby.sh/core'
 
 export interface WranglerDurableObject {
   binding: string
@@ -50,6 +50,9 @@ export interface WranglerManifest {
   d1Databases: string[]
   queues: { producers: WranglerQueueProducer[]; consumers: WranglerQueueConsumer[] }
   durableObjects: WranglerDurableObject[]
+  // `[triggers] crons`, validated: a malformed expression refuses the
+  // deploy with the expression named rather than firing on the wrong day.
+  crons: string[]
   // Every top-level key we saw and did not act on, so the deploy can print
   // them. Sorted, so the output is stable between runs.
   ignored: string[]
@@ -67,6 +70,7 @@ const HONOURED = new Set([
   'd1_databases',
   'queues',
   'durable_objects',
+  'triggers',
 ])
 
 // Keys we deliberately ignore, with the reason, so the deploy output can say
@@ -77,7 +81,8 @@ export const IGNORED_WITH_REASON: Record<string, string> = {
   route: 'hostnames come from hobby: <resource>.<project>.<domain>',
   workers_dev: 'there is no workers.dev here; this is your box',
   account_id: 'has no meaning outside Cloudflare',
-  triggers: 'scheduled workers are not built yet',
+  // `triggers` itself is honoured (crons). Anything else under it is not.
+  'triggers.crons': 'not an array of cron strings; no schedule was read',
   observability: 'Cloudflare-side telemetry; use `hobby logs`',
   placement: 'smart placement is a global-network feature; this is one box',
   limits: 'not enforced here (ADR 0004: no metering, no quotas)',
@@ -253,6 +258,22 @@ function stringMap(value: unknown): Record<string, string> {
   return out
 }
 
+function cronsFrom(value: unknown, ignored: string[]): string[] {
+  if (value === undefined) return []
+  const crons = isRecord(value) ? value['crons'] : undefined
+  if (crons === undefined) return []
+  if (!Array.isArray(crons) || !crons.every((entry) => typeof entry === 'string')) {
+    ignored.push('triggers.crons')
+    return []
+  }
+  for (const expression of crons) {
+    // Throws `usage` with the field named; the deploy fails here, before a
+    // build, which is where a typo in a schedule should be found.
+    parseCron(expression)
+  }
+  return crons
+}
+
 function durableObjectsFrom(value: unknown): WranglerDurableObject[] {
   if (!isRecord(value)) return []
   const bindings = value['bindings']
@@ -378,6 +399,7 @@ export function parseWranglerManifest(text: string, format: 'toml' | 'json'): Wr
   // 'queues.consumers.max_concurrency' into it.
   const ignored = Object.keys(raw).filter((key) => !HONOURED.has(key))
   const queues = queuesFrom(raw['queues'], ignored)
+  const crons = cronsFrom(raw['triggers'], ignored)
   ignored.sort()
 
   return {
@@ -393,6 +415,7 @@ export function parseWranglerManifest(text: string, format: 'toml' | 'json'): Wr
     d1Databases: stringArray(raw['d1_databases'], 'binding'),
     queues,
     durableObjects: durableObjectsFrom(raw['durable_objects']),
+    crons,
     ignored,
   }
 }

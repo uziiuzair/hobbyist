@@ -31,7 +31,7 @@ import {
   parseWranglerManifest,
   stripJsonComments,
 } from '../src/manifest.js'
-import { nodeBuiltinExternals, renderWorkerDockerfile, MINIFLARE_VERSION, WORKER_CONTEXT_EXCLUDES } from '../src/runtime-image.js'
+import { nodeBuiltinExternals, renderWorkerDockerfile, MINIFLARE_VERSION, RUNNER_SOURCE, WORKER_CONTEXT_EXCLUDES } from '../src/runtime-image.js'
 import {
   buildRunnerManifest,
   createWorkerResource,
@@ -1343,4 +1343,49 @@ test('a context that does not contain the worker directory is refused before any
     (err: unknown) => err instanceof HobbyError && err.code === 'usage' && /does not contain/.test(err.message)
   )
   assert.deepEqual(runtime._builds, [])
+})
+
+// Issue #75: [triggers] crons are read, validated and persisted, and the
+// runner's control channel can call scheduled().
+test('[triggers] crons are honoured: parsed, validated at deploy time, and no longer reported as ignored', async () => {
+  const manifest = parseWranglerManifest(
+    'name = "n"\nmain = "src/index.ts"\ncompatibility_date = "2026-08-01"\n[triggers]\ncrons = ["0 3 * * *", "*/15 * * * *"]\n',
+    'toml'
+  )
+  assert.deepEqual(manifest.crons, ['0 3 * * *', '*/15 * * * *'])
+  assert.deepEqual(manifest.ignored, [])
+  assert.equal(IGNORED_WITH_REASON['triggers'], undefined)
+
+  assert.throws(
+    () =>
+      parseWranglerManifest(
+        'name = "n"\nmain = "src/index.ts"\ncompatibility_date = "2026-08-01"\n[triggers]\ncrons = ["0 25 * * *"]\n',
+        'toml'
+      ),
+    (err: unknown) => err instanceof HobbyError && err.code === 'usage' && /invalid cron expression "0 25 \* \* \*"/.test(err.message)
+  )
+
+  const notStrings = parseWranglerManifest(
+    'name = "n"\nmain = "src/index.ts"\ncompatibility_date = "2026-08-01"\n[triggers]\ncrons = [1, 2]\n',
+    'toml'
+  )
+  assert.deepEqual(notStrings.crons, [])
+  assert.deepEqual(notStrings.ignored, ['triggers.crons'])
+
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'nightly',
+    sourcePath: workerSource(`${SAMPLE_TOML}\n[triggers]\ncrons = ["0 3 * * *"]\n`),
+    databaseResourceId: null,
+  })
+  assert.deepEqual(created.resource.config.manifest?.crons, ['0 3 * * *'])
+})
+
+test('the runner accepts POST /scheduled and the control worker calls scheduled() on the user worker', () => {
+  assert.match(RUNNER_SOURCE, /req\.url !== '\/queue' && req\.url !== '\/scheduled'/)
+  assert.match(RUNNER_SOURCE, /'http:\/\/hobby-control' \+ req\.url/)
+  assert.match(RUNNER_SOURCE, /env\.USER\.scheduled\(/)
+  assert.match(RUNNER_SOURCE, /scheduledTime: payload\.scheduledTime/)
 })
