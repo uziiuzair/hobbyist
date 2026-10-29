@@ -44,6 +44,14 @@ export const queueKindHandler: ResourceKindHandler<QueueResource> = {
     // messages outlive the worker that produced them.
   },
 
+  // Removes the files AND the row. The row is the part every other kind's
+  // destroy ends with (destroyPostgres, destroyApp, destroyWorker all call
+  // store.deleteResource last), and the part this one forgot (#65): without
+  // it the daemon's destroy route left the resource in `destroying` forever,
+  // which held the name against a re-create, made bare `project` targets
+  // ambiguous, refused `hobby branch`, and kept the queue in `hobby eject`.
+  // Files first, row last, so a failure removing the directory leaves a row
+  // behind to point at it rather than an orphaned directory nothing lists.
   async destroy(ctx: KindContext, resource: QueueResource): Promise<void> {
     const project = ctx.store.getProject(resource.projectId)
     if (project !== null) {
@@ -52,6 +60,7 @@ export const queueKindHandler: ResourceKindHandler<QueueResource> = {
         force: true,
       })
     }
+    ctx.store.deleteResource(resource.id)
   },
 
   // Observe, never create. openQueueDb (schema.ts) makes the directory,

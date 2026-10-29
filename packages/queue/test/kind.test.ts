@@ -11,7 +11,7 @@ after(() => {
   for (const home of homes) rmSync(home, { recursive: true, force: true })
 })
 
-function context(): { ctx: KindContext; resource: QueueResource } {
+function context(): { ctx: KindContext; resource: QueueResource; deleted: string[] } {
   const home = mkdtempSync(join(tmpdir(), 'hobby-queue-kind-'))
   homes.push(home)
   const paths = resolvePaths({ HOBBY_HOME: home })
@@ -41,8 +41,12 @@ function context(): { ctx: KindContext; resource: QueueResource } {
   // KindContext is filled with a value that fails loudly if it is ever
   // touched, so a handler that starts reading `runtime` or `config` breaks
   // this test instead of silently working.
+  const deleted: string[] = []
   const store = {
     getProject: () => ({ name: 'proj' }),
+    deleteResource: (id: string) => {
+      deleted.push(id)
+    },
   } as unknown as Store
   const ctx = {
     paths,
@@ -50,7 +54,7 @@ function context(): { ctx: KindContext; resource: QueueResource } {
     runtime: null as never,
     config: null as never,
   } as unknown as KindContext
-  return { ctx, resource }
+  return { ctx, resource, deleted }
 }
 
 test('the handler declares the queue kind', () => {
@@ -147,4 +151,13 @@ test('probe answers false once destroy has removed the queue directory', async (
   assert.equal(await queueKindHandler.probe(ctx, resource), true)
   await queueKindHandler.destroy(ctx, resource)
   assert.equal(await queueKindHandler.probe(ctx, resource), false)
+})
+
+// Issue #65: the files went but the row stayed, so `hobby queue rm` printed
+// "deleted" and `hobby ls` showed the queue in `destroying` forever.
+test('destroy deletes the resource row, the same as every other kind', async () => {
+  const { ctx, resource, deleted } = context()
+  await queueKindHandler.start(ctx, resource)
+  await queueKindHandler.destroy(ctx, resource)
+  assert.deepEqual(deleted, [resource.id])
 })
