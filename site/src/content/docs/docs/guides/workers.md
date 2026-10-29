@@ -44,6 +44,33 @@ and must still build; one with a `package.json` whose install fails stops
 there, with the installer's own message, rather than at a bundle error
 blaming an import you wrote correctly.
 
+## Cron triggers
+
+```toml
+[triggers]
+crons = ["0 3 * * *", "*/15 * * * *"]
+```
+
+The daemon keeps the clock (`packages/cli/src/daemon/crons.ts`). Every ten
+seconds it checks each deployed worker's schedules; when one is due it wakes
+the worker if it is asleep, through the same wake a request or a queue
+message uses, and calls the worker's `scheduled()` handler with the `cron`
+string and the `scheduledTime` it was due. Expressions are the five-field UTC
+form Cloudflare uses, with lists, ranges, steps and month and weekday names.
+A malformed one fails the deploy with the expression and field named.
+
+```sh
+hobby cron ls blog
+blog/nightly  "0 3 * * *"  next 2026-10-30T03:00:00.000Z  last not yet
+```
+
+Two limits, on purpose. Missed firings are not replayed: a daemon that was
+down from 02:00 to 09:00 runs a daily 03:00 job tomorrow, as cron on any box
+would. And a late schedule fires once, not once per minute missed. A
+`scheduled()` handler that runs long keeps the control request open for up to
+fifteen minutes; hibernation can still put the worker to sleep under a long
+run with no other activity, so keep handlers short or pin the project.
+
 ## Node builtins
 
 `compatibility_flags = ["nodejs_compat"]` (or `nodejs_compat_v2`) makes the
@@ -112,7 +139,6 @@ says about each:
 | `[assets]` | Static assets are not served for a worker. A site with assets deploys as an [app](/docs/guides/apps/), from a Dockerfile. |
 | `[[hyperdrive]]` | Not read. `hobby deploy --database <name>` binds the project's Postgres as `DB`; see Bindings below. |
 | `[[migrations]]` | Nothing to migrate. Every class in `durable_objects` is bound directly. |
-| `[triggers]` | Cron triggers are not built yet. The deploy says so rather than letting `scheduled()` silently never run. |
 | `[observability]`, `[[tail_consumers]]`, `logpush` | Cloudflare-side telemetry. Use `hobby logs`. |
 | `[build]`, `rules`, `define`, `minify`, `no_bundle` and the other bundler keys | Hobby bundles `main` with its own settings. |
 
@@ -130,6 +156,7 @@ should mean here yet.
 | Queues, producing | **Broken on Linux.** [Why](/docs/guides/queues/#the-linux-producer-gap) |
 | Hyperdrive | Works, pointed at a [Postgres](/docs/guides/postgres/) resource in the same project |
 | Workers AI | **Not provided, and will not be.** AI compute is out of scope. The deploy reports `[ai]` as ignored |
+| Cron triggers | Work. The daemon wakes the worker and calls `scheduled()` at each `[triggers] crons` time, see below |
 
 ## Where state lives
 

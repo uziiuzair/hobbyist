@@ -9,6 +9,7 @@ export * from './daemon/preflight.js'
 export * from './daemon/hibernator.js'
 export * from './daemon/caddy.js'
 export * from './daemon/wire.js'
+export * from './daemon/crons.js'
 
 // Studio's server side (task 10): the operator credential, sessions, and
 // the route-mounting/gate machinery the loopback TCP listener uses (see
@@ -38,6 +39,8 @@ export {
   cmdBranch,
   cmdConnect,
   cmdCreate,
+  cmdCron,
+  cmdCronLs,
   cmdDaemon,
   cmdDeploy,
   cmdEject,

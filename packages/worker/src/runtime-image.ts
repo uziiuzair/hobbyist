@@ -292,6 +292,17 @@ export default {
       return new Response('method not allowed', { status: 405 })
     }
     const payload = await request.json()
+    // A cron firing (issue #75): the daemon's scheduler posts { cron,
+    // scheduledTime } and this calls the user's scheduled() handler through
+    // the same service binding the queue path uses. Fetcher#scheduled, like
+    // Fetcher#queue, exists because of service_binding_extra_handlers.
+    if (new URL(request.url).pathname === '/scheduled') {
+      const result = await env.USER.scheduled({
+        cron: payload.cron,
+        scheduledTime: payload.scheduledTime,
+      })
+      return Response.json(result)
+    }
     const messages = (payload.messages || []).map(function (message) {
       return {
         id: message.id,
@@ -433,7 +444,7 @@ console.log('hobby: worker listening on ' + url.toString())
 // request, including Durable Object WebSocket upgrades and streamed
 // responses, to serve a channel used a few times a second at most.
 const controlServer = createServer((req, res) => {
-  if (req.method !== 'POST' || req.url !== '/queue') {
+  if (req.method !== 'POST' || (req.url !== '/queue' && req.url !== '/scheduled')) {
     res.writeHead(404, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
     return
@@ -445,7 +456,7 @@ const controlServer = createServer((req, res) => {
       try {
         const body = Buffer.concat(chunks).toString('utf8')
         const worker = await mf.getWorker('hobby-control')
-        const upstream = await worker.fetch('http://hobby-control/queue', {
+        const upstream = await worker.fetch('http://hobby-control' + req.url, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body,

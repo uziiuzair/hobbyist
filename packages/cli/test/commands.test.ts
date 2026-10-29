@@ -12,6 +12,7 @@ import { HobbyError } from '@hobby.sh/core'
 import {
   cmdConnect,
   cmdCreate,
+  cmdCron,
   cmdDeploy,
   cmdEnv,
   cmdLogs,
@@ -1145,4 +1146,51 @@ test('hobby deploy --context sends an absolute context for a worker, and refuses
     cmdDeploy(ctx, ['./apps/w'], { project: 'cl', dockerfile: 'x' }),
     (err: unknown) => err instanceof UsageError && /for apps/.test(err.message)
   )
+})
+
+// Issue #75: `hobby cron ls`.
+test('hobby cron ls lists each schedule with next and last, and says so when there are none', async () => {
+  const out: string[] = []
+  const api = {
+    async listProjects() {
+      return { projects: [{ name: 'blog' }, { name: 'quiet' }] }
+    },
+    async listCrons(name: string) {
+      if (name !== 'blog') return { crons: [] }
+      return {
+        crons: [
+          { worker: 'blog/nightly', resourceId: 'w1', cron: '0 3 * * *', nextAt: '2026-10-30T03:00:00.000Z', lastAt: null, lastOutcome: null },
+          {
+            worker: 'blog/nightly',
+            resourceId: 'w1',
+            cron: '*/15 * * * *',
+            nextAt: '2026-10-29T12:15:00.000Z',
+            lastAt: '2026-10-29T12:00:00.000Z',
+            lastOutcome: { outcome: 'exception', detail: 'scheduled() threw' },
+          },
+        ],
+      }
+    },
+  }
+  const ctx = {
+    io: { out: (s: string) => out.push(s), err: () => {}, env: {}, cwd: '/tmp', readLine: async () => '' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  assert.equal(await cmdCron(ctx, ['ls'], {}), 0)
+  assert.deepEqual(out, [
+    'blog/nightly  "0 3 * * *"  next 2026-10-30T03:00:00.000Z  last not yet',
+    'blog/nightly  "*/15 * * * *"  next 2026-10-29T12:15:00.000Z  last 2026-10-29T12:00:00.000Z (exception)',
+  ])
+
+  out.length = 0
+  assert.equal(await cmdCron(ctx, ['ls', 'quiet'], {}), 0)
+  assert.deepEqual(out, ['no worker in quiet declares a cron trigger'])
+
+  out.length = 0
+  assert.equal(await cmdCron(ctx, ['ls', 'blog', '--json'], { json: true }), 0)
+  assert.equal((JSON.parse(out[0] as string) as { crons: unknown[] }).crons.length, 2)
+  await assert.rejects(cmdCron(ctx, ['frob'], {}), UsageError)
 })

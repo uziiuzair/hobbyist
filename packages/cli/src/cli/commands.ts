@@ -855,6 +855,52 @@ export async function cmdEnv(c: Ctx, positionals: string[], flags: Flags): Promi
   }
 }
 
+// `hobby cron ls [project]`: every worker schedule, with when it next fires
+// and how the last firing went (issue #75). Shaped like `hobby queue ls`:
+// one project when named (or linked), every project with at least one
+// schedule otherwise.
+export async function cmdCronLs(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const projectArg = positionals[0] ?? c.config.project ?? undefined
+  const projectNames =
+    projectArg !== undefined ? [projectArg] : (await c.api.listProjects()).projects.map((p) => p.name)
+
+  const results: Array<{ project: string; crons: Awaited<ReturnType<Api['listCrons']>>['crons'] }> = []
+  for (const name of projectNames) {
+    const { crons } = await c.api.listCrons(name)
+    if (projectArg === undefined && crons.length === 0) {
+      continue
+    }
+    results.push({ project: name, crons })
+  }
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(projectArg !== undefined ? (results[0] ?? { project: projectArg, crons: [] }) : { projects: results }))
+    return 0
+  }
+  if (results.length === 0 || results.every((r) => r.crons.length === 0)) {
+    c.io.out(projectArg === undefined ? 'no worker declares a cron trigger' : `no worker in ${projectArg} declares a cron trigger`)
+    return 0
+  }
+  for (const { crons } of results) {
+    for (const entry of crons) {
+      const last =
+        entry.lastAt === null
+          ? 'not yet'
+          : `${entry.lastAt}${entry.lastOutcome === null || entry.lastOutcome.outcome === 'ok' ? '' : ` (${entry.lastOutcome.outcome})`}`
+      c.io.out(`${entry.worker}  ${JSON.stringify(entry.cron)}  next ${entry.nextAt}  last ${last}`)
+    }
+  }
+  return 0
+}
+
+export async function cmdCron(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const [sub, ...rest] = positionals
+  if (sub === 'ls' || sub === undefined) {
+    return cmdCronLs(c, rest, flags)
+  }
+  throw new UsageError(`unknown cron subcommand: ${sub}\nusage: hobby cron ls [project]`)
+}
+
 export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const name = positionals[0]
   if (name === undefined) {

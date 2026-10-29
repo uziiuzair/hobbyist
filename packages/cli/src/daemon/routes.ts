@@ -57,6 +57,7 @@ import {
 } from '@hobby.sh/worker'
 import { branchProject } from './branch.js'
 import { CLI_VERSION } from '../version.js'
+import { listCrons } from './crons.js'
 import { clearWakeRefusal, getOrCreateWake, waitForProjectAwakeable, wakeBoundDatabase, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
 import {
@@ -2422,6 +2423,15 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
         status: 201,
         body: { resource: await toWireResource(ctx, created.resource), ignored: created.ignored },
       }
+    }
+
+    // GET /v1/projects/:name/crons: every worker schedule in the project,
+    // with its next and last firing (issue #75). Read-only; the scheduler
+    // itself is not driven through the API.
+    if (segments.length === 4 && method === 'GET' && segments[3] === 'crons') {
+      const name = decodeURIComponent(segments[2] as string)
+      getProjectByNameOrThrow(ctx, name)
+      return { status: 200, body: { crons: listCrons(ctx, name) } }
     }
 
     if (segments.length === 4 && method === 'POST' && segments[3] === 'sleep-policy') {

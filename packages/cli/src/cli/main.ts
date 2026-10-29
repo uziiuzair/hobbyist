@@ -15,6 +15,7 @@ import {
   cmdAdopt,
   cmdBranch,
   cmdCreate,
+  cmdCron,
   cmdDeploy,
   cmdEject,
   cmdEnv,
@@ -206,6 +207,7 @@ const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]>
   ['queue', 'hobby queue purge <target>', 'delete every message, with confirmation'],
   ['queue', 'hobby queue rm <target> [--yes]', 'destroy the queue, with confirmation'],
   ['queue', 'hobby queue set <target> --retention <seconds>', 'change how long messages are kept'],
+  ['cron', 'hobby cron ls [project]', 'worker cron triggers, with next and last firing'],
   ['login', 'hobby login <url>', 'connect this machine to a box'],
   ['logout', 'hobby logout [url]', 'forget a box'],
   ['remote', 'hobby remote ls', 'which boxes this machine knows'],
@@ -448,6 +450,10 @@ export async function run(argv: string[], io: Io): Promise<number> {
           multi: ['env', 'build-arg'],
         })
         return await cmdDeploy(ctx, positionals, flags)
+      }
+      case 'cron': {
+        const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+        return await cmdCron(ctx, positionals, flags)
       }
       case 'env': {
         // One parseArgs for set / ls / unset, as `queue` and `snapshot` do:

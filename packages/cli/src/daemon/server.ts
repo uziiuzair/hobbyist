@@ -23,6 +23,7 @@ import { startAlarmMirror } from '@hobby.sh/do'
 import { startHttpRouter, startPgProxy, TLS_ASK_PATH, type ProxyTlsFiles } from '@hobby.sh/proxy'
 import { startQueueTick } from '@hobby.sh/queue'
 import { durableObjectNamespaces } from './alarms.js'
+import { cronState, postScheduled, scheduledWorkers, startCronScheduler } from './crons.js'
 import { createCaddyManager, type CaddyManager } from './caddy.js'
 import { createHttpProxyDeps, createProxyDeps, getOrCreateWake, type DaemonContext } from './context.js'
 import { startHibernator } from './hibernator.js'
@@ -670,6 +671,20 @@ export async function startDaemon(
     intervalMs: QUEUE_TICK_MS,
   })
 
+  // Cron triggers (issue #75): the same wake the queue tick and the alarm
+  // mirror share, so a cron firing into a sleeping worker is one wake, not
+  // a second one stacked on whatever else noticed it. Ten seconds, like the
+  // alarm mirror: a cron is written to the minute, and ten seconds late is
+  // inside what anyone means by "at 03:00".
+  const cronScheduler = startCronScheduler({
+    workers: () => scheduledWorkers(ctx),
+    wake: getOrCreateWake(ctx),
+    stateOf: queueStateOf(ctx),
+    fire: postScheduled,
+    state: cronState(ctx),
+    intervalMs: ALARM_MIRROR_TICK_MS,
+  })
+
   let shutdownPromise: Promise<void> | null = null
 
   // Idempotent and shared between the signal handlers and the returned
@@ -723,6 +738,8 @@ export async function startDaemon(
       // stopped, so an in-flight delivery finishes (or times out on its own)
       // rather than being abandoned with its lease still held.
       await queueTick.stop()
+
+      await cronScheduler.stop()
 
       // The proxy must close before any resource below is stopped: a proxy
       // still accepting connections would wake a resource right back up the

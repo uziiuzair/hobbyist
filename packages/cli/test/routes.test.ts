@@ -2156,3 +2156,43 @@ test('GET /v1/resources/:id redacts build arg values and keeps their names', asy
     assert.ok(!JSON.stringify(res.body).includes('npm_secret'))
   })
 })
+
+// Issue #75: GET /v1/projects/:name/crons lists every deployed worker's
+// schedules with the next firing computed from the daemon's start.
+test('GET /v1/projects/:name/crons lists schedules of deployed workers only, with a next time', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const deployed = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'nightly',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({ crons: ['0 3 * * *', '*/15 * * * *'] }),
+    }),
+  })
+  ctx.store.setResourceState(deployed.id, 'sleeping')
+  const undeployed = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'later',
+    config: sampleUndeployedWorkerConfig(),
+  })
+  ctx.store.setResourceState(undeployed.id, 'undeployed')
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'GET', '/v1/projects/blog/crons')
+    assert.equal(res.status, 200)
+    const body = res.body as { crons: Array<{ worker: string; cron: string; nextAt: string; lastAt: string | null }> }
+    assert.deepEqual(
+      body.crons.map((c) => [c.worker, c.cron, c.lastAt]),
+      [
+        ['blog/nightly', '0 3 * * *', null],
+        ['blog/nightly', '*/15 * * * *', null],
+      ]
+    )
+    assert.ok(Date.parse(body.crons[0]?.nextAt ?? '') > Date.now())
+
+    const missing = await call(baseUrl, 'GET', '/v1/projects/nope/crons')
+    assert.equal(missing.status, 404)
+  })
+})
