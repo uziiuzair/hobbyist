@@ -1238,3 +1238,110 @@ test('issue #9: a close after the first backend message is spliced through, not 
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }
 })
+
+// Issue #54: a container that dies behind the daemon stays `running` in the
+// store, and a refused dial on a running target never reached wake().
+test('issue #54: a running target whose port refuses the dial is woken once and then served', async () => {
+  const dead = await startFakeUpstream()
+  const deadPort = dead.port
+  await dead.close()
+
+  type Upstream = Awaited<ReturnType<typeof startFakeUpstream>>
+  let wakes = 0
+  let port = deadPort
+  let resolveWoken: (live: Upstream) => void = () => {}
+  const woken = new Promise<Upstream>((res) => {
+    resolveWoken = res
+  })
+  const deps: ProxyDeps = {
+    resolve: async (): Promise<ProxyTarget> => ({
+      resourceId: 'resource-1',
+      host: '127.0.0.1',
+      port,
+      state: 'running',
+      database: 'proj1',
+    }),
+    wake: async () => {
+      wakes++
+      const live = await startFakeUpstream()
+      port = live.port
+      resolveWoken(live)
+    },
+    activity: new ActivityTracker(),
+  }
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 5_000 })
+  let live: Upstream | null = null
+  try {
+    const client = await connectClient(proxy.port)
+    client.write(buildStartupPacket({ user: 'u', database: 'proj1' }))
+    live = await woken
+    const seen = await live.receivedFirstBytes()
+    assert.equal(wakes, 1)
+    assert.ok(seen.length > 0, 'the restarted backend received the startup packet')
+    client.destroy()
+  } finally {
+    await proxy.close()
+    if (live !== null) await live.close()
+  }
+})
+
+test('issue #54: a running target that still refuses after its one wake gets an ErrorResponse, with no second wake', async () => {
+  const dead = await startFakeUpstream()
+  const deadPort = dead.port
+  await dead.close()
+  let wakes = 0
+  const deps: ProxyDeps = {
+    resolve: async (): Promise<ProxyTarget> => ({
+      resourceId: 'resource-1',
+      host: '127.0.0.1',
+      port: deadPort,
+      state: 'running',
+      database: 'proj1',
+    }),
+    wake: async () => {
+      wakes++
+    },
+    activity: new ActivityTracker(),
+  }
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 5_000 })
+  try {
+    const client = await connectClient(proxy.port)
+    client.write(buildStartupPacket({ user: 'u', database: 'proj1' }))
+    const answer = await readAll(client)
+    assert.equal(extractSqlState(answer), '57P03')
+    assert.equal(wakes, 1)
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('issue #54: a running target whose wake is refused by the daemon is not woken on a refused dial', async () => {
+  const dead = await startFakeUpstream()
+  const deadPort = dead.port
+  await dead.close()
+  let wakes = 0
+  const deps: ProxyDeps = {
+    resolve: async (): Promise<ProxyTarget> => ({
+      resourceId: 'resource-1',
+      host: '127.0.0.1',
+      port: deadPort,
+      state: 'running',
+      database: 'proj1',
+    }),
+    wake: async () => {
+      wakes++
+    },
+    isWakeRefused: () => true,
+    activity: new ActivityTracker(),
+  }
+  const proxy = await startPgProxy({ port: 0, deps, wakeTimeoutMs: 5_000 })
+  try {
+    const client = await connectClient(proxy.port)
+    client.write(buildStartupPacket({ user: 'u', database: 'proj1' }))
+    const answer = await readAll(client)
+    assert.equal(extractSqlState(answer), '57P03')
+    assert.equal(wakes, 0)
+  } finally {
+    await proxy.close()
+  }
+})

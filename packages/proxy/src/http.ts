@@ -144,6 +144,13 @@ function sendPlain(res: ServerResponse, status: number, body: string): void {
   res.end(body)
 }
 
+// The errors a dial produces when nothing is listening on a port, as
+// distinct from a server that accepted and then misbehaved.
+function isDialFailure(err: Error): boolean {
+  const code = (err as { code?: unknown }).code
+  return code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EHOSTUNREACH'
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(message)), ms)
@@ -188,7 +195,8 @@ export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = 
   //                         now, so waking it would start a second copy.
   //   { kind: 'timeout' }   the wake did not finish in time (504)
   type Resolution =
-    | { kind: 'target'; target: HttpTarget }
+    // woke: whether this request already paid for a wake to get here.
+    | { kind: 'target'; target: HttpTarget; woke: boolean }
     | { kind: 'missing' }
     | { kind: 'refused'; reason: string }
     | { kind: 'timeout'; reason: string }
@@ -204,7 +212,7 @@ export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = 
       return { kind: 'missing' }
     }
     if (target.state === 'running') {
-      return { kind: 'target', target }
+      return { kind: 'target', target, woke: false }
     }
     // A resource whose last wake failed, and whose retry time has not come,
     // is refused here, with no wake: the same rule, for the same reason, as the
@@ -237,7 +245,7 @@ export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = 
     // but reading the post-wake state is what the Postgres proxy does after
     // its own wake and matching it costs one call.
     const woken = await deps.resolve(hostname).catch(() => null)
-    return { kind: 'target', target: woken ?? target }
+    return { kind: 'target', target: woken ?? target, woke: true }
   }
 
   // Caddy asks this before issuing a certificate for a hostname nobody
@@ -295,7 +303,7 @@ export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = 
         sendPlain(res, 504, `hobby: ${hostname} did not wake up in time (${resolution.reason}).\n`)
         return
       }
-      const target = resolution.target
+      let target = resolution.target
 
       // Activity is opened AFTER the wake, not before. A request that
       // waits three seconds for a container to start has not been using
@@ -309,51 +317,98 @@ export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = 
         deps.activity.close(handle)
       }
 
-      const upstream = httpRequest(
-        {
-          host: target.host,
-          port: target.port,
-          method: req.method,
-          path: req.url,
-          headers: forwardableHeaders(req),
-          timeout: upstreamTimeoutMs,
-        },
-        (upstreamRes) => {
-          // Headers are here, so the upstream has answered: from this point
-          // the response takes as long as it takes. The socket timeout set
-          // on the request above would otherwise fire on the next quiet
-          // stretch of a streaming response and cut it (#67).
-          upstreamRes.socket?.setTimeout(0)
-          res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers)
-          upstreamRes.pipe(res)
-          // Released when the RESPONSE ends, not when the request is sent.
-          // A streaming response (Server-Sent Events, a long download) is
-          // the app being used for its whole duration, and releasing early
-          // would let hibernation sleep a container mid-stream.
-          upstreamRes.on('end', release)
-          // An upstream that dies mid-body reports it here, on the
-          // response, not on the request above: 'aborted' then an 'error'
-          // of its own. pipe() ends nothing on a source error, so without
-          // this the client sat on a body that was never going to finish
-          // (#67). Destroyed rather than ended, so a truncated body never
-          // looks complete.
-          upstreamRes.on('error', () => {})
-          upstreamRes.on('close', () => {
-            release()
-            if (!upstreamRes.complete && !res.writableEnded) {
-              res.destroy(new Error(`${hostname} closed the connection before the response was complete`))
-            }
-          })
-        }
-      )
+      // A target the store calls `running` whose port refuses the dial is a
+      // container that died behind the daemon (issue #54, the HTTP shape):
+      // nothing above woke it because it was recorded running, and every
+      // request was a 502 in milliseconds until someone ran `hobby wake`.
+      // It is woken once, and the request is sent again if it can be: a
+      // request with a body has already streamed that body into the dead
+      // connection and cannot be replayed, so it gets the 502 after the
+      // wake, and the next one is served.
+      const bodiless =
+        req.headers['content-length'] === undefined && req.headers['transfer-encoding'] === undefined
+      let restarted = false
+      const canRestart = (): boolean =>
+        !restarted &&
+        resolution.kind === 'target' &&
+        !resolution.woke &&
+        target.state === 'running' &&
+        deps.isWakeRefused?.(target.resourceId) !== true
 
-      upstream.on('timeout', () => {
-        upstream.destroy(new Error(`upstream did not respond within ${upstreamTimeoutMs}ms`))
-      })
+      const send = (replay: boolean): void => {
+        const upstream = httpRequest(
+          {
+            host: target.host,
+            port: target.port,
+            method: req.method,
+            path: req.url,
+            headers: forwardableHeaders(req),
+            timeout: upstreamTimeoutMs,
+          },
+          (upstreamRes) => {
+            // Headers are here, so the upstream has answered: from this point
+            // the response takes as long as it takes. The socket timeout set
+            // on the request above would otherwise fire on the next quiet
+            // stretch of a streaming response and cut it (#67).
+            upstreamRes.socket?.setTimeout(0)
+            res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers)
+            upstreamRes.pipe(res)
+            // Released when the RESPONSE ends, not when the request is sent.
+            // A streaming response (Server-Sent Events, a long download) is
+            // the app being used for its whole duration, and releasing early
+            // would let hibernation sleep a container mid-stream.
+            upstreamRes.on('end', release)
+            // An upstream that dies mid-body reports it here, on the
+            // response, not on the request above: 'aborted' then an 'error'
+            // of its own. pipe() ends nothing on a source error, so without
+            // this the client sat on a body that was never going to finish
+            // (#67). Destroyed rather than ended, so a truncated body never
+            // looks complete.
+            upstreamRes.on('error', () => {})
+            upstreamRes.on('close', () => {
+              release()
+              if (!upstreamRes.complete && !res.writableEnded) {
+                res.destroy(new Error(`${hostname} closed the connection before the response was complete`))
+              }
+            })
+          }
+        )
 
-      upstream.on('error', (err: Error) => {
-        release()
-        if (res.headersSent) {
+        upstream.on('timeout', () => {
+          upstream.destroy(new Error(`upstream did not respond within ${upstreamTimeoutMs}ms`))
+        })
+
+        upstream.on('error', (err: Error) => {
+          if (isDialFailure(err) && canRestart() && !res.headersSent) {
+            restarted = true
+            void (async (): Promise<void> => {
+              try {
+                await withTimeout(deps.wake(target.resourceId), wakeTimeoutMs, `wake timed out after ${wakeTimeoutMs}ms`)
+              } catch (wakeErr) {
+                release()
+                sendPlain(
+                  res,
+                  502,
+                  `hobby: ${hostname} is recorded running but refused the connection (${err.message}), and could not be restarted (${wakeErr instanceof Error ? wakeErr.message : String(wakeErr)}).\n`
+                )
+                return
+              }
+              target = (await deps.resolve(hostname).catch(() => null)) ?? target
+              if (!bodiless) {
+                release()
+                sendPlain(
+                  res,
+                  502,
+                  `hobby: ${hostname} was not running and has been restarted; this request carried a body and could not be sent again, retry it.\n`
+                )
+                return
+              }
+              send(true)
+            })()
+            return
+          }
+          release()
+          if (res.headersSent) {
           // Too late for a status: the client has the headers and is
           // reading the body. Ending the response cleanly would hand it a
           // truncated body that looks complete; destroying the socket is
@@ -365,18 +420,25 @@ export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = 
         sendPlain(res, 502, `hobby: ${hostname} is running but did not answer (${err.message}).\n`)
       })
 
-      // A client that hangs up mid-request must not leave the upstream
-      // request open, and must not leave an activity handle behind either:
-      // an unreleased handle is a resource that never goes idle and
-      // therefore never sleeps again, which is the wedge quietly failing.
-      res.on('close', () => {
-        release()
-        if (!upstream.destroyed) {
-          upstream.destroy()
-        }
-      })
+        // A client that hangs up mid-request must not leave the upstream
+        // request open, and must not leave an activity handle behind either:
+        // an unreleased handle is a resource that never goes idle and
+        // therefore never sleeps again, which is the wedge quietly failing.
+        res.on('close', () => {
+          release()
+          if (!upstream.destroyed) {
+            upstream.destroy()
+          }
+        })
 
-      req.pipe(upstream)
+        if (replay) {
+          upstream.end()
+        } else {
+          req.pipe(upstream)
+        }
+      }
+
+      send(false)
     })()
   }
 

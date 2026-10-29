@@ -676,3 +676,69 @@ test('closing the router destroys upgraded sockets it detached, so shutdown does
   for (const s of upstreamSockets) s.destroy()
   await closeServer(server)
 })
+
+// Issue #54, the HTTP shape: a container that died behind the daemon is
+// still `running` in the store, so its refused port was a 502 in
+// milliseconds on every request until a human ran `hobby wake`.
+test('a running resource whose port refuses the dial is woken once and the request is served', async () => {
+  const probe = createServer()
+  const port = await listenOn(probe)
+  await closeServer(probe)
+
+  let server: Server | null = null
+  let wakes = 0
+  const activity = new ActivityTracker()
+  const router = await startHttpRouter(
+    {
+      async resolve(): Promise<HttpTarget> {
+        return { resourceId: 'r1', host: '127.0.0.1', port, state: 'running' }
+      },
+      async wake(): Promise<void> {
+        wakes++
+        server = createServer((_req, res) => {
+          res.writeHead(200)
+          res.end('back')
+        })
+        await new Promise<void>((resolve) => server!.listen(port, '127.0.0.1', () => resolve()))
+      },
+      activity,
+    },
+    { port: 0 }
+  )
+  try {
+    const res = await fetchThrough(router.port, 'web.blog.localhost')
+    assert.equal(res.status, 200)
+    assert.equal(res.body, 'back')
+    assert.equal(wakes, 1)
+    assert.equal(activity.count('r1'), 0)
+  } finally {
+    await router.close()
+    if (server !== null) await closeServer(server)
+  }
+})
+
+test('a running resource that still refuses after its one restart is a 502, with no second wake', async () => {
+  const probe = createServer()
+  const port = await listenOn(probe)
+  await closeServer(probe)
+  let wakes = 0
+  const router = await startHttpRouter(
+    {
+      async resolve(): Promise<HttpTarget> {
+        return { resourceId: 'r1', host: '127.0.0.1', port, state: 'running' }
+      },
+      async wake(): Promise<void> {
+        wakes++
+      },
+      activity: new ActivityTracker(),
+    },
+    { port: 0 }
+  )
+  try {
+    const res = await fetchThrough(router.port, 'web.blog.localhost')
+    assert.equal(res.status, 502)
+    assert.equal(wakes, 1)
+  } finally {
+    await router.close()
+  }
+})

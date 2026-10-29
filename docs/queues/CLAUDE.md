@@ -147,3 +147,11 @@ Every one of these is from a Mac, like every other measurement in this repo.
   has ever thrown, and no real container has ever died mid-batch.
 - **`queueDeliveryGuard` has never run inside a real hibernation tick.** Unit
   tests only.
+
+## Amendment, 2026-10-29: destroy deletes the row (issue #65)
+
+`queueKindHandler.destroy` removed the files and never the row, so `hobby
+queue rm` printed "deleted" and left the resource in `destroying` forever:
+the name stayed taken, bare `project` targets turned ambiguous, `hobby
+branch` refused the project and `hobby eject` still exported the queue. It
+now ends with `store.deleteResource`, as every other kind's destroy does.
