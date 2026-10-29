@@ -41,6 +41,7 @@ export {
   cmdDaemon,
   cmdDeploy,
   cmdEject,
+  cmdEnv,
   cmdInit,
   cmdLogs,
   cmdLs,

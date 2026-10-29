@@ -446,6 +446,87 @@ function readStringMap(value: unknown): Record<string, string> {
   return out
 }
 
+// What a POSIX environment accepts as a name. Checked here, at the control
+// surface, not only in the CLI's env-file parser: the MCP server and a raw
+// POST reach this route too, and a key with a space or an `=` in it would
+// not fail loudly, it would be dropped or mangled by docker and the app
+// would see nothing.
+const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+function validatedEnv(env: Record<string, string>): Record<string, string> {
+  for (const key of Object.keys(env)) {
+    if (!ENV_KEY.test(key)) {
+      throw new HobbyError(
+        'usage',
+        `${JSON.stringify(key)} is not a valid environment variable name`,
+        'letters, digits and _, not starting with a digit'
+      )
+    }
+  }
+  return env
+}
+
+function readStringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : []
+}
+
+// POST /v1/resources/:id/env, body { set?: {K: V}, unset?: [K], replace?:
+// {K: V} }: the one way to change an app's or a worker's variables after it
+// exists (issue #74). `replace` is the whole new set; otherwise `unset`
+// is applied, then `set` merged, onto what is there. Persisted to the
+// resource's config, which every start reads fresh (containerSpec in
+// packages/app/src/app.ts, buildRunnerManifest in
+// packages/worker/src/worker.ts), so nothing is rebuilt: an env change is
+// a config change, not a deploy.
+//
+// A running resource is stopped, not restarted. The next request wakes it
+// with the new values, which is the same mechanism every other change
+// here rides on (the wedge: everything sleeps, everything wakes on
+// demand), and it means the caller is told honestly that the old process
+// is gone rather than left to wonder whether it was. An undeployed
+// resource takes the values too; they apply at its first deploy.
+//
+// The response carries key names and never values: the wire shape redacts
+// env (packages/cli/src/daemon/wire.ts), and this route does not get an
+// exception to that.
+async function envRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
+  const resource = getResourceOrThrow(ctx, id)
+  if (resource.kind !== 'app' && resource.kind !== 'worker') {
+    throw new HobbyError(
+      'usage',
+      `${resource.name} is a ${resource.kind}, and only an app or a worker has environment variables to set`
+    )
+  }
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const set = validatedEnv(readStringMap(fields['set']))
+  const unset = readStringList(fields['unset'])
+  const replace = 'replace' in fields ? validatedEnv(readStringMap(fields['replace'])) : undefined
+
+  const next: Record<string, string> = replace ?? { ...(resource.config.env ?? {}) }
+  for (const key of unset) {
+    delete next[key]
+  }
+  Object.assign(next, set)
+
+  ctx.store.updateResourceConfig(resource.id, { ...resource.config, env: next })
+
+  let stopped = false
+  if (resource.state === 'running') {
+    await ctx.kinds.get(resource.kind).stop(ctx, getResourceOrThrow(ctx, id))
+    stopped = true
+  }
+
+  return {
+    status: 200,
+    body: {
+      resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)),
+      keys: Object.keys(next).sort(),
+      stopped,
+    },
+  }
+}
+
 // The one place a queue resource is built: from `hobby queue create` /
 // POST /v1/projects/:name/resources with kind 'queue' (createResourceRoute
 // below), and from syncWorkerQueueBindings (further down) auto-creating one
@@ -546,7 +627,7 @@ async function createResourceRoute(
       source,
       image,
       containerPort,
-      env: readStringMap(fields['env']),
+      env: validatedEnv(readStringMap(fields['env'])),
       databaseResourceId,
     })
     return { resource, ignored: [] }
@@ -584,6 +665,7 @@ async function createResourceRoute(
       name,
       sourcePath: source === null ? null : source.path,
       databaseResourceId,
+      ...('env' in fields ? { env: validatedEnv(readStringMap(fields['env'])) } : {}),
     })
     // Every wrangler key we read and did not act on, reported at the moment
     // the user is watching. Silence here is how a platform earns a
@@ -812,7 +894,7 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
   if (resource.kind === 'app') {
     // Only a present field replaces the app's env. An absent one keeps it,
     // so a plain redeploy never wipes variables set on an earlier one.
-    const env = isRecord(body) && 'env' in body ? readStringMap(body['env']) : undefined
+    const env = isRecord(body) && 'env' in body ? validatedEnv(readStringMap(body['env'])) : undefined
     const result = await deployApp(ctx, resource, {
       ...(source === null ? {} : { source }),
       ...(env === undefined ? {} : { env }),
@@ -846,7 +928,13 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
     const found = findWranglerManifest(sourcePath)
     assertQueueBindingsAreLegal(ctx.store, project, resource.id, resource.name, found.manifest.queues)
 
-    const result = await deployWorker(ctx, resource, source === null ? {} : { sourcePath: source.path })
+    // Same contract as the app branch above: a present `env` replaces the
+    // worker's set (WorkerConfig.env), an absent one keeps it.
+    const env = isRecord(body) && 'env' in body ? validatedEnv(readStringMap(body['env'])) : undefined
+    const result = await deployWorker(ctx, resource, {
+      ...(source === null ? {} : { sourcePath: source.path }),
+      ...(env === undefined ? {} : { env }),
+    })
     for (const line of describeIgnored(result.ignored)) {
       console.error(`worker ${resource.name}: ignoring ${line}`)
     }
@@ -2361,6 +2449,7 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       if (method === 'GET' && action === 'logs') return logsRoute(ctx, id, url)
       if (method === 'POST' && action === 'query') return queryRoute(ctx, req, id)
       if (method === 'POST' && action === 'deploy') return deployResourceRoute(ctx, req, id)
+      if (method === 'POST' && action === 'env') return envRoute(ctx, req, id)
     }
 
     // /v1/resources/:id/queue/messages and /v1/resources/:id/queue/retention.

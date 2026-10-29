@@ -85,6 +85,16 @@ export interface RmArgs {
   confirm: boolean
 }
 
+export interface EnvSetArgs {
+  target: string
+  set: Record<string, string>
+}
+
+export interface EnvUnsetArgs {
+  target: string
+  keys: string[]
+}
+
 export interface QueueLsArgs {
   project?: string
 }
@@ -230,6 +240,50 @@ export async function logsTool(api: Api, args: LogsArgs): Promise<ToolResult> {
 // Same project-vs-resource split as cmdRm: a bare project name deletes the
 // whole project (every resource in it, best-effort, per routes.ts); a
 // `project/resource` target deletes only that resource.
+// The env tools mirror `hobby env set|ls|unset` (issue #74) over the same
+// route. None returns a value: `ls` reads key names off the wire config,
+// which the daemon redacts, and set/unset echo the keys they touched. An
+// agent that needs a value has no path to it here, on purpose: the secret
+// goes in, and what comes back is the fact that it is there.
+async function envResource(api: Api, target: string): Promise<{ id: string; kind: string; config: Record<string, unknown> }> {
+  const { resource } = await resolveTarget(api, target)
+  if (resource.kind !== 'app' && resource.kind !== 'worker') {
+    throw new HobbyError(
+      'usage',
+      `${target} is a ${resource.kind}, and only an app or a worker has environment variables to set`
+    )
+  }
+  return { id: resource.id, kind: resource.kind, config: resource.config as unknown as Record<string, unknown> }
+}
+
+export async function envSetTool(api: Api, args: EnvSetArgs): Promise<ToolResult> {
+  return run(async () => {
+    const { id } = await envResource(api, args.target)
+    const result = await api.setEnv(id, { set: args.set })
+    return { set: Object.keys(args.set).sort(), keys: result.keys, stopped: result.stopped }
+  })
+}
+
+export async function envUnsetTool(api: Api, args: EnvUnsetArgs): Promise<ToolResult> {
+  return run(async () => {
+    const { id } = await envResource(api, args.target)
+    const result = await api.setEnv(id, { unset: args.keys })
+    return { unset: args.keys, keys: result.keys, stopped: result.stopped }
+  })
+}
+
+export async function envListTool(api: Api, args: TargetArgs): Promise<ToolResult> {
+  return run(async () => {
+    const { kind, config } = await envResource(api, args.target)
+    const env = (config['env'] as Record<string, string> | undefined) ?? {}
+    const manifest = config['manifest'] as { vars?: Record<string, string> } | null | undefined
+    return {
+      keys: Object.keys(env).sort(),
+      ...(kind === 'worker' ? { vars: Object.keys(manifest?.vars ?? {}).sort() } : {}),
+    }
+  })
+}
+
 export async function rmTool(api: Api, args: RmArgs): Promise<ToolResult> {
   return run(async () => {
     if (args.confirm !== true) {

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Api, BranchResponse, ConnectionResponse, DeletedResponse, LogsResponse, ProjectDetailResponse, ProjectsResponse, ResourceResponse, WireResource } from '@hobby.sh/cli'
 import type { Project } from '@hobby.sh/core'
-import { branchTool, connectionStringTool, listTool, logsTool, newTool, rmTool, sleepTool, wakeTool, type ToolResult } from '../src/tools.js'
+import { branchTool, connectionStringTool, envListTool, envSetTool, envUnsetTool, listTool, logsTool, newTool, rmTool, sleepTool, wakeTool, type ToolResult } from '../src/tools.js'
 
 function project(name: string, id = `${name}-id`): Project {
   return { id, name, networkName: `hobby-${name}`, sleepAfterSeconds: 300, createdAt: new Date('2026-01-01'), releasedAt: null }
@@ -55,6 +55,7 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
   const base: Api = {
     health: notWired('health'),
     version: notWired('version'),
+    setEnv: notWired('setEnv'),
     listProjects: notWired('listProjects'),
     createProject: notWired('createProject'),
     setSleepPolicy: notWired('setSleepPolicy'),
@@ -273,4 +274,73 @@ test('hobby_rm: confirm true and project/resource resolves the target then DELET
   const result = await rmTool(api, { target: 'blog/primary', confirm: true })
   assert.equal(result.isError, undefined)
   assert.deepEqual(calls, ['getProject("blog")', `deleteResource("${r.id}")`])
+})
+
+// Issue #74: the env tools mirror `hobby env set|ls|unset` over
+// POST /v1/resources/:id/env, and none of them returns a value.
+function appResource(name: string, projectId: string, env: Record<string, string>): WireResource {
+  return {
+    id: `${name}-id`,
+    projectId,
+    kind: 'app',
+    name,
+    state: 'running',
+    config: {
+      image: 'img:1',
+      containerName: `hobby-${projectId}-${name}`,
+      hostPort: 25500,
+      containerPort: 8080,
+      hostname: `${name}.blog.localhost`,
+      source: null,
+      env,
+      databaseResourceId: null,
+    },
+    sizeBytes: null,
+    connectionCount: 0,
+    lastActiveAt: null,
+    createdAt: new Date('2026-01-01'),
+  }
+}
+
+test('hobby_env_set: resolves the target then POST /v1/resources/:id/env with set, returning keys only', async () => {
+  const p = project('blog')
+  const r = appResource('web', p.id, {})
+  const { api, calls } = fakeApi({
+    getProject: async (): Promise<ProjectDetailResponse> => ({ project: p, resources: [r] }),
+    setEnv: async (id, input) => {
+      assert.equal(id, r.id)
+      assert.deepEqual(input, { set: { API_KEY: 'sk-secret' } })
+      return { resource: { ...r, state: 'sleeping' }, keys: ['API_KEY'], stopped: true }
+    },
+  })
+  const result = await envSetTool(api, { target: 'blog', set: { API_KEY: 'sk-secret' } })
+  assert.deepEqual(calls, ['getProject("blog")', `setEnv("${r.id}", {"set":{"API_KEY":"sk-secret"}})`])
+  assert.deepEqual(resultText(result), { set: ['API_KEY'], keys: ['API_KEY'], stopped: true })
+  assert.ok(!JSON.stringify(result).includes('sk-secret'))
+})
+
+test('hobby_env_unset and hobby_env_ls: unset over the same route; ls reads names off the redacted config', async () => {
+  const p = project('blog')
+  const r = appResource('web', p.id, { B: '<redacted>', A: '<redacted>' })
+  const { api } = fakeApi({
+    getProject: async (): Promise<ProjectDetailResponse> => ({ project: p, resources: [r] }),
+    setEnv: async (_id, input) => {
+      assert.deepEqual(input, { unset: ['B'] })
+      return { resource: r, keys: ['A'], stopped: false }
+    },
+  })
+  assert.deepEqual(resultText(await envUnsetTool(api, { target: 'blog', keys: ['B'] })), { unset: ['B'], keys: ['A'], stopped: false })
+  assert.deepEqual(resultText(await envListTool(api, { target: 'blog' })), { keys: ['A', 'B'] })
+})
+
+test('hobby_env_set on a postgres is a usage error, with no env call made', async () => {
+  const p = project('blog')
+  const r = resource('primary', p.id)
+  const { api, calls } = fakeApi({
+    getProject: async (): Promise<ProjectDetailResponse> => ({ project: p, resources: [r] }),
+  })
+  const result = await envSetTool(api, { target: 'blog', set: { A: '1' } })
+  assert.equal(result.isError, true)
+  assert.match(result.content[0]?.text ?? '', /only an app or a worker/)
+  assert.deepEqual(calls, ['getProject("blog")'])
 })

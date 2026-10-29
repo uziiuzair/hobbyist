@@ -17,6 +17,7 @@ import {
   cmdCreate,
   cmdDeploy,
   cmdEject,
+  cmdEnv,
   cmdInit,
   cmdLink,
   cmdLogin,
@@ -70,12 +71,16 @@ export interface Io {
 
 export interface ParsedArgs {
   positionals: string[]
-  flags: Record<string, string | boolean>
+  flags: Record<string, string | boolean | string[]>
 }
 
 export interface FlagSpec {
   bool?: string[]
   value?: string[]
+  // Repeatable value flags: `--env A=1 --env B=2` collects ['A=1', 'B=2'].
+  // A value flag given twice keeps the last one, which is the wrong answer
+  // for a flag whose whole point is being given many times.
+  multi?: string[]
 }
 
 // A hand-written parser, not a library, per the global constraint (no CLI
@@ -88,8 +93,9 @@ export interface FlagSpec {
 export function parseArgs(args: string[], spec: FlagSpec): ParsedArgs {
   const boolFlags = new Set(spec.bool ?? [])
   const valueFlags = new Set(spec.value ?? [])
+  const multiFlags = new Set(spec.multi ?? [])
   const positionals: string[] = []
-  const flags: Record<string, string | boolean> = {}
+  const flags: Record<string, string | boolean | string[]> = {}
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string
@@ -123,6 +129,23 @@ export function parseArgs(args: string[], spec: FlagSpec): ParsedArgs {
       continue
     }
 
+    if (multiFlags.has(name)) {
+      let value: string
+      if (eqIndex !== -1) {
+        value = arg.slice(eqIndex + 1)
+      } else {
+        const next = args[i + 1]
+        if (next === undefined) {
+          throw new UsageError(`--${name} requires a value`)
+        }
+        value = next
+        i++
+      }
+      const existing = flags[name]
+      flags[name] = Array.isArray(existing) ? [...existing, value] : [value]
+      continue
+    }
+
     throw new UsageError(`unknown flag: --${name}`)
   }
 
@@ -148,9 +171,14 @@ const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]>
   ['deploy', 'hobby deploy [path]', 'build a Dockerfile here and serve it'],
   ['deploy', 'hobby deploy [path] --database <r>', 'the same, bound to a sibling database'],
   ['deploy', 'hobby deploy [path] --env-file <f>', 'the same, with variables from a dotenv file'],
+  ['deploy', 'hobby deploy [path] --env K=V', 'the same, with one variable (repeatable)'],
   ['deploy', 'hobby deploy [path] --project <p> --name <n>', 'pick the project and resource name'],
   ['deploy', 'hobby deploy [path] --kind app|worker', 'when the directory holds both kinds of config'],
   ['create', 'hobby create <kind> <name> --project <p>', 'a resource with no code yet'],
+  ['env', 'hobby env set <target> K=V...', 'set variables on an app or worker, applied on its next wake'],
+  ['env', 'hobby env set <target> --env-file <f>', 'the same, from a dotenv file'],
+  ['env', 'hobby env ls <target>', 'its variable names (never the values)'],
+  ['env', 'hobby env unset <target> K...', 'remove variables'],
   ['pg', 'hobby pg create --project <p> <name>', 'the explicit form, for a second database'],
   ['connect', 'hobby connect <target>', 'open psql against it'],
   ['sleep', 'hobby sleep <target>', 'put it to sleep'],
@@ -414,8 +442,15 @@ export async function run(argv: string[], io: Io): Promise<number> {
         const { positionals, flags } = parseArgs(rest, {
           bool: ['json'],
           value: ['project', 'name', 'port', 'kind', 'database', 'env-file'],
+          multi: ['env'],
         })
         return await cmdDeploy(ctx, positionals, flags)
+      }
+      case 'env': {
+        // One parseArgs for set / ls / unset, as `queue` and `snapshot` do:
+        // cmdEnv reads the subcommand from the positionals.
+        const { positionals, flags } = parseArgs(rest, { bool: ['json'], value: ['env-file'] })
+        return await cmdEnv(ctx, positionals, flags)
       }
       case 'link': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json'] })

@@ -174,6 +174,16 @@ export interface WorkerConfig extends ResourceConfigBase {
   queueToken: string
   hostname: string
   databaseResourceId: ResourceId | null
+  // Secrets and variables set outside the wrangler manifest: `hobby env set`,
+  // `hobby deploy --env / --env-file`, or a `.dev.vars` beside the manifest
+  // (issue #74). Merged OVER the manifest's `vars` at start
+  // (buildRunnerManifest, packages/worker/src/worker.ts), so a value here
+  // wins, which is what `wrangler secret put` does on Cloudflare. Above the
+  // manifest split on purpose: the manifest is rebuilt from the file on
+  // every deploy, and a secret that vanished on redeploy would be worse than
+  // no secrets at all. Optional because rows written before this field
+  // existed have no key for it; every reader treats absent as empty.
+  env?: Record<string, string>
 
   // workerd derives every Durable Object's storage identity from this. If
   // it ever changes, every object's sqlite file is orphaned and the user

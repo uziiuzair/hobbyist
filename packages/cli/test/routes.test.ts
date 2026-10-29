@@ -2062,3 +2062,74 @@ test('creating a brand new worker whose manifest conflicts with an existing cons
     assert.equal(ctx.store.getResourceByName(project.id, 'beta'), null, 'no row was created for the refused worker')
   })
 })
+
+// Issue #74: POST /v1/resources/:id/env is the one way to change variables
+// after a resource exists. Persisted to config, read at the next start;
+// a running resource is stopped so the next request wakes it with the new
+// values; keys come back and values never do.
+test('POST /v1/resources/:id/env merges set and unset into config, stops a running app, and returns keys only', async () => {
+  const runtime = createFakeRuntime()
+  const ctx = buildContext(runtime)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const config = sampleUndeployedAppConfig({ image: 'img:1', env: { KEEP: 'k', DROP: 'd' } })
+  const resource = ctx.store.createResource({ projectId: project.id, kind: 'app', name: 'site', config })
+  ctx.store.setResourceState(resource.id, 'running')
+  runtime._state.set(config.containerName, { exists: true, running: true, exitCode: null })
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/env`, {
+      set: { API_KEY: 'sk-secret' },
+      unset: ['DROP'],
+    })
+    assert.equal(res.status, 200)
+    const body = res.body as { keys: string[]; stopped: boolean; resource: { state: string; config: { env: Record<string, string> } } }
+    assert.deepEqual(body.keys, ['API_KEY', 'KEEP'])
+    assert.equal(body.stopped, true)
+    assert.equal(body.resource.state, 'sleeping')
+    assert.deepEqual(body.resource.config.env, { API_KEY: '<redacted>', KEEP: '<redacted>' })
+    assert.ok(!JSON.stringify(res.body).includes('sk-secret'))
+
+    const stored = ctx.store.getResource(resource.id)
+    assert.equal(stored?.kind, 'app')
+    assert.deepEqual((stored?.config as AppConfig).env, { KEEP: 'k', API_KEY: 'sk-secret' })
+  })
+})
+
+test('POST /v1/resources/:id/env on a sleeping worker persists without stopping, and replace takes the whole set', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'cron',
+    config: sampleDeployedWorkerConfig({ env: { OLD: '1' } }),
+  })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/env`, { replace: { NEW: '2' } })
+    assert.equal(res.status, 200)
+    const body = res.body as { keys: string[]; stopped: boolean }
+    assert.deepEqual(body.keys, ['NEW'])
+    assert.equal(body.stopped, false)
+    assert.deepEqual((ctx.store.getResource(resource.id)?.config as WorkerConfig).env, { NEW: '2' })
+  })
+})
+
+test('POST /v1/resources/:id/env refuses a postgres and a bad key, changing nothing', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const pg = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig() })
+  const app = ctx.store.createResource({ projectId: project.id, kind: 'app', name: 'site', config: sampleUndeployedAppConfig() })
+
+  await withServer(ctx, async (baseUrl) => {
+    const onPg = await call(baseUrl, 'POST', `/v1/resources/${pg.id}/env`, { set: { A: '1' } })
+    assert.equal(onPg.status, 400)
+    assert.equal((onPg.body as { error: { code: string } }).error.code, 'usage')
+
+    const badKey = await call(baseUrl, 'POST', `/v1/resources/${app.id}/env`, { set: { 'A B': '1' } })
+    assert.equal(badKey.status, 400)
+    assert.match((badKey.body as { error: { message: string } }).error.message, /not a valid environment variable name/)
+    assert.deepEqual((ctx.store.getResource(app.id)?.config as AppConfig).env, {})
+  })
+})

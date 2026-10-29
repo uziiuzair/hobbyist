@@ -22,6 +22,37 @@ A `wrangler.toml`, `wrangler.jsonc` or `wrangler.json` in the directory is what
 makes it a worker rather than an [app](/docs/guides/apps/). Your existing
 wrangler manifest is read directly; there is no second config format to learn.
 
+## Secrets
+
+`[vars]` in the manifest are plain variables, in the repository, exactly as on
+Cloudflare. A secret goes in one of three places, all of which end up as
+`env.NAME` in the worker, over the manifest's own `vars` where a name
+collides:
+
+```sh
+# a .dev.vars beside the manifest, the file wrangler dev reads, gitignored
+echo 'API_KEY=sk-...' >> .dev.vars
+hobby deploy
+
+# or on the command line, which replaces .dev.vars rather than merging with it
+hobby deploy --env API_KEY=sk-...
+hobby deploy --env-file .env.production
+
+# or after the fact, with no rebuild
+hobby env set blog/api API_KEY=sk-...
+hobby env ls blog/api
+hobby env unset blog/api API_KEY
+```
+
+A redeploy without any of these keeps the secrets the worker already has. A
+running worker whose variables change is stopped, and the next request (or
+queue message, or alarm) wakes it with the new values. Values are redacted on
+every API response and never printed.
+
+`hobby env` is also how a worker that declared `[ai]` or another binding hobby
+does not provide reaches an external API instead: put the key in a secret and
+call the service over HTTP.
+
 ## What is honoured, and what is ignored
 
 Your manifest is for a platform with regions, tiers and a global network. This
