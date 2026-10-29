@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict'
 import { createServer, get as httpGet, type Server } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import net, { type AddressInfo } from 'node:net'
 import { test } from 'node:test'
 import { ActivityTracker } from '../src/activity.js'
 import { hostnameFrom, startHttpRouter, TLS_ASK_PATH, type HttpProxyDeps, type HttpTarget } from '../src/http.js'
@@ -467,4 +467,212 @@ test('the ask endpoint fails closed when the lookup throws', async () => {
   } finally {
     await router.close()
   }
+})
+
+// Issue #67: the upstream socket timeout fired on any quiet stretch of a
+// response that had already started, so an SSE stream with sparse events
+// was cut after the cap, and the client was left hanging.
+test('a response that has started is never cut by the upstream timeout, however long the gaps', async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.write('data: first\n\n')
+    setTimeout(() => res.end('data: second\n\n'), 250)
+  })
+  const port = await listenOn(server)
+  const activity = new ActivityTracker()
+  const router = await startHttpRouter(
+    {
+      async resolve(): Promise<HttpTarget> {
+        return { resourceId: 'r1', host: '127.0.0.1', port, state: 'running' }
+      },
+      async wake(): Promise<void> {},
+      activity,
+    },
+    // Far shorter than the gap between the two events.
+    { port: 0, upstreamTimeoutMs: 50 }
+  )
+  try {
+    const res = await fetchThrough(router.port, 'web.blog.localhost')
+    assert.equal(res.status, 200)
+    assert.equal(res.body, 'data: first\n\ndata: second\n\n')
+    assert.equal(activity.count('r1'), 0)
+  } finally {
+    await router.close()
+    await closeServer(server)
+  }
+})
+
+test('the upstream timeout still applies before the headers arrive', async () => {
+  const server = createServer(() => {
+    // Never answers.
+  })
+  const port = await listenOn(server)
+  const router = await startHttpRouter(
+    {
+      async resolve(): Promise<HttpTarget> {
+        return { resourceId: 'r1', host: '127.0.0.1', port, state: 'running' }
+      },
+      async wake(): Promise<void> {},
+      activity: new ActivityTracker(),
+    },
+    { port: 0, upstreamTimeoutMs: 50 }
+  )
+  try {
+    const res = await fetchThrough(router.port, 'web.blog.localhost')
+    assert.equal(res.status, 502)
+    assert.match(res.body, /did not respond within 50ms/)
+  } finally {
+    await router.close()
+    await closeServer(server)
+  }
+})
+
+// Issue #67, second half: when the upstream dies after the headers were
+// forwarded, sendPlain had nothing to do and the client waited for a body
+// that was never coming.
+test('an upstream that dies mid-body ends the client connection instead of leaving it hanging', async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' })
+    res.write('partial')
+    setTimeout(() => res.socket?.destroy(), 20)
+  })
+  const port = await listenOn(server)
+  const router = await startHttpRouter(
+    {
+      async resolve(): Promise<HttpTarget> {
+        return { resourceId: 'r1', host: '127.0.0.1', port, state: 'running' }
+      },
+      async wake(): Promise<void> {},
+      activity: new ActivityTracker(),
+    },
+    { port: 0 }
+  )
+  try {
+    const outcome = await new Promise<string>((resolve) => {
+      const timer = setTimeout(() => resolve('hung'), 2_000)
+      const req = httpGet({ host: '127.0.0.1', port: router.port, path: '/', headers: { host: 'web.blog.localhost' } }, (res) => {
+        res.on('data', () => {})
+        res.on('end', () => {
+          clearTimeout(timer)
+          resolve(res.complete ? 'complete' : 'cut')
+        })
+        res.on('error', () => {
+          clearTimeout(timer)
+          resolve('cut')
+        })
+        res.on('aborted', () => {
+          clearTimeout(timer)
+          resolve('cut')
+        })
+      })
+      req.on('error', () => {
+        clearTimeout(timer)
+        resolve('cut')
+      })
+    })
+    assert.equal(outcome, 'cut')
+  } finally {
+    await router.close()
+    await closeServer(server)
+  }
+})
+
+// Issue #68: a client that closed its side of a WebSocket left the pair
+// half-open when the upgrade handler did not end its own, and the activity
+// handle with it, so the app never slept.
+function upgradeThrough(port: number, host: string): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1', () => {
+      socket.write(`GET /ws HTTP/1.1\r\nHost: ${host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`)
+    })
+    socket.once('data', (chunk: Buffer) => {
+      if (chunk.toString('latin1').startsWith('HTTP/1.1 101')) resolve(socket)
+      else reject(new Error(`unexpected upgrade answer: ${chunk.toString('latin1').split('\r\n')[0]}`))
+    })
+    socket.once('error', reject)
+  })
+}
+
+function waitFor(check: () => boolean, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const started = Date.now()
+    const tick = (): void => {
+      if (check()) return resolve(true)
+      if (Date.now() - started > ms) return resolve(false)
+      setTimeout(tick, 10)
+    }
+    tick()
+  })
+}
+
+test('a client that half-closes an upgraded connection releases the activity handle and tears the upstream down', async () => {
+  const upstreamSockets: net.Socket[] = []
+  const server = createServer()
+  server.on('upgrade', (_req, socket) => {
+    upstreamSockets.push(socket as net.Socket)
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+    // Deliberately never ends its side when the peer does.
+    socket.on('data', () => {})
+  })
+  const port = await listenOn(server)
+  const activity = new ActivityTracker()
+  const router = await startHttpRouter(
+    {
+      async resolve(): Promise<HttpTarget> {
+        return { resourceId: 'r1', host: '127.0.0.1', port, state: 'running' }
+      },
+      async wake(): Promise<void> {},
+      activity,
+    },
+    { port: 0 }
+  )
+  try {
+    const client = await upgradeThrough(router.port, 'web.blog.localhost')
+    assert.equal(activity.count('r1'), 1)
+    client.end()
+    assert.equal(await waitFor(() => activity.count('r1') === 0, 2_000), true, 'activity handle released')
+    // The router's side of the upstream connection is gone, which the app
+    // sees as its end of the stream. What the app does with that is its
+    // business; this upstream deliberately does nothing, which is the shape
+    // that used to leak.
+    assert.equal(await waitFor(() => upstreamSockets.every((s) => s.readableEnded || s.destroyed), 2_000), true, 'upstream told')
+  } finally {
+    for (const s of upstreamSockets) s.destroy()
+    await router.close()
+    await closeServer(server)
+  }
+})
+
+test('closing the router destroys upgraded sockets it detached, so shutdown does not wait on them', async () => {
+  const upstreamSockets: net.Socket[] = []
+  const server = createServer()
+  server.on('upgrade', (_req, socket) => {
+    upstreamSockets.push(socket as net.Socket)
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+    socket.on('data', () => {})
+  })
+  const port = await listenOn(server)
+  const activity = new ActivityTracker()
+  const router = await startHttpRouter(
+    {
+      async resolve(): Promise<HttpTarget> {
+        return { resourceId: 'r1', host: '127.0.0.1', port, state: 'running' }
+      },
+      async wake(): Promise<void> {},
+      activity,
+    },
+    { port: 0 }
+  )
+  const client = await upgradeThrough(router.port, 'web.blog.localhost')
+  client.on('error', () => {})
+  const closed = await Promise.race([
+    router.close().then(() => 'closed'),
+    new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 2_000)),
+  ])
+  assert.equal(closed, 'closed')
+  assert.equal(await waitFor(() => client.destroyed || client.readableEnded, 2_000), true)
+  assert.equal(activity.count('r1'), 0)
+  client.destroy()
+  for (const s of upstreamSockets) s.destroy()
+  await closeServer(server)
 })

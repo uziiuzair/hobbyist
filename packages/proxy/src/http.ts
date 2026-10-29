@@ -61,8 +61,11 @@ export interface HttpRouterOptions {
   // eventually succeeds is a bad experience and a wake cut off at exactly
   // the ceiling is a broken one.
   wakeTimeoutMs?: number
-  // How long to wait for the upstream to accept a connection once the
-  // resource is running.
+  // How long to wait for the upstream to accept the connection and send its
+  // response HEADERS once the resource is running. It caps nothing after
+  // that: a response that has started is the app being used, however
+  // slowly, and a cap there cut every Server-Sent Events stream with a
+  // quiet spell and every long download at the cap (issue #67).
   upstreamTimeoutMs?: number
 }
 
@@ -71,7 +74,19 @@ export interface HttpRouterOptions {
 export const TLS_ASK_PATH = '/.hobby/tls-ask'
 
 const DEFAULT_WAKE_TIMEOUT_MS = 30_000
-const DEFAULT_UPSTREAM_TIMEOUT_MS = 10_000
+// Two minutes to the first byte of the response, which is the kind of
+// figure other gateways settle on (nginx and Cloudflare both wait a
+// comparable time for an origin), and long enough for a server-rendered page
+// or a proxied model call that genuinely takes a while to answer. The
+// previous 10 seconds was measured answering 502 to a valid request that
+// took 12 (#67). A container that is running and refuses its port fails
+// at once regardless of this; it only bounds how long an accepted request
+// may think before answering.
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 120_000
+// TCP keepalive on an upgraded pair, so a peer that vanished without a FIN
+// (a laptop closing its lid) is noticed by the kernel in minutes rather
+// than held open, with its activity handle, forever (#68).
+const UPGRADE_KEEPALIVE_MS = 30_000
 
 // Headers that describe a single hop and must not be forwarded to the
 // upstream. RFC 9110 section 7.6.1. `upgrade` and `connection` are handled
@@ -148,11 +163,18 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
 export interface HttpRouter {
   handleRequest(req: IncomingMessage, res: ServerResponse): void
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void
+  // Destroys every socket pair an upgrade detached from the HTTP server.
+  // Server.closeAllConnections does not know about them: once a socket is
+  // handed to 'upgrade' it is no longer the server's, so a shutdown that
+  // only called that left the daemon alive on a held WebSocket (#68).
+  closeUpgraded(): void
 }
 
 export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = {}): HttpRouter {
   const wakeTimeoutMs = opts.wakeTimeoutMs ?? DEFAULT_WAKE_TIMEOUT_MS
   const upstreamTimeoutMs = opts.upstreamTimeoutMs ?? DEFAULT_UPSTREAM_TIMEOUT_MS
+  // Every client socket currently detached by an upgrade, for closeUpgraded.
+  const upgraded = new Set<Duplex>()
 
   // Three outcomes, deliberately distinguished, because they mean different
   // things to whoever is looking at the browser tab:
@@ -297,6 +319,11 @@ export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = 
           timeout: upstreamTimeoutMs,
         },
         (upstreamRes) => {
+          // Headers are here, so the upstream has answered: from this point
+          // the response takes as long as it takes. The socket timeout set
+          // on the request above would otherwise fire on the next quiet
+          // stretch of a streaming response and cut it (#67).
+          upstreamRes.socket?.setTimeout(0)
           res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers)
           upstreamRes.pipe(res)
           // Released when the RESPONSE ends, not when the request is sent.
@@ -304,7 +331,19 @@ export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = 
           // the app being used for its whole duration, and releasing early
           // would let hibernation sleep a container mid-stream.
           upstreamRes.on('end', release)
-          upstreamRes.on('close', release)
+          // An upstream that dies mid-body reports it here, on the
+          // response, not on the request above: 'aborted' then an 'error'
+          // of its own. pipe() ends nothing on a source error, so without
+          // this the client sat on a body that was never going to finish
+          // (#67). Destroyed rather than ended, so a truncated body never
+          // looks complete.
+          upstreamRes.on('error', () => {})
+          upstreamRes.on('close', () => {
+            release()
+            if (!upstreamRes.complete && !res.writableEnded) {
+              res.destroy(new Error(`${hostname} closed the connection before the response was complete`))
+            }
+          })
         }
       )
 
@@ -314,6 +353,15 @@ export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = 
 
       upstream.on('error', (err: Error) => {
         release()
+        if (res.headersSent) {
+          // Too late for a status: the client has the headers and is
+          // reading the body. Ending the response cleanly would hand it a
+          // truncated body that looks complete; destroying the socket is
+          // the only honest signal left, and it is what stops the client
+          // hanging until its own timeout (#67).
+          res.destroy(err)
+          return
+        }
         sendPlain(res, 502, `hobby: ${hostname} is running but did not answer (${err.message}).\n`)
       })
 
@@ -372,6 +420,11 @@ export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = 
       }
 
       const upstream = net.connect(target.port, target.host)
+      upgraded.add(socket)
+      upstream.setKeepAlive(true, UPGRADE_KEEPALIVE_MS)
+      if (socket instanceof net.Socket) {
+        socket.setKeepAlive(true, UPGRADE_KEEPALIVE_MS)
+      }
 
       upstream.on('connect', () => {
         const lines = [`${req.method ?? 'GET'} ${req.url ?? '/'} HTTP/${req.httpVersion}`]
@@ -391,19 +444,39 @@ export function createHttpRouter(deps: HttpProxyDeps, opts: HttpRouterOptions = 
 
       // A held-open WebSocket is continuous use, so the handle lives as long
       // as the socket pair does. Released on whichever side closes first.
+      //
+      // 'end' counts as closing, on both sides. pipe() only half-closes:
+      // a client that sends its FIN had the upstream's write side ended
+      // for it and nothing more, and an upgrade handler that does not end
+      // its own side on a peer's close (most do not) left the pair open
+      // with the activity handle held, so the app never slept and the
+      // daemon hung on SIGTERM waiting for it (#68). An upgraded
+      // connection is a conversation, not a stream: once either side has
+      // said its last byte the pair is finished, and the other side is
+      // finished with it.
       const teardown = (): void => {
+        upgraded.delete(socket)
         release()
         if (!upstream.destroyed) upstream.destroy()
         if (!socket.destroyed) socket.destroy()
       }
       upstream.on('error', teardown)
+      upstream.on('end', teardown)
       upstream.on('close', teardown)
       socket.on('error', teardown)
+      socket.on('end', teardown)
       socket.on('close', teardown)
     })()
   }
 
-  return { handleRequest, handleUpgrade }
+  function closeUpgraded(): void {
+    for (const socket of upgraded) {
+      socket.destroy()
+    }
+    upgraded.clear()
+  }
+
+  return { handleRequest, handleUpgrade, closeUpgraded }
 }
 
 export interface HttpRouterHandle {
@@ -445,6 +518,7 @@ export function startHttpRouter(
             // closeServer in packages/cli/src/daemon/queue-endpoint.ts).
             server.close(() => resolveClose())
             server.closeAllConnections?.()
+            router.closeUpgraded()
           })
         },
       })
