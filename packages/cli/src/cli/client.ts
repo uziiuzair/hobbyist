@@ -155,6 +155,12 @@ async function call<T>(client: DaemonClient, method: string, path: string, body?
 export interface HealthResponse {
   status: string
 }
+// GET /v1/version. A daemon older than the route answers it with a `usage`
+// error (unknown route), which `hobby version` reports as "older than this
+// CLI" rather than failing.
+export interface VersionResponse {
+  version: string
+}
 export interface ProjectsResponse {
   projects: Project[]
 }
@@ -165,8 +171,18 @@ export interface ProjectDetailResponse {
   project: Project
   resources: WireResource[]
 }
+// One wrangler key the worker kind read and did not act on, with the
+// reason it gives (packages/worker/src/manifest.ts, IGNORED_WITH_REASON).
+// Carried on the create and deploy responses so every client prints the
+// same list the daemon logs; before this it reached the daemon's stderr and
+// nobody else (issue #76).
+export interface IgnoredKey {
+  key: string
+  reason: string
+}
 export interface ResourceResponse {
   resource: WireResource
+  ignored?: IgnoredKey[]
 }
 // POST /v1/projects/:name/branch. See packages/cli/src/daemon/branch.ts's
 // BranchResult for what each field means; this is its wire shape.
@@ -283,6 +299,7 @@ export interface SnapshotRestoreResponse {
 
 export interface Api {
   health(): Promise<HealthResponse>
+  version(): Promise<VersionResponse>
   listProjects(): Promise<ProjectsResponse>
   // sleepAfterSeconds: omitted takes the daemon's config default, null pins
   // the project awake, a positive number is its own idle threshold.
@@ -433,6 +450,7 @@ export function createApi(transport: string | DaemonClient): Api {
 
   return {
     health: () => call(client, 'GET', '/v1/health'),
+    version: () => call(client, 'GET', '/v1/version'),
     listProjects: () => call(client, 'GET', '/v1/projects'),
     createProject: (name, sleepAfterSeconds) =>
       call(

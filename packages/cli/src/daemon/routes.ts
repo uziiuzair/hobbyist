@@ -50,10 +50,13 @@ import {
   createWorkerResource,
   deployWorker,
   describeIgnored,
+  ignoredEntries,
+  type IgnoredKey,
   findWranglerManifest,
   resolveWorkerSourcePath,
 } from '@hobby.sh/worker'
 import { branchProject } from './branch.js'
+import { CLI_VERSION } from '../version.js'
 import { clearWakeRefusal, getOrCreateWake, waitForProjectAwakeable, wakeBoundDatabase, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
 import {
@@ -502,7 +505,15 @@ export async function createQueueResource(ctx: DaemonContext, project: Project, 
   return created
 }
 
-async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, projectName: string): Promise<Resource> {
+// `ignored` is the worker kind's list of wrangler keys it read and did not
+// act on, with reasons, and is empty for every other kind. It rides on the
+// response so the CLI can print it where the user is looking (issue #76);
+// the daemon's own stderr line below is kept for the daemon log.
+async function createResourceRoute(
+  ctx: DaemonContext,
+  req: IncomingMessage,
+  projectName: string
+): Promise<{ resource: Resource; ignored: IgnoredKey[] }> {
   const project = getProjectByNameOrThrow(ctx, projectName)
   const body = await readJsonBody(req)
   const fields = isRecord(body) ? body : {}
@@ -518,7 +529,7 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
   }
 
   if (kind === 'postgres') {
-    return createPostgres(ctx, { project, name })
+    return { resource: await createPostgres(ctx, { project, name }), ignored: [] }
   }
 
   if (kind === 'app') {
@@ -529,7 +540,7 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
     const databaseResourceId =
       typeof fields['databaseResourceId'] === 'string' ? fields['databaseResourceId'] : null
 
-    return createAppResource(ctx, {
+    const resource = await createAppResource(ctx, {
       project,
       name,
       source,
@@ -538,6 +549,7 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
       env: readStringMap(fields['env']),
       databaseResourceId,
     })
+    return { resource, ignored: [] }
   }
 
   if (kind === 'worker') {
@@ -581,11 +593,11 @@ async function createResourceRoute(ctx: DaemonContext, req: IncomingMessage, pro
       console.error(`worker ${name}: ignoring ${line}`)
     }
     await syncWorkerQueueBindings(ctx, project, result.resource)
-    return result.resource
+    return { resource: result.resource, ignored: ignoredEntries(result.ignored) }
   }
 
   if (kind === 'queue') {
-    return createQueueResource(ctx, project, name)
+    return { resource: await createQueueResource(ctx, project, name), ignored: [] }
   }
 
   throw new HobbyError(
@@ -849,7 +861,7 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
       body: {
         resource: await toWireResource(ctx, result.resource),
         image: result.image,
-        ignored: result.ignored,
+        ignored: ignoredEntries(result.ignored),
         logs: result.logs,
       },
     }
@@ -2249,6 +2261,17 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
     return { status: 200, body: { status: 'ok' } }
   }
 
+  // Its own route, not a field on /v1/health, because health is the one
+  // path the studio listener answers without a session (studio/routes.ts)
+  // and that listener faces the network (ADR 0008). A version string is
+  // small, but telling an unauthenticated caller exactly which build is
+  // listening is the kind of disclosure the gate exists to prevent. Here
+  // it sits behind the gate like every other route, and `hobby version`
+  // reads it over the unix socket or an authenticated remote (ADR 0018).
+  if (method === 'GET' && segments.length === 2 && segments[1] === 'version') {
+    return { status: 200, body: { version: CLI_VERSION } }
+  }
+
   if (method === 'GET' && segments.length === 2 && segments[1] === 'preflight') {
     return { status: 200, body: await runPreflight(ctx) }
   }
@@ -2267,8 +2290,11 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
 
     if (segments.length === 4 && method === 'POST' && segments[3] === 'resources') {
       const name = decodeURIComponent(segments[2] as string)
-      const resource = await createResourceRoute(ctx, req, name)
-      return { status: 201, body: { resource: await toWireResource(ctx, resource) } }
+      const created = await createResourceRoute(ctx, req, name)
+      return {
+        status: 201,
+        body: { resource: await toWireResource(ctx, created.resource), ignored: created.ignored },
+      }
     }
 
     if (segments.length === 4 && method === 'POST' && segments[3] === 'sleep-policy') {

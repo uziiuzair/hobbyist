@@ -33,6 +33,7 @@ import { DEFAULT_CONSUMER_OPTIONS, leaseBatch, openQueueDb, queueDbPath } from '
 import { createDefaultKindRegistry } from '../src/daemon/context.js'
 import { createApp, createProxyDeps, reconcile, type DaemonContext } from '../src/index.js'
 import { syncWorkerQueueBindings } from '../src/daemon/routes.js'
+import { CLI_VERSION } from '../src/version.js'
 import { drainableQueues } from '../src/daemon/queues.js'
 
 function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
@@ -219,6 +220,17 @@ test('GET /v1/health returns ok', async () => {
     const res = await call(baseUrl, 'GET', '/v1/health')
     assert.equal(res.status, 200)
     assert.deepEqual(res.body, { status: 'ok' })
+  })
+})
+
+// Separate from health on purpose: health is answered without a session on
+// the studio listener (auth.test.ts), and a build number should not be.
+test('GET /v1/version names the daemon build, for `hobby version`', async () => {
+  await withServer(buildContext(), async (baseUrl) => {
+    const res = await call(baseUrl, 'GET', '/v1/version')
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.body, { version: CLI_VERSION })
+    assert.notEqual(CLI_VERSION, 'unknown')
   })
 })
 
