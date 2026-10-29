@@ -546,6 +546,21 @@ async function envRoute(ctx: DaemonContext, req: IncomingMessage, id: string): P
     await ctx.kinds.get(resource.kind).stop(ctx, getResourceOrThrow(ctx, id))
     stopped = true
   }
+  // The container, not just the process, has to go. Both kinds hand the
+  // environment to docker at container CREATION (containerSpec in
+  // packages/app/src/app.ts and packages/worker/src/worker.ts), and both
+  // start paths call ensureCreated, which is a no-op for a container that
+  // already exists. A stopped container restarted on the next wake would
+  // come back with the OLD environment, config notwithstanding: found by
+  // running it, where an app whose MODE was changed answered with the
+  // previous value after a stop and a wake. Removing it here makes the next
+  // start build a fresh container from the config just written. Best
+  // effort: a resource that has never started has no container to remove.
+  try {
+    await ctx.runtime.remove(resource.config.containerName)
+  } catch (err) {
+    console.error(`env: could not remove container ${resource.config.containerName}: ${err instanceof Error ? err.message : String(err)}`)
+  }
 
   return {
     status: 200,
