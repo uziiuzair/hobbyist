@@ -174,6 +174,9 @@ const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]>
   ['deploy', 'hobby deploy [path] --env K=V', 'the same, with one variable (repeatable)'],
   ['deploy', 'hobby deploy [path] --project <p> --name <n>', 'pick the project and resource name'],
   ['deploy', 'hobby deploy [path] --kind app|worker', 'when the directory holds both kinds of config'],
+  ['deploy', 'hobby deploy <root> --dockerfile <f> --name <n>', 'an app from a monorepo: root as context, one Dockerfile each'],
+  ['deploy', 'hobby deploy [path] --build-arg K=V', 'a docker build argument (repeatable)'],
+  ['deploy', 'hobby deploy <dir> --context <root>', 'a worker inside a workspace: install from the root'],
   ['create', 'hobby create <kind> <name> --project <p>', 'a resource with no code yet'],
   ['env', 'hobby env set <target> K=V...', 'set variables on an app or worker, applied on its next wake'],
   ['env', 'hobby env set <target> --env-file <f>', 'the same, from a dotenv file'],
@@ -441,8 +444,8 @@ export async function run(argv: string[], io: Io): Promise<number> {
       case 'deploy': {
         const { positionals, flags } = parseArgs(rest, {
           bool: ['json'],
-          value: ['project', 'name', 'port', 'kind', 'database', 'env-file'],
-          multi: ['env'],
+          value: ['project', 'name', 'port', 'kind', 'database', 'env-file', 'dockerfile', 'context'],
+          multi: ['env', 'build-arg'],
         })
         return await cmdDeploy(ctx, positionals, flags)
       }

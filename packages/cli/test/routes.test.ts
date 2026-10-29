@@ -2133,3 +2133,26 @@ test('POST /v1/resources/:id/env refuses a postgres and a bad key, changing noth
     assert.deepEqual((ctx.store.getResource(app.id)?.config as AppConfig).env, {})
   })
 })
+
+// Issue #146: build args ride on the source and come back redacted, like
+// env, because a private registry token is exactly what someone passes as
+// one.
+test('GET /v1/resources/:id redacts build arg values and keeps their names', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'app',
+    name: 'admin',
+    config: sampleUndeployedAppConfig({
+      source: { path: '/repo', dockerfile: 'deploy/admin.Dockerfile', buildArgs: { NPM_TOKEN: 'npm_secret' } },
+    }),
+  })
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'GET', `/v1/resources/${resource.id}`)
+    const body = res.body as { resource: { config: { source: { dockerfile: string; buildArgs: Record<string, string> } } } }
+    assert.equal(body.resource.config.source.dockerfile, 'deploy/admin.Dockerfile')
+    assert.deepEqual(body.resource.config.source.buildArgs, { NPM_TOKEN: '<redacted>' })
+    assert.ok(!JSON.stringify(res.body).includes('npm_secret'))
+  })
+})

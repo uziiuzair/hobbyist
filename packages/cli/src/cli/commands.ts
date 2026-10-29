@@ -585,12 +585,40 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
   if (kindFlag !== undefined && kindFlag !== 'app' && kindFlag !== 'worker') {
     throw new UsageError(`unknown --kind: ${kindFlag}. Expected app or worker.`)
   }
+  // --dockerfile names a file relative to [path], which is the build
+  // context (issue #146): a monorepo deploys each of its apps from the root
+  // with its own Dockerfile, which the single `<path>/Dockerfile` check
+  // could not express. --build-arg is repeatable and persisted with the
+  // source, so a redeploy rebuilds with the same values. --context is the
+  // worker-side answer to the same problem (issue #147): the directory
+  // holding the manifest stays [path], and the install runs from the root.
+  const dockerfileFlag = flagString(flags, 'dockerfile')
+  const buildArgs = parseEnvAssignments(flagList(flags, 'build-arg'))
+  const contextFlag = flagString(flags, 'context')
   const kind =
     kindFlag ??
     detectDeployKind({
-      dockerfile: existsSync(joinPath(path, 'Dockerfile')),
+      dockerfile: existsSync(joinPath(path, dockerfileFlag ?? 'Dockerfile')),
       wrangler: existsSync(joinPath(path, 'wrangler.toml')) || existsSync(joinPath(path, 'wrangler.jsonc')),
     })
+  if (kind === 'worker' && (dockerfileFlag !== undefined || Object.keys(buildArgs).length > 0)) {
+    throw new UsageError('--dockerfile and --build-arg are for apps. A worker is built from its wrangler manifest.')
+  }
+  if (kind === 'app' && contextFlag !== undefined) {
+    throw new UsageError(
+      '--context is for workers. For an app, [path] is the build context: pass the root as the path and --dockerfile for the file.'
+    )
+  }
+  const context = contextFlag === undefined ? undefined : resolvePath(c.io.cwd, contextFlag)
+  // Only what was given goes on the wire, so a redeploy that names neither
+  // keeps the Dockerfile, build args and context the resource was last
+  // built with (readSourceInput, packages/cli/src/daemon/routes.ts).
+  const source = {
+    path,
+    ...(dockerfileFlag === undefined ? {} : { dockerfile: dockerfileFlag }),
+    ...(Object.keys(buildArgs).length === 0 ? {} : { buildArgs }),
+    ...(context === undefined ? {} : { context }),
+  }
 
   // The rarer half of the same rule, now that the deploy's own kind is
   // known: an app redeployed as though it were a worker, or the reverse,
@@ -630,7 +658,7 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     // `env` omitted keeps whatever the app already has; sent, it replaces
     // the whole set (deployApp, packages/app/src/app.ts).
     const result = await c.api.deployResource(existing.id, {
-      source: { path },
+      source,
       ...(env === undefined ? {} : { env }),
     })
     if (flags.json) {
@@ -671,14 +699,14 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
       ? {
           kind: 'worker',
           name,
-          source: { path },
+          source,
           ...(databaseResourceId === undefined ? {} : { databaseResourceId }),
           ...(env === undefined ? {} : { env }),
         }
       : {
           kind: 'app',
           name,
-          source: { path },
+          source,
           ...(portFlag === undefined ? {} : { port: portFlag }),
           ...(databaseResourceId === undefined ? {} : { databaseResourceId }),
           ...(env === undefined ? {} : { env }),

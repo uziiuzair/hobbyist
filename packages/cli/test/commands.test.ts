@@ -1099,3 +1099,50 @@ test('hobby env refuses a postgres target and an unknown subcommand', async () =
   await assert.rejects(cmdEnv(ctx, ['set', 'blog/primary', 'A=1'], {}), (err: unknown) => err instanceof UsageError && /postgres/.test(err.message))
   await assert.rejects(cmdEnv(ctx, ['frob', 'blog/web'], {}), UsageError)
 })
+
+// Issues #146 and #147: --dockerfile and --build-arg for an app, --context
+// for a worker, each only on the wire when given so a redeploy keeps the
+// stored values.
+test('hobby deploy <root> --dockerfile --build-arg sends them with the source and detects an app by that file', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'hobby-mono-'))
+  mkdirSync(join(root, 'deploy'))
+  writeFileSync(join(root, 'deploy', 'admin.Dockerfile'), 'FROM scratch\n')
+  const { ctx, recorded } = fakeCtx({ cwd: root })
+
+  const code = await cmdDeploy(ctx, ['.'], {
+    project: 'cl',
+    name: 'admin',
+    dockerfile: 'deploy/admin.Dockerfile',
+    'build-arg': ['NEXT_PUBLIC_URL=https://a', 'X=1'],
+  })
+  assert.equal(code, 0)
+  const body = recorded.resourceBodies[0]?.body as unknown as { kind: string; source: unknown }
+  assert.equal(body.kind, 'app')
+  assert.deepEqual(body.source, {
+    path: root,
+    dockerfile: 'deploy/admin.Dockerfile',
+    buildArgs: { NEXT_PUBLIC_URL: 'https://a', X: '1' },
+  })
+})
+
+test('hobby deploy --context sends an absolute context for a worker, and refuses it for an app', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'hobby-ws-'))
+  mkdirSync(join(root, 'apps', 'w'), { recursive: true })
+  writeFileSync(join(root, 'apps', 'w', 'wrangler.toml'), 'name = "w"\nmain = "src/index.ts"\ncompatibility_date = "2024-01-01"\n')
+  const { ctx, recorded } = fakeCtx({ cwd: root })
+
+  assert.equal(await cmdDeploy(ctx, ['./apps/w'], { project: 'cl', context: '.' }), 0)
+  const body = recorded.resourceBodies[0]?.body as unknown as { kind: string; source: unknown }
+  assert.equal(body.kind, 'worker')
+  assert.deepEqual(body.source, { path: join(root, 'apps', 'w'), context: root })
+
+  writeFileSync(join(root, 'Dockerfile'), 'FROM scratch\n')
+  await assert.rejects(
+    cmdDeploy(ctx, ['.'], { project: 'cl', name: 'web', context: '.' }),
+    (err: unknown) => err instanceof UsageError && /--context is for workers/.test(err.message)
+  )
+  await assert.rejects(
+    cmdDeploy(ctx, ['./apps/w'], { project: 'cl', dockerfile: 'x' }),
+    (err: unknown) => err instanceof UsageError && /for apps/.test(err.message)
+  )
+})
