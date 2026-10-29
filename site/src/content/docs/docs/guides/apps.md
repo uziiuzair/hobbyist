@@ -55,8 +55,11 @@ delete from it is gone afterwards. A redeploy without `--env-file` keeps what th
 app already has. Values are never printed, only a count.
 
 A database bound with `--database` always supplies `DATABASE_URL`, even if the
-file sets one too. Workers take their variables from `[vars]` in their wrangler
-config instead, and `--env-file` refuses them.
+file sets one too. That URL goes through the wake proxy, the same way your own
+`psql` does, so the app's first query wakes a sleeping database and its open
+connections keep it awake for as long as the app is. Workers take their
+variables from `[vars]` in their wrangler config instead, and `--env-file`
+refuses them.
 
 ## Your Dockerfile
 
