@@ -184,6 +184,13 @@ export interface ResourceResponse {
   resource: WireResource
   ignored?: IgnoredKey[]
 }
+export interface EnvResponse {
+  resource: WireResource
+  keys: string[]
+  // True when the resource was running and was stopped so the next wake
+  // picks the new values up.
+  stopped: boolean
+}
 // POST /v1/projects/:name/branch. See packages/cli/src/daemon/branch.ts's
 // BranchResult for what each field means; this is its wire shape.
 export interface BranchResponse {
@@ -335,6 +342,7 @@ export interface Api {
           // worker with no code yet.
           source?: { path: string }
           databaseResourceId?: string
+          env?: Record<string, string>
         }
   ): Promise<ResourceResponse>
   deployResource(
@@ -344,6 +352,11 @@ export interface Api {
     input?: { source?: { path: string; dockerfile?: string }; env?: Record<string, string> }
   ): Promise<ResourceResponse & { image: string; logs: string }>
   getResource(id: string): Promise<ResourceResponse>
+  // POST /v1/resources/:id/env. Keys come back, values never do.
+  setEnv(
+    id: string,
+    input: { set?: Record<string, string>; unset?: string[]; replace?: Record<string, string> }
+  ): Promise<EnvResponse>
   deleteResource(id: string): Promise<DeletedResponse>
   startResource(id: string): Promise<ResourceResponse>
   stopResource(id: string): Promise<ResourceResponse>
@@ -476,6 +489,7 @@ export function createApi(transport: string | DaemonClient): Api {
     createResource: (project, input) => call(client, 'POST', `/v1/projects/${p(project)}/resources`, input),
     deployResource: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/deploy`, input ?? {}),
     getResource: (id) => call(client, 'GET', `/v1/resources/${p(id)}`),
+    setEnv: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/env`, input),
     deleteResource: (id) => call(client, 'DELETE', `/v1/resources/${p(id)}`),
     startResource: (id) => call(client, 'POST', `/v1/resources/${p(id)}/start`),
     stopResource: (id) => call(client, 'POST', `/v1/resources/${p(id)}/stop`),

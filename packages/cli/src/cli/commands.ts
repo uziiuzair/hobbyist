@@ -51,7 +51,7 @@ import {
 // the two files (main.ts imports these command functions at runtime).
 import type { Io } from './main.js'
 
-export type Flags = Record<string, string | boolean>
+export type Flags = Record<string, string | boolean | string[]>
 
 export interface Ctx {
   io: Io
@@ -89,6 +89,11 @@ async function ensurePrivateDir(path: string): Promise<void> {
 function flagString(flags: Flags, name: string): string | undefined {
   const value = flags[name]
   return typeof value === 'string' ? value : undefined
+}
+
+function flagList(flags: Flags, name: string): string[] {
+  const value = flags[name]
+  return Array.isArray(value) ? value : []
 }
 
 // The positional a target-taking verb was given, or the project this
@@ -449,6 +454,48 @@ export function parseEnvFile(text: string): Record<string, string> {
   return env
 }
 
+// `K=V` arguments, from `hobby deploy --env K=V` and `hobby env set <target>
+// K=V...`. Same key rule and same first-`=` split as parseEnvFile, no
+// quote stripping: the shell already did that.
+export function parseEnvAssignments(assignments: string[]): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const assignment of assignments) {
+    const eq = assignment.indexOf('=')
+    if (eq === -1) {
+      throw new UsageError(`expected KEY=VALUE, got ${JSON.stringify(assignment)}`)
+    }
+    const key = assignment.slice(0, eq)
+    if (!ENV_KEY.test(key)) {
+      throw new UsageError(
+        `${JSON.stringify(key)} is not a valid variable name (letters, digits and _, not starting with a digit)`
+      )
+    }
+    env[key] = assignment.slice(eq + 1)
+  }
+  return env
+}
+
+// Every source of variables a deploy or `hobby env set` accepts, merged in
+// the order a user would expect to win: an explicit `--env K=V` beats the
+// same key in `--env-file`. Undefined when neither was given, which the
+// callers read as "keep what is there".
+async function envFromFlags(c: Ctx, flags: Flags): Promise<Record<string, string> | undefined> {
+  let env: Record<string, string> | undefined
+  const envFileFlag = flagString(flags, 'env-file')
+  if (envFileFlag !== undefined) {
+    const envPath = resolvePath(c.io.cwd, envFileFlag)
+    if (!existsSync(envPath)) {
+      throw new UsageError(`--env-file: no such file ${envPath}`)
+    }
+    env = parseEnvFile(await readFile(envPath, 'utf8'))
+  }
+  const assignments = flagList(flags, 'env')
+  if (assignments.length > 0) {
+    env = { ...(env ?? {}), ...parseEnvAssignments(assignments) }
+  }
+  return env
+}
+
 function deployKindConflict(project: string, name: string, existingKind: string): UsageError {
   return new UsageError(
     `${project}/${name} is a ${existingKind}, and a deploy would replace it. Pick another name with --name, or remove it first.`
@@ -457,13 +504,19 @@ function deployKindConflict(project: string, name: string, existingKind: string)
 
 // A count and never the values: an env file is where the secrets live, and
 // terminal scrollback and CI logs are where they leak.
-function printEnvCount(c: Ctx, env: Record<string, string> | undefined): void {
+function printEnvCount(c: Ctx, env: Record<string, string> | undefined, source?: string): void {
   if (env === undefined) {
     return
   }
   const count = Object.keys(env).length
-  c.io.out(`  env       ${count} ${count === 1 ? 'variable' : 'variables'}`)
+  c.io.out(`  env       ${count} ${count === 1 ? 'variable' : 'variables'}${source === undefined ? '' : ` (from ${source})`}`)
 }
+
+// The wrangler convention for local secrets: a dotenv file beside the
+// manifest, gitignored, that `wrangler dev` reads and `wrangler deploy`
+// does not. Here it is read on deploy, because this box is where the
+// worker runs (issue #74).
+const DEV_VARS = '.dev.vars'
 
 // Every wrangler key the daemon read and did not act on, one line each,
 // where the user is looking. The spec promised "every ignored key printed
@@ -525,15 +578,8 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
   // against a remote daemon (ADR 0018) as against a local one: the file
   // never has to exist on the box. Read before anything below mutates, so a
   // missing or malformed file leaves no empty project behind.
-  let env: Record<string, string> | undefined
-  const envFileFlag = flagString(flags, 'env-file')
-  if (envFileFlag !== undefined) {
-    const envPath = resolvePath(c.io.cwd, envFileFlag)
-    if (!existsSync(envPath)) {
-      throw new UsageError(`--env-file: no such file ${envPath}`)
-    }
-    env = parseEnvFile(await readFile(envPath, 'utf8'))
-  }
+  let env = await envFromFlags(c, flags)
+  let envSource: string | undefined
 
   const kindFlag = typeof flags['kind'] === 'string' ? flags['kind'] : undefined
   if (kindFlag !== undefined && kindFlag !== 'app' && kindFlag !== 'worker') {
@@ -563,12 +609,14 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     c.io.err('note: the wrangler manifest beside this Dockerfile is not read for an app; its vars do not reach the container. Use --env-file.')
   }
 
-  // A worker's variables are its wrangler config's `vars`, the same file
-  // Cloudflare reads, so a second source here would only drift from it.
-  if (env !== undefined && kind === 'worker') {
-    throw new UsageError(
-      '--env-file is for apps. A worker takes its variables from [vars] in its wrangler config.'
-    )
+  // A worker with no explicit variables on the command line takes its
+  // secrets from a `.dev.vars` beside the manifest when there is one, the
+  // file wrangler itself reads for local runs. Explicit flags win over it
+  // rather than merging, so what was sent is exactly one thing the user can
+  // name. Plain `[vars]` still come from the manifest at start, under these.
+  if (env === undefined && kind === 'worker' && existsSync(joinPath(path, DEV_VARS))) {
+    env = parseEnvFile(await readFile(joinPath(path, DEV_VARS), 'utf8'))
+    envSource = DEV_VARS
   }
 
   // A project is created on first deploy rather than required up front. The
@@ -592,7 +640,7 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     c.io.out(`deployed ${projectName}/${name}`)
     c.io.out(`  image     ${result.image}`)
     c.io.out(`  url       https://${hostnameOf(result.resource)}`)
-    printEnvCount(c, env)
+    printEnvCount(c, env, envSource)
     printIgnored(c, result.ignored)
     c.io.out('')
     c.io.out('It is asleep. The first request wakes it.')
@@ -620,7 +668,13 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
   const { resource, ignored } = await c.api.createResource(
     projectName,
     kind === 'worker'
-      ? { kind: 'worker', name, source: { path }, ...(databaseResourceId === undefined ? {} : { databaseResourceId }) }
+      ? {
+          kind: 'worker',
+          name,
+          source: { path },
+          ...(databaseResourceId === undefined ? {} : { databaseResourceId }),
+          ...(env === undefined ? {} : { env }),
+        }
       : {
           kind: 'app',
           name,
@@ -638,11 +692,139 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
   c.io.out(`deployed ${projectName}/${name}`)
   c.io.out(`  image     ${imageLine(resource.config.image)}`)
   c.io.out(`  url       https://${hostnameOf(resource)}`)
-  printEnvCount(c, env)
+  printEnvCount(c, env, envSource)
   printIgnored(c, ignored)
   c.io.out('')
   c.io.out('It is asleep. The first request wakes it.')
   return 0
+}
+
+// `hobby env set|ls|unset`: variables and secrets on an app or a worker
+// after it exists (issue #74), over POST /v1/resources/:id/env. Values are
+// never printed by any of the three, and `ls` reads key names off the
+// redacted wire config, so the CLI has no path that could print one.
+//
+// The target follows the link like every other target verb (targetOrLinked):
+// `hobby env set K=V` in a linked directory is the common case, and it is
+// told apart from `hobby env set <target> K=V` by the first argument
+// containing an `=`, which no target can.
+const ENV_USAGE = 'usage: hobby env set <target> K=V... [--env-file <f>] | hobby env ls <target> | hobby env unset <target> K...'
+
+function envTargetAndRest(c: Ctx, args: string[], takesTarget: (arg: string) => boolean): { target: string; rest: string[] } {
+  const first = args[0]
+  if (first !== undefined && takesTarget(first)) {
+    return { target: first, rest: args.slice(1) }
+  }
+  return { target: targetOrLinked(c, [], ENV_USAGE), rest: args }
+}
+
+async function resolveEnvTarget(c: Ctx, target: string): Promise<{ project: Project; resource: WireResource }> {
+  const found = await resolveTarget(c.api, target, c.config.project)
+  if (found.resource.kind !== 'app' && found.resource.kind !== 'worker') {
+    throw new UsageError(`${target} is a ${found.resource.kind}, and only an app or a worker has environment variables to set`)
+  }
+  return found
+}
+
+function printEnvOutcome(c: Ctx, label: string, keys: string[], stopped: boolean): void {
+  c.io.out(label)
+  for (const key of keys) {
+    c.io.out(`  ${key}`)
+  }
+  c.io.out(
+    stopped
+      ? 'It was running and has been stopped. The next request wakes it with the new values.'
+      : 'Applied on its next wake.'
+  )
+}
+
+export async function cmdEnvSet(c: Ctx, args: string[], flags: Flags): Promise<number> {
+  const { target, rest } = envTargetAndRest(c, args, (arg) => !arg.includes('='))
+  const fromFlags = await envFromFlags(c, flags)
+  const fromArgs = parseEnvAssignments(rest)
+  const set = { ...(fromFlags ?? {}), ...fromArgs }
+  if (Object.keys(set).length === 0) {
+    throw new UsageError('hobby env set: nothing to set. Pass K=V arguments or --env-file <f>.')
+  }
+  const { project, resource } = await resolveEnvTarget(c, target)
+  const result = await c.api.setEnv(resource.id, { set })
+  if (flags.json) {
+    c.io.out(JSON.stringify({ set: Object.keys(set).sort(), keys: result.keys, stopped: result.stopped }))
+    return 0
+  }
+  const count = Object.keys(set).length
+  printEnvOutcome(c, `set ${count} ${count === 1 ? 'variable' : 'variables'} on ${project.name}/${resource.name}:`, Object.keys(set).sort(), result.stopped)
+  return 0
+}
+
+export async function cmdEnvUnset(c: Ctx, args: string[], flags: Flags): Promise<number> {
+  // `hobby env unset <target> K...` or, linked, `hobby env unset K...`: with
+  // two or more arguments the first is the target; with one and a link,
+  // it is a key.
+  const { target, rest } =
+    args.length >= 2 || (c.config.project ?? null) === null
+      ? envTargetAndRest(c, args, () => true)
+      : { target: targetOrLinked(c, [], ENV_USAGE), rest: args }
+  if (rest.length === 0) {
+    throw new UsageError('hobby env unset: name at least one variable to remove')
+  }
+  const { project, resource } = await resolveEnvTarget(c, target)
+  const result = await c.api.setEnv(resource.id, { unset: rest })
+  if (flags.json) {
+    c.io.out(JSON.stringify({ unset: rest, keys: result.keys, stopped: result.stopped }))
+    return 0
+  }
+  printEnvOutcome(c, `unset ${rest.length} ${rest.length === 1 ? 'variable' : 'variables'} on ${project.name}/${resource.name}:`, rest, result.stopped)
+  return 0
+}
+
+export async function cmdEnvLs(c: Ctx, args: string[], flags: Flags): Promise<number> {
+  const target = targetOrLinked(c, args, ENV_USAGE)
+  const { project, resource } = await resolveEnvTarget(c, target)
+  const env = (resource.config as { env?: Record<string, string> }).env ?? {}
+  const keys = Object.keys(env).sort()
+  // A worker also has the manifest's own [vars], which are its too, read
+  // from the file on every deploy. Listed apart, because `hobby env unset`
+  // cannot remove one of those: the file is where it lives.
+  const vars =
+    resource.kind === 'worker'
+      ? Object.keys((resource.config as { manifest?: { vars?: Record<string, string> } | null }).manifest?.vars ?? {}).sort()
+      : []
+
+  if (flags.json) {
+    c.io.out(JSON.stringify({ keys, ...(resource.kind === 'worker' ? { vars } : {}) }))
+    return 0
+  }
+  if (keys.length === 0) {
+    c.io.out(`${project.name}/${resource.name} has no variables set`)
+  } else {
+    c.io.out(`${project.name}/${resource.name}:`)
+    for (const key of keys) {
+      c.io.out(`  ${key}`)
+    }
+  }
+  if (vars.length > 0) {
+    c.io.out(`from [vars] in its wrangler config (change the file and redeploy):`)
+    for (const key of vars) {
+      c.io.out(`  ${key}`)
+    }
+  }
+  c.io.out('values are never printed. Set one again to change it.')
+  return 0
+}
+
+export async function cmdEnv(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const [sub, ...rest] = positionals
+  switch (sub) {
+    case 'set':
+      return cmdEnvSet(c, rest, flags)
+    case 'unset':
+      return cmdEnvUnset(c, rest, flags)
+    case 'ls':
+      return cmdEnvLs(c, rest, flags)
+    default:
+      throw new UsageError(sub === undefined ? ENV_USAGE : `unknown env subcommand: ${sub}\n${ENV_USAGE}`)
+  }
 }
 
 export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promise<number> {

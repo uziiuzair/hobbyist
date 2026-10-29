@@ -16,6 +16,9 @@ import { z } from 'zod'
 import {
   branchTool,
   connectionStringTool,
+  envListTool,
+  envSetTool,
+  envUnsetTool,
   listTool,
   logsTool,
   newTool,
@@ -142,6 +145,48 @@ export function createServer(api: Api): McpServer {
       },
     },
     async (args) => logsTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_env_set',
+    {
+      description:
+        'set environment variables or secrets on an app or worker. mirrors `hobby env set <target> K=V...`. ' +
+        'applied on its next wake; a running resource is stopped so the next request picks the values up. ' +
+        'returns the key names, never the values.',
+      inputSchema: {
+        target: z.string().min(1).describe(TARGET_DESCRIPTION),
+        set: z.record(z.string(), z.string()).describe('variables to set or replace, name to value'),
+      },
+    },
+    async (args) => envSetTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_env_ls',
+    {
+      description:
+        'list the names of the environment variables set on an app or worker. mirrors `hobby env ls <target>`. ' +
+        'values are never returned. for a worker, `vars` lists the names from [vars] in its wrangler config too.',
+      inputSchema: {
+        target: z.string().min(1).describe(TARGET_DESCRIPTION),
+      },
+    },
+    async (args) => envListTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_env_unset',
+    {
+      description:
+        'remove environment variables from an app or worker. mirrors `hobby env unset <target> K...`. ' +
+        'applied on its next wake; a running resource is stopped.',
+      inputSchema: {
+        target: z.string().min(1).describe(TARGET_DESCRIPTION),
+        keys: z.array(z.string().min(1)).min(1).describe('variable names to remove'),
+      },
+    },
+    async (args) => envUnsetTool(api, args)
   )
 
   server.registerTool(

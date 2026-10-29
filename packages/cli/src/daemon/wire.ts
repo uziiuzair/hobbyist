@@ -154,6 +154,9 @@ function redactConfig(kind: Resource['kind'], config: ResourceConfig): WireResou
     return {
       ...worker,
       queueToken: REDACTED,
+      // Keys stay, so `hobby env ls` can list them; values never cross the
+      // wire, the same rule as an app's env.
+      ...(worker.env === undefined ? {} : { env: redactValues(worker.env) }),
       manifest:
         worker.manifest === null ? null : { ...worker.manifest, vars: redactValues(worker.manifest.vars) },
     }

@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { parseTarget, type ErrorCode } from '@hobby.sh/core'
-import { parseDeploy, parseEnvFile } from '../src/cli/commands.js'
+import { parseDeploy, parseEnvAssignments, parseEnvFile } from '../src/cli/commands.js'
 import { exitCodeForError } from '../src/cli/exit.js'
 import { parseArgs, UsageError } from '../src/cli/main.js'
 
@@ -161,4 +161,21 @@ test('parseTarget: a bare project has no resource segment', () => {
 
 test('parseTarget: project/resource splits on the first slash', () => {
   assert.deepEqual(parseTarget('blog/analytics'), { project: 'blog', resource: 'analytics' })
+})
+
+test('parseArgs: a multi flag collects every occurrence, in order, in both spellings', () => {
+  const result = parseArgs(['.', '--env', 'A=1', '--env=B=2', '--env', 'C=x=y'], { multi: ['env'] })
+  assert.deepEqual(result.positionals, ['.'])
+  assert.deepEqual(result.flags.env, ['A=1', 'B=2', 'C=x=y'])
+  assert.throws(() => parseArgs(['--env'], { multi: ['env'] }), UsageError)
+})
+
+test('parseEnvAssignments: first = splits, keys are validated, no quote stripping', () => {
+  assert.deepEqual(parseEnvAssignments(['A=1', 'URL=postgres://u:p@h/db?x=1', 'Q="quoted"']), {
+    A: '1',
+    URL: 'postgres://u:p@h/db?x=1',
+    Q: '"quoted"',
+  })
+  assert.throws(() => parseEnvAssignments(['NOEQ']), /NOEQ/)
+  assert.throws(() => parseEnvAssignments(['1A=2']), /not a valid variable name/)
 })

@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { HobbyError } from '@hobby.sh/core'
@@ -13,6 +13,7 @@ import {
   cmdConnect,
   cmdCreate,
   cmdDeploy,
+  cmdEnv,
   cmdLogs,
   cmdNew,
   cmdPg,
@@ -424,16 +425,69 @@ test('hobby deploy without --env-file sends no env on a redeploy', async () => {
   assert.equal('env' in (recorded.deploys[0]?.input as object), false)
 })
 
-test('hobby deploy --env-file refuses a worker and creates nothing', async () => {
+// Issue #74: a worker used to refuse --env-file with "use [vars]", which
+// left it with no way to hold a secret outside the repository.
+test('hobby deploy --env-file sends env for a worker too', async () => {
   const dir = envFileDir('A=1\n')
   const { ctx, recorded } = fakeCtx({ cwd: dir })
 
+  const code = await cmdDeploy(ctx, ['./api'], { project: 'blog', kind: 'worker', 'env-file': '.env.production' })
+  assert.equal(code, 0)
+  const body = recorded.resourceBodies[0]?.body as { kind: string; env?: Record<string, string> }
+  assert.equal(body.kind, 'worker')
+  assert.deepEqual(body.env, { A: '1' })
+})
+
+test('hobby deploy --env K=V is repeatable and beats the same key in --env-file', async () => {
+  const dir = envFileDir('A=file\nB=file\n')
+  const { ctx, recorded, out } = fakeCtx({ cwd: dir })
+
+  const code = await cmdDeploy(ctx, ['./site'], {
+    project: 'blog',
+    kind: 'app',
+    'env-file': '.env.production',
+    env: ['A=flag', 'C=x=y'],
+  })
+  assert.equal(code, 0)
+  const body = recorded.resourceBodies[0]?.body as { env?: Record<string, string> }
+  assert.deepEqual(body.env, { A: 'flag', B: 'file', C: 'x=y' })
+  assert.ok(out.includes('  env       3 variables'))
+  assert.ok(!out.some((line) => line.includes('flag') || line.includes('x=y')), 'values are never printed')
+})
+
+test('a worker deploy with no explicit variables reads .dev.vars beside the manifest', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-devvars-'))
+  const src = join(dir, 'api')
+  mkdirSync(src)
+  writeFileSync(join(src, 'wrangler.toml'), 'name = "api"\nmain = "src/index.ts"\ncompatibility_date = "2024-01-01"\n')
+  writeFileSync(join(src, '.dev.vars'), 'SECRET=hunter2\n')
+  const { ctx, recorded, out } = fakeCtx({ cwd: dir })
+
+  assert.equal(await cmdDeploy(ctx, ['./api'], { project: 'blog' }), 0)
+  const body = recorded.resourceBodies[0]?.body as { env?: Record<string, string> }
+  assert.deepEqual(body.env, { SECRET: 'hunter2' })
+  assert.ok(out.includes('  env       1 variable (from .dev.vars)'))
+  assert.ok(!out.some((line) => line.includes('hunter2')))
+
+  // An explicit --env wins outright rather than merging with the file, so
+  // what was sent is one nameable thing.
+  recorded.resourceBodies.length = 0
+  assert.equal(await cmdDeploy(ctx, ['./api'], { project: 'blog', env: ['OTHER=1'] }), 0)
+  assert.deepEqual((recorded.resourceBodies[0]?.body as { env?: Record<string, string> }).env, { OTHER: '1' })
+})
+
+test('hobby deploy --env with a bad assignment is a usage error naming it, before anything is created', async () => {
+  const dir = envFileDir('A=1\n')
+  const { ctx, recorded } = fakeCtx({ cwd: dir })
   await assert.rejects(
-    () => cmdDeploy(ctx, ['./api'], { project: 'blog', kind: 'worker', 'env-file': '.env.production' }),
-    (err: unknown) => err instanceof UsageError && /wrangler/.test(err.message)
+    () => cmdDeploy(ctx, ['./site'], { project: 'blog', kind: 'app', env: ['NOEQUALS'] }),
+    (err: unknown) => err instanceof UsageError && /NOEQUALS/.test(err.message)
+  )
+  await assert.rejects(
+    () => cmdDeploy(ctx, ['./site'], { project: 'blog', kind: 'app', env: ['9BAD=1'] }),
+    (err: unknown) => err instanceof UsageError && /9BAD/.test(err.message)
   )
   assert.deepEqual(recorded.created, [])
-  assert.deepEqual(recorded.resources, [])
 })
 
 test('hobby deploy --env-file with a missing file is a usage error', async () => {
@@ -949,4 +1003,99 @@ test('hobby deploy prints every ignored wrangler key with its reason, and includ
   assert.equal(await cmdDeploy(ctx, ['.'], { project: 'blog', name: 'wk', json: true }), 0)
   const parsed = JSON.parse(out.join('\n')) as { ignored: unknown }
   assert.deepEqual(parsed.ignored, ignored)
+})
+
+// Issue #74: `hobby env set|ls|unset` over POST /v1/resources/:id/env.
+function envCtx(opts: {
+  kind?: string
+  env?: Record<string, string>
+  vars?: Record<string, string>
+  linked?: string
+  stopped?: boolean
+} = {}): { ctx: Ctx; out: string[]; calls: Array<{ id: string; input: unknown }> } {
+  const out: string[] = []
+  const calls: Array<{ id: string; input: unknown }> = []
+  const kind = opts.kind ?? 'app'
+  const config: Record<string, unknown> = { image: 'img', hostname: 'web.blog.localhost', env: opts.env ?? {} }
+  if (kind === 'worker') config['manifest'] = { vars: opts.vars ?? {} }
+  const resource = { id: 'web-1', name: 'web', kind, state: 'running', config }
+  // A linked project holds just the app, so a bare target resolves; the
+  // explicit-target cases keep a postgres beside it to prove the kind check.
+  const siblings = opts.linked === undefined ? [{ id: 'db-1', name: 'primary', kind: 'postgres', config: {} }] : []
+  const api = {
+    async getProject(name: string) {
+      return { project: { id: 'p1', name }, resources: [resource, ...siblings] }
+    },
+    async setEnv(id: string, input: unknown) {
+      calls.push({ id, input })
+      const current = { ...(opts.env ?? {}) }
+      const body = input as { set?: Record<string, string>; unset?: string[] }
+      for (const key of body.unset ?? []) delete current[key]
+      Object.assign(current, body.set ?? {})
+      return { resource: { ...resource, state: 'sleeping' }, keys: Object.keys(current).sort(), stopped: opts.stopped ?? false }
+    },
+  }
+  const ctx = {
+    io: { out: (s: string) => out.push(s), err: () => {}, env: {}, cwd: '/tmp', readLine: async () => '' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: { project: opts.linked ?? null } as Ctx['config'],
+  } as Ctx
+  return { ctx, out, calls }
+}
+
+test('hobby env set <target> K=V sends set over the env route and prints keys, never values', async () => {
+  const { ctx, out, calls } = envCtx({ stopped: true })
+  assert.equal(await cmdEnv(ctx, ['set', 'blog/web', 'API_KEY=sk-secret', 'MODE=prod'], {}), 0)
+  assert.deepEqual(calls, [{ id: 'web-1', input: { set: { API_KEY: 'sk-secret', MODE: 'prod' } } }])
+  assert.ok(out.includes('set 2 variables on blog/web:'))
+  assert.ok(out.includes('  API_KEY'))
+  assert.ok(out.some((l) => l.includes('has been stopped')))
+  assert.ok(!out.some((l) => l.includes('sk-secret')))
+})
+
+test('hobby env set in a linked directory takes K=V as its first argument', async () => {
+  const { ctx, calls } = envCtx({ linked: 'blog' })
+  assert.equal(await cmdEnv(ctx, ['set', 'A=1'], {}), 0)
+  assert.deepEqual(calls, [{ id: 'web-1', input: { set: { A: '1' } } }])
+})
+
+test('hobby env set --env-file merges the file under explicit K=V', async () => {
+  const dir = envFileDir('A=file\nB=file\n')
+  const { ctx, calls } = envCtx()
+  ctx.io.cwd = dir
+  assert.equal(await cmdEnv(ctx, ['set', 'blog/web', 'A=arg'], { 'env-file': '.env.production' }), 0)
+  assert.deepEqual(calls, [{ id: 'web-1', input: { set: { A: 'arg', B: 'file' } } }])
+})
+
+test('hobby env set with nothing to set is a usage error', async () => {
+  const { ctx } = envCtx()
+  await assert.rejects(cmdEnv(ctx, ['set', 'blog/web'], {}), UsageError)
+})
+
+test('hobby env unset <target> K sends unset; linked, a lone argument is a key', async () => {
+  const explicit = envCtx({ env: { A: '1', B: '2' } })
+  assert.equal(await cmdEnv(explicit.ctx, ['unset', 'blog/web', 'A'], {}), 0)
+  assert.deepEqual(explicit.calls, [{ id: 'web-1', input: { unset: ['A'] } }])
+
+  const linked = envCtx({ env: { A: '1', B: '2' }, linked: 'blog' })
+  assert.equal(await cmdEnv(linked.ctx, ['unset', 'B'], {}), 0)
+  assert.deepEqual(linked.calls, [{ id: 'web-1', input: { unset: ['B'] } }])
+})
+
+test('hobby env ls prints key names from the redacted config, and a worker\'s [vars] apart', async () => {
+  const app = envCtx({ env: { ZED: '<redacted>', ALPHA: '<redacted>' } })
+  assert.equal(await cmdEnv(app.ctx, ['ls', 'blog/web'], {}), 0)
+  assert.deepEqual(app.out.slice(0, 3), ['blog/web:', '  ALPHA', '  ZED'])
+  assert.ok(!app.out.some((l) => l.includes('<redacted>')))
+
+  const worker = envCtx({ kind: 'worker', env: { SECRET: '<redacted>' }, vars: { PUBLIC: '<redacted>' } })
+  assert.equal(await cmdEnv(worker.ctx, ['ls', 'blog/web', '--json'], { json: true }), 0)
+  assert.deepEqual(JSON.parse(worker.out[0] as string), { keys: ['SECRET'], vars: ['PUBLIC'] })
+})
+
+test('hobby env refuses a postgres target and an unknown subcommand', async () => {
+  const { ctx } = envCtx()
+  await assert.rejects(cmdEnv(ctx, ['set', 'blog/primary', 'A=1'], {}), (err: unknown) => err instanceof UsageError && /postgres/.test(err.message))
+  await assert.rejects(cmdEnv(ctx, ['frob', 'blog/web'], {}), UsageError)
 })
