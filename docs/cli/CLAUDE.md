@@ -91,3 +91,40 @@ discipline: there is only one surface to drift from.
   target, but the container runtime differs.
 - Does the daemon supervise itself, or does it hand that to systemd and launchd?
   Handing it over is less code and worse on the boxes that have neither.
+
+## Amendment, 2026-10-29: help, version, and what a link means (issues #96, #98, #76)
+
+`hobby <verb> --help`, `hobby <verb> -h` and `hobby help <verb>` print that
+verb's rows from the `USAGE` table in `packages/cli/src/cli/main.ts`, the same
+table `printHelp` prints in full. The table replaced a run of `io.out` calls
+so one verb's help could be printed without a second copy of the text;
+`site/scripts/check-cli-reference.mjs` parses the verb column out of it.
+`hobby version` (and `--version`) prints `CLI_VERSION`
+(`packages/cli/src/version.ts`, read from the package's own package.json) and
+the daemon's, from a new `GET /v1/version`. That is a separate route rather
+than a field on `/v1/health` because health is the one path the studio
+listener answers without a session (`UNAUTHENTICATED_PATHS`,
+`packages/cli/src/daemon/studio/routes.ts`), and a build number should not
+be readable from the network unauthenticated.
+
+`hobby link` now means what its own message said. `cmdDeploy` takes the
+linked project when `--project` is absent (it used to create a project named
+after the directory). The single-target verbs (`connect`, `sleep`, `wake`,
+`logs`, `pin`, `unpin`, `eject`, `adopt`, `snapshot`, `snapshot ls`) act on
+the linked project when given no target, through `targetOrLinked`
+(`packages/cli/src/cli/commands.ts`). `resolveTarget` takes the link as a
+third argument and tries a bare name as a resource of the linked project
+before reading it as a project name, so `hobby logs web` beside a hobby.json
+pointing at `blog` means `blog/web`. A target with a slash never consults the
+link. `rm`, `snapshot restore`, `snapshot rm` and the `queue` verbs are
+deliberately still explicit.
+
+Wrangler keys a worker deploy ignored used to reach only the daemon's
+stderr. `createResourceRoute` and `deployResourceRoute`
+(`packages/cli/src/daemon/routes.ts`) now put them on the response as
+`ignored: [{ key, reason }]` (`ignoredEntries`,
+`packages/worker/src/manifest.ts`), and `cmdDeploy` prints one
+`ignoring <key>: <reason>` line each, on create and redeploy, and includes
+the list under `--json`. The response shape for `ignored` changed from a
+list of keys to a list of objects; Studio's `DeployResult` type was updated
+and nothing in Studio read the field.

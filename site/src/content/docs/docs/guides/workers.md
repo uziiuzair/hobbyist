@@ -34,8 +34,29 @@ because there is one box and one consumer container. A dead letter queue named
 by something other than a string queue name is ignored, and the consumer ends up
 with none.
 
-Read the ignored list after your first deploy. A silently dropped setting is the
-failure mode this is designed to avoid.
+Read the ignored list after your first deploy. It is printed by `hobby deploy`
+as one `ignoring <key>: <reason>` line per key, on every deploy, and comes back
+as `ignored` under `--json`. A silently dropped setting is the failure mode
+this is designed to avoid.
+
+The keys a real production monorepo is most likely to carry, and what hobby
+says about each:
+
+| Key | What happens |
+|---|---|
+| `[ai]` | **Workers AI is not provided.** AI compute is out of scope for hobby, by design. A worker that needs a model calls one over HTTP instead. `env.AI` is undefined at runtime, and the deploy says so. |
+| `[[services]]` | Service bindings are not built. Call the other worker over HTTP at its own hostname. |
+| `[env.*]` | Named environments are not read. Hobby deploys the top-level config only. |
+| `[assets]` | Static assets are not served for a worker. A site with assets deploys as an [app](/docs/guides/apps/), from a Dockerfile. |
+| `[[hyperdrive]]` | Not read. `hobby deploy --database <name>` binds the project's Postgres as `DB`; see Bindings below. |
+| `[[migrations]]` | Nothing to migrate. Every class in `durable_objects` is bound directly. |
+| `[triggers]` | Cron triggers are not built yet. The deploy says so rather than letting `scheduled()` silently never run. |
+| `[observability]`, `[[tail_consumers]]`, `logpush` | Cloudflare-side telemetry. Use `hobby logs`. |
+| `[build]`, `rules`, `define`, `minify`, `no_bundle` and the other bundler keys | Hobby bundles `main` with its own settings. |
+
+A key with no entry in the table inside `manifest.ts` is reported as
+`not recognised by hobby`, which means exactly that: nobody has decided what it
+should mean here yet.
 
 ## Bindings
 
@@ -46,6 +67,7 @@ failure mode this is designed to avoid.
 | Queues, consuming | Works. A message wakes a sleeping consumer |
 | Queues, producing | **Broken on Linux.** [Why](/docs/guides/queues/#the-linux-producer-gap) |
 | Hyperdrive | Works, pointed at a [Postgres](/docs/guides/postgres/) resource in the same project |
+| Workers AI | **Not provided, and will not be.** AI compute is out of scope. The deploy reports `[ai]` as ignored |
 
 ## Where state lives
 
