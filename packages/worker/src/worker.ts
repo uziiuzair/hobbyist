@@ -11,7 +11,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import {
   HobbyError,
   routingKeyFor,
@@ -37,6 +37,7 @@ import {
   CONTAINER_CONTROL_PORT,
   CONTAINER_DO,
   CONTAINER_STATE,
+  GENERATED_DOCKERFILE,
   renderWorkerDockerfile,
 } from './runtime-image.js'
 
@@ -420,6 +421,26 @@ async function waitListening(
   }
 }
 
+// The build context and the worker's directory inside it (issue #147). With
+// no context the two are the same directory and `workerDir` is '.'. A
+// context that does not contain the worker is refused: the Dockerfile
+// would `cd` to a path that is not in the image.
+export function resolveBuildContext(sourcePath: string, context: string | null | undefined): { contextPath: string; workerDir: string } {
+  if (context === null || context === undefined) {
+    return { contextPath: sourcePath, workerDir: '.' }
+  }
+  const contextPath = resolve(context)
+  const workerDir = relative(contextPath, resolve(sourcePath))
+  if (workerDir.startsWith('..') || isAbsolute(workerDir)) {
+    throw new HobbyError(
+      'usage',
+      `the build context ${contextPath} does not contain the worker directory ${resolve(sourcePath)}`,
+      '--context must be the worker directory itself or a parent of it, such as the workspace root'
+    )
+  }
+  return { contextPath, workerDir: workerDir === '' ? '.' : workerDir }
+}
+
 export function workerTag(project: string, resource: string, at: number): string {
   return `hobby/${project}-${resource}-worker:${Math.floor(at / 1000)}`
 }
@@ -432,12 +453,21 @@ async function writeGeneratedDockerfile(
   deps: WorkerDeps,
   project: string,
   resource: string,
-  manifest: WranglerManifest
+  manifest: WranglerManifest,
+  build: { contextPath: string; workerDir: string }
 ): Promise<string> {
   const dir = deps.paths.resourcePath(project, resource, 'bundle')
   await mkdir(dir, { recursive: true })
-  const path = join(dir, 'Dockerfile')
-  await writeFile(path, renderWorkerDockerfile({ main: manifest.main }), 'utf8')
+  const path = join(dir, GENERATED_DOCKERFILE)
+  await writeFile(
+    path,
+    renderWorkerDockerfile({
+      main: manifest.main,
+      dir: build.workerDir,
+      compatibilityFlags: manifest.compatibilityFlags,
+    }),
+    'utf8'
+  )
   return path
 }
 
@@ -448,6 +478,9 @@ export interface CreateWorkerOptions {
   databaseResourceId: ResourceId | null
   // See WorkerConfig.env. Absent means none yet.
   env?: Record<string, string>
+  // The build context when it is not sourcePath (a workspace root). See
+  // WorkerManifest.source.context.
+  context?: string | null
 }
 
 export interface CreateWorkerResult {
@@ -525,10 +558,11 @@ export async function createWorkerResource(
   const controlPort = await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO, [hostPort])
   const containerName = `hobby-${opts.project.name}-${opts.name}`
 
-  const dockerfilePath = await writeGeneratedDockerfile(deps, opts.project.name, opts.name, manifest)
+  const build = resolveBuildContext(opts.sourcePath, opts.context)
+  const dockerfilePath = await writeGeneratedDockerfile(deps, opts.project.name, opts.name, manifest, build)
   const tag = workerTag(opts.project.name, opts.name, now())
   const logs = await buildWorkerImage(deps.runtime, {
-    contextPath: opts.sourcePath,
+    contextPath: build.contextPath,
     dockerfilePath,
     tag,
     memory: BUILD_MEMORY,
@@ -553,7 +587,11 @@ export async function createWorkerResource(
     databaseResourceId: opts.databaseResourceId,
     env: opts.env ?? {},
     manifest: {
-      source: { path: opts.sourcePath, manifest: found.file },
+      source: {
+        path: opts.sourcePath,
+        manifest: found.file,
+        ...(opts.context === null || opts.context === undefined ? {} : { context: build.contextPath }),
+      },
       compatibilityDate: manifest.compatibilityDate,
       compatibilityFlags: manifest.compatibilityFlags,
       vars: manifest.vars,
@@ -760,10 +798,12 @@ export function resolveWorkerSourcePath(resource: WorkerResource, projectName: s
 // `env` present replaces the worker's whole set (WorkerConfig.env); absent
 // keeps it, the same contract deployApp has for an app, so a plain redeploy
 // never wipes a secret set earlier.
+// `context` given replaces the stored one; absent keeps it (a redeploy of a
+// workspace worker does not have to repeat --context); null clears it.
 export async function deployWorker(
   deps: WorkerDeps,
   resource: WorkerResource,
-  opts: { sourcePath?: string; env?: Record<string, string> } = {}
+  opts: { sourcePath?: string; env?: Record<string, string>; context?: string | null } = {}
 ): Promise<DeployWorkerResult> {
   const project = deps.store.getProject(resource.projectId)
   if (project === null) {
@@ -789,10 +829,12 @@ export async function deployWorker(
     const manifest = found.manifest
     const now = deps.now ?? Date.now
 
-    const dockerfilePath = await writeGeneratedDockerfile(deps, project.name, resource.name, manifest)
+    const context = opts.context === undefined ? (resource.config.manifest?.source.context ?? null) : opts.context
+    const build = resolveBuildContext(sourcePath, context)
+    const dockerfilePath = await writeGeneratedDockerfile(deps, project.name, resource.name, manifest, build)
     const tag = workerTag(project.name, resource.name, now())
     const logs = await buildWorkerImage(deps.runtime, {
-      contextPath: sourcePath,
+      contextPath: build.contextPath,
       dockerfilePath,
       tag,
       memory: BUILD_MEMORY,
@@ -819,7 +861,7 @@ export async function deployWorker(
       queueToken: resource.config.queueToken,
       ...(opts.env === undefined ? {} : { env: opts.env }),
       manifest: {
-        source: { path: sourcePath, manifest: found.file },
+        source: { path: sourcePath, manifest: found.file, ...(context === null ? {} : { context: build.contextPath }) },
         compatibilityDate: manifest.compatibilityDate,
         compatibilityFlags: manifest.compatibilityFlags,
         vars: manifest.vars,
