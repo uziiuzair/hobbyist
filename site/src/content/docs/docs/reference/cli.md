@@ -140,12 +140,41 @@ Both present is an error rather than a guess.
 | `--project <p>` | Which project it belongs to |
 | `--name <n>` | The resource name |
 | `--port <n>` | The port your process listens on inside the container. Apps only |
-| `--env-file <f>` | Variables from a dotenv file, replacing the app's current set. Apps only |
+| `--env-file <f>` | Variables from a dotenv file, replacing the resource's current set |
+| `--env K=V` | One variable, repeatable. Wins over the same key in `--env-file` |
 | `--kind app\|worker` | Only needed when the directory is ambiguous |
 | `--json` | Machine-readable output |
 
 Without `--project`, the project is the one this directory is linked to
 (`hobby link`), and failing that the directory's own name.
+
+A worker deployed with neither `--env` nor `--env-file` takes its secrets from
+a `.dev.vars` beside its manifest when there is one, the same file
+`wrangler dev` reads. Either flag replaces that outright. A redeploy with no
+variables given keeps what the resource already has. Only a count is printed.
+
+### `hobby env set|ls|unset <target>`
+
+Variables and secrets on an app or a worker after it exists, over
+`POST /v1/resources/:id/env`. Nothing is rebuilt: the values are read at the
+next start. A resource that is running is stopped so the next request wakes it
+with the new values, and the command says so.
+
+```sh
+hobby env set blog/web API_KEY=sk-... MODE=prod
+hobby env set blog/web --env-file .env.production   # merged in, under any K=V given
+hobby env ls blog/web                               # names only, never values
+hobby env unset blog/web MODE
+```
+
+In a linked directory the target can be left out: `hobby env set K=V`,
+`hobby env ls`, `hobby env unset K`. A worker's `ls` also lists the names from
+`[vars]` in its wrangler config, apart, since those live in the file and
+`unset` cannot remove them. A postgres has no variables to set and is refused.
+
+Values are never printed by any of the three, and the daemon redacts them on
+the wire, so there is no path from the CLI or MCP back to a value once set. Set
+a variable again to change it. Accepts `--json`.
 
 A worker deploy prints one `ignoring <key>: <reason>` line for every key in
 the wrangler manifest that hobby read and did not act on, on the first deploy

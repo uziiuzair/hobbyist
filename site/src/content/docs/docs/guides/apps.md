@@ -35,14 +35,30 @@ hobby deploy ./my-app --project blog --name site --port 8080
 | `--name <n>` | The resource name |
 | `--port <n>` | The port your process listens on inside the container |
 | `--env-file <f>` | Variables from a dotenv file, see below |
+| `--env K=V` | One variable, repeatable, see below |
 | `--kind app\|worker` | Only needed when the directory is ambiguous |
 | `--json` | Machine-readable output |
 
-## Environment variables
+## Environment variables and secrets
 
 ```sh
 hobby deploy ./my-app --project blog --env-file .env.production
+hobby deploy ./my-app --project blog --env MODE=prod --env API_KEY=sk-...
 ```
+
+After the app exists, change them without a rebuild:
+
+```sh
+hobby env set blog/my-app API_KEY=sk-...
+hobby env ls blog/my-app          # names only
+hobby env unset blog/my-app MODE
+```
+
+A change is read at the app's next start. If the app is running it is stopped,
+and the next request wakes it with the new values; the command tells you which
+happened. There is no secrets vault here and none is planned: these are plain
+per-resource variables, stored with the resource's config and redacted on every
+API response, which is enough for one person's box.
 
 The file is read on the machine you run `hobby` from and sent to the daemon, so
 it never has to exist on a [remote box](/docs/guides/remote/). One `KEY=VALUE`
@@ -51,15 +67,17 @@ allowed, and one pair of matching quotes around a value is stripped. Nothing is
 interpolated: `$OTHER` arrives as written.
 
 On a redeploy the file replaces the app's variables as a whole, so a key you
-delete from it is gone afterwards. A redeploy without `--env-file` keeps what the
-app already has. Values are never printed, only a count.
+delete from it is gone afterwards. `--env K=V` wins over the same key in the
+file. A redeploy with neither keeps what the app already has. Values are never
+printed, only a count.
 
 A database bound with `--database` always supplies `DATABASE_URL`, even if the
 file sets one too. That URL goes through the wake proxy, the same way your own
 `psql` does, so the app's first query wakes a sleeping database and its open
-connections keep it awake for as long as the app is. Workers take their
-variables from `[vars]` in their wrangler config instead, and `--env-file`
-refuses them.
+connections keep it awake for as long as the app is. Workers take plain
+variables from `[vars]` in their wrangler config and secrets from `.dev.vars`,
+`--env`, `--env-file` or `hobby env set`; see the
+[workers guide](/docs/guides/workers/#secrets).
 
 ## Your Dockerfile
 

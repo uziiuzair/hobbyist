@@ -54,3 +54,14 @@ its own bugs, and the person maintaining it is one person.
   read-only default with explicit opt-in is the obvious shape.
 - Destructive operations need a confirmation model that survives an agent being
   overconfident.
+
+## Amendment, 2026-10-29: env tools (issue #74)
+
+`hobby_env_set`, `hobby_env_ls` and `hobby_env_unset`
+(`packages/mcp/src/tools.ts`, registered in `server.ts`) mirror `hobby env
+set|ls|unset` over `POST /v1/resources/:id/env`, the same route the CLI
+uses, per the rule above that this surface wraps the CLI and never extends
+it. Response shaping matters more here than anywhere else in the tool set:
+an agent is handed a secret to set, and what comes back is the key names and
+whether the resource was stopped, never a value. `ls` reads names off the
+daemon's redacted wire config, so there is no tool that could return one.

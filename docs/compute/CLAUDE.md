@@ -190,3 +190,35 @@ including its `vars`, is not read.
 
 Not done here, and still open: `[env.*]` selection (there is no `--env`),
 service bindings, and cron `[triggers]` (#75) are reported, not built.
+
+## Amendment, 2026-10-29: env vars and secrets after creation (issue #74)
+
+`hobby deploy --env-file` existed for apps and nothing else did: no `--env`,
+no way to change variables after creation, workers refused `--env-file`
+with "use `[vars]`", which is plaintext in the repository. Every real app
+needs a secret somewhere, and a vault is out of scope (root CLAUDE.md), so
+this is the plain per-resource answer.
+
+`WorkerConfig.env` (`packages/core/src/types.ts`) is new, optional for rows
+written before it, above the manifest split so a redeploy that rebuilds the
+manifest from the file does not lose it. `buildRunnerManifest`
+(`packages/worker/src/worker.ts`) merges it over `manifest.vars`, the
+precedence `wrangler secret put` has over `[vars]` on Cloudflare. The wire
+shape redacts its values like an app's (`redactConfig`,
+`packages/cli/src/daemon/wire.ts`).
+
+`POST /v1/resources/:id/env` (`envRoute`, `packages/cli/src/daemon/routes.ts`)
+takes `{ set, unset, replace }`, persists to config, and stops a running
+resource so the next wake reads the new values; nothing is rebuilt, because
+both kinds build their container environment at every start. It returns key
+names and `stopped`, never values. Keys are validated against the POSIX name
+rule at the route, not only in the CLI, since MCP and raw POSTs reach it too.
+
+`hobby deploy --env K=V` is repeatable (`multi` flags in `parseArgs`,
+`packages/cli/src/cli/main.ts`) and wins over `--env-file`. A worker deploy
+given neither reads `.dev.vars` beside its manifest when present, the file
+`wrangler dev` reads. `hobby env set|ls|unset <target>` (`cmdEnv`,
+`packages/cli/src/cli/commands.ts`) follow the link like every target verb;
+`ls` reads names off the redacted wire config, so the CLI has no code path
+that could print a value. MCP mirrors the three as `hobby_env_set`,
+`hobby_env_ls`, `hobby_env_unset` (`packages/mcp/src/tools.ts`).
