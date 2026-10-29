@@ -143,6 +143,12 @@ export interface WorkerManifest {
     }>
   }
   durableObjects: Array<{ binding: string; className: string }>
+  // `[triggers] crons` from the manifest, each already validated by
+  // parseCron at deploy time (issue #75). The daemon's cron scheduler
+  // (packages/cli/src/daemon/crons.ts) wakes the worker and calls its
+  // scheduled() handler at each one. Optional because rows deployed before
+  // this field have no key for it; readers treat absent as none.
+  crons?: string[]
 }
 
 // A Cloudflare Worker, running on Cloudflare's own runtime. See ADR 0011:
