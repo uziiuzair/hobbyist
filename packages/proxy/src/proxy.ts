@@ -498,7 +498,11 @@ function awaitBackendAnswer(client: net.Socket, upstream: net.Socket, timeoutMs:
 
 type HoldResult =
   | { kind: 'serving'; upstream: net.Socket; initial: Buffer; handle: ConnectionHandle }
-  | { kind: 'refused'; message: string }
+  // dialFailed: the port never accepted at all, as opposed to a backend
+  // that accepted and then would not serve. handleStartup treats the first
+  // on a target recorded `running` as a container that is not actually
+  // running (issue #54).
+  | { kind: 'refused'; message: string; dialFailed?: boolean }
   | { kind: 'client_gone' }
 
 // Dials the backend and replays the startup packet, and keeps doing that for
@@ -581,7 +585,11 @@ async function holdUntilServing(
     try {
       upstream = await connectUpstream(target.host, target.port)
     } catch (err) {
-      return release({ kind: 'refused', message: `could not connect to ${target.resourceId}: ${errorMessage(err)}` })
+      return release({
+        kind: 'refused',
+        message: `could not connect to ${target.resourceId}: ${errorMessage(err)}`,
+        dialFailed: true,
+      })
     }
     // Same reasoning as the safety net on the client socket in
     // handleConnectionInner: connectUpstreamOnce's own 'error' listener is
@@ -710,6 +718,11 @@ async function handleStartup(
   // a wake that already spent most of one.
   const deadline = Date.now() + wakeTimeoutMs
 
+  // Whether this connection has already paid for a wake. A target that was
+  // recorded running, and then refused the dial, gets exactly one (see the
+  // dialFailed branch below), never a loop.
+  let woken = false
+
   if (target.state !== 'running') {
     // The client may already be gone by the time we would even start a
     // multi-second wake; no point pinning a resource awake for nobody.
@@ -751,6 +764,7 @@ async function handleStartup(
       sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, `could not wake ${target.resourceId}: ${errorMessage(err)}`)
       return
     }
+    woken = true
 
     // The resource was asleep, so the host and port read before the wake
     // are exactly the thing that may have just changed (a new container,
@@ -791,7 +805,57 @@ async function handleStartup(
   const finalDatabase = routingKey.database ?? target.database
   const packet = buildStartupPacket({ ...message.params, database: finalDatabase }, message.version)
 
-  const held = await holdUntilServing(socket, target, packet, deadline, wakeTimeoutMs, deps.activity)
+  let held = await holdUntilServing(socket, target, packet, deadline, wakeTimeoutMs, deps.activity)
+
+  // A target the store calls `running` whose port refuses the dial outright
+  // is a container that died behind the daemon: an OOM kill, a crash,
+  // `docker kill` (issue #54). The store still says running, so nothing
+  // above woke it, the hibernator will not touch it, and every connection
+  // failed in a few milliseconds with ECONNREFUSED until a human ran
+  // `hobby wake`. A refused dial to a running target is treated as what it
+  // is, not running, and goes through wake() exactly once, which is the
+  // same `docker start` plus readiness wait a sleeping target gets. The
+  // daemon's wake refusal is honoured here as it is above, and `woken`
+  // keeps a target that is refused again after its one wake from looping.
+  //
+  // The 2026-09-19 amendment in docs/proxy covers the other shape of the
+  // same death, a port that accepts and then closes (Docker Desktop), inside
+  // holdUntilServing's retry; this is the shape where the port refuses
+  // (OrbStack, a Linux bridge), which never reached that retry.
+  if (
+    held.kind === 'refused' &&
+    held.dialFailed === true &&
+    !woken &&
+    !socket.destroyed &&
+    deps.isWakeRefused?.(target.resourceId) !== true
+  ) {
+    try {
+      await raceTimeout(
+        deps.wake(target.resourceId),
+        Math.max(remainingMs(deadline), FIRST_ANSWER_FLOOR_MS),
+        () => new Error(`wake timed out after ${wakeTimeoutMs}ms`)
+      )
+    } catch (err) {
+      sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, `${held.message}; could not restart it: ${errorMessage(err)}`)
+      return
+    }
+    woken = true
+    try {
+      target = await deps.resolve(routingKey.project)
+    } catch (err) {
+      sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, `failed to resolve ${database} after restart: ${errorMessage(err)}`)
+      return
+    }
+    if (target === null) {
+      sendErrorAndClose(socket, 'FATAL', UNKNOWN_DATABASE, `unknown database: ${database}`)
+      return
+    }
+    if (socket.destroyed) {
+      return
+    }
+    held = await holdUntilServing(socket, target, packet, deadline, wakeTimeoutMs, deps.activity)
+  }
+
   if (held.kind === 'refused') {
     sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, held.message)
     return

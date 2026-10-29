@@ -460,7 +460,9 @@ test('a failed first deploy on the readiness probe leaves no running container',
   assert.equal(status.exists, false)
 })
 
-test('a failed redeploy of a working app leaves it failed, because it does have code', async () => {
+// Issue #78: a redeploy that fails must leave the previous version serving.
+// A build failure changes nothing, so the resource stays as it was.
+test('a redeploy whose build fails leaves the working app exactly as it was', async () => {
   const deps = buildDeps()
   const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
   const project = makeProject(deps.store)
@@ -481,8 +483,83 @@ test('a failed redeploy of a working app leaves it failed, because it does have 
     throw new HobbyError('build_failed', 'docker build failed', 'step 3 of 7')
   }
 
-  await assert.rejects(() => deployApp(deps, created, { source }), /docker build failed/)
+  await assert.rejects(
+    () => deployApp(deps, created, { source }),
+    (err: unknown) => {
+      assert.ok(err instanceof HobbyError)
+      assert.equal(err.code, 'build_failed')
+      assert.match(err.hint ?? '', /nothing was changed/)
+      return true
+    }
+  )
 
+  const after = deps.store.getResource(created.id)
+  assert.equal(after?.state, 'sleeping')
+  assert.equal(after?.config.image, created.config.image)
+})
+
+// The case from the issue: the build succeeds, the container is replaced,
+// and the new code never listens. The previous image is put back.
+test('a redeploy that fails readiness rolls back to the previous image', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const source = sourceDir()
+
+  const created = await createAppResource(deps, {
+    project,
+    name: 'site',
+    source,
+    image: null,
+    containerPort: 3000,
+    env: { GOOD: '1' },
+    databaseResourceId: null,
+  })
+  const firstImage = created.config.image
+  assert.ok(firstImage !== null)
+
+  deps.now = () => 1_754_870_500_000
+  deps.appProbeFactory = () => async () => false
+  await assert.rejects(
+    () => deployApp(deps, created, { source, env: { BROKEN: '1' } }),
+    (err: unknown) => {
+      assert.ok(err instanceof HobbyError)
+      assert.equal(err.code, 'wake_timeout')
+      assert.match(err.hint ?? '', new RegExp(`previous image ${firstImage} was put back`))
+      return true
+    }
+  )
+
+  const after = deps.store.getResource(created.id)
+  assert.ok(after !== null && after.kind === 'app')
+  assert.equal(after.state, 'sleeping')
+  assert.equal(after.config.image, firstImage)
+  assert.deepEqual(after.config.env, { GOOD: '1' })
+  // The container on disk is the previous image's, stopped, ready to wake.
+  assert.equal(runtime._specs.get(created.config.containerName)?.image, firstImage)
+  assert.equal((await runtime.inspect(created.config.containerName)).running, false)
+})
+
+test('a redeploy of an already failed app stays failed, since there is nothing known good to go back to', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const source = sourceDir()
+
+  const created = await createAppResource(deps, {
+    project,
+    name: 'site',
+    source,
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+  deps.store.setResourceState(created.id, 'failed')
+  const failed = deps.store.getResource(created.id)
+  assert.ok(failed !== null && failed.kind === 'app')
+
+  deps.appProbeFactory = () => async () => false
+  await assert.rejects(() => deployApp(deps, failed, { source }), /did not start listening/)
   assert.equal(deps.store.getResource(created.id)?.state, 'failed')
 })
 

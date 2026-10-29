@@ -271,3 +271,46 @@ from a non-loopback peer is refused with 28000; a plaintext CancelRequest is
 not. Two Bun gaps shaped this, both measured on Bun 1.3.14 and both passing
 under Node: an in-place `tls.TLSSocket` upgrade hangs, and
 `setSecureContext` is a no-op. The ADR has the detail.
+
+## Amendment, 2026-10-29: the QA sweep's proxy findings (issues #54, #67, #68)
+
+Three fixes, all in `packages/proxy/src`, all measured by the 2026-10-16 QA
+lanes.
+
+**A refused dial to a `running` target is a dead container, and it is woken
+(#54).** A Postgres container that died behind the daemon (OOM kill,
+`docker kill`) stayed `running` in the store, so neither front door woke it:
+the only wake trigger was `state !== 'running'`, and `holdUntilServing`'s
+retry (the 2026-09-19 amendment above) only covers a port that accepts and
+then closes, the Docker Desktop shape. On OrbStack and a Linux bridge the
+port refuses outright, which took the `connectUpstream` throw path straight
+to a 57P03 in a few milliseconds, for every connection, until a human ran
+`hobby wake`. `holdUntilServing` now marks that result `dialFailed`, and
+`handleStartup` answers it on a target that was `running` at entry with
+exactly one `wake()` (the same `docker start` plus readiness wait a sleeping
+target gets, honouring the daemon's refusal set), a re-resolve, and one more
+hold. The HTTP router does the same on `ECONNREFUSED` from a `running`
+target, and replays the request when it carried no body; a request with a
+body gets a 502 that says the app has been restarted, since its body has
+already gone into the dead connection. The paragraph above that says "the
+HTTP router got no equivalent" is superseded for this one shape.
+
+**No idle cap on a response that has started (#67).** `upstreamTimeoutMs`
+was passed as the socket timeout of every upstream request, so any response
+quiet for 10s was cut with a 502, and once the headers had been forwarded
+that 502 had nowhere to go and the client hung until its own timeout. The
+timeout now bounds only the wait for the response headers, at 120s by
+default (`DEFAULT_UPSTREAM_TIMEOUT_MS`), and is cleared the moment they
+arrive. An upstream that dies mid-body destroys the client connection
+rather than ending it, so a truncated body never looks complete.
+
+**A half-closed upgrade is torn down (#68).** `socket.pipe(upstream)` only
+half-closes: a client's FIN ended the upstream's write side and nothing
+more, and an upgrade handler that does not end its own side on a peer's
+close (most do not) left the pair open with its activity handle held. The
+app never slept, and the daemon hung on SIGTERM waiting for sockets the
+HTTP server no longer owned, because `closeAllConnections` does not know
+about a socket handed to `'upgrade'`. Either side's `'end'` now tears both
+down, the pair carries TCP keepalive so a peer that vanished without a FIN
+is noticed by the kernel, and `HttpRouter.closeUpgraded` destroys every
+detached socket on shutdown.

@@ -27,6 +27,7 @@ import {
   type Store,
   type WorkerConfig,
   type WorkerResource,
+  allocateHostPort,
 } from '@hobby.sh/core'
 import { assertWorkerConfig } from './assert-config.js'
 import { findWranglerManifest, type WranglerManifest } from './manifest.js'
@@ -364,44 +365,26 @@ function httpProbe(port: number, request: { method: string; path: string }): () 
   }
 }
 
-// Whether this worker has any reason to need the control port at all. A
-// producer never receives anything on it: the shim posts straight to the
-// daemon's enqueue listener. A consumer needs it for everything, since a
-// batch is DELIVERED by a POST to this exact port
-// (docs/queues/specs/2026-08-13-queues-design.md, "Delivery over a second
-// port, not a proxy"), so this checks both lists, not only producers, and a
-// worker with neither is never made to wait on a channel it will never use.
+// Readiness is proven on the CONTROL port, never by a request to the
+// worker's own port. The runner (runtime-image.ts's RUNNER_SOURCE) starts
+// its control server only after `await mf.ready`, which is workerd
+// listening on the worker port, so a control server that answers is proof
+// the worker port is up too, and it is proof that costs no user code: the
+// control server answers `GET /` itself with a 404 before anything reaches
+// the user's fetch handler. A `GET /` to the worker port (issue #161) ran
+// that handler on every start, queue and alarm wakes included, so a worker
+// whose fetch enqueued a message enqueued one per wake with no request
+// from anyone; on Cloudflare nothing calls a worker unbidden, and now
+// nothing here does either.
 //
-// A null manifest (no code deployed yet, ADR 0014) declares nothing, so it
-// answers false and the readiness probe stays on the main port alone.
-function declaresQueueBindings(config: WorkerConfig): boolean {
-  if (config.manifest === null) return false
-  return config.manifest.queues.producers.length > 0 || config.manifest.queues.consumers.length > 0
-}
-
-// A worker recorded `running` on the main port alone, while its control
-// port never came up, is the exact failure this whole capability exists to
-// prevent, arriving through the readiness probe instead of the broker: the
-// daemon would go on to deliver every batch to a port with nothing behind
-// it, and nothing about the worker would look wrong. So when the worker
-// declares a queue binding, readiness requires BOTH ports to answer, not
-// only the one already covered above.
-//
-// The control probe POSTs to /queue with an empty body on purpose.
-// CONTROL_SOURCE's fetch handler throws on `request.json()` for that, and
-// runtime-image.ts's node:http bridge turns any error, thrown or rejected,
-// into a real HTTP response rather than a hung socket, so this still proves
-// what a probe needs to prove: something on the other end is parsing HTTP.
-// The exact status code does not matter, 4xx and 5xx both count.
+// The same probe covers the queue case. A worker recorded `running` while
+// its control port never came up is the failure the control probe was
+// added to prevent: the daemon would deliver every batch to a port with
+// nothing behind it. Probing the control port for every worker keeps that
+// guarantee for consumers and extends it to the rest. The exact status
+// code does not matter, 4xx and 5xx both count.
 function defaultProbeFactory(): (config: WorkerConfig) => () => Promise<boolean> {
-  return (config: WorkerConfig) => {
-    const mainProbe = httpProbe(config.hostPort, { method: 'GET', path: '/' })
-    if (!declaresQueueBindings(config)) {
-      return mainProbe
-    }
-    const controlProbe = httpProbe(config.controlPort, { method: 'POST', path: '/queue' })
-    return async (): Promise<boolean> => (await mainProbe()) && (await controlProbe())
-  }
+  return (config: WorkerConfig) => httpProbe(config.controlPort, { method: 'GET', path: '/' })
 }
 
 async function waitListening(
@@ -470,14 +453,14 @@ export async function createWorkerResource(
   // The modifier is still written in two steps, because it is derived from
   // the id the store assigns, but there is no build between them any more.
   if (opts.sourcePath === null) {
-    const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
+    const hostPort = await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO)
     // Both allocated here rather than at first deploy, which is the whole
     // point of them living above the manifest split (WorkerConfig, core's
     // types.ts): a worker created from Studio has a stable control port and
     // a stable producer token from the moment the row exists, and a redeploy
     // never moves either. Excludes hostPort for the same reason the deployed
     // path below does: the store cannot yet see a port it has not written.
-    const controlPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO, [hostPort])
+    const controlPort = await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO, [hostPort])
     const containerName = `hobby-${opts.project.name}-${opts.name}`
     const config: WorkerConfig = {
       image: null,
@@ -517,10 +500,10 @@ export async function createWorkerResource(
   const found = findWranglerManifest(opts.sourcePath)
   const manifest = found.manifest
 
-  const hostPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO)
+  const hostPort = await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO)
   // Excludes hostPort: both come from the store before this resource has a
   // row, so the store cannot yet see hostPort's own answer to skip it.
-  const controlPort = deps.store.allocatePort(PORT_RANGE_FROM, PORT_RANGE_TO, [hostPort])
+  const controlPort = await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO, [hostPort])
   const containerName = `hobby-${opts.project.name}-${opts.name}`
 
   const dockerfilePath = await writeGeneratedDockerfile(deps, opts.project.name, opts.name, manifest)
@@ -643,6 +626,10 @@ export async function startWorker(deps: WorkerDeps, resource: WorkerResource): P
     timeoutMs: deps.config.wakeTimeoutMs,
   })
   if (!result.ready) {
+    // Same as startPostgres's stopAfterFailedStart (#59): a container left
+    // running after a failed start makes every later start a no-op that
+    // times out again. Best effort, the readiness error is the one to keep.
+    await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC }).catch(() => undefined)
     deps.store.setResourceState(resource.id, 'failed')
     throw notListening(resource.config, result.waitedMs)
   }
@@ -770,6 +757,9 @@ export async function deployWorker(
   // the same thing for rollback purposes. Same rule as deployApp's,
   // packages/app/src/app.ts.
   const wasUndeployed = resource.state === 'undeployed'
+  // See deployApp's `replaced`: false until the new config is committed,
+  // so a failure before that point is known to have touched nothing.
+  let replaced = false
 
   try {
     const found = findWranglerManifest(sourcePath)
@@ -816,6 +806,7 @@ export async function deployWorker(
         durableObjects: manifest.durableObjects,
       },
     }
+    replaced = true
     deps.store.updateResourceConfig(resource.id, config)
 
     // Replaced, not restarted: the image and the manifest environment are
@@ -856,9 +847,55 @@ export async function deployWorker(
         // Deliberately swallowed, see the comment above.
       }
     }
-    deps.store.setResourceState(resource.id, wasUndeployed ? 'undeployed' : 'failed')
-    throw err
+    if (wasUndeployed) {
+      deps.store.setResourceState(resource.id, 'undeployed')
+      throw err
+    }
+    throw await rollBackDeploy(deps, resource, project, replaced, err)
   }
+}
+
+// The same rollback deployApp does (packages/app/src/app.ts, issue #78):
+// a redeploy that fails puts the previous version back rather than leaving
+// a broken image where a working one was. The previous container is
+// recreated from the previous config and left asleep, which is where every
+// successful deploy leaves a worker too.
+async function rollBackDeploy(
+  deps: WorkerDeps,
+  previous: WorkerResource,
+  project: Project,
+  replaced: boolean,
+  err: unknown
+): Promise<unknown> {
+  const restorable = previous.config.image !== null && (previous.state === 'sleeping' || previous.state === 'running')
+  if (!restorable) {
+    deps.store.setResourceState(previous.id, 'failed')
+    return err
+  }
+  if (!replaced) {
+    deps.store.setResourceState(previous.id, previous.state)
+    return withRollbackNote(err, `nothing was changed: ${previous.name} still serves ${previous.config.image}`)
+  }
+  try {
+    deps.store.updateResourceConfig(previous.id, previous.config)
+    await deps.runtime.stop(previous.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+    await deps.runtime.remove(previous.config.containerName)
+    await deps.runtime.ensureNetwork(project.networkName)
+    await deps.runtime.ensureCreated(containerSpec(deps, previous, project))
+    deps.store.setResourceState(previous.id, 'sleeping')
+    deps.activity?.reset(previous.id)
+  } catch {
+    deps.store.setResourceState(previous.id, 'failed')
+    return err
+  }
+  return withRollbackNote(err, `the previous image ${previous.config.image} was put back and serves on the next request`)
+}
+
+function withRollbackNote(err: unknown, note: string): unknown {
+  if (!(err instanceof HobbyError)) {
+    return err
+  }
+  return new HobbyError(err.code, err.message, err.hint === undefined ? note : `${err.hint}; ${note}`)
 }
 
 function errorMessage(err: unknown): string {

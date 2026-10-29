@@ -55,3 +55,36 @@ Postgres, the feature is wrong, not Postgres.
   the obvious answer and it needs a real timeout budget, because it sits directly
   in the user's first-query latency.
 - What happens to an instance whose container was killed out from under us.
+
+## Amendment, 2026-10-29: ports, failed starts, logs (issues #59, #60, #61)
+
+**Host ports are probed, not only looked up (#60).** `Store.allocatePort`
+knows every port a resource row holds and nothing else, so any other
+process on the next "free" port made every `hobby new` fail with "address
+already in use" until that process let go. Core's `allocateHostPort`
+(`packages/core/src/ports.ts`) wraps it: it asks the store for a candidate,
+binds it on loopback (where every container port is published), and moves
+on when the bind fails. Every kind and the snapshot restore path allocate
+through it. A bind-and-release is a check, not a reservation; the race
+between it and docker's own bind is the one the store alone always had,
+narrowed from "ever" to "this moment".
+
+**A failed start stops its container (#59).** `startPostgres` left a
+container running when readiness failed, so the next wake's `docker start`
+was a no-op on an already running container and waited out the whole
+`wakeTimeoutMs` again; only `hobby sleep` cleared it. `stopAfterFailedStart`
+now stops the container before `failed` is recorded, and then, with docker's
+hold on the port gone, checks the port once more: one still held is held by
+another process, and the hint says so. The app and worker kinds do the
+same stop. The open question below about "an instance whose container was
+killed out from under us" is answered by the proxy amendment of the same
+date (#54).
+
+**`hobby logs` carries both streams (#61).** `docker logs` replays the
+container's stderr on its own stderr, and `ComputeRuntime.logs` returned
+only stdout, so every Postgres LOG, FATAL and PANIC line and most crash
+output never reached `hobby logs`, the logs route or the MCP tool, while
+every failure hint pointed at them. Both streams are now requested with
+`--timestamps` and merged on the timestamp (`mergeTimestampedLogs`), then
+the prefix is stripped, so the result reads in order as `docker logs` does
+at a terminal.

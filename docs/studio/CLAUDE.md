@@ -59,3 +59,14 @@ that reaches it.
   page load against a database we may have just woken.
 - How much of Studio works while every resource is asleep? Ideally all of the
   control plane, since sleep state should be readable without ending it.
+
+## Amendment, 2026-10-29: multi-statement SQL (issue #115)
+
+The query route (`POST /v1/resources/:id/query`, which the SQL editor uses)
+sends a text with no parameters over the simple protocol, and the simple
+protocol runs every statement in it and answers with one result per
+statement. `runQuery` read `.rows` off that array, so every statement had
+already committed when the route answered 400. `shapeQueryResult`
+(`packages/pg/src/query.ts`) now returns the last statement's result, which
+is what the text was written to see; the earlier statements run exactly as
+they would in psql.

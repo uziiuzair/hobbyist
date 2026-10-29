@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:net'
 import { test } from 'node:test'
 import { HobbyError, type PostgresConfig } from '@hobby.sh/core'
-import { runQuery } from '../src/query.js'
+import { runQuery, shapeQueryResult } from '../src/query.js'
 
 function sampleConfig(overrides: Partial<PostgresConfig> = {}): PostgresConfig {
   return {
@@ -83,4 +83,39 @@ test('runQuery: a closed port refuses the connection immediately and still throw
       return true
     }
   )
+})
+
+// Issue #115: a multi-statement text over the simple protocol comes back from
+// node-postgres as one Result per statement. Every statement has already
+// run, so the only honest answer is the last statement's result, never a
+// crash on `.rows` of an array.
+test('shapeQueryResult returns the last statement result for a multi-statement text', () => {
+  const shaped = shapeQueryResult([
+    { fields: [], rows: [], rowCount: null, command: 'CREATE' },
+    { fields: [], rows: [], rowCount: 2, command: 'INSERT' },
+    { fields: [{ name: 'count', dataTypeID: 20 }], rows: [{ count: '2' }], rowCount: 1, command: 'SELECT' },
+  ])
+  assert.equal(shaped.command, 'SELECT')
+  assert.equal(shaped.rowCount, 1)
+  assert.deepEqual(shaped.rows, [{ count: '2' }])
+  assert.deepEqual(
+    shaped.columns.map((c) => c.name),
+    ['count']
+  )
+})
+
+test('shapeQueryResult shapes a single result exactly as before', () => {
+  const shaped = shapeQueryResult({
+    fields: [{ name: 'id', dataTypeID: 23 }],
+    rows: [{ id: 1 }, { id: 2 }],
+    rowCount: null,
+    command: 'SELECT',
+  })
+  assert.equal(shaped.rowCount, 2)
+  assert.equal(shaped.columns[0]?.name, 'id')
+})
+
+test('shapeQueryResult answers an empty shape for an empty text, which the simple protocol reports as no results', () => {
+  const shaped = shapeQueryResult([])
+  assert.deepEqual(shaped, { columns: [], rows: [], rowCount: 0, command: '' })
 })

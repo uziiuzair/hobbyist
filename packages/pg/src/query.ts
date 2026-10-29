@@ -102,6 +102,43 @@ function toQueryError(err: unknown): HobbyError {
   return new HobbyError('usage', errorMessage(err))
 }
 
+// The subset of node-postgres's Result this file reads, so the shaping below
+// can be exercised without a server (query.test.ts) and stays honest about
+// what it depends on.
+export interface RawQueryResult {
+  fields?: Array<{ name: string; dataTypeID: number }>
+  rows: unknown[]
+  rowCount: number | null
+  command: string
+}
+
+// With no parameters, node-postgres sends the text over the simple query
+// protocol, and the simple protocol runs every statement in the text:
+// `insert ...; select count(*)` is two statements, both committed, and the
+// driver answers with an ARRAY of results, one per statement. Reading
+// `.rows` off that array was issue #115: every statement had already run and
+// committed, then the route reported "Cannot read properties of undefined
+// (reading 'length')" as a 400, so Studio showed an error for a write that
+// happened. The last statement's result is the one a user wrote the text to
+// see, so that is what comes back; the earlier ones ran exactly as they
+// would in psql.
+export function shapeQueryResult(result: RawQueryResult | RawQueryResult[]): QueryResultShape {
+  const last = Array.isArray(result) ? result[result.length - 1] : result
+  if (last === undefined) {
+    return { columns: [], rows: [], rowCount: 0, command: '' }
+  }
+  const columns: QueryColumn[] = (last.fields ?? []).map((field) => ({
+    name: field.name,
+    dataType: dataTypeName(field.dataTypeID),
+  }))
+  return {
+    columns,
+    rows: last.rows as Array<Record<string, unknown>>,
+    rowCount: last.rowCount ?? last.rows.length,
+    command: last.command,
+  }
+}
+
 export async function runQuery(
   config: PostgresConfig,
   sql: string,
@@ -132,17 +169,7 @@ export async function runQuery(
   }
 
   try {
-    const result = await client.query({ text: sql, values: params })
-    const columns: QueryColumn[] = (result.fields ?? []).map((field) => ({
-      name: field.name,
-      dataType: dataTypeName(field.dataTypeID),
-    }))
-    return {
-      columns,
-      rows: result.rows as Array<Record<string, unknown>>,
-      rowCount: result.rowCount ?? result.rows.length,
-      command: result.command,
-    }
+    return shapeQueryResult(await client.query({ text: sql, values: params }))
   } catch (err) {
     throw toQueryError(err)
   } finally {

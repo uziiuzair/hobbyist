@@ -160,6 +160,53 @@ function buildCreateArgs(spec: ContainerSpec): string[] {
   return args
 }
 
+// Merges the two output streams of `docker logs --timestamps` into one text
+// ordered by the timestamp docker prefixed to every line, then strips the
+// prefix again so the result reads like `docker logs` would at a terminal.
+// A stable merge of two already-ordered streams, so lines with the same
+// timestamp keep stdout before stderr. A line without a timestamp (a
+// continuation of a multi-line write, in practice) stays attached to the
+// line before it.
+export function mergeTimestampedLogs(stdout: string, stderr: string): string {
+  const TIMESTAMP = /^(\d{4}-\d{2}-\d{2}T[0-9:.]+Z) ?/
+  type Entry = { at: string; lines: string[] }
+  const parse = (text: string): Entry[] => {
+    const entries: Entry[] = []
+    for (const line of text.split('\n')) {
+      if (line.length === 0) continue
+      const match = TIMESTAMP.exec(line)
+      const last = entries[entries.length - 1]
+      if (match === null) {
+        if (last !== undefined) {
+          last.lines.push(line)
+        } else {
+          entries.push({ at: '', lines: [line] })
+        }
+        continue
+      }
+      entries.push({ at: match[1] ?? '', lines: [line.slice(match[0].length)] })
+    }
+    return entries
+  }
+  const a = parse(stdout)
+  const b = parse(stderr)
+  const out: string[] = []
+  let i = 0
+  let j = 0
+  while (i < a.length || j < b.length) {
+    const left = a[i]
+    const right = b[j]
+    if (right === undefined || (left !== undefined && left.at <= right.at)) {
+      out.push(...left!.lines)
+      i++
+    } else {
+      out.push(...right.lines)
+      j++
+    }
+  }
+  return out.length === 0 ? '' : `${out.join('\n')}\n`
+}
+
 export function createDockerRuntime(exec: ExecFn = defaultExec, spawnFn: SpawnFn = defaultSpawn): ComputeRuntime {
   async function run(args: string[]): Promise<{ stdout: string; stderr: string }> {
     try {
@@ -230,9 +277,16 @@ export function createDockerRuntime(exec: ExecFn = defaultExec, spawnFn: SpawnFn
       return inspectContainer(exec, name)
     },
 
+    // Both streams, in order. `docker logs` replays the container's stdout
+    // on its own stdout and the container's stderr on its own stderr, and
+    // returning only the first (issue #61) dropped exactly the lines
+    // anyone runs `hobby logs` for: Postgres writes every LOG, FATAL and
+    // PANIC line to stderr, and so does most crash output. Interleaving two
+    // separately buffered pipes by arrival order is a guess, so each line
+    // is asked for with its timestamp and the two are merged on that.
     async logs(name: string, opts: { tail: number }): Promise<string> {
-      const { stdout } = await run(['logs', '--tail', String(opts.tail), name])
-      return stdout
+      const { stdout, stderr } = await run(['logs', '--tail', String(opts.tail), '--timestamps', name])
+      return mergeTimestampedLogs(stdout, stderr)
     },
 
     // `docker build`, with the caps that keep a build from starving the box

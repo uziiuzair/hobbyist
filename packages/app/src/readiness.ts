@@ -35,11 +35,25 @@ export interface TcpProbeOptions {
 // server is serving, not whether it likes this request. `Connection: close`
 // so a keep-alive server does not hold the socket open past the answer, and a
 // deliberately odd Host header so nothing routes on it.
+//
+// A connection that is accepted and then HELD, with nothing written back
+// for the whole window, also counts (issue #79). The two shapes docker's
+// port proxy produces for a container with nothing listening inside are a
+// refused dial and an accept followed at once by a close, never a socket
+// that stays open: the proxy only keeps it open once its own dial into
+// the container has succeeded, which means a process is listening. So a
+// quiet, open socket is "listening, and slow to answer `/`", which is
+// what a server-rendered homepage that queries a database on every
+// request looks like, and before this it was indistinguishable from
+// "nothing is listening" and failed every deploy with the loopback-bind
+// hint. The window is still short on purpose: a fast server answers in
+// milliseconds and pays none of it.
 export function tcpProbe(opts: TcpProbeOptions): () => Promise<boolean> {
   return function probe(): Promise<boolean> {
     return new Promise((resolve) => {
       const socket = new net.Socket()
       let settled = false
+      let connected = false
       const finish = (value: boolean): void => {
         if (settled) return
         settled = true
@@ -48,6 +62,7 @@ export function tcpProbe(opts: TcpProbeOptions): () => Promise<boolean> {
       }
       socket.setTimeout(opts.timeoutMs)
       socket.once('connect', () => {
+        connected = true
         socket.write('GET / HTTP/1.1\r\nHost: hobby.probe\r\nConnection: close\r\n\r\n')
       })
       socket.once('data', (chunk: Buffer) => {
@@ -57,7 +72,7 @@ export function tcpProbe(opts: TcpProbeOptions): () => Promise<boolean> {
       // exact shape of "docker accepted, the process is gone".
       socket.once('end', () => finish(false))
       socket.once('close', () => finish(false))
-      socket.once('timeout', () => finish(false))
+      socket.once('timeout', () => finish(connected))
       socket.once('error', () => finish(false))
       socket.connect(opts.port, opts.host)
     })
