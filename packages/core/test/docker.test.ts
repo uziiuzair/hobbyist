@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { createDockerRuntime, createFakeRuntime, type ExecFn, type SpawnedProcess } from '../src/index.js'
+import { createDockerRuntime, createFakeRuntime, mergeTimestampedLogs, type ExecFn, type SpawnedProcess } from '../src/index.js'
 import type { ContainerSpec } from '../src/index.js'
 
 interface RecordedCall {
@@ -375,4 +375,40 @@ test('the fake runtime refuses to exec into a container that is not running, as 
   const exec = runtime.execStream('hobby-blog-primary', ['true'])
   await assert.rejects(exec.done, /docker exec failed/)
   assert.equal(runtime._exec.calls.length, 1)
+})
+
+// Issue #61: Postgres logs to stderr, and `docker logs` replays the
+// container's stderr on its own stderr. Only stdout ever reached
+// `hobby logs`.
+test('logs asks docker for both streams with timestamps and merges them in order', async () => {
+  const calls: RecordedCall[] = []
+  const exec: ExecFn = async (cmd, args) => {
+    calls.push({ cmd, args })
+    return {
+      stdout: '2026-10-16T10:00:00.000000001Z entrypoint: starting\n2026-10-16T10:00:02.000000000Z entrypoint: done\n',
+      stderr:
+        '2026-10-16T10:00:01.000000000Z LOG:  database system was shut down\n2026-10-16T10:00:01.500000000Z FATAL:  the database system is starting up\n',
+    }
+  }
+  const runtime = createDockerRuntime(exec)
+  const text = await runtime.logs('hobby-blog-primary', { tail: 30 })
+  assert.deepEqual(calls[0]?.args, ['logs', '--tail', '30', '--timestamps', 'hobby-blog-primary'])
+  assert.equal(
+    text,
+    [
+      'entrypoint: starting',
+      'LOG:  database system was shut down',
+      'FATAL:  the database system is starting up',
+      'entrypoint: done',
+      '',
+    ].join('\n')
+  )
+})
+
+test('mergeTimestampedLogs keeps a continuation line with the line before it and handles an empty stream', () => {
+  assert.equal(mergeTimestampedLogs('', ''), '')
+  assert.equal(
+    mergeTimestampedLogs('2026-01-01T00:00:00Z one\n', '2026-01-01T00:00:01Z Error: boom\n    at main.js:1\n'),
+    'one\nError: boom\n    at main.js:1\n'
+  )
 })
