@@ -28,9 +28,15 @@ string.
 ## Connect
 
 ```sh
-hobby connect blog          # opens psql
-hobby connect blog --json   # the connection string, for an ORM or a .env
+hobby connect blog              # opens psql
+hobby connect blog --json       # the connection string, for an ORM or a .env
+hobby connect blog/analytics    # the second database: its string ends in /blog.analytics
 ```
+
+The database segment of the string is how the proxy routes. `blog` reaches the
+project's `primary`; `blog.analytics` reaches the postgres named `analytics`.
+Both strings work at the same time, and a project's first string does not
+change when a second database is added.
 
 `hobby connect` never puts the connection string in the child process's argument
 list. The credentials go through the environment instead, so nothing that reads

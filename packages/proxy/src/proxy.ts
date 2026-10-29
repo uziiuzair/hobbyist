@@ -36,11 +36,25 @@ export interface ProxyTarget {
   // database in that case, and only `resolve` (backed by the resource's
   // stored config, see packages/pg's PostgresConfig.database) knows what
   // the project's actual default database is called.
+  //
+  // databaseSegmentIsResource: true when the routing key's dotted segment
+  // named this RESOURCE (`blog.analytics` reaching the postgres called
+  // analytics), so the segment has been consumed by routing and `database`
+  // above is what goes on the wire, not the segment. Absent or false, the
+  // segment is a database inside this resource and is substituted as before.
+  databaseSegmentIsResource?: boolean
   database: string
 }
 
 export interface ProxyDeps {
-  resolve(routingKey: string): Promise<ProxyTarget | null>
+  // The routing key the client sent, already split (core's parseRoutingKey):
+  // the project, and the segment after the first dot or null when there was
+  // none. The daemon decides what that segment means. A resource name in
+  // the project routes to that resource (issue #66); anything else is a
+  // database inside the project's default resource, substituted on the wire
+  // as before. The target says which happened, see
+  // ProxyTarget.databaseSegmentIsResource.
+  resolve(project: string, database: string | null): Promise<ProxyTarget | null>
   // Safe to call concurrently: ten simultaneous connections to a sleeping
   // resource each call wake and each await it. This file does not
   // deduplicate those calls, does not track "a wake is already in flight,"
@@ -702,7 +716,7 @@ async function handleStartup(
 
   let target: ProxyTarget | null
   try {
-    target = await deps.resolve(routingKey.project)
+    target = await deps.resolve(routingKey.project, routingKey.database)
   } catch (err) {
     sendErrorAndClose(socket, 'FATAL', UNKNOWN_DATABASE, `failed to resolve ${database}: ${errorMessage(err)}`)
     return
@@ -770,7 +784,7 @@ async function handleStartup(
     // are exactly the thing that may have just changed (a new container,
     // a new port allocation). Re-resolve rather than trust them.
     try {
-      target = await deps.resolve(routingKey.project)
+      target = await deps.resolve(routingKey.project, routingKey.database)
     } catch (err) {
       sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, `failed to resolve ${database} after wake: ${errorMessage(err)}`)
       return
@@ -802,7 +816,8 @@ async function handleStartup(
   // filled in, which only `resolve` knows. Nothing else is touched, so
   // SCRAM still negotiates directly between the client and Postgres and
   // this proxy never sees a password.
-  const finalDatabase = routingKey.database ?? target.database
+  const finalDatabase =
+    target.databaseSegmentIsResource === true ? target.database : (routingKey.database ?? target.database)
   const packet = buildStartupPacket({ ...message.params, database: finalDatabase }, message.version)
 
   let held = await holdUntilServing(socket, target, packet, deadline, wakeTimeoutMs, deps.activity)
@@ -841,7 +856,7 @@ async function handleStartup(
     }
     woken = true
     try {
-      target = await deps.resolve(routingKey.project)
+      target = await deps.resolve(routingKey.project, routingKey.database)
     } catch (err) {
       sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, `failed to resolve ${database} after restart: ${errorMessage(err)}`)
       return

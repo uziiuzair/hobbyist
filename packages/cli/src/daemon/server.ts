@@ -202,6 +202,14 @@ async function networkGateway(name: string): Promise<string | null> {
   }
 }
 
+// The bridge gateways of every project network on this box, Linux only. The
+// wake-on-connect proxy binds these too (#53), so an app's DATABASE_URL by
+// host.docker.internal reaches it; see queueEndpointHosts for the longer
+// account of why the gateway is the address.
+async function proxyGatewayHosts(ctx: DaemonContext): Promise<string[]> {
+  return (await queueEndpointHosts(ctx)).filter((host) => host !== '127.0.0.1')
+}
+
 async function queueEndpointHosts(ctx: DaemonContext): Promise<string[]> {
   const hosts = new Set<string>(['127.0.0.1'])
   if (process.platform !== 'linux') {
@@ -471,7 +479,15 @@ export async function startDaemon(
   const proxyHosts = await resolveProxyHosts(ctx)
   const proxyTls = proxyTlsFiles(ctx.config.proxyTls)
   const proxies: Array<{ port: number; close: () => Promise<void> }> = []
-  for (const host of proxyHosts) {
+  const proxyBound = new Set<string>()
+  // `local`: a listener only this box's own containers can reach (a project
+  // network's bridge gateway, see proxyGatewayHosts below). Plaintext is
+  // allowed on it even with TLS configured, the same way it is on loopback:
+  // the traffic never leaves the machine, and an app's DATABASE_URL carries
+  // no sslmode. A listener on an operator-chosen address keeps ADR 0019's
+  // rule exactly as it was.
+  const startProxyOn = async (host: string, local: boolean): Promise<void> => {
+    if (proxyBound.has(host)) return
     proxies.push(
       await startPgProxy({
         port: ctx.config.proxyPort,
@@ -479,8 +495,41 @@ export async function startDaemon(
         deps: createProxyDeps(ctx),
         wakeTimeoutMs: ctx.config.wakeTimeoutMs,
         ...(proxyTls === undefined ? {} : { tls: proxyTls }),
+        ...(local ? { plaintextAllowed: () => true } : {}),
       })
     )
+    proxyBound.add(host)
+  }
+  for (const host of proxyHosts) {
+    await startProxyOn(host, false)
+  }
+  // Issue #53: an app or worker reaches its database through the proxy by
+  // host.docker.internal (packages/app/src/app.ts's databaseUrlFor), which
+  // on Linux is each project network's bridge gateway, an address a proxy
+  // bound to loopback never sees. The same addresses the enqueue listener
+  // binds, for the same reason, with the same best-effort rule: a gateway
+  // that cannot be bound is logged, not fatal. A "0.0.0.0" bind already
+  // covers them and binding again would fail, hence the `all` check.
+  if (!proxyHosts.includes('0.0.0.0')) {
+    for (const gateway of await proxyGatewayHosts(ctx)) {
+      try {
+        await startProxyOn(gateway, true)
+      } catch (err) {
+        console.error(
+          `daemon: could not bind the wake-on-connect proxy on docker gateway ${gateway}, apps in that project may not reach their database: ${errorMessage(err)}`
+        )
+      }
+    }
+  }
+  const addProxyGateway = async (gateway: string): Promise<void> => {
+    if (proxyHosts.includes('0.0.0.0')) return
+    try {
+      await startProxyOn(gateway, true)
+    } catch (err) {
+      console.error(
+        `daemon: could not bind the wake-on-connect proxy on docker gateway ${gateway}, apps in that project may not reach their database: ${errorMessage(err)}`
+      )
+    }
   }
   const proxy = proxies[0]!
 
@@ -597,6 +646,9 @@ export async function startDaemon(
       const gateway = await networkGateway(name)
       if (gateway !== null) {
         await queueEndpoint.addHost(gateway)
+        // The proxy too, for the same reason (#53): a project created while
+        // the daemon runs gets its apps' path to their database at once.
+        await addProxyGateway(gateway)
       }
     }
   }

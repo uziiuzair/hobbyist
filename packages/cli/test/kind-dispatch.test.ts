@@ -298,27 +298,30 @@ test('the postgres proxy ignores non-postgres resources when resolving a project
   })
 
   const deps = createProxyDeps(ctx)
-  const target = await deps.resolve('blog')
+  const target = await deps.resolve('blog', null)
 
   assert.ok(target !== null, 'a project holding one database and one app still resolves')
   assert.equal(target.resourceId, pg.id)
   assert.equal(target.database, 'blog')
 })
 
-test('a project with two databases is still ambiguous, apps notwithstanding', async () => {
+test('a project with two databases routes the bare key to primary, apps notwithstanding', async () => {
   const ctx = buildContext(stubAppHandler())
   const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: null })
+  const created = new Map<string, string>()
   for (const name of ['primary', 'analytics']) {
-    ctx.store.createResource({
+    const row = ctx.store.createResource({
       projectId: project.id,
       kind: 'postgres',
       name,
       config: samplePostgresConfig(),
     })
+    created.set(name, row.id)
   }
 
   const deps = createProxyDeps(ctx)
-  await assert.rejects(() => deps.resolve('blog'), /more than one postgres resource/)
+  assert.equal((await deps.resolve('blog', null))?.resourceId, created.get('primary'))
+  assert.equal((await deps.resolve('blog', 'analytics'))?.resourceId, created.get('analytics'))
 })
 
 // The wire boundary is where a payload stops being internal state. Phase 1

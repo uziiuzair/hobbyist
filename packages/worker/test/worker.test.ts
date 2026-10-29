@@ -650,7 +650,10 @@ test('a bound database becomes a hyperdrive binding against the container name',
   })
 
   const manifest = buildRunnerManifest(deps, result.resource)
-  assert.equal(manifest.hyperdrives?.['DB'], 'postgres://postgres:secret-password@hobby-blog-primary:5432/blog')
+  // Through the proxy, by the host's container-facing name (issue #53, the
+  // same shape as the app kind's DATABASE_URL), never straight at the
+  // database container.
+  assert.equal(manifest.hyperdrives?.['DB'], 'postgres://postgres:secret-password@host.docker.internal:5432/blog')
 })
 
 test('the container mounts state and durable object storage separately', async () => {

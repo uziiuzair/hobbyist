@@ -4,13 +4,15 @@
 // caller no longer chooses the port itself, which is what makes viaProxy
 // load-bearing rather than a flag the function ignores.
 //
-// The database segment comes from resource.config.database, not
-// project.name. They are equal by construction (createPostgres names the
-// in-container database after the project, see postgres.ts), but the
-// config is the actual value that governs what the proxy and psql both see,
-// and there should be exactly one source of truth for it.
+// The database segment depends on which way the string goes. Direct to the
+// container, it is resource.config.database, the database Postgres itself
+// holds. Through the proxy, it is the ROUTING KEY (core's routingKeyFor):
+// the project name for the default resource, `project.resource` for any
+// other. Before this (issue #66) every resource rendered the project name,
+// so a second postgres in a project got a string identical to the first's
+// that the proxy could not route, and the first's stopped working too.
 
-import type { PostgresResource, Project } from '@hobby.sh/core'
+import { routingKeyFor, type PostgresResource, type Project } from '@hobby.sh/core'
 
 // Takes a PostgresResource, not a Resource. Since the model was widened for
 // Phase 2 (packages/core/src/types.ts), `Resource` is a union and an app or
@@ -22,12 +24,9 @@ export function connectionString(
   resource: PostgresResource,
   opts: { host: string; proxyPort: number; viaProxy: boolean }
 ): string {
-  // project is accepted for symmetry with the resource-kind functions above
-  // it and because callers already have both objects in hand at every call
-  // site; the rendered string itself no longer reads project.name (see the
-  // file comment on resource.config.database).
   const user = encodeURIComponent(resource.config.superuser)
   const password = encodeURIComponent(resource.config.password)
   const port = opts.viaProxy ? opts.proxyPort : resource.config.hostPort
-  return `postgres://${user}:${password}@${opts.host}:${port}/${resource.config.database}`
+  const database = opts.viaProxy ? routingKeyFor(project.name, resource.name) : resource.config.database
+  return `postgres://${user}:${password}@${opts.host}:${port}/${database}`
 }

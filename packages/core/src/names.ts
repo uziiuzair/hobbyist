@@ -25,6 +25,21 @@ export function validateName(name: string): void {
   }
 }
 
+// The postgres resource `hobby new` creates, and the one a bare routing key
+// (a project name with no dot) reaches when a project holds more than one.
+export const DEFAULT_POSTGRES_NAME = 'primary'
+
+// The database segment of a proxy connection string for a given postgres
+// resource: the project name alone for the default resource, which keeps
+// the string `hobby new` prints exactly as it always was, and
+// `project.resource` for any other, which is how a second postgres in the
+// same project is reached through the proxy (issue #66). The inverse of
+// the resource-name match in the daemon's resolve (createProxyDeps in
+// packages/cli/src/daemon/context.ts).
+export function routingKeyFor(projectName: string, resourceName: string): string {
+  return resourceName === DEFAULT_POSTGRES_NAME ? projectName : `${projectName}.${resourceName}`
+}
+
 export function parseRoutingKey(database: string): { project: string; database: string | null } {
   const dotIndex = database.indexOf('.')
   if (dotIndex === -1) {

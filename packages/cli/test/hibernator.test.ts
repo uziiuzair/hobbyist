@@ -252,14 +252,14 @@ test('wake: an unknown resourceId rejects with resource_not_found and never touc
 test('resolve: unknown project resolves to null', async () => {
   const ctx = buildContext()
   const deps = createProxyDeps(ctx)
-  assert.equal(await deps.resolve('does-not-exist'), null)
+  assert.equal(await deps.resolve('does-not-exist', null), null)
 })
 
 test('resolve: a project with no resources resolves to null', async () => {
   const ctx = buildContext()
   ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
   const deps = createProxyDeps(ctx)
-  assert.equal(await deps.resolve('blog'), null)
+  assert.equal(await deps.resolve('blog', null), null)
 })
 
 test('resolve: a project with exactly one resource returns its host, port, state and database', async () => {
@@ -270,7 +270,7 @@ test('resolve: a project with exactly one resource returns its host, port, state
   ctx.store.setResourceState(resource.id, 'running')
 
   const deps = createProxyDeps(ctx)
-  const target = await deps.resolve('blog')
+  const target = await deps.resolve('blog', null)
 
   assert.deepEqual(target, {
     resourceId: resource.id,
@@ -278,20 +278,54 @@ test('resolve: a project with exactly one resource returns its host, port, state
     port: 25558,
     state: 'running',
     database: 'blog',
+    databaseSegmentIsResource: false,
   })
 })
 
-test('resolve: a project with more than one resource throws ambiguous_target rather than guessing', async () => {
+// Issue #66: adding a second postgres used to make every postgres in the
+// project unreachable, because resolve threw ambiguous_target for the bare
+// project name and the second resource's own string was identical to the
+// first's. A bare key now reaches the default resource, and a dotted key
+// whose segment is a resource name reaches that resource.
+test('resolve: a project with two postgres resources routes the bare key to primary and a resource name to that resource', async () => {
   const ctx = buildContext()
   const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
-  ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig({ hostPort: 25559 }) })
+  const primary = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig({ hostPort: 25559 }) })
+  const analytics = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'analytics', config: samplePostgresConfig({ hostPort: 25560 }) })
+
+  const deps = createProxyDeps(ctx)
+  const bare = await deps.resolve('blog', null)
+  assert.equal(bare?.resourceId, primary.id)
+  assert.equal(bare?.databaseSegmentIsResource, false)
+
+  const named = await deps.resolve('blog', 'analytics')
+  assert.equal(named?.resourceId, analytics.id)
+  assert.equal(named?.port, 25560)
+  assert.equal(named?.databaseSegmentIsResource, true, 'the segment was consumed by routing, not a database inside')
+
+  // A segment that is not a resource keeps its older meaning: a database
+  // inside the default resource, which the proxy substitutes on the wire.
+  const inside = await deps.resolve('blog', 'reporting')
+  assert.equal(inside?.resourceId, primary.id)
+  assert.equal(inside?.databaseSegmentIsResource, false)
+})
+
+test('resolve: two postgres resources and no primary is ambiguous for the bare key, and the hint names the dotted forms', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'main', config: samplePostgresConfig({ hostPort: 25559 }) })
   ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'analytics', config: samplePostgresConfig({ hostPort: 25560 }) })
 
   const deps = createProxyDeps(ctx)
-  await assert.rejects(deps.resolve('blog'), (err: unknown) => {
+  await assert.rejects(deps.resolve('blog', null), (err: unknown) => {
     assert.equal((err as { code?: string }).code, 'ambiguous_target')
+    const hint = (err as { hint?: string }).hint ?? ''
+    assert.match(hint, /blog\.main/)
+    assert.match(hint, /blog\.analytics/)
     return true
   })
+  const named = await deps.resolve('blog', 'main')
+  assert.equal(named?.port, 25559)
 })
 
 // ---------------------------------------------------------------------------
