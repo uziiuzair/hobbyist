@@ -837,6 +837,24 @@ async function reservedFreePort(): Promise<number> {
   return port
 }
 
+// A real HTTP server that records every request line it receives, so a
+// test can assert that readiness sent it nothing.
+function countingHttpServer(): Promise<{ server: Server; port: number; requests: string[] }> {
+  const requests: string[] = []
+  return new Promise((resolve) => {
+    const server = createServer((req, res) => {
+      requests.push(`${req.method ?? ''} ${req.url ?? ''}`)
+      res.writeHead(200)
+      res.end()
+    })
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      const port = typeof address === 'object' && address !== null ? address.port : 0
+      resolve({ server, port, requests })
+    })
+  })
+}
+
 function closeServer(server: Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()))
 }
@@ -909,18 +927,19 @@ test('readiness requires the control port too, once the worker declares a queue 
   }
 })
 
-test('readiness does not wait on the control port for a worker with no queue binding at all', async () => {
+// Issue #161: the probe used to send `GET /` to the worker's own port, which
+// ran the user's fetch handler on every start, queue and alarm wakes
+// included. Readiness is now the control port alone, which the runner only
+// starts once workerd is listening, so the worker port is never asked.
+test('readiness never sends a request to the worker port, for a worker with no queue binding at all', async () => {
   const deps = buildDeps({ workerProbeFactory: undefined })
   const project = makeProject(deps.store)
-  const { server: mainServer, port: hostPort } = await realHttpServer(200)
+  const { server: mainServer, port: hostPort, requests } = await countingHttpServer()
+  const { server: controlServer, port: controlPort } = await realHttpServer(404)
 
   try {
-    const controlPort = await reservedFreePort()
     const config = sampleWorkerConfig({
       hostPort,
-      // Nothing is listening here, and nothing should ever have to be: this
-      // worker declares no producer and no consumer. Reserved rather than
-      // hostPort + 1 for the same reason as the test above.
       controlPort,
       manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [] } }),
     })
@@ -928,13 +947,11 @@ test('readiness does not wait on the control port for a worker with no queue bin
     const resource = deps.store.getResource(created.id)
     assert.ok(resource !== null && resource.kind === 'worker')
 
-    assert.equal(
-      await probeWorker(deps, resource),
-      true,
-      'the control port is never checked, because this worker has nothing to deliver through it'
-    )
+    assert.equal(await probeWorker(deps, resource), true, 'the control port answering is readiness')
+    assert.equal(requests.length, 0, 'nothing reached the user worker')
   } finally {
     await closeServer(mainServer)
+    await closeServer(controlServer)
   }
 })
 

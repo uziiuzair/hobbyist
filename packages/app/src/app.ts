@@ -338,6 +338,10 @@ export async function startApp(deps: AppDeps, resource: AppResource): Promise<vo
     timeoutMs: deps.config.wakeTimeoutMs,
   })
   if (!result.ready) {
+    // Same as startPostgres's stopAfterFailedStart (#59): a container left
+    // running after a failed start makes every later start a no-op that
+    // times out again. Best effort, the readiness error is the one to keep.
+    await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC }).catch(() => undefined)
     deps.store.setResourceState(resource.id, 'failed')
     throw notListening(resource.config, result.waitedMs)
   }

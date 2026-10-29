@@ -365,44 +365,26 @@ function httpProbe(port: number, request: { method: string; path: string }): () 
   }
 }
 
-// Whether this worker has any reason to need the control port at all. A
-// producer never receives anything on it: the shim posts straight to the
-// daemon's enqueue listener. A consumer needs it for everything, since a
-// batch is DELIVERED by a POST to this exact port
-// (docs/queues/specs/2026-08-13-queues-design.md, "Delivery over a second
-// port, not a proxy"), so this checks both lists, not only producers, and a
-// worker with neither is never made to wait on a channel it will never use.
+// Readiness is proven on the CONTROL port, never by a request to the
+// worker's own port. The runner (runtime-image.ts's RUNNER_SOURCE) starts
+// its control server only after `await mf.ready`, which is workerd
+// listening on the worker port, so a control server that answers is proof
+// the worker port is up too, and it is proof that costs no user code: the
+// control server answers `GET /` itself with a 404 before anything reaches
+// the user's fetch handler. A `GET /` to the worker port (issue #161) ran
+// that handler on every start, queue and alarm wakes included, so a worker
+// whose fetch enqueued a message enqueued one per wake with no request
+// from anyone; on Cloudflare nothing calls a worker unbidden, and now
+// nothing here does either.
 //
-// A null manifest (no code deployed yet, ADR 0014) declares nothing, so it
-// answers false and the readiness probe stays on the main port alone.
-function declaresQueueBindings(config: WorkerConfig): boolean {
-  if (config.manifest === null) return false
-  return config.manifest.queues.producers.length > 0 || config.manifest.queues.consumers.length > 0
-}
-
-// A worker recorded `running` on the main port alone, while its control
-// port never came up, is the exact failure this whole capability exists to
-// prevent, arriving through the readiness probe instead of the broker: the
-// daemon would go on to deliver every batch to a port with nothing behind
-// it, and nothing about the worker would look wrong. So when the worker
-// declares a queue binding, readiness requires BOTH ports to answer, not
-// only the one already covered above.
-//
-// The control probe POSTs to /queue with an empty body on purpose.
-// CONTROL_SOURCE's fetch handler throws on `request.json()` for that, and
-// runtime-image.ts's node:http bridge turns any error, thrown or rejected,
-// into a real HTTP response rather than a hung socket, so this still proves
-// what a probe needs to prove: something on the other end is parsing HTTP.
-// The exact status code does not matter, 4xx and 5xx both count.
+// The same probe covers the queue case. A worker recorded `running` while
+// its control port never came up is the failure the control probe was
+// added to prevent: the daemon would deliver every batch to a port with
+// nothing behind it. Probing the control port for every worker keeps that
+// guarantee for consumers and extends it to the rest. The exact status
+// code does not matter, 4xx and 5xx both count.
 function defaultProbeFactory(): (config: WorkerConfig) => () => Promise<boolean> {
-  return (config: WorkerConfig) => {
-    const mainProbe = httpProbe(config.hostPort, { method: 'GET', path: '/' })
-    if (!declaresQueueBindings(config)) {
-      return mainProbe
-    }
-    const controlProbe = httpProbe(config.controlPort, { method: 'POST', path: '/queue' })
-    return async (): Promise<boolean> => (await mainProbe()) && (await controlProbe())
-  }
+  return (config: WorkerConfig) => httpProbe(config.controlPort, { method: 'GET', path: '/' })
 }
 
 async function waitListening(
@@ -644,6 +626,10 @@ export async function startWorker(deps: WorkerDeps, resource: WorkerResource): P
     timeoutMs: deps.config.wakeTimeoutMs,
   })
   if (!result.ready) {
+    // Same as startPostgres's stopAfterFailedStart (#59): a container left
+    // running after a failed start makes every later start a no-op that
+    // times out again. Best effort, the readiness error is the one to keep.
+    await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC }).catch(() => undefined)
     deps.store.setResourceState(resource.id, 'failed')
     throw notListening(resource.config, result.waitedMs)
   }
