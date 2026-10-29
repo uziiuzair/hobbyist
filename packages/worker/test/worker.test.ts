@@ -1160,3 +1160,39 @@ test('a worker entry path with a space or a quote cannot break out of the build 
   const dockerfile = renderWorkerDockerfile({ main: 'src/my worker".ts' })
   assert.match(dockerfile, /"src\/my worker\\"\.ts"/)
 })
+
+// Issue #78, the worker half: a redeploy that fails readiness puts the
+// previous image back rather than leaving a broken one where a working one
+// was.
+test('a redeploy that fails readiness rolls the worker back to the previous image', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const source = workerSource()
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: source,
+    databaseResourceId: null,
+  })
+  const firstImage = created.resource.config.image
+  assert.ok(firstImage !== null)
+
+  deps.now = () => 1_754_870_500_000
+  deps.workerProbeFactory = () => async () => false
+  await assert.rejects(
+    () => deployWorker(deps, created.resource),
+    (err: unknown) => {
+      assert.ok(err instanceof HobbyError)
+      assert.match(err.hint ?? '', new RegExp(`previous image ${firstImage} was put back`))
+      return true
+    }
+  )
+
+  const after = deps.store.getResource(created.resource.id)
+  assert.ok(after !== null && after.kind === 'worker')
+  assert.equal(after.state, 'sleeping')
+  assert.equal(after.config.image, firstImage)
+  assert.equal(runtime._specs.get(created.resource.config.containerName)?.image, firstImage)
+  assert.equal((await runtime.inspect(created.resource.config.containerName)).running, false)
+})

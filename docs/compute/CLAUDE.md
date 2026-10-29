@@ -110,3 +110,47 @@ Still open, and all real:
   filled.
 - **Cold start on a five dollar VPS is unmeasured.** The Mac numbers pass
   comfortably and are the easy end of the matrix.
+
+## Amendment, 2026-10-29: readiness and rollback (issues #79, #161, #78)
+
+**The app probe accepts a slow homepage (#79).** `tcpProbe`
+(`packages/app/src/readiness.ts`) sent `GET /` with a 500ms window and read
+a quiet socket as "not listening", so an app whose `/` took longer (a
+server-rendered page that queries the database) could never deploy and
+failed with the loopback-bind hint while listening on 0.0.0.0 the whole
+time. Docker's port proxy produces exactly two shapes for a container with
+nothing listening inside, a refused dial and an accept followed at once by a
+close, and never a socket it holds open: it only keeps the host side open
+once its own dial into the container has succeeded. So a connection held
+quietly for the window now counts as listening. A fast server still answers
+in milliseconds and pays nothing; the loopback-bind failure still closes at
+once and still gets its hint. `GET /` is still sent, so an app's `/` handler
+still runs once per wake; a user-defined health path is #90 and is the
+answer to that.
+
+**The worker probe never calls the user's worker (#161).** It sent `GET /`
+to the worker's own port on every start, queue and alarm wakes included, so
+a `fetch` with side effects ran once per wake with no request from anyone.
+Readiness is now the control port alone: the runner starts its control
+server only after `await mf.ready`, which is workerd listening on the
+worker port, and the control server answers `GET /` itself with a 404
+before anything reaches user code. The same single probe covers consumers,
+which is the guarantee the control-port check was originally added for. A
+worker image built before the control server existed will not pass this
+probe until it is redeployed.
+
+**A failed redeploy rolls back (#78).** The previous tag was always kept on
+disk for exactly this and nothing ever rolled back to it: `deployApp`
+committed the new image before the readiness probe, so a `server.js` that
+threw on line 1 replaced a working site with a 504. Both `deployApp` and
+`deployWorker` now end a failed redeploy in `rollBackDeploy`: a failure
+before anything was replaced (the build) leaves the resource exactly as it
+was; a failure after it writes the previous config back, recreates the
+container from the previous image and leaves it `sleeping`, which is where
+every successful deploy ends too; a resource that was already `failed` has
+nothing known good to go back to and stays `failed`. The error's hint says
+which happened.
+
+**A start that fails readiness stops its container.** All three container
+kinds now do what `startPostgres` does (engine amendment of the same date,
+#59), so the next start is a real one.

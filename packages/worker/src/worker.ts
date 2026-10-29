@@ -757,6 +757,9 @@ export async function deployWorker(
   // the same thing for rollback purposes. Same rule as deployApp's,
   // packages/app/src/app.ts.
   const wasUndeployed = resource.state === 'undeployed'
+  // See deployApp's `replaced`: false until the new config is committed,
+  // so a failure before that point is known to have touched nothing.
+  let replaced = false
 
   try {
     const found = findWranglerManifest(sourcePath)
@@ -803,6 +806,7 @@ export async function deployWorker(
         durableObjects: manifest.durableObjects,
       },
     }
+    replaced = true
     deps.store.updateResourceConfig(resource.id, config)
 
     // Replaced, not restarted: the image and the manifest environment are
@@ -843,9 +847,55 @@ export async function deployWorker(
         // Deliberately swallowed, see the comment above.
       }
     }
-    deps.store.setResourceState(resource.id, wasUndeployed ? 'undeployed' : 'failed')
-    throw err
+    if (wasUndeployed) {
+      deps.store.setResourceState(resource.id, 'undeployed')
+      throw err
+    }
+    throw await rollBackDeploy(deps, resource, project, replaced, err)
   }
+}
+
+// The same rollback deployApp does (packages/app/src/app.ts, issue #78):
+// a redeploy that fails puts the previous version back rather than leaving
+// a broken image where a working one was. The previous container is
+// recreated from the previous config and left asleep, which is where every
+// successful deploy leaves a worker too.
+async function rollBackDeploy(
+  deps: WorkerDeps,
+  previous: WorkerResource,
+  project: Project,
+  replaced: boolean,
+  err: unknown
+): Promise<unknown> {
+  const restorable = previous.config.image !== null && (previous.state === 'sleeping' || previous.state === 'running')
+  if (!restorable) {
+    deps.store.setResourceState(previous.id, 'failed')
+    return err
+  }
+  if (!replaced) {
+    deps.store.setResourceState(previous.id, previous.state)
+    return withRollbackNote(err, `nothing was changed: ${previous.name} still serves ${previous.config.image}`)
+  }
+  try {
+    deps.store.updateResourceConfig(previous.id, previous.config)
+    await deps.runtime.stop(previous.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+    await deps.runtime.remove(previous.config.containerName)
+    await deps.runtime.ensureNetwork(project.networkName)
+    await deps.runtime.ensureCreated(containerSpec(deps, previous, project))
+    deps.store.setResourceState(previous.id, 'sleeping')
+    deps.activity?.reset(previous.id)
+  } catch {
+    deps.store.setResourceState(previous.id, 'failed')
+    return err
+  }
+  return withRollbackNote(err, `the previous image ${previous.config.image} was put back and serves on the next request`)
+}
+
+function withRollbackNote(err: unknown, note: string): unknown {
+  if (!(err instanceof HobbyError)) {
+    return err
+  }
+  return new HobbyError(err.code, err.message, err.hint === undefined ? note : `${err.hint}; ${note}`)
 }
 
 function errorMessage(err: unknown): string {

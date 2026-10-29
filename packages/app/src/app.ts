@@ -463,6 +463,11 @@ export async function deployApp(
   // failure in this function (a build failure, a container failure, a
   // readiness timeout): all three mean the same thing for rollback purposes.
   const wasUndeployed = resource.state === 'undeployed'
+  // Whether anything the previous version was serving from has been changed
+  // yet. False until the new config is committed below; a failure before
+  // that (the build, most commonly) has touched nothing, and the resource is
+  // exactly as it was.
+  let replaced = false
 
   const now = deps.now ?? Date.now
   try {
@@ -480,6 +485,7 @@ export async function deployApp(
       source,
       ...(opts.env === undefined ? {} : { env: opts.env }),
     }
+    replaced = true
     deps.store.updateResourceConfig(resource.id, config)
 
     deps.store.setResourceState(resource.id, 'starting')
@@ -525,9 +531,64 @@ export async function deployApp(
         // Deliberately swallowed, see the comment above.
       }
     }
-    deps.store.setResourceState(resource.id, wasUndeployed ? 'undeployed' : 'failed')
-    throw err
+    if (wasUndeployed) {
+      deps.store.setResourceState(resource.id, 'undeployed')
+      throw err
+    }
+    throw await rollBackDeploy(deps, resource, project.networkName, replaced, err)
   }
+}
+
+// A redeploy that fails puts the previous version back (issue #78). The
+// previous tag was always kept on disk for exactly this ("so a failed
+// deploy can roll back to an image that is known to have served",
+// build.ts's buildTag), and then nothing ever rolled back to it: the new
+// image was committed to config before the readiness probe, so a server.js
+// that threw on line 1 replaced a working site with a 504.
+//
+// Three cases. Nothing was replaced yet (the build failed): the previous
+// container is untouched and still serves, so the state goes back to what
+// it was and that is the whole rollback. Something was replaced: the
+// previous config is written back and its container recreated from the
+// previous image, left asleep so the next request wakes it, which is the
+// same resting state every successful deploy ends in. No previous version
+// to go back to (the last deploy had already failed, or there never was an
+// image): `failed`, as before. A rollback that itself fails is also
+// `failed`, with the deploy's own error still the one thrown, since it is
+// the one that says what to fix.
+async function rollBackDeploy(
+  deps: AppDeps,
+  previous: AppResource,
+  network: string,
+  replaced: boolean,
+  err: unknown
+): Promise<unknown> {
+  const restorable = previous.config.image !== null && (previous.state === 'sleeping' || previous.state === 'running')
+  if (!restorable) {
+    deps.store.setResourceState(previous.id, 'failed')
+    return err
+  }
+  if (!replaced) {
+    deps.store.setResourceState(previous.id, previous.state)
+    return withRollbackNote(err, `nothing was changed: ${previous.name} still serves ${previous.config.image}`)
+  }
+  try {
+    deps.store.updateResourceConfig(previous.id, previous.config)
+    await replaceContainer(deps, previous.config, network)
+    deps.store.setResourceState(previous.id, 'sleeping')
+    deps.activity?.reset(previous.id)
+  } catch {
+    deps.store.setResourceState(previous.id, 'failed')
+    return err
+  }
+  return withRollbackNote(err, `the previous image ${previous.config.image} was put back and serves on the next request`)
+}
+
+function withRollbackNote(err: unknown, note: string): unknown {
+  if (!(err instanceof HobbyError)) {
+    return err
+  }
+  return new HobbyError(err.code, err.message, err.hint === undefined ? note : `${err.hint}; ${note}`)
 }
 
 export async function probeApp(deps: AppDeps, resource: AppResource): Promise<boolean> {
