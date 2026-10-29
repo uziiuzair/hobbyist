@@ -5,6 +5,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { HobbyError } from './errors.js'
 
 // Which subdirectory of a resource's own directory a caller wants. Phase 1
 // had exactly one and hard-coded it; each kind now owns its own parts and
@@ -219,10 +220,31 @@ function sanitizeFileConfig(fileConfig: Partial<HobbyConfig>): Partial<HobbyConf
   return sanitized
 }
 
+// Every numeric variable goes through here rather than a bare Number(...):
+// Number('5m') is NaN, and NaN is not an error anywhere downstream, it is a
+// value. Stored as sleepAfterSeconds it became `null`, which means pinned,
+// so a typo in HOBBY_SLEEP_AFTER_SECONDS silently turned hibernation off for
+// every project created afterwards (issue #71); as a port it surfaced as a
+// raw Node RangeError from `hobby init`. Refused here, by name, the same
+// way routes.ts's parseSleepAfterSeconds refuses a bad `--sleep-after`.
+function envInteger(name: string, raw: string, min: number, max: number): number {
+  const value = Number(raw)
+  if (!/^-?\d+$/.test(raw.trim()) || !Number.isSafeInteger(value) || value < min || value > max) {
+    throw new HobbyError(
+      'usage',
+      `${name} must be a whole number between ${min} and ${max}, got "${raw}"`,
+      `unset ${name} or give it a number of seconds, milliseconds or a port as its documentation says`
+    )
+  }
+  return value
+}
+
+const PORT_MAX = 65535
+
 function readEnvConfig(env: NodeJS.ProcessEnv): Partial<HobbyConfig> {
   const config: Partial<HobbyConfig> = {}
   if (env.HOBBY_IMAGE !== undefined) config.image = env.HOBBY_IMAGE
-  if (env.HOBBY_PROXY_PORT !== undefined) config.proxyPort = Number(env.HOBBY_PROXY_PORT)
+  if (env.HOBBY_PROXY_PORT !== undefined) config.proxyPort = envInteger('HOBBY_PROXY_PORT', env.HOBBY_PROXY_PORT, 0, PORT_MAX)
   if (env.HOBBY_PROXY_HOST !== undefined) config.proxyHost = env.HOBBY_PROXY_HOST
   // All three or none. A partial set is kept partial (empty strings) rather
   // than dropped, so the daemon refuses to start and names what is missing,
@@ -233,22 +255,27 @@ function readEnvConfig(env: NodeJS.ProcessEnv): Partial<HobbyConfig> {
   if (tlsCert !== undefined || tlsKey !== undefined || tlsHostname !== undefined) {
     config.proxyTls = { certFile: tlsCert ?? '', keyFile: tlsKey ?? '', hostname: tlsHostname ?? '' }
   }
-  if (env.HOBBY_STUDIO_PORT !== undefined) config.studioPort = Number(env.HOBBY_STUDIO_PORT)
-  if (env.HOBBY_API_PORT !== undefined) config.apiPort = Number(env.HOBBY_API_PORT)
-  if (env.HOBBY_HTTP_PORT !== undefined) config.httpPort = Number(env.HOBBY_HTTP_PORT)
+  if (env.HOBBY_STUDIO_PORT !== undefined) config.studioPort = envInteger('HOBBY_STUDIO_PORT', env.HOBBY_STUDIO_PORT, 0, PORT_MAX)
+  if (env.HOBBY_API_PORT !== undefined) config.apiPort = envInteger('HOBBY_API_PORT', env.HOBBY_API_PORT, 0, PORT_MAX)
+  if (env.HOBBY_HTTP_PORT !== undefined) config.httpPort = envInteger('HOBBY_HTTP_PORT', env.HOBBY_HTTP_PORT, 0, PORT_MAX)
   if (env.HOBBY_DOMAIN !== undefined) config.domain = env.HOBBY_DOMAIN
   if (env.HOBBY_SLEEP_AFTER_SECONDS !== undefined) {
+    // 'null' is the one word accepted, and it means pinned on purpose. Any
+    // other non-number is refused rather than becoming NaN, which stored as
+    // null meant pinned by accident.
     config.sleepAfterSeconds =
-      env.HOBBY_SLEEP_AFTER_SECONDS === 'null' ? null : Number(env.HOBBY_SLEEP_AFTER_SECONDS)
+      env.HOBBY_SLEEP_AFTER_SECONDS === 'null'
+        ? null
+        : envInteger('HOBBY_SLEEP_AFTER_SECONDS', env.HOBBY_SLEEP_AFTER_SECONDS, 1, Number.MAX_SAFE_INTEGER)
   }
   if (env.HOBBY_WAKE_TIMEOUT_MS !== undefined) {
-    config.wakeTimeoutMs = Number(env.HOBBY_WAKE_TIMEOUT_MS)
+    config.wakeTimeoutMs = envInteger('HOBBY_WAKE_TIMEOUT_MS', env.HOBBY_WAKE_TIMEOUT_MS, 1, Number.MAX_SAFE_INTEGER)
   }
   if (env.HOBBY_READINESS_POLL_MS !== undefined) {
-    config.readinessPollMs = Number(env.HOBBY_READINESS_POLL_MS)
+    config.readinessPollMs = envInteger('HOBBY_READINESS_POLL_MS', env.HOBBY_READINESS_POLL_MS, 1, Number.MAX_SAFE_INTEGER)
   }
   if (env.HOBBY_QUEUE_PORT !== undefined) {
-    config.queuePort = Number(env.HOBBY_QUEUE_PORT)
+    config.queuePort = envInteger('HOBBY_QUEUE_PORT', env.HOBBY_QUEUE_PORT, 0, PORT_MAX)
   }
   // Fail closed: only the two conventional truthy spellings turn this on.
   // Everything else, including a typo like 'tru' or 'yes', is treated as
@@ -261,7 +288,7 @@ function readEnvConfig(env: NodeJS.ProcessEnv): Partial<HobbyConfig> {
     config.caddyEnabled = value === '1' || value === 'true'
   }
   if (env.HOBBY_CADDY_ADMIN_PORT !== undefined) {
-    config.caddyAdminPort = Number(env.HOBBY_CADDY_ADMIN_PORT)
+    config.caddyAdminPort = envInteger('HOBBY_CADDY_ADMIN_PORT', env.HOBBY_CADDY_ADMIN_PORT, 0, PORT_MAX)
   }
   if (env.HOBBY_CADDY_STUDIO_HOST !== undefined) {
     config.caddyStudioHost = env.HOBBY_CADDY_STUDIO_HOST

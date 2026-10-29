@@ -89,8 +89,20 @@ function workerHostname(project: string, resource: string, domain: string): stri
 // Verified against a running Miniflare on 2026-08-10: the value becomes the
 // storage directory name, `<uniqueKey>/<objectId>.sqlite` beneath the durable
 // object persist root.
-export function uniqueKeyFor(resourceId: ResourceId, className: string): string {
-  return `${resourceId}-${className}`
+export function uniqueKeyFor(modifier: string, className: string): string {
+  return `${modifier}-${className}`
+}
+
+// The modifier the key is built from: WorkerConfig.durableObjectUniqueKeyModifier,
+// which createWorkerResource sets to the resource's own id. Reading the stored
+// field rather than resource.id directly is what lets a snapshot restored into
+// a NEW project (restoreSnapshot, packages/cli/src/daemon/snapshots.ts) keep
+// its objects: the restored worker has a new id but carries the original
+// modifier, so every object's sqlite file is found under the same key. The
+// fallback covers only the window between createResource and the config
+// update that writes the modifier, which no start path can reach.
+function uniqueKeyModifierOf(resource: WorkerResource): string {
+  return resource.config.durableObjectUniqueKeyModifier === '' ? resource.id : resource.config.durableObjectUniqueKeyModifier
 }
 
 // What the container's runner reads out of one environment variable. Built
@@ -175,7 +187,7 @@ export function buildRunnerManifest(deps: WorkerDeps, resource: WorkerResource):
       // alarm deadline a stopped container cannot fire for itself) readable
       // from outside the runtime.
       useSQLite: true,
-      unsafeUniqueKey: uniqueKeyFor(resource.id, entry.className),
+      unsafeUniqueKey: uniqueKeyFor(uniqueKeyModifierOf(resource), entry.className),
     }
   }
 

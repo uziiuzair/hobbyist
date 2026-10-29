@@ -29,6 +29,18 @@ emits a plain `docker-compose.yml` plus the data directory, stops managing the
 instance, and gets out of the way. From that moment Hobbyist is uninstallable
 with nothing lost.
 
+**2026-10-28 amendment.** "Plus the data directory" means *named*, not
+copied: the compose file mounts hobby's own directories under
+`$HOBBY_HOME/projects/<name>` in place, and the file's header says so
+(issue #180). After `--release`, `hobby rm <name>` forgets the project and
+leaves those directories alone (issue #172); uninstalling hobby by deleting
+`$HOBBY_HOME` still deletes them, so move them and edit the volume paths
+first. Without `--release` the file is a preview of a project hobby still
+manages, and starting it beside hobby ran a second postgres on the live
+data directory (issue #174): every service in the preview is behind the
+compose profile `hobby-released`, so `docker compose up` starts nothing
+from it until `--release` has produced the file that is meant to be started.
+
 ## Why this is a capability and not a footnote
 
 This project exists because its author objects to vendor lock-in. A tool built on

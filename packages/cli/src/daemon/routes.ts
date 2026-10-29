@@ -11,6 +11,8 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
+import { join } from 'node:path'
 import {
   DEFAULT_PORT_BIND,
   HobbyError,
@@ -260,6 +262,15 @@ async function getProjectRoute(ctx: DaemonContext, name: string): Promise<RouteR
 async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<RouteResult> {
   const project = getProjectByNameOrThrow(ctx, name)
   const resources = ctx.store.listResources(project.id)
+  // A released project's data directory is open in the user's own compose
+  // stack (issue #172): deleting it here destroyed the cluster they had just
+  // ejected to, from under a running postgres. "I have left, now clean hobby
+  // up" is the obvious next step after `hobby eject --release`, so it is
+  // answered by forgetting the rows and hobby's own stopped containers, and
+  // never by touching anything on disk.
+  if (project.releasedAt != null) {
+    return forgetReleasedProject(ctx, project, resources)
+  }
   const failures: string[] = []
 
   for (const resource of resources) {
@@ -284,6 +295,25 @@ async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<Rou
     failures.push(`remove network ${project.networkName}: ${errorMessage(err)}`)
   }
 
+  // Each kind removes what it owns (a postgres its data directory, a queue
+  // its sqlite), and a worker deliberately leaves its Durable Object and
+  // state directories behind on a single-resource rm (destroyWorker's
+  // comment, packages/worker/src/worker.ts). Deleting the whole project is a
+  // different instruction: the user typed the project's name to confirm
+  // losing it, and what the kinds left under projects/<name> (empty parent
+  // directories, a worker's do/ and state/, a bundle/) made restoring or
+  // branching to that name fail with "destination already exists" (issue
+  // #178). Only attempted once every kind succeeded: a failed teardown
+  // leaves its data where it is for the manual cleanup the error names.
+  const projectDir = join(ctx.paths.projectsDir, project.name)
+  if (failures.length === 0) {
+    try {
+      await rm(projectDir, { recursive: true, force: true })
+    } catch (err) {
+      failures.push(`remove ${projectDir}: ${errorMessage(err)}`)
+    }
+  }
+
   ctx.store.deleteProject(project.id)
 
   if (failures.length > 0) {
@@ -295,6 +325,53 @@ async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<Rou
   }
 
   return { status: 200, body: { deleted: true } }
+}
+
+// The released half of deleteProjectRoute. Hobby's own containers were
+// stopped by the release and are removed here because nothing else ever
+// will; the rows go; the network goes if it can. The data directories, a
+// worker's do/ and state/, a queue's backlog: all of it stays exactly where
+// the compose file hobby handed over expects to find it, and the response
+// says so, so `hobby rm` can print it.
+async function forgetReleasedProject(
+  ctx: DaemonContext,
+  project: Project,
+  resources: Resource[]
+): Promise<RouteResult> {
+  const failures: string[] = []
+  for (const resource of resources) {
+    ctx.store.setResourceState(resource.id, 'destroying')
+    if ('containerName' in resource.config) {
+      const containerName = resource.config.containerName
+      try {
+        if ((await ctx.runtime.inspect(containerName)).exists) {
+          await ctx.runtime.stop(containerName, { timeoutSec: 10 })
+          await ctx.runtime.remove(containerName)
+        }
+      } catch (err) {
+        failures.push(`${resource.name}: ${errorMessage(err)}`)
+      }
+    }
+    ctx.store.deleteResource(resource.id)
+    ctx.activity.reset(resource.id)
+  }
+  try {
+    await ctx.runtime.removeNetwork(project.networkName)
+  } catch (err) {
+    failures.push(`remove network ${project.networkName}: ${errorMessage(err)}`)
+  }
+  ctx.store.deleteProject(project.id)
+
+  const kept = join(ctx.paths.projectsDir, project.name)
+  if (failures.length > 0) {
+    throw new HobbyError(
+      'internal',
+      `project ${project.name} is no longer managed and nothing under ${kept} was touched, but ${failures.length} ` +
+        `cleanup step(s) did not complete cleanly: ${failures.join('; ')}`,
+      'a container or network may still remain and may need manual cleanup'
+    )
+  }
+  return { status: 200, body: { deleted: true, kept } }
 }
 
 // POST /v1/projects/:name/branch, the one route behind `hobby branch`, so
@@ -820,6 +897,18 @@ function findBindingWorker(ctx: DaemonContext, queue: QueueResource): WorkerReso
 
 async function destroyResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
+  // Same reason as deleteProjectRoute's released branch: a single resource's
+  // destroy removes its data directory, which a released project's compose
+  // stack is running on. Forgetting the whole project keeps the data;
+  // adopting it first makes this an ordinary delete again.
+  const owner = getOwningProjectOrThrow(ctx, resource)
+  if (owner.releasedAt != null) {
+    throw new HobbyError(
+      'conflict',
+      `${resource.name} belongs to ${owner.name}, which was released and is no longer managed by hobby`,
+      `run \`hobby rm ${owner.name}\` to forget the whole project (its data stays on disk), or \`hobby adopt ${owner.name}\` first`
+    )
+  }
   // Refused before anything is torn down, and before state ever moves to
   // `destroying`: deleting a queue out from under a worker that still binds
   // it turns a working `env.X.send()`/`queue()` handler into a silent
@@ -881,6 +970,12 @@ function refuseUndeployed(ctx: DaemonContext, resource: Resource): void {
 async function startResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
   let resource = getResourceOrThrow(ctx, id)
   refuseUndeployed(ctx, resource)
+  // The same refusal the proxies make (issue #173): an explicit `hobby wake`
+  // of a released project started hobby's container on a data directory the
+  // user's compose stack was already serving, two postmasters on one PGDATA.
+  // Checked here, before clearWakeRefusal below, so a refused release cannot
+  // be worked around by asking twice.
+  refuseReleased(getOwningProjectOrThrow(ctx, resource))
   // An explicit `hobby wake` in the middle of a snapshot is the same hot
   // clone an automatic wake would cause (holdProjectAsleep's comment,
   // packages/cli/src/daemon/context.ts), so it waits the same way. Re-read
@@ -1011,6 +1106,35 @@ function isDeployed(resource: AppResource | WorkerResource): boolean {
   return resource.config.image !== null
 }
 
+function renderComposeHeader(ctx: DaemonContext, projectName: string, shape: 'preview' | 'released'): string[] {
+  const projectDir = join(ctx.paths.projectsDir, projectName)
+  const lines = [
+    `# Generated by \`hobby eject ${projectName}${shape === 'released' ? ' --release' : ''}\`.`,
+    '#',
+    '# Every volume below is a directory hobby already owns, mounted in place:',
+    `#   ${projectDir}`,
+    '# Nothing was copied. Deleting that directory, HOBBY_HOME, or hobby itself',
+    `# deletes this stack's data. \`hobby rm ${projectName}\` after a release leaves it`,
+    '# untouched; to uninstall hobby, move the directories first and edit the',
+    '# volume paths below to match.',
+  ]
+  if (shape === 'preview') {
+    lines.push(
+      '#',
+      `# PREVIEW. hobby is still managing ${projectName}, and starting this file`,
+      '# beside it would run a second postgres on the same live data directory,',
+      '# with both accepting writes until a restart kept one and dropped the',
+      `# other. Every service here is behind the profile \`${PREVIEW_PROFILE}\`, so`,
+      '# `docker compose up` starts nothing from this file. For the file that is',
+      `# meant to be started, run \`hobby eject ${projectName} --release\`: it stops`,
+      "# hobby's containers first and emits the same services without the profile.",
+      '# (With hobby stopped for good and the risk understood:',
+      `#   docker compose --profile ${PREVIEW_PROFILE} up -d)`
+    )
+  }
+  return lines
+}
+
 // A plain, literal rendering of what containerSpec (packages/pg/src/postgres.ts)
 // actually asked Docker to create, not an aspiration: image, container name,
 // the real generated credentials, the real host port and the real data
@@ -1027,21 +1151,45 @@ function isDeployed(resource: AppResource | WorkerResource): boolean {
 // `string` (packages/core/src/types.ts:80), and comparing a non-nullable
 // string to `null` does not compile (TS2367), so the type system itself
 // proves the postgres loop below can never emit `image: null`.
+//
+// Two shapes, and the difference is whether `docker compose up` starts
+// anything. Every volume is hobby's own directory mounted in place, nothing
+// is copied (issue #180), so a file started while hobby still manages the
+// project runs a second postgres on the live data directory: the shared host
+// port is the only thing that stops it, editing that port is the first thing
+// someone does when compose says "port is already allocated", and both
+// clusters then accept writes until a restart keeps one and drops the other
+// (issue #174, reproduced). The preview shape therefore puts every service
+// behind the compose profile `hobby-released`, which `up` does not start
+// unless asked for by name, and says so in its header; the released shape is
+// the plain, startable file, because `--release` has already stopped hobby's
+// containers. Both headers name the directory the data lives in and what
+// deleting it means, because the earlier file said nothing and docs promised
+// "uninstallable with nothing lost".
+export const PREVIEW_PROFILE = 'hobby-released'
+
 function renderCompose(
   ctx: DaemonContext,
   projectName: string,
   resources: PostgresResource[],
   apps: AppResource[] = [],
-  workers: WorkerResource[] = []
+  workers: WorkerResource[] = [],
+  shape: 'preview' | 'released' = 'released'
 ): { compose: string; skipped: string[] } {
   // Every postgres resource in this project, by id, so an app's
   // databaseResourceId can be rewritten to the compose service name below.
   const byId = new Map(resources.map((resource) => [resource.id, resource]))
-  const lines: string[] = ['services:']
+  const lines: string[] = [...renderComposeHeader(ctx, projectName, shape), 'services:']
+  const guard = (): void => {
+    if (shape === 'preview') {
+      lines.push(`    profiles: ["${PREVIEW_PROFILE}"]`)
+    }
+  }
   const skipped: string[] = []
   for (const resource of resources) {
     const cfg = resource.config
     lines.push(`  ${resource.name}:`)
+    guard()
     lines.push(`    image: ${cfg.image}`)
     // Deliberately no container_name. Pinning it to the name Hobbyist uses
     // means the emitted file cannot start while Hobbyist still manages this
@@ -1094,6 +1242,7 @@ function renderCompose(
       continue
     }
     lines.push(`  ${app.name}:`)
+    guard()
     lines.push(`    image: ${cfg.image}`)
     // Emitted alongside `image:` rather than instead of it when we built it
     // from source. compose accepts both and treats the image as the tag for
@@ -1147,6 +1296,7 @@ function renderCompose(
       continue
     }
     lines.push(`  ${worker.name}:`)
+    guard()
     lines.push(`    image: ${cfg.image}`)
     // No `build:` counterpart to the app kind's, deliberately. A worker's
     // Dockerfile is generated by hobby and lives under hobby's own home
@@ -1520,7 +1670,14 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
   // every resource lands in that list, the refusal a few lines down fires
   // instead of returning a `services:` header with nothing under it: see that
   // check for why an empty compose file is not an acceptable 200.
-  const rendered = renderCompose(ctx, project.name, postgresResources, appResources, workerResources)
+  const rendered = renderCompose(
+    ctx,
+    project.name,
+    postgresResources,
+    appResources,
+    workerResources,
+    release ? 'released' : 'preview'
+  )
   // The same isDeployed predicate renderCompose used, applied here so Caddy
   // never routes a hostname to a service renderCompose just skipped. ADR 0009
   // is explicit that "an ejected app that no longer serves is not an ejected

@@ -672,12 +672,27 @@ export interface RestoreResult {
 // never a range of this file's own: an earlier version allocated every kind
 // from 15000 to 19999, which put a restored postgres below the range every
 // other postgres lives in, and an app or worker inside it.
+//
+// Two things are deliberately NOT rewritten, and both are the restore
+// silently losing something if they were:
+//
+// - durableObjectUniqueKeyModifier keeps the snapshot's value. workerd
+//   derives every object's storage identity from it (uniqueKeyFor,
+//   packages/worker/src/worker.ts): the directory under .../<worker>/do/ AND
+//   the per-object sqlite file name inside it. An earlier version set it to
+//   the new resource id and renamed the directory to match, which kept the
+//   directory and orphaned every file in it (issue #175): the restored worker
+//   came up with an empty Counter beside the original's 8 KB one.
+// - databaseResourceId is remapped through `idMap`, the snapshot's resource
+//   ids to the restored rows' ids, rather than kept. Kept, a restored app
+//   stayed bound to the SOURCE project's database (issue #176), writing into
+//   the original from a project that claims to be a copy of it.
 function rewriteConfig(
   ctx: DaemonContext,
   config: ResourceConfig,
   projectName: string,
   resourceName: string,
-  newId: string
+  idMap: ReadonlyMap<string, string>
 ): ResourceConfig {
   if ('queueToken' in config) {
     const hostPort = ctx.store.allocatePort(WORKER_PORT_RANGE.from, WORKER_PORT_RANGE.to)
@@ -688,7 +703,7 @@ function rewriteConfig(
       controlPort: ctx.store.allocatePort(WORKER_PORT_RANGE.from, WORKER_PORT_RANGE.to, [hostPort]),
       queueToken: randomUUID(),
       hostname: `${resourceName}.${projectName}.${ctx.config.domain}`,
-      durableObjectUniqueKeyModifier: newId,
+      databaseResourceId: remapDatabase(config.databaseResourceId, idMap, resourceName),
     }
   }
 
@@ -698,36 +713,35 @@ function rewriteConfig(
       containerName: `hobby-${projectName}-${resourceName}`,
       hostPort: ctx.store.allocatePort(APP_PORT_RANGE.from, APP_PORT_RANGE.to),
       hostname: `${resourceName}.${projectName}.${ctx.config.domain}`,
+      databaseResourceId: remapDatabase(config.databaseResourceId, idMap, resourceName),
     }
   }
 
   return config
 }
 
-// worker.ts:174 builds a Durable Object's storage key from the RESOURCE ID
-// (uniqueKeyFor, worker.ts:88), and the key is the directory name under
-// .../<worker>/do/. A restored worker has a new id, so without this rename
-// every object comes up empty rather than erroring: the state is on disk under
-// a key nothing will ever ask for again. The sharpest silent failure in the
-// whole feature.
-async function renameDurableObjectDirs(
-  ctx: DaemonContext,
-  projectName: string,
-  entry: SnapshotResourceEntry,
-  newId: string
-): Promise<void> {
-  const doDir = ctx.paths.resourcePath(projectName, entry.name, 'do')
-  for (const className of entry.durableObjectClasses) {
-    const from = join(doDir, `${entry.id}-${className}`)
-    const to = join(doDir, `${newId}-${className}`)
-    try {
-      await rename(from, to)
-    } catch {
-      // A worker that has deployed but whose object has never been addressed
-      // has no directory yet. That is not an error, and inventing an empty one
-      // would be worse than leaving it absent.
-    }
+// A binding names a sibling in the same project (resolveDatabaseUrl,
+// packages/app/src/app.ts), and a snapshot captures the whole project, so a
+// bound id with no entry in the map is a manifest this code does not
+// understand. Refusing beats the alternative of restoring the app unbound
+// and letting it fail at its first query with no mention of why.
+function remapDatabase(
+  databaseResourceId: ResourceId | null,
+  idMap: ReadonlyMap<string, string>,
+  resourceName: string
+): ResourceId | null {
+  if (databaseResourceId === null) {
+    return null
   }
+  const mapped = idMap.get(databaseResourceId)
+  if (mapped === undefined) {
+    throw new HobbyError(
+      'internal',
+      `${resourceName} is bound to database ${databaseResourceId}, which is not in the snapshot`,
+      'the snapshot manifest is inconsistent; take a fresh snapshot of the source project'
+    )
+  }
+  return mapped as ResourceId
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -745,10 +759,9 @@ async function pathExists(path: string): Promise<boolean> {
 // Resource ids, not just names, must match the snapshot exactly, and a
 // project whose resource set has changed since is refused. Same ids is what
 // makes this restore need none of the rewriting a restore into a new project
-// does (rewriteConfig and renameDurableObjectDirs above): ports, container
-// names, hostnames, queue tokens and every Durable Object storage key
-// (uniqueKeyFor, packages/worker/src/worker.ts, embeds the resource id) are
-// already the ones on disk. A resource added since the snapshot has no data
+// does (rewriteConfig above): ports, container names, hostnames, queue
+// tokens and database bindings are already the ones on disk, and Durable
+// Object storage keys never change in either shape (rewriteConfig's comment). A resource added since the snapshot has no data
 // in it and would be silently emptied; one deleted since has no row to
 // restore it into. Guessing at either is how a restore quietly loses
 // something, so the answer for a changed project is `--as`, beside it.
@@ -916,14 +929,37 @@ export async function restoreSnapshot(
     throw new HobbyError('name_taken', `a project named ${target} already exists`, 'pass a different --as name')
   }
 
-  await cloneTree(join(found.dir, 'data'), join(ctx.paths.projectsDir, target))
+  // The same check branch.ts's preflight makes, for the same reason: nothing
+  // in the store owns this path (the check above), so whatever is there was
+  // left by something else, most often a project removed while part of its
+  // tree could not be. cloneTree refuses an existing destination on its own,
+  // but as a plain Error that reached the CLI as a bare "internal error"
+  // (issue #178); naming the path, and the fact that no project owns it, is
+  // what makes it something the user can act on.
+  const targetDir = join(ctx.paths.projectsDir, target)
+  if (await pathExists(targetDir)) {
+    throw new HobbyError(
+      'conflict',
+      `${targetDir} already exists, but no project named ${target} does`,
+      'it is left over from something else; move it aside or pass a different --as name'
+    )
+  }
+
+  await cloneTree(join(found.dir, 'data'), targetDir)
 
   const project = ctx.store.createProject({
     name: target,
     sleepAfterSeconds: found.manifest.project.sleepAfterSeconds,
   })
 
+  // Two passes. Every row is created first so that `idMap` (snapshot id to
+  // restored id) is complete before any config is rewritten: an app's
+  // databaseResourceId names a postgres that may come later in the manifest
+  // than the app does, and rewriting it in manifest order would find no
+  // entry for it.
+  const idMap = new Map<string, string>()
   const resources: Resource[] = []
+  const pending: Array<{ entry: SnapshotResourceEntry; id: string }> = []
   for (const entry of found.manifest.resources) {
     // A postgres is the one kind whose start needs a container to exist
     // already (startPostgres calls runtime.start and nothing else), so it
@@ -932,24 +968,26 @@ export async function restoreSnapshot(
     // this, and every wake of the restored database then failed with "No
     // such container". createPostgresFromClone's comment has the rest.
     if (entry.kind === 'postgres' && 'dataDir' in entry.config) {
-      resources.push(
-        await createPostgresFromClone(ctx, { project, name: entry.name, source: entry.config })
-      )
+      const restored = await createPostgresFromClone(ctx, { project, name: entry.name, source: entry.config })
+      idMap.set(entry.id, restored.id)
+      resources.push(restored)
       continue
     }
 
-    // Created with the old config first so the row (and its id) exists before
-    // the rewrite needs it: durableObjectUniqueKeyModifier is derived from the
-    // new id, and the DO directory rename needs it too.
+    // Created with the snapshot's config; the rewrite below replaces it once
+    // every id is known.
     const created = ctx.store.createResource({
       projectId: project.id,
       kind: entry.kind,
       name: entry.name,
       config: entry.config,
     })
-    const rewritten = rewriteConfig(ctx, entry.config, target, entry.name, created.id)
-    ctx.store.updateResourceConfig(created.id, rewritten)
-    await renameDurableObjectDirs(ctx, target, entry, created.id)
+    idMap.set(entry.id, created.id)
+    pending.push({ entry, id: created.id })
+  }
+
+  for (const { entry, id } of pending) {
+    ctx.store.updateResourceConfig(id, rewriteConfig(ctx, entry.config, target, entry.name, idMap))
 
     // Never `running`: nothing has been started, and a row claiming otherwise
     // is exactly the lie reconcile.ts exists to catch.
@@ -959,9 +997,9 @@ export async function restoreSnapshot(
     // created on its first wake (ensureCreated in the app and worker start
     // paths).
     const keepsState = entry.kind === 'queue' || entry.stateAtSnapshot === 'undeployed'
-    ctx.store.setResourceState(created.id, keepsState ? entry.stateAtSnapshot : 'sleeping')
+    ctx.store.setResourceState(id, keepsState ? entry.stateAtSnapshot : 'sleeping')
 
-    const reloaded = ctx.store.getResource(created.id)
+    const reloaded = ctx.store.getResource(id)
     if (reloaded !== null) {
       resources.push(reloaded)
     }

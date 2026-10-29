@@ -75,8 +75,11 @@ Restore, both shapes:
   `--as` says otherwise). Non-destructive: the original is untouched and may
   keep running. Ports (from each kind's own range), container names,
   hostnames, the data directory path and the queue token are reallocated, and
-  Durable Object storage is renamed to the new resource ids (`rewriteConfig`
-  and `renameDurableObjectDirs`). Each postgres gets a real container, created
+  an app's or worker's database binding is remapped to the restored sibling
+  (`rewriteConfig`). The Durable Object unique key modifier is kept as it was,
+  because workerd derives both the storage directory and every object's file
+  name from it: a restored worker keeps its objects by keeping its key, never
+  by renaming. Each postgres gets a real container, created
   stopped on the cloned data (`createPostgresFromClone`,
   `packages/pg/src/postgres.ts`), because its start path only ever starts an
   existing one; an app or worker is created on its first wake.

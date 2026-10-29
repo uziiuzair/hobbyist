@@ -7,6 +7,7 @@ import { WakingBanner } from "../components/WakingBanner.js";
 import { Workbench } from "../components/Workbench.js";
 import { SpotRows } from "../components/Spot.js";
 import { quoteIdentifier } from "../lib/identifiers.js";
+import { cellText, isBinaryType } from "../lib/cells.js";
 import { loadSchema, type TableInfo } from "../lib/schema.js";
 import { Button } from "../components/reusable/button.js";
 
@@ -47,6 +48,10 @@ export function Tables({
     rowIndex: number;
     column: string;
     popout: boolean;
+    // The text the editor was seeded with. An edit that ends with the same
+    // text is not an update: writing it back is where a value whose text
+    // form is lossy (issue #119) gets silently replaced by that text.
+    original: string;
   } | null>(null);
   const [editValue, setEditValue] = useState("");
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -144,6 +149,10 @@ export function Tables({
 
   const POPOUT_AT = 48;
 
+  function columnType(column: string): string {
+    return currentTable?.columns.find((c) => c.name === column)?.dataType ?? "";
+  }
+
   function startEdit(
     rowIndex: number,
     column: string,
@@ -151,17 +160,19 @@ export function Tables({
   ): void {
     if (currentTable === undefined || currentTable.primaryKey.length === 0)
       return;
-    const text = currentValue === null ? "" : String(currentValue);
+    const dataType = columnType(column);
+    if (isBinaryType(dataType)) return;
+    const text =
+      currentValue === null || currentValue === undefined
+        ? ""
+        : cellText(currentValue, dataType);
     setEditing({
       rowIndex,
       column,
       popout: text.length > POPOUT_AT || text.includes("\n"),
+      original: text,
     });
-    setEditValue(
-      currentValue === null || currentValue === undefined
-        ? ""
-        : String(currentValue),
-    );
+    setEditValue(text);
     setSaveError(null);
   }
 
@@ -178,6 +189,11 @@ export function Tables({
     if (row === undefined) return;
     const pk = currentTable.primaryKey;
     if (pk.length === 0) return;
+    if (editValue === editing.original) {
+      setEditing(null);
+      setSaveError(null);
+      return;
+    }
 
     const setSql = `${quoteIdentifier(editing.column)} = $1`;
     const whereSql = pk
@@ -420,9 +436,11 @@ export function Tables({
                           editing !== null &&
                           editing.rowIndex === rowIndex &&
                           editing.column === col;
+                        const dataType = columnType(col);
                         const editable =
                           currentTable !== undefined &&
-                          currentTable.primaryKey.length > 0;
+                          currentTable.primaryKey.length > 0 &&
+                          !isBinaryType(dataType);
                         return (
                           <td
                             key={col}
@@ -467,9 +485,9 @@ export function Tables({
                               // unreadable or a kilometre wide.
                               <span
                                 className="cell-value"
-                                title={String(value)}
+                                title={cellText(value, dataType)}
                               >
-                                {String(value)}
+                                {cellText(value, dataType)}
                               </span>
                             )}
                           </td>

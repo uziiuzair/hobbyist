@@ -1045,6 +1045,8 @@ export async function cmdRm(c: Ctx, positionals: string[], flags: Flags): Promis
 
   if (flags.json) {
     c.io.out(JSON.stringify(result))
+  } else if (result.kept !== undefined) {
+    c.io.out(`deleted ${target} from hobby. it was released, so nothing on disk was touched: ${result.kept} is still there`)
   } else {
     c.io.out(`deleted ${target}`)
   }
@@ -1377,8 +1379,10 @@ export async function cmdEject(c: Ctx, positionals: string[], flags: Flags): Pro
     )
   } else {
     c.io.err(
-      'this is a snapshot of current state; hobby is still managing this project. pass --release to hand ' +
-        'it over: databases stopped and hobby out of the way, with every record and every byte kept.'
+      `this is a preview: hobby is still managing ${project}, and the file mounts its live data directories ` +
+        'in place, so every service is behind the compose profile "hobby-released" and `docker compose up` ' +
+        'starts nothing from it. pass --release to hand the project over: databases stopped, hobby out of the ' +
+        'way, every record and every byte kept, and a file that is meant to be started.'
     )
   }
   return 0
@@ -1960,7 +1964,8 @@ export async function cmdUpdate(io: Io, paths: Paths, flags: Flags): Promise<num
   const git = (args: string[]): string => {
     const res = spawnSync('git', ['-C', src, ...args], { encoding: 'utf8' })
     if (res.status !== 0) {
-      throw new HobbyError('internal', `git ${args[0]} failed`, (res.stderr || '').trim() || undefined)
+      const verb = args.find((arg) => !arg.startsWith('-') && arg !== 'versionsort.suffix=-') ?? args[0]
+      throw new HobbyError('internal', `git ${verb} failed`, (res.stderr || '').trim() || undefined)
     }
     return (res.stdout || '').trim()
   }
@@ -1976,8 +1981,13 @@ export async function cmdUpdate(io: Io, paths: Paths, flags: Flags): Promise<num
   git(['fetch', '--tags', '--force', '--quiet', 'origin'])
 
   // Sorted by version, newest last, so this picks the highest tag rather than
-  // the most recently created one.
-  const tags = git(['tag', '--list', 'v*', '--sort=v:refname']).split('\n').filter((t) => t.length > 0)
+  // the most recently created one. versionsort.suffix=- is what makes a
+  // pre-release sort BEFORE its final: without it git's version sort puts
+  // v0.1.0-alpha.10 after v0.1.0, and the first box on a final release would
+  // have been "updated" back onto an alpha (issue #134).
+  const tags = git(['-c', 'versionsort.suffix=-', 'tag', '--list', 'v*', '--sort=v:refname'])
+    .split('\n')
+    .filter((t) => t.length > 0)
   const latest = tags[tags.length - 1]
   if (latest === undefined) {
     throw new HobbyError('internal', 'no release tags found', 'the remote has no v* tags to update to')

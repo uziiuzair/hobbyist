@@ -164,9 +164,8 @@ function preflight(ctx: DaemonContext, sourceName: string, targetName: string, a
   // id (worker.ts's uniqueKeyFor), a queue's consumer binding and a worker's
   // queue token are ids and secrets that must not be shared with the source,
   // and an app or worker hostname is a routed Caddy name. restoreSnapshot's
-  // rewriteConfig and renameDurableObjectDirs (snapshots.ts) show how large
-  // that rewrite surface is, and each missed field there is a silent
-  // failure. Quietly leaving those resources out would instead produce a
+  // rewriteConfig (snapshots.ts) shows how large that rewrite surface is,
+  // and each missed field there is a silent failure. Quietly leaving those resources out would instead produce a
   // branch that looks complete and is not. A branch that refuses is the
   // honest first version; one that handles them is a later, separate change.
   const other = all.filter((resource) => resource.kind !== 'postgres')
