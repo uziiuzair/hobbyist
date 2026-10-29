@@ -81,6 +81,60 @@ export const IGNORED_WITH_REASON: Record<string, string> = {
   observability: 'Cloudflare-side telemetry; use `hobby logs`',
   placement: 'smart placement is a global-network feature; this is one box',
   limits: 'not enforced here (ADR 0004: no metering, no quotas)',
+  // Required on Cloudflare, so "not recognised" read as alarming (issue
+  // #76). Here every class named in durable_objects is bound directly
+  // (buildRunnerManifest, worker.ts), so there is no upload-time migration
+  // step for this key to drive.
+  migrations:
+    'Durable Object migrations are Cloudflare upload-time bookkeeping; hobby binds every class in durable_objects directly, so there is nothing to migrate',
+  // Workers AI is the one binding real projects declare most that this box
+  // cannot provide: AI compute is out of scope (root CLAUDE.md). The deploy
+  // says so at the moment the user is watching rather than letting the
+  // worker find `env.AI` undefined at runtime (issue #149).
+  ai: 'Workers AI is not provided by hobby (AI compute is out of scope); call a model API over HTTP from the worker instead',
+  // The rest of the keys Creative Log's sixteen manifests used that hobby
+  // does not act on (issue #152). Each gets a reason, so a user reading the
+  // deploy output can tell "not built" from "meaningless here".
+  services: 'service bindings are not built; call the other worker over HTTP at its own hostname',
+  env: '[env.*] environments are not read; hobby deploys the top-level config only',
+  assets: 'static assets are not served for a worker; a site with assets deploys as an app, from a Dockerfile',
+  hyperdrive:
+    'hyperdrive bindings are not read; `hobby deploy --database <name>` binds the project database as DB',
+  browser: 'browser rendering is a Cloudflare service and is not provided here',
+  vectorize: 'Vectorize is a Cloudflare service and is not provided here; postgres with pgvector is the local answer',
+  analytics_engine_datasets: 'Analytics Engine is a Cloudflare service and is not provided here',
+  send_email: 'Email Workers are a Cloudflare service and are not provided here',
+  images: 'Cloudflare Images is not provided here',
+  pipelines: 'Cloudflare Pipelines are not provided here',
+  workflows: 'Workflows are not built',
+  containers: 'Cloudflare Containers are not provided here; deploy the container as an app instead',
+  cloudchamber: 'Cloudflare Containers are not provided here; deploy the container as an app instead',
+  secrets_store_secrets: 'Cloudflare Secrets Store is not provided here',
+  dispatch_namespaces: 'Workers for Platforms is a Cloudflare feature with no meaning on one box',
+  mtls_certificates: 'mTLS certificate bindings are not provided here',
+  tail_consumers: 'tail workers are not built; use `hobby logs`',
+  logpush: 'Cloudflare-side telemetry; use `hobby logs`',
+  version_metadata: 'Cloudflare deployment versions have no meaning here',
+  unsafe: 'unsafe bindings are Cloudflare-internal',
+  site: 'Workers Sites is deprecated on Cloudflare and not built here',
+  build: 'custom build commands are not run; hobby bundles `main` itself',
+  dev: 'wrangler dev settings; nothing here reads them',
+  rules: 'bundler option; hobby bundles `main` with its own settings',
+  define: 'bundler option; hobby bundles `main` with its own settings',
+  alias: 'bundler option; hobby bundles `main` with its own settings',
+  minify: 'bundler option; hobby bundles `main` with its own settings',
+  no_bundle: 'bundler option; hobby bundles `main` with its own settings',
+  find_additional_modules: 'bundler option; hobby bundles `main` with its own settings',
+  tsconfig: 'bundler option; hobby bundles `main` with its own settings',
+  base_dir: 'bundler option; hobby bundles `main` with its own settings',
+  upload_source_maps: 'bundler option; hobby bundles `main` with its own settings',
+  keep_vars: 'vars come from this file on every deploy, so there is nothing to keep',
+  preserve_file_names: 'bundler option; hobby bundles `main` with its own settings',
+  text_blobs: 'module bindings are not built; import the file from `main` instead',
+  data_blobs: 'module bindings are not built; import the file from `main` instead',
+  wasm_modules: 'module bindings are not built; import the file from `main` instead',
+  node_compat: 'legacy flag; set compatibility_flags instead',
+  $schema: 'an editor schema hint, nothing to honour',
   // Nested under `queues`, not a top-level key, so it can never be found by
   // the ignored-key scan below. `queuesFrom` pushes the literal string
   // 'queues.consumers.max_concurrency' into `ignored` by hand when it sees
@@ -379,9 +433,19 @@ export function findWranglerManifest(dir: string): FoundManifest {
 // One line per ignored key, for the deploy to print. Keys we know about get
 // their reason; anything else is reported as unrecognised rather than
 // pretended away.
+export interface IgnoredKey {
+  key: string
+  reason: string
+}
+
+// The structured form, for the daemon's create and deploy responses, so a
+// CLI printing `ignoring <key>: <reason>` and a `--json` consumer reading
+// the same list see one source (issue #76). describeIgnored below is the
+// one-line rendering of it, for the daemon log.
+export function ignoredEntries(ignored: string[]): IgnoredKey[] {
+  return ignored.map((key) => ({ key, reason: IGNORED_WITH_REASON[key] ?? 'not recognised by hobby' }))
+}
+
 export function describeIgnored(ignored: string[]): string[] {
-  return ignored.map((key) => {
-    const reason = IGNORED_WITH_REASON[key]
-    return reason === undefined ? `${key}: not recognised by hobby` : `${key}: ${reason}`
-  })
+  return ignoredEntries(ignored).map((entry) => `${entry.key}: ${entry.reason}`)
 }

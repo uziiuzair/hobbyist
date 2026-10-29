@@ -25,6 +25,7 @@ import {
 } from '@hobby.sh/core'
 import {
   describeIgnored,
+  ignoredEntries,
   findWranglerManifest,
   IGNORED_WITH_REASON,
   parseWranglerManifest,
@@ -295,6 +296,45 @@ test('keys we do not act on are reported, with a reason where we have one', () =
 
 test('an unrecognised key is reported as unrecognised, not silently explained away', () => {
   assert.deepEqual(describeIgnored(['some_future_key']), ['some_future_key: not recognised by hobby'])
+  assert.deepEqual(ignoredEntries(['some_future_key', 'routes']), [
+    { key: 'some_future_key', reason: 'not recognised by hobby' },
+    { key: 'routes', reason: 'hostnames come from hobby: <resource>.<project>.<domain>' },
+  ])
+})
+
+// Issues #149 and #152: the keys a real production monorepo (sixteen
+// manifests) actually used, each with a named reason rather than the
+// alarming-sounding "not recognised". `ai` in particular is the binding a
+// worker finds undefined at runtime if nobody said so at deploy time.
+test('ai, services, env, assets, hyperdrive and migrations all carry a named reason', () => {
+  const entries = ignoredEntries(['ai', 'services', 'env', 'assets', 'hyperdrive', 'migrations'])
+  for (const entry of entries) {
+    assert.notEqual(entry.reason, 'not recognised by hobby', `${entry.key} has no reason`)
+  }
+  assert.match(entries[0]?.reason ?? '', /Workers AI is not provided by hobby/)
+  assert.match(entries[5]?.reason ?? '', /nothing to migrate/)
+})
+
+test('a manifest with [ai], [[services]], [env.staging], [assets] and [[hyperdrive]] lists each as ignored', () => {
+  const toml = `
+name = "indexer"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+[ai]
+binding = "AI"
+[[services]]
+binding = "AUTH"
+service = "auth"
+[env.staging]
+name = "indexer-staging"
+[assets]
+directory = "./public"
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "abc"
+`
+  const manifest = parseWranglerManifest(toml, 'toml')
+  assert.deepEqual(manifest.ignored, ['ai', 'assets', 'env', 'hyperdrive', 'services'])
 })
 
 test('a manifest with no main or no compatibility_date is refused with a reason', () => {
