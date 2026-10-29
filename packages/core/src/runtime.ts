@@ -65,6 +65,17 @@ export interface BuildSpec {
   // always loses to anything else contending for the box.
   memory?: string
   cpuShares?: number
+  // `docker build --build-arg K=V`, one per entry (issue #146). Baked into
+  // the image by whatever ARG reads them, so not a place for a secret.
+  buildArgs?: Record<string, string>
+  // Path patterns left out of the build context (issue #151). When set, the
+  // context is streamed to docker as a tar the runtime assembles itself,
+  // with the Dockerfile added to it, instead of docker reading the directory:
+  // docker's own exclusion mechanism is a .dockerignore at the context root,
+  // and for a worker the context is the user's directory, which hobby does
+  // not write into. The generated Dockerfile lives outside the context, so
+  // this is also what lets it be used without `-f` pointing outside the tar.
+  exclude?: string[]
 }
 
 // A process run inside an already running container, with its stdout handed

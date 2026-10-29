@@ -12,6 +12,7 @@
 // hobby leaving files in a directory it does not own, which is exactly the
 // kind of thing `hobby eject` exists to promise we do not do.
 
+import { builtinModules } from 'node:module'
 import { HobbyError, type BuildSpec, type ComputeRuntime } from '@hobby.sh/core'
 
 // Pinned, and not to `latest`. As of 2026-08-10 npm's `latest` tag for
@@ -493,22 +494,55 @@ process.on('SIGINT', shutdown)
 `
 
 export interface WorkerDockerfileOptions {
-  // The Worker entry point, relative to the build context, from the
+  // The Worker entry point, relative to the worker's own directory, from the
   // manifest's own `main`.
   main: string
+  // The worker's directory relative to the build context, when the context
+  // is a workspace root rather than the worker itself (issue #147). Absent
+  // or '.' means the context is the worker directory, as before.
+  dir?: string
+  // The manifest's compatibility_flags. `nodejs_compat` (and `_v2`) make
+  // workerd provide the Node builtins, so the bundler must leave them
+  // external rather than refuse them (issue #148).
+  compatibilityFlags?: string[]
 }
+
+// What wrangler does when nodejs_compat is on: every builtin, in both the
+// `node:` and bare spellings, is left for the runtime. Bun's --external
+// takes a wildcard for the prefixed form; the bare names have to be listed,
+// which is what node's own builtinModules is for (it includes the subpath
+// ones, `util/types` and `fs/promises` among them, that the reporter's
+// workers hit).
+export function nodeBuiltinExternals(compatibilityFlags: string[]): string[] {
+  const nodejsCompat = compatibilityFlags.some((flag) => flag === 'nodejs_compat' || flag === 'nodejs_compat_v2')
+  if (!nodejsCompat) return []
+  return ['node:*', ...builtinModules.filter((name) => !name.startsWith('_'))]
+}
+
+export const WORKER_CONTEXT_EXCLUDES = ['node_modules', '.git']
 
 export function renderWorkerDockerfile(opts: WorkerDockerfileOptions): string {
   const runner = Buffer.from(RUNNER_SOURCE, 'utf8').toString('base64')
+  const dir = opts.dir === undefined || opts.dir === '' || opts.dir === '.' ? null : opts.dir
+  const externals = ['cloudflare:*', ...nodeBuiltinExternals(opts.compatibilityFlags ?? [])]
+  const externalFlags = externals.map((name) => `--external ${JSON.stringify(name)}`).join(' ')
+  const bundle = `bun build ${JSON.stringify(opts.main)} --outfile /out/worker.mjs --target=browser --format=esm --conditions=workerd,worker,browser ${externalFlags}`
   return [
     `FROM ${BUN_IMAGE} AS build`,
     'WORKDIR /src',
+    '# The context arrives without node_modules or .git (WORKER_CONTEXT_EXCLUDES,',
+    '# applied by the runtime when it streams the context), so the install',
+    '# below starts clean rather than over the host\'s own symlinks.',
     'COPY . .',
     '# Their dependencies, if they have any. A worker with no imports beyond',
-    '# the runtime has no package.json and must still build, so a failed or',
-    '# absent install is not fatal here: the bundle step below is what decides',
-    '# whether the code is actually buildable.',
-    'RUN bun install --frozen-lockfile 2>/dev/null || bun install 2>/dev/null || true',
+    '# the runtime has no package.json and must still build, so the install is',
+    '# skipped when there is nothing to install from. When there IS a',
+    '# package.json the install must succeed and its errors are shown: hiding',
+    '# them (issue #151) turned a workspace that failed to resolve into a',
+    '# bundle error blaming an import the user wrote correctly. A pnpm',
+    '# lockfile means a pnpm workspace, which bun does not read, so pnpm does',
+    '# that install.',
+    'RUN if [ -f pnpm-lock.yaml ]; then bunx pnpm install --frozen-lockfile; elif [ -f package.json ]; then bun install; fi',
     '# Bundled for workerd, not for Bun or Node: the `workerd` condition is',
     '# what makes packages that ship a Workers-specific entry point resolve to',
     '# it, and `browser` is the target Cloudflare\'s own tooling uses because a',
@@ -524,7 +558,11 @@ export function renderWorkerDockerfile(opts: WorkerDockerfileOptions): string {
     '# The failure is at build time with a message about installing a package,',
     '# so it reads like the user got their imports wrong rather than like a',
     '# platform that cannot run the syntax its own docs are written in.',
-    `RUN bun build ${JSON.stringify(opts.main)} --outfile /out/worker.mjs --target=browser --format=esm --conditions=workerd,worker,browser --external ${JSON.stringify('cloudflare:*')}`,
+    '# With nodejs_compat on, `node:*` and the bare builtin names are external',
+    '# too, as wrangler leaves them, because workerd provides them at runtime;',
+    '# without it the bundler refuses them with "Browser build cannot import',
+    '# Node.js builtin" (issue #148).',
+    dir === null ? `RUN ${bundle}` : `RUN cd ${JSON.stringify(dir)} && ${bundle}`,
     '',
     `FROM ${NODE_IMAGE}`,
     `RUN mkdir -p ${CONTAINER_ROOT} ${CONTAINER_STATE} ${CONTAINER_DO}`,
@@ -549,6 +587,12 @@ export interface BuildWorkerImageOptions {
   cpuShares?: number
 }
 
+// The Dockerfile is generated into a directory hobby owns, outside the
+// user's source, so the runtime streams the context with this file added to
+// it under this name. Dotted and prefixed so it cannot collide with a
+// Dockerfile the user keeps at their own root.
+export const GENERATED_DOCKERFILE = '.hobby.Dockerfile'
+
 export async function buildWorkerImage(
   runtime: ComputeRuntime,
   opts: BuildWorkerImageOptions
@@ -564,6 +608,7 @@ export async function buildWorkerImage(
     contextPath: opts.contextPath,
     dockerfile: opts.dockerfilePath,
     tag: opts.tag,
+    exclude: WORKER_CONTEXT_EXCLUDES,
     ...(opts.memory === undefined ? {} : { memory: opts.memory }),
     ...(opts.cpuShares === undefined ? {} : { cpuShares: opts.cpuShares }),
   }

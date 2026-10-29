@@ -325,7 +325,7 @@ export interface Api {
       | {
           kind: 'app'
           name: string
-          source?: { path: string; dockerfile?: string }
+          source?: { path: string; dockerfile?: string; buildArgs?: Record<string, string> }
           image?: string
           port?: number
           env?: Record<string, string>
@@ -340,16 +340,21 @@ export interface Api {
           // accepts sourcePath: null and produces an `undeployed` row). Not
           // required the way it once was, now that a project can hold a
           // worker with no code yet.
-          source?: { path: string }
+          source?: { path: string; context?: string }
           databaseResourceId?: string
           env?: Record<string, string>
         }
   ): Promise<ResourceResponse>
   deployResource(
     id: string,
-    // `env` is apps only. Omitted keeps the app's current variables; sent,
-    // it replaces them wholesale (deployApp, packages/app/src/app.ts).
-    input?: { source?: { path: string; dockerfile?: string }; env?: Record<string, string> }
+    // `env` omitted keeps the resource's current variables; sent, it
+    // replaces them wholesale (deployApp, deployWorker). source.dockerfile
+    // and source.buildArgs absent keep what the app was last built with;
+    // source.context absent keeps a worker's, null clears it.
+    input?: {
+      source?: { path: string; dockerfile?: string; buildArgs?: Record<string, string>; context?: string | null }
+      env?: Record<string, string>
+    }
   ): Promise<ResourceResponse & { image: string; logs: string }>
   getResource(id: string): Promise<ResourceResponse>
   // POST /v1/resources/:id/env. Keys come back, values never do.

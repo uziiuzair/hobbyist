@@ -420,7 +420,21 @@ async function branchProjectRoute(ctx: DaemonContext, req: IncomingMessage, sour
 // all, and an image that hardcodes something else declares it here.
 const DEFAULT_APP_PORT = 3000
 
-function readAppSource(body: Record<string, unknown>): AppSource | null {
+// What a request said about where to build from, with nothing filled in:
+// the two callers default differently. A create defaults the Dockerfile
+// name; a redeploy keeps whatever the resource was last built with, so a
+// plain `hobby deploy` does not reset an app deployed with --dockerfile
+// back to `Dockerfile` (issue #146).
+interface SourceInput {
+  path: string
+  dockerfile?: string
+  buildArgs?: Record<string, string>
+  // Workers only: the build context when it is not `path` (issue #147).
+  // Null clears a stored one; absent keeps it.
+  context?: string | null
+}
+
+function readSourceInput(body: Record<string, unknown>): SourceInput | null {
   const source = body['source']
   if (!isRecord(source)) {
     return null
@@ -430,7 +444,22 @@ function readAppSource(body: Record<string, unknown>): AppSource | null {
     return null
   }
   const dockerfile = source['dockerfile']
-  return { path, dockerfile: typeof dockerfile === 'string' && dockerfile.length > 0 ? dockerfile : 'Dockerfile' }
+  const context = source['context']
+  return {
+    path,
+    ...(typeof dockerfile === 'string' && dockerfile.length > 0 ? { dockerfile } : {}),
+    ...('buildArgs' in source ? { buildArgs: validatedEnv(readStringMap(source['buildArgs'])) } : {}),
+    ...(typeof context === 'string' && context.length > 0 ? { context } : context === null ? { context: null } : {}),
+  }
+}
+
+function appSourceFrom(input: SourceInput, previous: AppSource | null): AppSource {
+  const buildArgs = input.buildArgs ?? previous?.buildArgs
+  return {
+    path: input.path,
+    dockerfile: input.dockerfile ?? previous?.dockerfile ?? 'Dockerfile',
+    ...(buildArgs === undefined || Object.keys(buildArgs).length === 0 ? {} : { buildArgs }),
+  }
 }
 
 function readStringMap(value: unknown): Record<string, string> {
@@ -614,7 +643,8 @@ async function createResourceRoute(
   }
 
   if (kind === 'app') {
-    const source = readAppSource(fields)
+    const input = readSourceInput(fields)
+    const source = input === null ? null : appSourceFrom(input, null)
     const image = typeof fields['image'] === 'string' && fields['image'].length > 0 ? fields['image'] : null
     const rawPort = fields['port']
     const containerPort = typeof rawPort === 'number' && Number.isInteger(rawPort) ? rawPort : DEFAULT_APP_PORT
@@ -639,7 +669,7 @@ async function createResourceRoute(
     // createWorkerResource, packages/worker/src/worker.ts). readAppSource
     // already returns null when no source was given, so there is nothing
     // left to reject here.
-    const source = readAppSource(fields)
+    const source = readSourceInput(fields)
     const databaseResourceId =
       typeof fields['databaseResourceId'] === 'string' ? fields['databaseResourceId'] : null
 
@@ -666,6 +696,7 @@ async function createResourceRoute(
       sourcePath: source === null ? null : source.path,
       databaseResourceId,
       ...('env' in fields ? { env: validatedEnv(readStringMap(fields['env'])) } : {}),
+      ...(source?.context === undefined ? {} : { context: source.context }),
     })
     // Every wrangler key we read and did not act on, reported at the moment
     // the user is watching. Silence here is how a platform earns a
@@ -889,14 +920,14 @@ export async function syncWorkerQueueBindings(ctx: DaemonContext, project: Proje
 async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
   const body = await readJsonBody(req)
-  const source = isRecord(body) ? readAppSource(body) : null
+  const source = isRecord(body) ? readSourceInput(body) : null
 
   if (resource.kind === 'app') {
     // Only a present field replaces the app's env. An absent one keeps it,
     // so a plain redeploy never wipes variables set on an earlier one.
     const env = isRecord(body) && 'env' in body ? validatedEnv(readStringMap(body['env'])) : undefined
     const result = await deployApp(ctx, resource, {
-      ...(source === null ? {} : { source }),
+      ...(source === null ? {} : { source: appSourceFrom(source, resource.config.source) }),
       ...(env === undefined ? {} : { env }),
     })
     return {
@@ -933,6 +964,7 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
     const env = isRecord(body) && 'env' in body ? validatedEnv(readStringMap(body['env'])) : undefined
     const result = await deployWorker(ctx, resource, {
       ...(source === null ? {} : { sourcePath: source.path }),
+      ...(source?.context === undefined ? {} : { context: source.context }),
       ...(env === undefined ? {} : { env }),
     })
     for (const line of describeIgnored(result.ignored)) {
@@ -1354,6 +1386,13 @@ function renderCompose(
       lines.push('    build:')
       lines.push(`      context: ${cfg.source.path}`)
       lines.push(`      dockerfile: ${cfg.source.dockerfile}`)
+      const buildArgs = Object.entries(cfg.source.buildArgs ?? {})
+      if (buildArgs.length > 0) {
+        lines.push('      args:')
+        for (const [key, value] of buildArgs) {
+          lines.push(`        ${key}: ${JSON.stringify(value)}`)
+        }
+      }
     }
     lines.push('    restart: unless-stopped')
     lines.push('    environment:')

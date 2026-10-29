@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -726,4 +726,38 @@ test('a bound database wins over a DATABASE_URL in the app env', async () => {
   assert.ok(spec !== undefined)
   assert.equal(spec.env['DATABASE_URL'], 'postgres://postgres:secret-password@host.docker.internal:5432/blog')
   assert.equal(spec.env['OTHER'], 'x')
+})
+
+// Issue #146: a Dockerfile that is not `<path>/Dockerfile`, and build args,
+// both persisted so a redeploy rebuilds the same way.
+test('an app source names its Dockerfile relative to the context and carries build args to the build', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const root = mkdtempSync(join(tmpdir(), 'hobby-mono-'))
+  mkdirSync(join(root, 'deploy'))
+  writeFileSync(join(root, 'deploy', 'admin.Dockerfile'), 'FROM scratch\nARG NEXT_PUBLIC_URL\n')
+
+  const app = await createAppResource(deps, {
+    project,
+    name: 'admin',
+    source: { path: root, dockerfile: 'deploy/admin.Dockerfile', buildArgs: { NEXT_PUBLIC_URL: 'https://admin.example' } },
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+  assert.equal(runtime._builds[0]?.contextPath, root)
+  assert.equal(runtime._builds[0]?.dockerfile, join(root, 'deploy', 'admin.Dockerfile'))
+  assert.deepEqual(runtime._builds[0]?.buildArgs, { NEXT_PUBLIC_URL: 'https://admin.example' })
+  assert.deepEqual(app.config.source, {
+    path: root,
+    dockerfile: 'deploy/admin.Dockerfile',
+    buildArgs: { NEXT_PUBLIC_URL: 'https://admin.example' },
+  })
+
+  // A redeploy with no source given rebuilds from the stored one, args included.
+  await deployApp(deps, app, {})
+  assert.deepEqual(runtime._builds[1]?.buildArgs, { NEXT_PUBLIC_URL: 'https://admin.example' })
+  assert.equal(runtime._builds[1]?.dockerfile, join(root, 'deploy', 'admin.Dockerfile'))
 })

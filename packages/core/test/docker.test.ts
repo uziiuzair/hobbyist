@@ -412,3 +412,92 @@ test('mergeTimestampedLogs keeps a continuation line with the line before it and
     'one\nError: boom\n    at main.js:1\n'
   )
 })
+
+// Issues #146 and #151: build args reach docker as --build-arg, and a build
+// with `exclude` streams a tar of the context (patterns left out, generated
+// Dockerfile added) to `docker build -` instead of pointing docker at the
+// directory.
+test('build passes --build-arg per entry and the context directory when nothing is excluded', async () => {
+  const calls: RecordedCall[] = []
+  const exec: ExecFn = async (cmd, args) => {
+    calls.push({ cmd, args })
+    return { stdout: 'sha256:abc\n', stderr: 'step 1/3\n' }
+  }
+  const runtime = createDockerRuntime(exec)
+  const logs = await runtime.build!({
+    contextPath: '/repo',
+    dockerfile: '/repo/deploy/web.Dockerfile',
+    tag: 'hobby/blog-web:1',
+    buildArgs: { NEXT_PUBLIC_URL: 'https://x', A: 'b=c' },
+  })
+  assert.equal(logs, 'step 1/3\nsha256:abc\n')
+  assert.deepEqual(calls[0]?.args, [
+    'build',
+    '-f',
+    '/repo/deploy/web.Dockerfile',
+    '-t',
+    'hobby/blog-web:1',
+    '--build-arg',
+    'NEXT_PUBLIC_URL=https://x',
+    '--build-arg',
+    'A=b=c',
+    '/repo',
+  ])
+})
+
+test('build with exclude streams a tar with the patterns left out and the Dockerfile appended', async () => {
+  const calls: Array<RecordedCall & { stdin?: unknown }> = []
+  const spawned = fakeSpawned()
+  const spawnCalls: RecordedCall[] = []
+  const exec: ExecFn = async (cmd, args, opts) => {
+    calls.push({ cmd, args, stdin: opts?.stdin })
+    // docker finished reading: the tar process closes cleanly afterwards.
+    spawned.emitter.emit('close', 0)
+    return { stdout: '', stderr: 'ok\n' }
+  }
+  const runtime = createDockerRuntime(exec, (cmd, args) => {
+    spawnCalls.push({ cmd, args })
+    return spawned.process
+  })
+  await runtime.build!({
+    contextPath: '/work/api',
+    dockerfile: '/home/.hobby/projects/blog/api/bundle/.hobby.Dockerfile',
+    tag: 'hobby/blog-api-worker:1',
+    exclude: ['node_modules', '.git'],
+  })
+  assert.deepEqual(spawnCalls, [
+    {
+      cmd: 'tar',
+      args: [
+        '-cf',
+        '-',
+        '--exclude',
+        'node_modules',
+        '--exclude',
+        '.git',
+        '-C',
+        '/work/api',
+        '.',
+        '-C',
+        '/home/.hobby/projects/blog/api/bundle',
+        '.hobby.Dockerfile',
+      ],
+    },
+  ])
+  assert.deepEqual(calls[0]?.args, ['build', '-f', '.hobby.Dockerfile', '-t', 'hobby/blog-api-worker:1', '-'])
+  assert.equal(calls[0]?.stdin, spawned.stdout, 'the tar stream is docker\'s stdin')
+})
+
+test('a tar that fails fails the build with tar\'s own words, not docker\'s', async () => {
+  const spawned = fakeSpawned()
+  const exec: ExecFn = async () => {
+    spawned.stderr.write('tar: ./secret: Cannot open: Permission denied\n')
+    spawned.emitter.emit('close', 1)
+    return { stdout: '', stderr: '' }
+  }
+  const runtime = createDockerRuntime(exec, () => spawned.process)
+  await assert.rejects(
+    runtime.build!({ contextPath: '/work', dockerfile: '/gen/.hobby.Dockerfile', tag: 't', exclude: ['node_modules'] }),
+    (err: unknown) => err instanceof Error && /assemble the build context/.test(err.message) && /Permission denied/.test(String((err as { hint?: string }).hint))
+  )
+})

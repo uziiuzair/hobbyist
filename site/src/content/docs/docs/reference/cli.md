@@ -142,8 +142,19 @@ Both present is an error rather than a guess.
 | `--port <n>` | The port your process listens on inside the container. Apps only |
 | `--env-file <f>` | Variables from a dotenv file, replacing the resource's current set |
 | `--env K=V` | One variable, repeatable. Wins over the same key in `--env-file` |
+| `--dockerfile <f>` | The Dockerfile, relative to `[path]`, when it is not `<path>/Dockerfile`. Apps only |
+| `--build-arg K=V` | A `docker build --build-arg`, repeatable, persisted for redeploys. Apps only |
+| `--context <dir>` | The build context when it is not `[path]`: a workspace root the worker's install needs. Workers only |
 | `--kind app\|worker` | Only needed when the directory is ambiguous |
 | `--json` | Machine-readable output |
+
+`[path]` is the build context for an app, so a monorepo deploys each app from
+the root with `--dockerfile` and `--name`. For a worker, `[path]` is the
+directory holding the wrangler manifest and `--context` is the root to install
+from. A redeploy that names none of these keeps the Dockerfile, build args and
+context the resource was last built with. Build arg values are redacted on
+every API response, like env values, but they are baked into the image by
+whatever `ARG` reads them, so they are not a place for a secret.
 
 Without `--project`, the project is the one this directory is linked to
 (`hobby link`), and failing that the directory's own name.

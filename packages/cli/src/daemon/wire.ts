@@ -122,7 +122,17 @@ function redactConfig(kind: Resource['kind'], config: ResourceConfig): WireResou
   }
   if (kind === 'app') {
     const app = config as AppConfig
-    return { ...app, env: redactValues(app.env) }
+    return {
+      ...app,
+      env: redactValues(app.env),
+      // Build args are baked into the image and documented as not a place
+      // for a secret, but a private registry token passed as one is exactly
+      // what a user who did not read that would do, so values go the same
+      // way env values do.
+      ...(app.source?.buildArgs === undefined
+        ? {}
+        : { source: { ...app.source, buildArgs: redactValues(app.source.buildArgs) } }),
+    }
   }
   if (kind === 'queue') {
     // A queue's config holds no user-supplied secret: no password, no env,

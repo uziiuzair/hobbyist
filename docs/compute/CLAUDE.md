@@ -222,3 +222,49 @@ given neither reads `.dev.vars` beside its manifest when present, the file
 `ls` reads names off the redacted wire config, so the CLI has no code path
 that could print a value. MCP mirrors the three as `hobby_env_set`,
 `hobby_env_ls`, `hobby_env_unset` (`packages/mcp/src/tools.ts`).
+
+## Amendment, 2026-10-29: building from a monorepo (issues #146, #147, #148, #151)
+
+A real production monorepo (four Next.js apps and eleven workers) could
+deploy one app and none of the workers from their real directories. Four
+causes, four fixes, all in how a build is described and assembled.
+
+`AppConfig.source` (`packages/core/src/types.ts`) keeps `path` as the build
+context and `dockerfile` relative to it, and gains `buildArgs`, persisted so
+a redeploy rebuilds the same way. `hobby deploy <root> --dockerfile <f>
+--build-arg K=V --name <n>` is the CLI for it; the daemon's
+`readSourceInput` / `appSourceFrom` (`packages/cli/src/daemon/routes.ts`)
+default a create to `Dockerfile` and a redeploy to what the app was last
+built with, so a plain `hobby deploy` no longer resets a custom Dockerfile.
+`BuildSpec.buildArgs` reaches docker as `--build-arg`; values are redacted
+on the wire like env (and documented as not a place for a secret, since an
+`ARG` bakes them into the image). Eject's compose file carries them as
+`build.args`.
+
+Workers get `--context <root>` (`WorkerManifest.source.context`,
+`resolveBuildContext` in `packages/worker/src/worker.ts`): the context is
+the root, the generated Dockerfile installs there and bundles from the
+worker's directory inside it, and a context that does not contain the
+worker is refused before any build. Persisted, kept on redeploy, cleared
+with `context: null`.
+
+`BuildSpec.exclude` (`packages/core/src/docker.ts`) is the answer to the
+missing `.dockerignore`: docker's only exclusion mechanism is a file at the
+context root, which for a worker is the user's directory, so the runtime
+streams the context itself, as a tar with the patterns left out and the
+generated Dockerfile appended under `.hobby.Dockerfile`, to `docker build
+-`. Workers always exclude `node_modules` and `.git`
+(`WORKER_CONTEXT_EXCLUDES`). A failing tar fails the build with tar's own
+words. Apps are unchanged: they have their own `.dockerignore`.
+
+The worker install step no longer discards its errors (`2>/dev/null ||
+true`): it runs only when there is a `package.json`, uses pnpm when there
+is a `pnpm-lock.yaml` (bun does not read pnpm workspaces), and otherwise
+`bun install`, and its failure is the deploy's failure. With `nodejs_compat`
+(or `_v2`) in `compatibility_flags`, `nodeBuiltinExternals`
+(`packages/worker/src/runtime-image.ts`) marks `node:*` and every bare
+builtin from node's own `builtinModules` external, as wrangler does, so a
+worker importing `dns` or `tls` bundles and workerd provides them.
+
+Not verified against a real docker daemon in this change; the tar flags
+used (`-cf - --exclude P -C dir .`) are the subset GNU tar and bsdtar share.

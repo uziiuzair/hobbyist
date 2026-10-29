@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -31,7 +31,7 @@ import {
   parseWranglerManifest,
   stripJsonComments,
 } from '../src/manifest.js'
-import { renderWorkerDockerfile, MINIFLARE_VERSION } from '../src/runtime-image.js'
+import { nodeBuiltinExternals, renderWorkerDockerfile, MINIFLARE_VERSION, WORKER_CONTEXT_EXCLUDES } from '../src/runtime-image.js'
 import {
   buildRunnerManifest,
   createWorkerResource,
@@ -1265,4 +1265,82 @@ test('config.env is merged over the manifest vars at start and kept across a red
   const replaced = await deployWorker(deps, redeployed.resource, { env: { ONLY: '1' } })
   assert.deepEqual(replaced.resource.config.env, { ONLY: '1' })
   assert.deepEqual(buildRunnerManifest(deps, replaced.resource).vars, { MODE: 'file', SHARED: 'file', ONLY: '1' })
+})
+
+// Issues #147, #148 and #151: the generated Dockerfile for a worker in a
+// workspace, with nodejs_compat on, with install errors visible.
+test('nodejs_compat leaves node:* and the bare builtin names external; without the flag they are not', () => {
+  const on = renderWorkerDockerfile({ main: 'src/index.ts', compatibilityFlags: ['nodejs_compat'] })
+  assert.match(on, /--external "node:\*"/)
+  assert.match(on, /--external "dns"/)
+  assert.match(on, /--external "tls"/)
+  assert.match(on, /--external "util\/types"/)
+  assert.match(on, /--external "cloudflare:\*"/)
+  assert.equal(on.includes('--external "_http_common"'), false, 'internal modules are not listed')
+
+  const off = renderWorkerDockerfile({ main: 'src/index.ts', compatibilityFlags: [] })
+  assert.equal(off.includes('--external "node:*"'), false)
+  assert.equal(off.includes('--external "dns"'), false)
+  assert.deepEqual(nodeBuiltinExternals(['nodejs_compat_v2']).slice(0, 1), ['node:*'])
+})
+
+test('the install step shows its errors, skips only when there is no package.json, and uses pnpm for a pnpm workspace', () => {
+  const dockerfile = renderWorkerDockerfile({ main: 'src/index.ts' })
+  assert.equal(dockerfile.includes('2>/dev/null'), false, 'install errors were swallowed (issue #151)')
+  assert.equal(dockerfile.includes('|| true'), false)
+  assert.match(dockerfile, /if \[ -f pnpm-lock\.yaml \]; then bunx pnpm install --frozen-lockfile; elif \[ -f package\.json \]; then bun install; fi/)
+})
+
+test('a worker inside a workspace bundles from its own directory within the root context', () => {
+  const dockerfile = renderWorkerDockerfile({ main: 'src/index.ts', dir: 'apps/workers/indexer' })
+  assert.match(dockerfile, /^RUN cd "apps\/workers\/indexer" && bun build "src\/index\.ts"/m)
+  const flat = renderWorkerDockerfile({ main: 'src/index.ts', dir: '.' })
+  assert.match(flat, /^RUN bun build "src\/index\.ts"/m)
+})
+
+test('a worker build excludes node_modules and .git from the context and names the generated Dockerfile', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  await createWorkerResource(deps, { project, name: 'api', sourcePath: workerSource(), databaseResourceId: null })
+  assert.deepEqual(runtime._builds[0]?.exclude, WORKER_CONTEXT_EXCLUDES)
+  assert.ok(runtime._builds[0]?.dockerfile.endsWith('/.hobby.Dockerfile'))
+})
+
+test('--context builds from the workspace root, persists it, and a redeploy keeps it', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const root = mkdtempSync(join(tmpdir(), 'hobby-workspace-'))
+  const dir = join(root, 'apps', 'indexer')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'wrangler.toml'), SAMPLE_TOML)
+  writeFileSync(join(dir, 'index.ts'), 'export default { fetch: () => new Response("ok") }\n')
+
+  const created = await createWorkerResource(deps, { project, name: 'indexer', sourcePath: dir, databaseResourceId: null, context: root })
+  assert.equal(runtime._builds[0]?.contextPath, root)
+  assert.equal(created.resource.config.manifest?.source.context, root)
+  assert.equal(created.resource.config.manifest?.source.path, dir)
+  const dockerfile = readFileSync(runtime._builds[0]?.dockerfile ?? '', 'utf8')
+  assert.match(dockerfile, /^RUN cd "apps\/indexer" && bun build/m)
+
+  const redeployed = await deployWorker(deps, created.resource, {})
+  assert.equal(runtime._builds[1]?.contextPath, root)
+  assert.equal(redeployed.resource.config.manifest?.source.context, root)
+
+  const cleared = await deployWorker(deps, redeployed.resource, { context: null })
+  assert.equal(runtime._builds[2]?.contextPath, dir)
+  assert.equal(cleared.resource.config.manifest?.source.context, undefined)
+})
+
+test('a context that does not contain the worker directory is refused before any build', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const elsewhere = mkdtempSync(join(tmpdir(), 'hobby-elsewhere-'))
+  await assert.rejects(
+    createWorkerResource(deps, { project, name: 'api', sourcePath: workerSource(), databaseResourceId: null, context: elsewhere }),
+    (err: unknown) => err instanceof HobbyError && err.code === 'usage' && /does not contain/.test(err.message)
+  )
+  assert.deepEqual(runtime._builds, [])
 })

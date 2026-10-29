@@ -5,12 +5,16 @@
 // shell string: that is what keeps this free of command injection.
 
 import { execFile, spawn } from 'node:child_process'
+import { basename, dirname } from 'node:path'
 import type { Readable } from 'node:stream'
 import { HobbyError } from './errors.js'
 import { DEFAULT_PORT_BIND } from './runtime.js'
 import type { BuildSpec, ComputeRuntime, ContainerId, ContainerSpec, ContainerStatus, ExecStream } from './runtime.js'
 
-export type ExecFn = (cmd: string, args: string[]) => Promise<{ stdout: string; stderr: string }>
+// `stdin`, when given, is piped to the child: `docker build -` reads its
+// build context from it (the streamed build below). Only that caller passes
+// one; every other call leaves stdin closed exactly as before.
+export type ExecFn = (cmd: string, args: string[], opts?: { stdin?: Readable }) => Promise<{ stdout: string; stderr: string }>
 
 // The streaming counterpart of ExecFn, used only by execStream below. A
 // separate seam because ExecFn's contract is "run to completion and hand me
@@ -57,7 +61,10 @@ interface ExecError {
   message?: string
 }
 
-function defaultExec(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+function defaultExec(cmd: string, args: string[], opts?: { stdin?: Readable }): Promise<{ stdout: string; stderr: string }> {
+  if (opts?.stdin !== undefined) {
+    return execWithStdin(cmd, args, opts.stdin)
+  }
   return new Promise((resolve, reject) => {
     execFile(cmd, args, { maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
@@ -69,6 +76,39 @@ function defaultExec(cmd: string, args: string[]): Promise<{ stdout: string; std
       }
       resolve({ stdout, stderr })
     })
+  })
+}
+
+// execFile has no stdin seam, so the one caller that needs one goes
+// through spawn and collects the same two strings. The same ExecError shape
+// is rejected on a non-zero exit, so build()'s error handling below does
+// not know which path ran.
+function execWithStdin(cmd: string, args: string[], stdin: Readable): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk
+    })
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk
+    })
+    stdin.on('error', (err) => {
+      child.kill()
+      reject(Object.assign(new Error(`input stream failed: ${err.message}`), { stdout, stderr }))
+    })
+    child.on('error', (err) => reject(Object.assign(err, { stdout, stderr })))
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr })
+      } else {
+        reject(Object.assign(new Error(`${cmd} exited with ${String(code)}`), { stdout, stderr }))
+      }
+    })
+    stdin.pipe(child.stdin)
   })
 }
 
@@ -300,22 +340,69 @@ export function createDockerRuntime(exec: ExecFn = defaultExec, spawnFn: SpawnFn
     // the hint because the last line of a docker build is rarely the line
     // that explains it.
     async build(spec: BuildSpec): Promise<string> {
-      const args = ['build', '-f', spec.dockerfile, '-t', spec.tag]
+      const streamed = spec.exclude !== undefined && spec.exclude.length > 0
+      // In the streamed case the Dockerfile is an entry in the tar, named
+      // by its basename, and docker is told to read the context from stdin.
+      const args = ['build', '-f', streamed ? basename(spec.dockerfile) : spec.dockerfile, '-t', spec.tag]
       if (spec.memory !== undefined) {
         args.push('--memory', spec.memory)
       }
       if (spec.cpuShares !== undefined) {
         args.push('--cpu-shares', String(spec.cpuShares))
       }
-      args.push(spec.contextPath)
+      for (const [key, value] of Object.entries(spec.buildArgs ?? {})) {
+        args.push('--build-arg', `${key}=${value}`)
+      }
+      args.push(streamed ? '-' : spec.contextPath)
+
+      // The context as a tar built here, with the excluded patterns left
+      // out and the Dockerfile appended from wherever it lives. `--exclude`
+      // before the paths, which both GNU tar and bsdtar honour, and a bare
+      // pattern (`node_modules`) matches that name at any depth in both. A
+      // tar that fails (an unreadable file, a missing directory) fails the
+      // build with tar's own words rather than docker's complaint about a
+      // truncated stream.
+      let tar: SpawnedProcess | undefined
+      let tarStderr = ''
+      let tarFailed: Promise<string | null> | undefined
+      if (streamed) {
+        tar = spawnFn('tar', [
+          '-cf',
+          '-',
+          ...(spec.exclude ?? []).flatMap((pattern) => ['--exclude', pattern]),
+          '-C',
+          spec.contextPath,
+          '.',
+          '-C',
+          dirname(spec.dockerfile),
+          basename(spec.dockerfile),
+        ])
+        tar.stderr.setEncoding('utf8')
+        tar.stderr.on('data', (chunk: string) => {
+          tarStderr += chunk
+        })
+        const spawned = tar
+        tarFailed = new Promise((resolve) => {
+          spawned.once('error', (err) => resolve(err.message))
+          spawned.once('close', (code) => resolve(code === 0 ? null : `tar exited with ${String(code)}: ${tarStderr.trim()}`))
+        })
+      }
 
       try {
-        const { stdout, stderr } = await exec('docker', args)
+        const { stdout, stderr } = await exec('docker', args, tar === undefined ? undefined : { stdin: tar.stdout })
+        const tarError = tarFailed === undefined ? null : await tarFailed
+        if (tarError !== null) {
+          throw new HobbyError('build_failed', `could not assemble the build context for ${spec.tag}`, tarError)
+        }
         // docker build writes its progress to stderr and only the final
         // image id to stdout, so a caller shown stdout alone sees nothing
         // useful.
         return `${stderr}${stdout}`
       } catch (err) {
+        tar?.kill()
+        if (err instanceof HobbyError) {
+          throw err
+        }
         const e = errorOf(err)
         throw new HobbyError(
           'build_failed',

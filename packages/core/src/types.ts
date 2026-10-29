@@ -89,8 +89,12 @@ export interface PostgresConfig extends ResourceConfigBase {
 // persistence comes from a sibling postgres resource.
 export interface AppConfig extends ResourceConfigBase {
   // Absent for an image-based app, present for a source-based one, and it
-  // is what a redeploy rebuilds from.
-  source: { path: string; dockerfile: string } | null
+  // is what a redeploy rebuilds from. `path` is the build context and
+  // `dockerfile` is relative to it (or absolute), so a monorepo deploys
+  // several apps from one root with one Dockerfile each (issue #146).
+  // `buildArgs` are `docker build --build-arg` values, persisted so a
+  // redeploy rebuilds with the same ones; absent on rows from before them.
+  source: { path: string; dockerfile: string; buildArgs?: Record<string, string> } | null
   // The port the process inside listens on, handed to it as $PORT and
   // published to hostPort. A process that binds 127.0.0.1 inside its own
   // container is unreachable from the host, which is the single most
@@ -112,8 +116,10 @@ export interface AppConfig extends ResourceConfigBase {
 // structural instead of a comment someone has to notice and honour.
 export interface WorkerManifest {
   // The directory holding the user's wrangler manifest and entry script,
-  // and the name of the manifest file we actually read from it.
-  source: { path: string; manifest: string }
+  // and the name of the manifest file we actually read from it. `context`
+  // is the build context when it is not `path`: the root of a workspace
+  // whose install the worker needs (issue #147). Absent means `path`.
+  source: { path: string; manifest: string; context?: string }
   compatibilityDate: string
   compatibilityFlags: string[]
   vars: Record<string, string>
