@@ -268,3 +268,30 @@ worker importing `dns` or `tls` bundles and workerd provides them.
 
 Not verified against a real docker daemon in this change; the tar flags
 used (`-cf - --exclude P -C dir .`) are the subset GNU tar and bsdtar share.
+
+## Amendment, 2026-10-29: cron triggers (issue #75)
+
+`[triggers] crons` was reported as "scheduled workers are not built yet".
+It is built: `triggers` is honoured in `packages/worker/src/manifest.ts`,
+each expression is validated at deploy by `parseCron`
+(`packages/core/src/cron.ts`, five-field UTC, lists, ranges, steps, names,
+either/or day semantics as Vixie cron and Cloudflare), and the list is
+persisted as `WorkerManifest.crons`. The runner's control channel
+(`RUNNER_SOURCE` and `CONTROL_SOURCE`, `packages/worker/src/runtime-image.ts`)
+accepts `POST /scheduled` beside `/queue` and calls `env.USER.scheduled()`
+through the same service binding, which `service_binding_extra_handlers`
+already made possible for `queue()`.
+
+The daemon keeps the clock: `startCronScheduler`
+(`packages/cli/src/daemon/crons.ts`), started in `server.ts` on the alarm
+mirror's ten-second tick, computes for every (worker, cron) the first match
+after its last firing (or after the daemon started), and when it has passed
+wakes the worker through `getOrCreateWake` and posts the firing. State is
+in memory on purpose: missed firings while the daemon was down are not
+replayed, and several missed in a row collapse to one, both documented in
+the module header. `GET /v1/projects/:name/crons` and `hobby cron ls`
+(`cmdCronLs`) show next and last per schedule.
+
+Not done: a scheduled() run that outlasts the hibernation window with no
+other activity can be slept mid-run; the control request itself does not
+count as activity. Noted in the workers guide rather than fixed here.

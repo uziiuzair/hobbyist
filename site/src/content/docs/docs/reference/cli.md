@@ -283,6 +283,16 @@ Destroys the queue, with confirmation.
 Changes how long messages are kept. Note that
 [retention never sweeps a queue with no drainable consumer](/docs/guides/queues/#retention-has-a-gap-too).
 
+## Cron triggers
+
+### `hobby cron ls [project]`
+
+Every worker cron trigger (`[triggers] crons` in the wrangler manifest), with
+when it next fires and when it last did. One project when named, or the
+linked one; every project with at least one schedule otherwise. Read-only:
+the schedules come from each worker's manifest at deploy time, and the daemon
+fires them (`packages/cli/src/daemon/crons.ts`). Accepts `--json`.
+
 ## Connecting from another machine
 
 These are the commands that make the CLI work from your laptop against a box.
