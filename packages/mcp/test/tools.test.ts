@@ -54,6 +54,7 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
   }
   const base: Api = {
     health: notWired('health'),
+    version: notWired('version'),
     listProjects: notWired('listProjects'),
     createProject: notWired('createProject'),
     setSleepPolicy: notWired('setSleepPolicy'),

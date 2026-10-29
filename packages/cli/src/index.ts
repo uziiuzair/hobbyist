@@ -65,6 +65,7 @@ export {
   cmdStudio,
   cmdStudioPasswd,
   cmdUnpin,
+  cmdVersion,
   cmdWake,
   connectionEnv,
   resolveQueueTarget,
@@ -73,3 +74,4 @@ export {
   type Ctx,
 } from './cli/commands.js'
 export * from './cli/output.js'
+export * from './version.js'

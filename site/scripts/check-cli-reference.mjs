@@ -9,7 +9,8 @@
  * a command that no longer exists is worse than no page, because a reader
  * will type it.
  *
- * Ground truth is printHelp in packages/cli/src/cli/main.ts, parsed out of the
+ * Ground truth is the USAGE table in packages/cli/src/cli/main.ts (the rows
+ * printHelp and `hobby <verb> --help` both print from), parsed out of the
  * source rather than by running the binary, so this needs no build and no
  * Docker.
  */
@@ -26,17 +27,17 @@ const PAGE = join(here, '..', 'src', 'content', 'docs', 'docs', 'reference', 'cl
 // the top-level verb only. `hobby queue peek` living under a `### hobby queue
 // peek` heading is fine; what matters is that `queue` itself is covered.
 const source = await readFile(MAIN, 'utf8')
-const help = source.slice(source.indexOf('function printHelp'))
-const helpBody = help.slice(0, help.indexOf('\n}'))
+const table = source.slice(source.indexOf('const USAGE'))
+const tableBody = table.slice(0, table.indexOf('\n]'))
 
 const verbs = new Set()
-for (const match of helpBody.matchAll(/io\.out\('\s{2}hobby ([a-z]+)/g)) {
+for (const match of tableBody.matchAll(/^\s*\['([a-z]+)', 'hobby /gm)) {
   verbs.add(match[1])
 }
 
 if (verbs.size === 0) {
-  console.error(`could not parse any verbs out of printHelp in ${MAIN}`)
-  console.error('the parser in this script assumes lines of the form:  io.out(\'  hobby <verb> ...')
+  console.error(`could not parse any verbs out of the USAGE table in ${MAIN}`)
+  console.error("the parser in this script assumes rows of the form:  ['verb', 'hobby verb ...', '...'],")
   process.exit(1)
 }
 

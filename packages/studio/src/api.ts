@@ -233,12 +233,13 @@ export function eject(
 
 // Only an app or a worker can be deployed; the daemon refuses any other kind
 // with a `usage` error rather than a 404, so the caller learns which kind it
-// actually addressed. `ignored` lists paths the build skipped.
+// actually addressed. `ignored` lists the wrangler keys a worker deploy read
+// and did not act on, each with the reason the daemon gives.
 export interface DeployResult {
   resource: Resource;
   image: string;
   logs: string;
-  ignored?: string[];
+  ignored?: Array<{ key: string; reason: string }>;
 }
 
 export function deployResource(

@@ -29,7 +29,8 @@ import { startDaemon } from '../daemon/server.js'
 import { hasOperatorCredential, setOperatorPassword } from '../daemon/studio/auth.js'
 import { issueToken, readTokens, revokeToken } from '../daemon/studio/tokens.js'
 import type { WireResource } from '../daemon/wire.js'
-import { createRemoteClient, type Api } from './client.js'
+import { createRemoteClient, DaemonUnreachableError, type Api, type IgnoredKey } from './client.js'
+import { CLI_VERSION } from '../version.js'
 import { forgetRemote, listRemotes, saveRemote } from './remote.js'
 import { exitCodeForError } from './exit.js'
 import {
@@ -90,14 +91,50 @@ function flagString(flags: Flags, name: string): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
+// The positional a target-taking verb was given, or the project this
+// directory is linked to when it was given none (issue #98). `hobby link`
+// has always printed "commands run from here default to that project", and
+// until this every verb but `create` ignored the link. With neither, the
+// verb's own usage line, unchanged.
+function targetOrLinked(c: Ctx, positionals: string[], usage: string): string {
+  const target = positionals[0] ?? c.config.project ?? undefined
+  if (target === undefined) {
+    throw new UsageError(usage)
+  }
+  return target
+}
+
 // Resolves a CLI target (`project` or `project/resource`) to exactly one
 // resource. Ambiguity, per the spec, is an error listing the candidates,
 // never a guess: a bare project name with more than one resource throws
 // `ambiguous_target`, the same ErrorCode the daemon uses for this exact
 // situation, so it maps through exit.ts identically regardless of which
 // side of the socket noticed it.
-export async function resolveTarget(api: Api, target: string): Promise<{ project: Project; resource: WireResource }> {
+//
+// `linked` is the project this directory is linked to (`hobby link`, ADR
+// 0018), or null. In a linked directory a bare name is tried first as a
+// resource OF the linked project, so `hobby logs web` next to a hobby.json
+// pointing at `blog` means `blog/web` (issue #98: before this it meant "the
+// project named web", which did not exist, and the link was useless for
+// every verb but create). Only when the linked project has no resource by
+// that name does the bare name fall through to its original meaning, a
+// project. A `project/resource` target never consults the link: the slash
+// already said everything.
+export async function resolveTarget(
+  api: Api,
+  target: string,
+  linked: string | null = null
+): Promise<{ project: Project; resource: WireResource }> {
   const { project: projectName, resource: resourceName } = parseTarget(target)
+
+  if (resourceName === null && linked !== null && linked !== projectName) {
+    const linkedDetail = await api.getProject(linked)
+    const inLinked = linkedDetail.resources.find((r) => r.name === projectName)
+    if (inLinked !== undefined) {
+      return { project: linkedDetail.project, resource: inLinked }
+    }
+  }
+
   const detail = await api.getProject(projectName)
 
   if (resourceName !== null) {
@@ -428,10 +465,25 @@ function printEnvCount(c: Ctx, env: Record<string, string> | undefined): void {
   c.io.out(`  env       ${count} ${count === 1 ? 'variable' : 'variables'}`)
 }
 
+// Every wrangler key the daemon read and did not act on, one line each,
+// where the user is looking. The spec promised "every ignored key printed
+// at deploy time" and the daemon kept the promise only to its own stderr
+// (issue #76). A redeploy prints them again: the manifest is re-read every
+// time, and a key added since the last deploy is news.
+function printIgnored(c: Ctx, ignored: IgnoredKey[] | undefined): void {
+  for (const entry of ignored ?? []) {
+    c.io.out(`  ignoring  ${entry.key}: ${entry.reason}`)
+  }
+}
+
 export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const parsed = parseDeploy(positionals, flags)
   const path = resolvePath(c.io.cwd, parsed.path)
-  const projectName = parsed.project ?? basename(path)
+  // --project, then the linked project, then the directory's own name. The
+  // middle step is issue #98: `hobby link blog; hobby deploy` used to create
+  // a brand new project named after the directory, which is the one thing a
+  // user who just linked the directory cannot have meant.
+  const projectName = parsed.project ?? c.config.project ?? basename(path)
   const name = parsed.name ?? basename(path)
 
   const portFlag = typeof flags['port'] === 'string' ? Number(flags['port']) : undefined
@@ -501,6 +553,16 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     throw deployKindConflict(projectName, name, existing.kind)
   }
 
+  // An app deploy reads the Dockerfile and nothing else. A wrangler manifest
+  // sitting beside it (reachable only with an explicit --kind app, since
+  // detectDeployKind refuses the pair otherwise) is not read, including its
+  // `vars`, and saying so is the difference between "hobby forgot" and
+  // "hobby is deliberately not touching this" (issue #152). On stderr so
+  // `--json` stdout stays the object.
+  if (kind === 'app' && (existsSync(joinPath(path, 'wrangler.toml')) || existsSync(joinPath(path, 'wrangler.jsonc')))) {
+    c.io.err('note: the wrangler manifest beside this Dockerfile is not read for an app; its vars do not reach the container. Use --env-file.')
+  }
+
   // A worker's variables are its wrangler config's `vars`, the same file
   // Cloudflare reads, so a second source here would only drift from it.
   if (env !== undefined && kind === 'worker') {
@@ -524,13 +586,14 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
       ...(env === undefined ? {} : { env }),
     })
     if (flags.json) {
-      c.io.out(JSON.stringify({ resource: result.resource, image: result.image }, null, 2))
+      c.io.out(JSON.stringify({ resource: result.resource, image: result.image, ignored: result.ignored ?? [] }, null, 2))
       return 0
     }
     c.io.out(`deployed ${projectName}/${name}`)
     c.io.out(`  image     ${result.image}`)
     c.io.out(`  url       https://${hostnameOf(result.resource)}`)
     printEnvCount(c, env)
+    printIgnored(c, result.ignored)
     c.io.out('')
     c.io.out('It is asleep. The first request wakes it.')
     return 0
@@ -554,7 +617,7 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     databaseResourceId = database.id
   }
 
-  const { resource } = await c.api.createResource(
+  const { resource, ignored } = await c.api.createResource(
     projectName,
     kind === 'worker'
       ? { kind: 'worker', name, source: { path }, ...(databaseResourceId === undefined ? {} : { databaseResourceId }) }
@@ -569,13 +632,14 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
   )
 
   if (flags.json) {
-    c.io.out(JSON.stringify({ resource }, null, 2))
+    c.io.out(JSON.stringify({ resource, ignored: ignored ?? [] }, null, 2))
     return 0
   }
   c.io.out(`deployed ${projectName}/${name}`)
   c.io.out(`  image     ${imageLine(resource.config.image)}`)
   c.io.out(`  url       https://${hostnameOf(resource)}`)
   printEnvCount(c, env)
+  printIgnored(c, ignored)
   c.io.out('')
   c.io.out('It is asleep. The first request wakes it.')
   return 0
@@ -862,11 +926,8 @@ export function connectionEnv(connectionString: string): Record<string, string> 
 // inherited so the user's own psql settings (PAGER, PSQLRC, PGSSLMODE, and
 // so on) still apply; only the five PG* connection variables are forced.
 export async function cmdConnect(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
-  const target = positionals[0]
-  if (target === undefined) {
-    throw new UsageError('usage: hobby connect <target>')
-  }
-  const { resource } = await resolveTarget(c.api, target)
+  const target = targetOrLinked(c, positionals, 'usage: hobby connect <target>')
+  const { resource } = await resolveTarget(c.api, target, c.config.project)
   const { connectionString, tailnetConnectionString, publicConnectionString } = await c.api.getConnection(resource.id)
 
   if (flags.json) {
@@ -897,11 +958,8 @@ export async function cmdConnect(c: Ctx, positionals: string[], flags: Flags): P
 }
 
 async function cmdSleepWake(c: Ctx, verb: 'sleep' | 'wake', positionals: string[], flags: Flags): Promise<number> {
-  const target = positionals[0]
-  if (target === undefined) {
-    throw new UsageError(`usage: hobby ${verb} <target>`)
-  }
-  const { resource } = await resolveTarget(c.api, target)
+  const target = targetOrLinked(c, positionals, `usage: hobby ${verb} <target>`)
+  const { resource } = await resolveTarget(c.api, target, c.config.project)
   // The API says start/stop because those are mechanical container
   // operations; the CLI says wake/sleep because that is the domain, per the
   // brief. This is the one place that translation happens.
@@ -937,10 +995,7 @@ function renderSleepPolicyLine(project: Project): string {
 // unpin set what the hibernator is allowed to do from now on. Different
 // tense, different verb.
 export async function cmdPin(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
-  const name = positionals[0]
-  if (name === undefined) {
-    throw new UsageError('usage: hobby pin <project>')
-  }
+  const name = targetOrLinked(c, positionals, 'usage: hobby pin <project>')
   const result = await c.api.setSleepPolicy(name, null)
 
   if (flags.json) {
@@ -952,10 +1007,7 @@ export async function cmdPin(c: Ctx, positionals: string[], flags: Flags): Promi
 }
 
 export async function cmdUnpin(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
-  const name = positionals[0]
-  if (name === undefined) {
-    throw new UsageError('usage: hobby unpin <project> [--sleep-after <seconds>]')
-  }
+  const name = targetOrLinked(c, positionals, 'usage: hobby unpin <project> [--sleep-after <seconds>]')
   const raw = flagString(flags, 'sleep-after')
   let sleepAfterSeconds: number
   if (raw === undefined) {
@@ -989,11 +1041,8 @@ export async function cmdUnpin(c: Ctx, positionals: string[], flags: Flags): Pro
 }
 
 export async function cmdLogs(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
-  const target = positionals[0]
-  if (target === undefined) {
-    throw new UsageError('usage: hobby logs <target> [--tail N]')
-  }
-  const { resource } = await resolveTarget(c.api, target)
+  const target = targetOrLinked(c, positionals, 'usage: hobby logs <target> [--tail N]')
+  const { resource } = await resolveTarget(c.api, target, c.config.project)
 
   const tailRaw = flagString(flags, 'tail')
   let tail: number | undefined
@@ -1323,10 +1372,7 @@ export async function cmdQueue(c: Ctx, positionals: string[], flags: Flags): Pro
 // does not get an exception for messages just because they are awkward to
 // hand over.
 export async function cmdEject(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
-  const project = positionals[0]
-  if (project === undefined) {
-    throw new UsageError('usage: hobby eject <project>')
-  }
+  const project = targetOrLinked(c, positionals, 'usage: hobby eject <project>')
   const release = flags.release === true
   const result = await c.api.eject(project, { release })
 
@@ -1393,10 +1439,7 @@ export async function cmdEject(c: Ctx, positionals: string[], flags: Flags): Pro
 // curiosity: nothing was deleted, so taking a project back is a state change
 // rather than a restore.
 export async function cmdAdopt(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
-  const project = positionals[0]
-  if (project === undefined) {
-    throw new UsageError('usage: hobby adopt <project>')
-  }
+  const project = targetOrLinked(c, positionals, 'usage: hobby adopt <project>')
 
   const result = await c.api.adopt(project)
 
@@ -1447,10 +1490,10 @@ async function snapshotOfProject(c: Ctx, project: string, id: string): Promise<v
 }
 
 export async function cmdSnapshotTake(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
-  const project = positionals[0]
-  if (project === undefined || positionals.length > 1) {
+  if (positionals.length > 1) {
     throw new UsageError('usage: hobby snapshot <project> [--online | --allow-pause]')
   }
+  const project = targetOrLinked(c, positionals, 'usage: hobby snapshot <project> [--online | --allow-pause]')
   const online = flags.online === true
   const allowPause = flags['allow-pause'] === true
   // Refused here as well as by the daemon (takeSnapshotRoute), so the
@@ -1499,10 +1542,7 @@ export async function cmdSnapshotTake(c: Ctx, positionals: string[], flags: Flag
 }
 
 export async function cmdSnapshotLs(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
-  const project = positionals[0]
-  if (project === undefined) {
-    throw new UsageError('usage: hobby snapshot ls <project>')
-  }
+  const project = targetOrLinked(c, positionals, 'usage: hobby snapshot ls <project>')
   const result = await c.api.listSnapshots(project)
   if (flags.json) {
     c.io.out(JSON.stringify(result))
@@ -1877,7 +1917,7 @@ export async function cmdLink(
     c.io.out(JSON.stringify({ project: name, file: target }))
   } else {
     c.io.out(`${target} now points at ${name}`)
-    c.io.out('commands run from here default to that project.')
+    c.io.out('commands run from here default to that project: deploy goes into it, and a verb given no target acts on it.')
   }
   return 0
 }
@@ -1951,6 +1991,43 @@ export async function cmdToken(
 //
 // Runs against tags, not main. Someone typing `hobby update` is asking for the
 // newest release, and main is whatever was merged an hour ago.
+// `hobby version [--json]`: this binary's version, and the daemon's if one
+// answers (issue #96). Two numbers, not one, because ADR 0018 lets this CLI
+// talk to a box it was not installed on, and a bug report that says "alpha.4"
+// has to say which side. An unreachable daemon is `null`, not an error: the
+// question "what version am I running" has an answer without one. A daemon
+// older than GET /v1/version answers it with `usage` (unknown route), which
+// is reported as "older than this CLI" rather than as a failure.
+export async function cmdVersion(c: Ctx, flags: Flags): Promise<number> {
+  let daemon: string | null = null
+  let reachable = false
+  try {
+    const res = await c.api.version()
+    reachable = true
+    daemon = res.version
+  } catch (err) {
+    if (err instanceof HobbyError && err.code === 'usage') {
+      reachable = true
+    } else if (!(err instanceof DaemonUnreachableError)) {
+      throw err
+    }
+  }
+
+  if (flags.json) {
+    c.io.out(JSON.stringify({ cli: CLI_VERSION, daemon, daemonReachable: reachable }))
+    return 0
+  }
+  c.io.out(`hobby   ${CLI_VERSION}`)
+  if (!reachable) {
+    c.io.out('daemon  not reachable')
+  } else if (daemon === null) {
+    c.io.out('daemon  older than this CLI (it has no /v1/version route)')
+  } else {
+    c.io.out(`daemon  ${daemon}`)
+  }
+  return 0
+}
+
 export async function cmdUpdate(io: Io, paths: Paths, flags: Flags): Promise<number> {
   const src = process.env.HOBBY_SRC_DIR ?? joinPath(paths.home, 'src')
 

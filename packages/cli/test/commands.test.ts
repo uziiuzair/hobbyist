@@ -7,12 +7,13 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { HobbyError } from '@hobby.sh/core'
 import {
   cmdConnect,
   cmdCreate,
   cmdDeploy,
+  cmdLogs,
   cmdNew,
   cmdPg,
   cmdPin,
@@ -23,6 +24,7 @@ import {
   cmdQueueSend,
   cmdQueueSet,
   cmdUnpin,
+  resolveTarget,
   UsageError,
   type Ctx,
 } from '../src/index.js'
@@ -804,4 +806,147 @@ test('hobby queue set sends the retention value to the resolved queue', async ()
 
   assert.equal(code, 0)
   assert.deepEqual(calls, [{ id: 'jobs-id', retentionSeconds: 3600 }])
+})
+
+// Issue #98: `hobby link` wrote a hobby.json and then every verb but
+// `create` ignored it. These pin the three behaviours that make a link
+// useful: deploy goes into the linked project, a verb given no target acts
+// on it, and a bare name next to a link is first a resource of that project.
+function linkedCtx(
+  projects: Record<string, Array<{ id: string; name: string; kind: string }>>,
+  linked: string
+): { ctx: Ctx; out: string[]; recorded: { resources: string[]; logs: string[] } } {
+  const out: string[] = []
+  const recorded = { resources: [] as string[], logs: [] as string[] }
+  const api = {
+    async getProject(name: string) {
+      const resources = projects[name]
+      if (resources === undefined) {
+        throw new HobbyError('project_not_found', `no project named ${name}`)
+      }
+      return {
+        project: { id: `p-${name}`, name, networkName: `hobby-${name}`, sleepAfterSeconds: 300, createdAt: new Date() },
+        resources,
+      }
+    },
+    async createProject(name: string) {
+      projects[name] = []
+      return { project: { id: `p-${name}`, name, networkName: `hobby-${name}`, sleepAfterSeconds: 300, createdAt: new Date() } }
+    },
+    async createResource(projectName: string, body: { kind: string; name: string }) {
+      recorded.resources.push(`${projectName}/${body.name}`)
+      return {
+        resource: {
+          id: 'r1',
+          kind: body.kind,
+          name: body.name,
+          state: 'undeployed',
+          config: { image: null, hostname: `${body.name}.${projectName}.localhost` },
+        },
+      }
+    },
+    async getLogs(id: string) {
+      recorded.logs.push(id)
+      return { logs: `logs of ${id}` }
+    },
+  }
+  const ctx = {
+    io: { out: (s: string) => out.push(s), err: () => {}, env: {}, cwd: '/tmp', readLine: async () => '' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: { project: linked } as Ctx['config'],
+  } as Ctx
+  return { ctx, out, recorded }
+}
+
+test('hobby deploy in a linked directory deploys into the linked project, not one named after the directory', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-linked-'))
+  writeFileSync(join(dir, 'Dockerfile'), 'FROM scratch\n')
+  const { ctx, recorded } = linkedCtx({ qacomp1: [] }, 'qacomp1')
+  ctx.io.cwd = dir
+
+  assert.equal(await cmdDeploy(ctx, ['.'], {}), 0)
+  assert.deepEqual(recorded.resources, [`qacomp1/${basename(dir)}`])
+})
+
+test('--project still beats the link on deploy', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-linked-'))
+  writeFileSync(join(dir, 'Dockerfile'), 'FROM scratch\n')
+  const { ctx, recorded } = linkedCtx({ qacomp1: [], other: [] }, 'qacomp1')
+  ctx.io.cwd = dir
+
+  assert.equal(await cmdDeploy(ctx, ['.'], { project: 'other' }), 0)
+  assert.deepEqual(recorded.resources, [`other/${basename(dir)}`])
+})
+
+test('a target-taking verb given no target acts on the linked project', async () => {
+  const { ctx, recorded } = linkedCtx({ qacomp1: [{ id: 'web-1', name: 'web', kind: 'app' }] }, 'qacomp1')
+  assert.equal(await cmdLogs(ctx, [], {}), 0)
+  assert.deepEqual(recorded.logs, ['web-1'])
+})
+
+test('a bare name in a linked directory is first a resource of the linked project, then a project', async () => {
+  const { ctx } = linkedCtx(
+    {
+      qacomp1: [
+        { id: 'web-1', name: 'web', kind: 'app' },
+        { id: 'db-1', name: 'primary', kind: 'postgres' },
+      ],
+      blog: [{ id: 'blog-db', name: 'primary', kind: 'postgres' }],
+    },
+    'qacomp1'
+  )
+  const asResource = await resolveTarget(ctx.api, 'web', 'qacomp1')
+  assert.equal(asResource.resource.id, 'web-1')
+  const asProject = await resolveTarget(ctx.api, 'blog', 'qacomp1')
+  assert.equal(asProject.resource.id, 'blog-db')
+  // A slash never consults the link.
+  const dotted = await resolveTarget(ctx.api, 'blog/primary', 'qacomp1')
+  assert.equal(dotted.resource.id, 'blog-db')
+})
+
+test('without a link, a missing target is still the usage error', async () => {
+  const { ctx } = fakeCtx()
+  await assert.rejects(cmdLogs(ctx, [], {}), UsageError)
+})
+
+// Issue #76: the daemon reported ignored wrangler keys on its own stderr and
+// nowhere the user could see. They ride on the response now, and the CLI
+// prints them on create and on redeploy, and under --json.
+test('hobby deploy prints every ignored wrangler key with its reason, and includes them under --json', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-ignored-'))
+  writeFileSync(join(dir, 'wrangler.toml'), 'name = "wk"\nmain = "src/index.ts"\ncompatibility_date = "2024-01-01"\n')
+  const ignored = [
+    { key: 'triggers', reason: 'scheduled workers are not built yet' },
+    { key: 'ai', reason: 'Workers AI is not provided by hobby' },
+  ]
+  const out: string[] = []
+  const api = {
+    async getProject() {
+      return { project: { id: 'p1', name: 'blog' }, resources: [{ id: 'w1', name: 'wk', kind: 'worker' }] }
+    },
+    async deployResource() {
+      return {
+        resource: { id: 'w1', kind: 'worker', name: 'wk', state: 'sleeping', config: { image: 'img:1', hostname: 'wk.blog.localhost' } },
+        image: 'img:1',
+        logs: '',
+        ignored,
+      }
+    },
+  }
+  const ctx = {
+    io: { out: (s: string) => out.push(s), err: () => {}, env: {}, cwd: dir, readLine: async () => '' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  assert.equal(await cmdDeploy(ctx, ['.'], { project: 'blog', name: 'wk' }), 0)
+  assert.ok(out.includes('  ignoring  triggers: scheduled workers are not built yet'))
+  assert.ok(out.includes('  ignoring  ai: Workers AI is not provided by hobby'))
+
+  out.length = 0
+  assert.equal(await cmdDeploy(ctx, ['.'], { project: 'blog', name: 'wk', json: true }), 0)
+  const parsed = JSON.parse(out.join('\n')) as { ignored: unknown }
+  assert.deepEqual(parsed.ignored, ignored)
 })

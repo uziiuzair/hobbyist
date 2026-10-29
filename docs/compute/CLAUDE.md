@@ -169,3 +169,24 @@ host gateway on Linux. The proxy half, including the Linux listener, is in
 `docs/proxy/CLAUDE.md`'s amendment of the same date. Eject is unchanged: an
 ejected stack has no proxy, so its compose file names the database service
 directly, as before.
+
+## Amendment, 2026-10-29: named reasons for the wrangler keys real projects use (issues #149, #152, #76)
+
+`IGNORED_WITH_REASON` (`packages/worker/src/manifest.ts`) gained entries for
+every top-level key a sixteen-manifest production monorepo turned out to
+carry: `ai`, `services`, `env`, `assets`, `hyperdrive`, `migrations`, and the
+long tail of Cloudflare-only services and bundler options. The point is the
+distinction between "not built" and "meaningless here", which `not recognised
+by hobby` could not make. `ai` is the one that matters most: Workers AI is
+not provided and will not be (AI compute is out of scope, root CLAUDE.md),
+and before this the only trace was a daemon stderr line while the worker
+failed at runtime on an undefined `env.AI`. The deploy now says so where the
+user is looking (CLI amendment of the same date), and the workers guide on
+the site has a table of these keys. `migrations` was reworded from "not
+recognised" because it is required on Cloudflare and the old wording read as
+a fault. An app deployed with `--kind app` from a directory that also holds
+a wrangler manifest gets a stderr note from `cmdDeploy` that the manifest,
+including its `vars`, is not read.
+
+Not done here, and still open: `[env.*]` selection (there is no `--env`),
+service bindings, and cron `[triggers]` (#75) are reported, not built.

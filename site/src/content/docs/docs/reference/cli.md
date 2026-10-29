@@ -11,12 +11,30 @@ Every verb below appears in `printHelp` (`packages/cli/src/cli/main.ts`). A
 script in `site/scripts/check-cli-reference.mjs` runs in CI and fails if this
 page lists a verb the binary does not have, or omits one it does.
 
-Two conventions apply throughout:
+Three conventions apply throughout:
 
 - **`<target>`** is `project` when the project holds exactly one resource, and
-  `project/resource` otherwise.
+  `project/resource` otherwise. In a directory linked with `hobby link`, a verb
+  given no target acts on the linked project, and a bare name is tried first as
+  one of that project's resources (see `hobby link` below).
 - **`--json`** is accepted by every command that returns data, and prints the
   same object the human output was rendered from, so the two cannot drift.
+- **`--help`** (or `-h`) after any verb prints that verb's usage lines and exits
+  0, the same text `hobby help <verb>` prints.
+
+### `hobby help [verb]`
+
+The full usage with no argument, or the lines for one verb. `hobby <verb>
+--help` is the same thing.
+
+### `hobby version`
+
+This binary's version, and the daemon's. They can differ when the CLI talks to
+a remote box (`hobby login`), which is why both are printed. A daemon that
+cannot be reached is reported as such with exit 0: the question has an answer
+without one. Accepts `--json`, which gives `{ cli, daemon, daemonReachable }`
+with `daemon` null when nothing answered or the daemon predates the
+`GET /v1/version` route.
 
 ## Host and daemon
 
@@ -125,6 +143,18 @@ Both present is an error rather than a guess.
 | `--env-file <f>` | Variables from a dotenv file, replacing the app's current set. Apps only |
 | `--kind app\|worker` | Only needed when the directory is ambiguous |
 | `--json` | Machine-readable output |
+
+Without `--project`, the project is the one this directory is linked to
+(`hobby link`), and failing that the directory's own name.
+
+A worker deploy prints one `ignoring <key>: <reason>` line for every key in
+the wrangler manifest that hobby read and did not act on, on the first deploy
+and on every redeploy, and includes the same list as `ignored` under `--json`.
+The reasons live in `IGNORED_WITH_REASON` (`packages/worker/src/manifest.ts`);
+the [workers guide](/docs/guides/workers/) lists the ones that come up most.
+An app deployed with `--kind app` from a directory that also holds a wrangler
+manifest gets a note on stderr that the manifest, including its `vars`, is not
+read.
 
 ## Lifecycle
 
@@ -257,10 +287,29 @@ commands run from there default to it and stop needing `--project`.
 cd ~/code/blog
 hobby link blog
 hobby create worker api      # no --project needed
+hobby deploy                 # into blog, not into a project named after the directory
+hobby logs                   # blog's one resource, or an ambiguity error naming them
+hobby logs api               # blog/api: a bare name is first a resource of the linked project
+hobby sleep other            # a project named other, since blog has no resource called that
 ```
 
-An explicit `--project` always wins over the linked one. The project must
-already exist: link checks, rather than writing a file that points at nothing.
+Three things follow from a link, in `packages/cli/src/cli/commands.ts`:
+
+- `hobby deploy` and the `create` verbs use it when `--project` is absent.
+- `connect`, `sleep`, `wake`, `logs`, `pin`, `unpin`, `eject`, `adopt`,
+  `snapshot` and `snapshot ls` act on it when given no target
+  (`targetOrLinked`).
+- A bare name is resolved against the linked project's resources before it is
+  read as a project name (`resolveTarget`). `project/resource` never consults
+  the link.
+
+`hobby rm`, `hobby snapshot restore`, `hobby snapshot rm` and the `queue`
+verbs still take their target explicitly: the first three are destructive or
+take a second positional, and a queue target names a queue, not a project.
+
+An explicit `--project` or an explicit target always wins over the linked one.
+The project must already exist: link checks, rather than writing a file that
+points at nothing.
 
 ### `hobby token create <name>`
 

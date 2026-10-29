@@ -36,6 +36,7 @@ import {
   cmdStudio,
   cmdStudioPasswd,
   cmdUnpin,
+  cmdVersion,
   cmdWake,
   UsageError,
   type Ctx,
@@ -128,59 +129,114 @@ export function parseArgs(args: string[], spec: FlagSpec): ParsedArgs {
   return { positionals, flags }
 }
 
+// One row per usage line of `hobby --help`: the verb it belongs to, the
+// invocation, and what it does. A table rather than a run of io.out calls
+// because `hobby <verb> --help` and `hobby help <verb>` (issue #96) print the
+// rows for one verb, and a second copy of the text per verb would drift from
+// the first. site/scripts/check-cli-reference.mjs parses the verb column out
+// of this source to check the CLI reference page documents every verb, so
+// the shape of each row (`['verb', 'hobby verb ...', '...']`) is load-bearing.
+const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]> = [
+  ['init', 'hobby init', 'prepare the host, check the filesystem'],
+  ['daemon', 'hobby daemon', 'run the daemon in the foreground'],
+  ['new', 'hobby new <name>', 'project + postgres + connection string'],
+  ['new', 'hobby new <name> --empty', 'a project with nothing in it'],
+  ['new', 'hobby new <name> --pin', 'born pinned: never auto-sleeps'],
+  ['ls', 'hobby ls', 'everything, with sleep state'],
+  ['branch', 'hobby branch <project> <name>', 'a new project from a copy of its data, unpinned'],
+  ['branch', 'hobby branch ... --allow-pause', 'accept pausing a pinned, awake source'],
+  ['deploy', 'hobby deploy [path]', 'build a Dockerfile here and serve it'],
+  ['deploy', 'hobby deploy [path] --database <r>', 'the same, bound to a sibling database'],
+  ['deploy', 'hobby deploy [path] --env-file <f>', 'the same, with variables from a dotenv file'],
+  ['deploy', 'hobby deploy [path] --project <p> --name <n>', 'pick the project and resource name'],
+  ['deploy', 'hobby deploy [path] --kind app|worker', 'when the directory holds both kinds of config'],
+  ['create', 'hobby create <kind> <name> --project <p>', 'a resource with no code yet'],
+  ['pg', 'hobby pg create --project <p> <name>', 'the explicit form, for a second database'],
+  ['connect', 'hobby connect <target>', 'open psql against it'],
+  ['sleep', 'hobby sleep <target>', 'put it to sleep'],
+  ['wake', 'hobby wake <target>', 'wake it back up'],
+  ['pin', 'hobby pin <project>', 'never auto-sleep this project'],
+  ['unpin', 'hobby unpin <project> [--sleep-after N]', 'auto-sleep it again'],
+  ['logs', 'hobby logs <target> [--tail N]', 'tail its logs'],
+  ['rm', 'hobby rm <target> [--yes]', 'destroy, with confirmation'],
+  ['eject', 'hobby eject <project>', 'emit docker-compose.yml plus data'],
+  ['eject', 'hobby eject <project> --release', 'the same, and stop managing it'],
+  ['adopt', 'hobby adopt <project>', 'manage a released project again'],
+  ['snapshot', 'hobby snapshot <project> [--allow-pause]', 'a local snapshot, everything quiesced'],
+  ['snapshot', 'hobby snapshot <project> --online', 'postgres-only projects: no pause, pg_basebackup'],
+  ['snapshot', 'hobby snapshot ls <project>', 'its snapshots, newest first'],
+  ['snapshot', 'hobby snapshot restore <project> <id> [--as <name>]', 'into a new project, original untouched'],
+  ['snapshot', 'hobby snapshot restore <project> <id> --in-place [--yes]', 'replace its data, old data kept until it works'],
+  ['snapshot', 'hobby snapshot rm <project> <id> [--yes]', 'delete one, with confirmation'],
+  ['queue', 'hobby queue ls [project]', 'list queues, with depth and consumer'],
+  ['queue', 'hobby queue create <name> --project <p>', 'a queue with no consumer bound yet'],
+  ['queue', 'hobby queue peek <target> [--limit n]', 'the oldest messages, without leasing them'],
+  ['queue', 'hobby queue send <target> <json>', 'enqueue one message'],
+  ['queue', 'hobby queue purge <target>', 'delete every message, with confirmation'],
+  ['queue', 'hobby queue rm <target> [--yes]', 'destroy the queue, with confirmation'],
+  ['queue', 'hobby queue set <target> --retention <seconds>', 'change how long messages are kept'],
+  ['login', 'hobby login <url>', 'connect this machine to a box'],
+  ['logout', 'hobby logout [url]', 'forget a box'],
+  ['remote', 'hobby remote ls', 'which boxes this machine knows'],
+  ['link', 'hobby link <project>', 'point this directory at a project'],
+  ['token', 'hobby token create <name>', 'a token for another machine'],
+  ['token', 'hobby token ls', 'tokens this box has issued'],
+  ['token', 'hobby token rm <name>', 'revoke one'],
+  ['update', 'hobby update', 'update to the latest release'],
+  ['update', 'hobby update --check', 'say whether one is available, change nothing'],
+  ['studio', 'hobby studio passwd', 'set the studio operator password'],
+  ['studio', 'hobby studio', 'print the studio URL and open it'],
+  ['version', 'hobby version', 'this CLI and the daemon it talks to'],
+  ['help', 'hobby help [verb]', 'this, or one verb in detail'],
+]
+
+const USAGE_COLUMN = 52
+
+function usageLine(usage: string, what: string): string {
+  return `  ${usage.padEnd(USAGE_COLUMN)} ${what}`
+}
+
+function printConventions(io: Io): void {
+  io.out('<target> is `project` when the project has one resource, `project/resource` otherwise.')
+  io.out('in a directory linked with `hobby link`, a verb given no target acts on the linked project,')
+  io.out('and a bare name is tried first as one of its resources.')
+  io.out('every command that returns data supports --json. every verb accepts --help.')
+}
+
 function printHelp(io: Io): void {
   io.out('hobby: your postgres, your box, their convenience')
   io.out('')
   io.out('usage:')
-  io.out('  hobby init                          prepare the host, check the filesystem')
-  io.out('  hobby daemon                         run the daemon in the foreground')
-  io.out('  hobby new <name>                     project + postgres + connection string')
-  io.out('  hobby new <name> --empty             a project with nothing in it')
-  io.out('  hobby new <name> --pin               born pinned: never auto-sleeps')
-  io.out('  hobby ls                             everything, with sleep state')
-  io.out('  hobby branch <project> <name>        a new project from a copy of its data, unpinned')
-  io.out('  hobby branch ... --allow-pause        accept pausing a pinned, awake source')
-  io.out('  hobby deploy [path]                  build a Dockerfile here and serve it')
-  io.out('  hobby deploy [path] --database <r>   the same, bound to a sibling database')
-  io.out('  hobby deploy [path] --env-file <f>   the same, with variables from a dotenv file')
-  io.out('  hobby create <kind> <name> --project <p>  a resource with no code yet')
-  io.out('  hobby pg create --project <p> <name> the explicit form, for a second database')
-  io.out('  hobby connect <target>                open psql against it')
-  io.out('  hobby sleep <target>                  put it to sleep')
-  io.out('  hobby wake <target>                   wake it back up')
-  io.out('  hobby pin <project>                   never auto-sleep this project')
-  io.out('  hobby unpin <project> [--sleep-after N]  auto-sleep it again')
-  io.out('  hobby logs <target> [--tail N]        tail its logs')
-  io.out('  hobby rm <target> [--yes]              destroy, with confirmation')
-  io.out('  hobby eject <project>                 emit docker-compose.yml plus data')
-  io.out('  hobby eject <project> --release       the same, and stop managing it')
-  io.out('  hobby adopt <project>                 manage a released project again')
-  io.out('  hobby snapshot <project> [--allow-pause]    a local snapshot, everything quiesced')
-  io.out('  hobby snapshot <project> --online     postgres-only projects: no pause, pg_basebackup')
-  io.out('  hobby snapshot ls <project>           its snapshots, newest first')
-  io.out('  hobby snapshot restore <project> <id> [--as <name>]   into a new project, original untouched')
-  io.out('  hobby snapshot restore <project> <id> --in-place [--yes]   replace its data, old data kept until it works')
-  io.out('  hobby snapshot rm <project> <id> [--yes]    delete one, with confirmation')
-  io.out('  hobby queue ls [project]              list queues, with depth and consumer')
-  io.out('  hobby queue create <name> --project <p>   a queue with no consumer bound yet')
-  io.out('  hobby queue peek <target> [--limit n]  the oldest messages, without leasing them')
-  io.out('  hobby queue send <target> <json>       enqueue one message')
-  io.out('  hobby queue purge <target>             delete every message, with confirmation')
-  io.out('  hobby queue rm <target> [--yes]        destroy the queue, with confirmation')
-  io.out('  hobby queue set <target> --retention <seconds>   change how long messages are kept')
-  io.out('  hobby login <url>                     connect this machine to a box')
-  io.out('  hobby logout [url]                    forget a box')
-  io.out('  hobby remote ls                       which boxes this machine knows')
-  io.out('  hobby link <project>                  point this directory at a project')
-  io.out('  hobby token create <name>             a token for another machine')
-  io.out('  hobby token ls                        tokens this box has issued')
-  io.out('  hobby token rm <name>                 revoke one')
-  io.out('  hobby update                          update to the latest release')
-  io.out('  hobby studio passwd                   set the studio operator password')
-  io.out('  hobby studio                          print the studio URL and open it')
+  for (const [, usage, what] of USAGE) {
+    io.out(usageLine(usage, what))
+  }
   io.out('')
-  io.out('<target> is `project` when the project has one resource, `project/resource` otherwise.')
-  io.out('every command that returns data supports --json.')
+  printConventions(io)
+}
+
+export function knownVerbs(): string[] {
+  return [...new Set(USAGE.map(([verb]) => verb))]
+}
+
+// `hobby <verb> --help`, `hobby <verb> -h` and `hobby help <verb>`: the rows
+// for that one verb, and the conventions. An unknown verb is the same
+// UsageError the dispatcher raises, so `hobby bogus --help` and `hobby bogus`
+// disagree on nothing but the help text.
+function printVerbHelp(io: Io, verb: string): void {
+  const rows = USAGE.filter(([v]) => v === verb)
+  if (rows.length === 0) {
+    throw new UsageError(`unknown command: ${verb}`)
+  }
+  io.out('usage:')
+  for (const [, usage, what] of rows) {
+    io.out(usageLine(usage, what))
+  }
+  io.out('')
+  printConventions(io)
+}
+
+function isHelpFlag(arg: string): boolean {
+  return arg === '--help' || arg === '-h'
 }
 
 function handleError(err: unknown, io: Io): number {
@@ -206,7 +262,10 @@ function handleError(err: unknown, io: Io): number {
 
 export async function run(argv: string[], io: Io): Promise<number> {
   try {
-    const [cmd, ...rest] = argv
+    const [argv0, ...rest] = argv
+    // `--version` is the spelling every other CLI answers to, so it is an
+    // alias for the verb (issue #96).
+    const cmd = argv0 === '--version' ? 'version' : argv0
 
     if (cmd === undefined) {
       printHelp(io)
@@ -214,6 +273,22 @@ export async function run(argv: string[], io: Io): Promise<number> {
     }
     if (cmd === '-h' || cmd === '--help') {
       printHelp(io)
+      return 0
+    }
+    if (cmd === 'help') {
+      const verb = rest[0]
+      if (verb === undefined) {
+        printHelp(io)
+      } else {
+        printVerbHelp(io, verb)
+      }
+      return 0
+    }
+    // Before the verb's own parseArgs, which would otherwise throw `unknown
+    // flag: --help` for every verb (issue #96). Exact tokens only, so a
+    // positional that merely contains the text is untouched.
+    if (rest.some(isHelpFlag)) {
+      printVerbHelp(io, cmd)
       return 0
     }
 
@@ -283,6 +358,10 @@ export async function run(argv: string[], io: Io): Promise<number> {
     const ctx: Ctx = { io, api, paths, config }
 
     switch (cmd) {
+      case 'version': {
+        const { flags } = parseArgs(rest, { bool: ['json'] })
+        return await cmdVersion(ctx, flags)
+      }
       case 'new': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json', 'empty', 'pin'] })
         return await cmdNew(ctx, positionals, flags)

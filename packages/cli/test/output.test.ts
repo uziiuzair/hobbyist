@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { run, type Io } from '../src/cli/main.js'
+import { CLI_VERSION } from '../src/version.js'
 import { connectionEnv } from '../src/cli/commands.js'
 import { formatBytes, renderResourceLine } from '../src/cli/output.js'
 
@@ -466,4 +467,70 @@ test('renderResourceLine shortens a long last error and says when the retry time
 
 test('renderResourceLine prints no refusal trailer when there is none', () => {
   assert.equal(renderResourceLine(refusedPostgres(null)), 'primary  postgres  failed  port 15432')
+})
+
+// Issue #96: every verb used to answer `--help` with `unknown flag: --help`
+// and exit 2, and nothing printed the installed version.
+test('`hobby deploy --help` prints only deploy rows and exits 0, before touching any config', async () => {
+  const { io, outLines, errLines } = makeIo({})
+  const code = await run(['deploy', '--help'], io)
+  assert.equal(code, 0)
+  assert.deepEqual(errLines, [])
+  assert.ok(outLines.some((l) => l.includes('hobby deploy [path] --env-file <f>')))
+  assert.ok(!outLines.some((l) => l.includes('hobby snapshot')), 'other verbs are left out')
+})
+
+test('`hobby help <verb>` and `-h` after a verb are the same as --help; `hobby help` alone is the full usage', async () => {
+  const byHelp = makeIo({})
+  assert.equal(await run(['help', 'snapshot'], byHelp.io), 0)
+  const byFlag = makeIo({})
+  assert.equal(await run(['snapshot', 'ls', '-h'], byFlag.io), 0)
+  assert.deepEqual(byHelp.outLines, byFlag.outLines)
+  assert.ok(byHelp.outLines.some((l) => l.includes('hobby snapshot restore')))
+
+  const full = makeIo({})
+  assert.equal(await run(['help'], full.io), 0)
+  assert.ok(full.outLines.some((l) => l.includes('hobby deploy')))
+  assert.ok(full.outLines.some((l) => l.includes('hobby version')))
+})
+
+test('`hobby bogus --help` is the same unknown-command usage error as `hobby bogus`', async () => {
+  const { io, errLines } = makeIo({})
+  const code = await run(['bogus', '--help'], io)
+  assert.equal(code, 2)
+  assert.ok(errLines.some((l) => l.includes('unknown command: bogus')))
+})
+
+test('`hobby version` prints the CLI version and says the daemon is unreachable rather than failing', async () => {
+  const home = tempHome()
+  const { io, outLines } = makeIo({ HOBBY_HOME: home })
+  const code = await run(['version'], io)
+  assert.equal(code, 0)
+  assert.equal(outLines[0], `hobby   ${CLI_VERSION}`)
+  assert.equal(outLines[1], 'daemon  not reachable')
+  assert.notEqual(CLI_VERSION, 'unknown')
+
+  const json = makeIo({ HOBBY_HOME: home })
+  assert.equal(await run(['--version', '--json'], json.io), 0)
+  assert.deepEqual(JSON.parse(json.outLines[0] as string), { cli: CLI_VERSION, daemon: null, daemonReachable: false })
+  rmSync(home, { recursive: true, force: true })
+})
+
+test('`hobby version` reports the daemon version from /v1/version when one answers', async () => {
+  const home = tempHome()
+  const socketPath = join(home, 'hobby.sock')
+  const server = createServer((req, res) => {
+    assert.equal(req.url, '/v1/version')
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify({ version: '9.9.9-test' }))
+  })
+  await listen(server, socketPath)
+  try {
+    const { io, outLines } = makeIo({ HOBBY_HOME: home })
+    assert.equal(await run(['version'], io), 0)
+    assert.equal(outLines[1], 'daemon  9.9.9-test')
+  } finally {
+    await close(server)
+    rmSync(home, { recursive: true, force: true })
+  }
 })
