@@ -97,6 +97,24 @@ EXPOSE 8080
 CMD ["node", "server.js"]
 ```
 
+## Monorepos
+
+`[path]` is the build context, and `--dockerfile` names the file inside it, so
+several apps that all need the repository root as context deploy from the same
+root with one Dockerfile each:
+
+```sh
+hobby deploy . --project cl --name web     --dockerfile deploy/hobby/web.Dockerfile
+hobby deploy . --project cl --name admin   --dockerfile deploy/hobby/admin.Dockerfile \
+  --build-arg NEXT_PUBLIC_API_URL=https://api.cl.example
+```
+
+Both are persisted with the resource, so `hobby deploy . --name admin` later
+rebuilds with the same file and the same arguments. A `--build-arg` is inlined
+into the image by whatever `ARG` reads it, which is what `NEXT_PUBLIC_*` values
+need and what a secret must never be: use [environment variables](#environment-variables-and-secrets)
+for anything the running process reads.
+
 ## Create now, deploy later
 
 ```sh

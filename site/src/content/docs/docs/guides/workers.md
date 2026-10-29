@@ -22,6 +22,37 @@ A `wrangler.toml`, `wrangler.jsonc` or `wrangler.json` in the directory is what
 makes it a worker rather than an [app](/docs/guides/apps/). Your existing
 wrangler manifest is read directly; there is no second config format to learn.
 
+## Monorepos
+
+The build context defaults to the worker's own directory. A worker inside a
+workspace imports siblings and installs from the root lockfile, neither of
+which is reachable from there, so point `--context` at the root:
+
+```sh
+hobby deploy ./apps/workers/indexer --project cl --context .
+```
+
+The manifest stays where it is; the install runs at the root (`bun install`,
+or `pnpm install --frozen-lockfile` when there is a `pnpm-lock.yaml`), and the
+bundle runs in the worker's directory. The context is persisted, so a later
+`hobby deploy ./apps/workers/indexer` keeps it. The context is streamed to
+docker without `node_modules` or `.git`, so the host's own installs never
+reach the image and a large workspace does not upload them on every deploy.
+
+Install errors are shown. A worker with no `package.json` skips the install
+and must still build; one with a `package.json` whose install fails stops
+there, with the installer's own message, rather than at a bundle error
+blaming an import you wrote correctly.
+
+## Node builtins
+
+`compatibility_flags = ["nodejs_compat"]` (or `nodejs_compat_v2`) makes the
+bundler leave `node:*` and the bare builtin names (`dns`, `tls`,
+`util/types`, the rest) external, the way wrangler does, and workerd provides
+what it provides at runtime. Without the flag a Node builtin import fails the
+build with `Browser build cannot import Node.js builtin`, which is the same
+thing wrangler would tell you.
+
 ## Secrets
 
 `[vars]` in the manifest are plain variables, in the repository, exactly as on
