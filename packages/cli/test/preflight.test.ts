@@ -14,13 +14,15 @@
 
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import net, { type AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createFakeRuntime, openStore, resolvePaths, type ComputeRuntime, type HobbyConfig, type Store } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
 import { createDefaultKindRegistry, runPreflight, type DaemonContext } from '../src/index.js'
-import { hostNetworkingWarning } from '../src/cli/output.js'
+import { acquireDaemonLock } from '../src/daemon/single-instance.js'
+import { hostNetworkingWarning, preflightBlockers, studioExposureNote } from '../src/cli/output.js'
 
 // Mirrors routes.test.ts's and caddy.test.ts's own testConfig/buildContext
 // exactly, since that is this repo's one established way to build a
@@ -101,4 +103,107 @@ test('a runtime without host networking warns rather than failing', async () => 
   // io.err line (packages/cli/src/cli/commands.ts), matching the ext4
   // reflink case's "warn rather than fail".
   assert.equal(report.runtimeAvailable, true)
+})
+
+// --- what the daemon will bind (issue #108) --------------------------------
+
+// A lock path of this test's own, so a daemon running on the developer's
+// box never shows up in a result here.
+function testLockPath(): string {
+  return join(tmpdir(), `hobby-preflight-lock-${randomUUID()}`)
+}
+
+test('every port the daemon binds is checked, on the host it binds it on, and studioPort is not', async () => {
+  const ctx = buildContext(createFakeRuntime())
+  const report = await runPreflight(ctx, { lockPath: testLockPath() })
+
+  for (const key of ['proxy', 'api', 'http', 'queue'] as const) {
+    const check = report.ports[key]
+    assert.equal(check.host, '127.0.0.1')
+    assert.equal(check.bound, false, `port 0 is never in use: ${key}`)
+    assert.equal(check.error, null)
+  }
+  assert.equal(report.ports.caddy, null, 'caddy off: 80/443 not checked')
+  assert.equal('studio' in report.ports, false, 'nothing listens on studioPort, so it is not reported as a port')
+  assert.deepEqual(report.proxyHost, { setting: '127.0.0.1', hosts: ['127.0.0.1'], error: null })
+  assert.equal(report.studio.listen, '127.0.0.1:0')
+  assert.equal(report.studio.publicHost, null)
+  assert.equal(report.daemon, null)
+})
+
+test('a port something else holds is reported bound, by name', async () => {
+  const server = net.createServer()
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const taken = (server.address() as AddressInfo).port
+  try {
+    const ctx = buildContext(createFakeRuntime(), { apiPort: taken })
+    const report = await runPreflight(ctx, { lockPath: testLockPath() })
+    assert.equal(report.ports.api.port, taken)
+    assert.equal(report.ports.api.bound, true)
+    assert.equal(report.ports.proxy.bound, false)
+    assert.match(preflightBlockers(report).join('\n'), new RegExp(`api port ${taken} on 127.0.0.1 is already in use`))
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
+
+test('a proxyHost this machine does not have is reported as unbindable, as the daemon would find it', async () => {
+  // 198.51.100.0/24 is TEST-NET-2, reserved for documentation and never
+  // routed, so no interface here carries it (the issue used 10.9.9.9).
+  const ctx = buildContext(createFakeRuntime(), { proxyHost: '198.51.100.23' })
+  const report = await runPreflight(ctx, { lockPath: testLockPath() })
+
+  assert.deepEqual(report.proxyHost, { setting: '198.51.100.23', hosts: ['198.51.100.23'], error: null })
+  assert.equal(report.ports.proxy.host, '198.51.100.23')
+  assert.equal(report.ports.proxy.bound, false)
+  assert.equal(report.ports.proxy.error, 'EADDRNOTAVAIL')
+  const blockers = preflightBlockers(report)
+  assert.equal(blockers.length, 1)
+  assert.match(blockers[0] ?? '', /proxy port 0 cannot be bound on 198.51.100.23 \(EADDRNOTAVAIL\)/)
+})
+
+test('a proxyHost that does not resolve is reported with the lookup failure', async () => {
+  const ctx = buildContext(createFakeRuntime(), { proxyHost: 'bogus.invalid' })
+  const report = await runPreflight(ctx, { lockPath: testLockPath() })
+
+  assert.equal(report.ports.proxy.host, 'bogus.invalid')
+  assert.equal(report.ports.proxy.bound, false)
+  assert.equal(report.ports.proxy.error, 'ENOTFOUND')
+  assert.equal(preflightBlockers(report).length, 1)
+})
+
+test('a running daemon is reported from the lock, and its bound ports are not blockers when it is this process', async () => {
+  const lockPath = testLockPath()
+  const lock = acquireDaemonLock('/home/someone/.hobby', lockPath)
+  try {
+    const ctx = buildContext(createFakeRuntime())
+    const report = await runPreflight(ctx, { lockPath })
+    assert.ok(report.daemon !== null)
+    assert.equal(report.daemon.pid, process.pid)
+    assert.equal(report.daemon.running, true)
+    assert.equal(report.daemon.self, true)
+    assert.deepEqual(preflightBlockers(report), [])
+  } finally {
+    lock.release()
+  }
+})
+
+test('with caddy on, 80 and 443 are checked by connecting, and studio reports its public hostname', async () => {
+  const ctx = buildContext(createFakeRuntime(), { caddyEnabled: true, caddyStudioHost: 'studio.example.com' })
+  const report = await runPreflight(ctx, { lockPath: testLockPath() })
+
+  assert.ok(report.ports.caddy !== null)
+  assert.deepEqual(
+    report.ports.caddy.map((c) => c.port),
+    [80, 443]
+  )
+  for (const check of report.ports.caddy) {
+    assert.equal(check.host, '127.0.0.1')
+    // Whatever this machine has on 80/443, the probe answers one of the two
+    // honest ways; it never throws and never needs root.
+    assert.equal(typeof check.bound, 'boolean')
+  }
+  assert.equal(report.studio.publicHost, 'studio.example.com')
+  assert.match(studioExposureNote(report), /published by caddy at https:\/\/studio\.example\.com/)
+  assert.match(studioExposureNote(report), /reachable from the internet/)
 })

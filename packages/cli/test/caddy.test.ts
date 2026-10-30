@@ -5,12 +5,12 @@
 
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { createFakeRuntime, openStore, resolvePaths, type ComputeRuntime, type HobbyConfig, type Store } from '@hobby.sh/core'
+import { createFakeRuntime, HobbyError, openStore, resolvePaths, type ComputeRuntime, type HobbyConfig, type Store } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
 import {
   createCaddyManager,
@@ -531,6 +531,59 @@ test('a caddy that will not start leaves the daemon running and its control sock
     await daemon.close()
     ctx.store.close()
   }
+})
+
+// --- caddyAdminPort is honoured (issue #132) --------------------------------
+
+test('ensureRunning writes a bootstrap Caddyfile with the configured admin address and mounts it over the image default', async () => {
+  const runtime = createFakeRuntime()
+  const fetchFn = (async () => new Response('{}', { status: 200 })) as typeof fetch
+  const home = mkdtempSync(join(tmpdir(), 'hobby-caddy-home-'))
+  const caddyfilePath = join(home, 'caddy', 'Caddyfile')
+  const manager = createCaddyManager(runtime, { adminPort: 16520, fetchFn, caddyfilePath })
+
+  await manager.ensureRunning()
+
+  assert.equal(readFileSync(caddyfilePath, 'utf8'), '{\n\tadmin 127.0.0.1:16520\n}\n')
+  const spec = runtime._specs.get('hobby-caddy')
+  assert.deepEqual(spec?.binds, [{ host: caddyfilePath, container: '/etc/caddy/Caddyfile' }])
+  rmSync(home, { recursive: true, force: true })
+})
+
+test('every config pushed to caddy carries the admin address, so a load never moves the listener back to 2019', async () => {
+  const runtime = createFakeRuntime()
+  const bodies: Array<{ admin?: { listen?: string } }> = []
+  const fetchFn = (async (_url: string | URL | Request, init?: RequestInit) => {
+    if (init?.body !== undefined) {
+      bodies.push(JSON.parse(String(init.body)) as { admin?: { listen?: string } })
+    }
+    return new Response('{}', { status: 200 })
+  }) as typeof fetch
+  const manager = createCaddyManager(runtime, { adminPort: 16520, fetchFn })
+
+  await manager.setFallback({ upstream: '127.0.0.1:7433' })
+  await manager.addRoute({ id: 'studio', host: 'studio.example.com', upstream: '127.0.0.1:7432' })
+
+  assert.equal(bodies.length, 2)
+  for (const body of bodies) {
+    assert.equal(body.admin?.listen, '127.0.0.1:16520')
+  }
+})
+
+test('an admin API that never answers names the configured port and how to recreate an old container', async () => {
+  const runtime = createFakeRuntime()
+  const fetchFn = (async () => {
+    throw new Error('ECONNREFUSED')
+  }) as typeof fetch
+  const manager = createCaddyManager(runtime, { adminPort: 16520, fetchFn })
+
+  await assert.rejects(manager.ensureRunning(), (err: unknown) => {
+    assert.ok(err instanceof HobbyError)
+    assert.match(err.message, /never became reachable at http:\/\/127\.0\.0\.1:16520/)
+    assert.match(err.hint ?? '', /caddyAdminPort is 16520/)
+    assert.match(err.hint ?? '', /docker rm -f hobby-caddy/)
+    return true
+  })
 })
 
 test('a failing route push leaves the daemon running and its control socket answering', async () => {

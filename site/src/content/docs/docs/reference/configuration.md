@@ -49,7 +49,7 @@ Start the daemon from the directory holding your `hobby.json`.
 | `proxyHost` | `HOBBY_PROXY_HOST` | `127.0.0.1` | Which addresses it binds. An address, `"tailnet"`, or `"all"`. See below |
 | `proxyTls` | `HOBBY_PROXY_TLS_CERT`, `HOBBY_PROXY_TLS_KEY`, `HOBBY_PROXY_TLS_HOSTNAME` | `null` | TLS for the proxy: `{ certFile, keyFile, hostname }`. See below |
 | `project` | | `null` | Which project this directory belongs to. Written by `hobby link` |
-| `studioPort` | `HOBBY_STUDIO_PORT` | `8443` | **Nothing listens on this.** Studio is served by the daemon on `apiPort`. The value is only used by a preflight port check |
+| `studioPort` | `HOBBY_STUDIO_PORT` | `8443` | **Unused.** Nothing listens on it and, since issue #108, nothing checks it: Studio is served by the daemon on `apiPort`, which is the port `hobby init` now checks. Kept so an existing `hobby.json` still parses |
 | `apiPort` | `HOBBY_API_PORT` | `7432` | The daemon API, loopback only. Gated by the operator session or an API token; see [the API reference](/docs/reference/api/#listeners-and-what-authenticates) |
 | `httpPort` | `HOBBY_HTTP_PORT` | `7433` | The HTTP wake router |
 | `queuePort` | `HOBBY_QUEUE_PORT` | `7434` | The queue endpoint |
@@ -58,7 +58,7 @@ Start the daemon from the directory holding your `hobby.json`.
 | `wakeTimeoutMs` | `HOBBY_WAKE_TIMEOUT_MS` | `30000` | How long a wake may take before it is a failure |
 | `readinessPollMs` | `HOBBY_READINESS_POLL_MS` | `25` | How often readiness is polled during a wake |
 | `caddyEnabled` | `HOBBY_CADDY_ENABLED` | `false` | Whether the Caddy front door runs at all. Only `1` or `true` turns it on; anything else is false |
-| `caddyAdminPort` | `HOBBY_CADDY_ADMIN_PORT` | `2019` | Caddy's admin API, loopback only |
+| `caddyAdminPort` | `HOBBY_CADDY_ADMIN_PORT` | `2019` | Caddy's admin API, on `127.0.0.1`. The daemon writes `$HOBBY_HOME/caddy/Caddyfile` holding only `admin 127.0.0.1:<port>` and mounts it into the container, so the port is honoured on every start. A `hobby-caddy` container created by a daemon older than this (issue #132) still has Caddy's default, 2019: `docker rm -f hobby-caddy` once and start the daemon again |
 | `caddyStudioHost` | `HOBBY_CADDY_STUDIO_HOST` | `null` | The public hostname for Studio. `null` publishes no Studio route |
 
 Every numeric variable is validated by name (`envInteger`): a value that is

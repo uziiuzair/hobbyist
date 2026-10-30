@@ -5,24 +5,31 @@
 // no way to bind a published port to a specific host address, and no way to
 // override a container's command. `network: 'host'` (below) is the answer
 // to both: the container shares the host's network namespace outright, so
-// Caddy's own default admin listener (`localhost:2019`, unmodified, no
-// bootstrap file needed) is the same loopback interface the daemon itself
-// runs on, and ports 80/443 that Caddy binds are reachable exactly the way
-// a host-installed reverse proxy would be, with nothing published via `-p`
-// at all.
+// Caddy's admin listener is on the same loopback interface the daemon
+// itself runs on, and ports 80/443 that Caddy binds are reachable exactly
+// the way a host-installed reverse proxy would be, with nothing published
+// via `-p` at all.
 //
-// The stock `caddy` image's own baked-in default Caddyfile is irrelevant
-// here: the very first POST to /load below replaces the entire running
-// config, in memory, with whatever this manager decides routes should be.
-// That is what "configured entirely over its admin API" means in practice:
-// there is never a moment after startup where Caddy is serving its own
-// default page instead of ours, and there is never a file on disk holding
-// our routes for an operator to find or hand-edit.
+// "No config files on disk" has one exception since issue #132: a one-line
+// bootstrap Caddyfile holding only the admin address (`{ admin
+// 127.0.0.1:<caddyAdminPort> }`), bind-mounted over the image's default so
+// the admin API comes up on the configured port rather than Caddy's own
+// default of 2019. It carries no routes. The very first POST to /load below
+// still replaces the entire running config, in memory, with whatever this
+// manager decides routes should be: there is never a moment after startup
+// where Caddy is serving its own default page instead of ours, and there is
+// never a file on disk holding our routes for an operator to find or
+// hand-edit.
 
+import { mkdir, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { HobbyError, type ComputeRuntime } from '@hobby.sh/core'
 import { waitForHttpReachable } from './preflight.js'
 
 const CADDY_CONTAINER_NAME = 'hobby-caddy'
+// Where the image's own default Caddyfile lives, and therefore where the
+// bootstrap file below is bind-mounted so `caddy run` reads ours instead.
+const CADDY_CONFIG_PATH = '/etc/caddy/Caddyfile'
 const CADDY_IMAGE = 'caddy:2-alpine'
 const CADDY_SERVER_NAME = 'hobby'
 const FALLBACK_ROUTE_ID = 'hobby-fallback'
@@ -99,9 +106,35 @@ export interface CreateCaddyManagerOptions {
   // and is reachable only by the daemon.").
   adminHost?: string
   fetchFn?: FetchFn
+  // Where ensureRunning writes the one-line bootstrap Caddyfile that puts
+  // Caddy's admin API on `adminPort` before the first POST /load (issue
+  // #132): a file under HOBBY_HOME, bind-mounted over the image's default
+  // Caddyfile. Without it the container starts with the image's default,
+  // admin on 2019, and any other `caddyAdminPort` is polled forever and
+  // never answers. Optional only so the unit tests, whose fake runtime
+  // mounts nothing, can leave it out; startDaemon always passes it.
+  caddyfilePath?: string
 }
 
-function buildConfig(routes: Map<string, CaddyRoute>, fallback: CaddyFallback | null): unknown {
+// Caddy reads its admin address from the config it is running, so the
+// address has to appear in two places: the bootstrap Caddyfile the container
+// starts from (renderBootstrapCaddyfile) and every config pushed over the
+// admin API afterwards (buildConfig). A pushed config with no `admin` block
+// would move the listener back to Caddy's default, 2019, and the next push
+// would fail to reach it.
+function adminListen(adminHost: string, adminPort: number): string {
+  return `${adminHost}:${adminPort}`
+}
+
+export function renderBootstrapCaddyfile(adminHost: string, adminPort: number): string {
+  return `{\n\tadmin ${adminListen(adminHost, adminPort)}\n}\n`
+}
+
+export function buildConfig(
+  routes: Map<string, CaddyRoute>,
+  fallback: CaddyFallback | null,
+  admin: { host: string; port: number }
+): unknown {
   const matched = [...routes.values()].map((route) => ({
     '@id': route.id,
     match: [{ host: [route.host] }],
@@ -128,6 +161,7 @@ function buildConfig(routes: Map<string, CaddyRoute>, fallback: CaddyFallback | 
         ]
 
   const config: Record<string, unknown> = {
+    admin: { listen: adminListen(admin.host, admin.port) },
     apps: {
       http: {
         servers: {
@@ -165,7 +199,8 @@ function buildConfig(routes: Map<string, CaddyRoute>, fallback: CaddyFallback | 
 }
 
 export function createCaddyManager(runtime: ComputeRuntime, opts: CreateCaddyManagerOptions): CaddyManager {
-  const adminBase = `http://${opts.adminHost ?? '127.0.0.1'}:${opts.adminPort}`
+  const admin = { host: opts.adminHost ?? '127.0.0.1', port: opts.adminPort }
+  const adminBase = `http://${admin.host}:${admin.port}`
   const fetchFn = opts.fetchFn ?? fetch
   const routes = new Map<string, CaddyRoute>()
   let fallback: CaddyFallback | null = null
@@ -195,7 +230,7 @@ export function createCaddyManager(runtime: ComputeRuntime, opts: CreateCaddyMan
       res = await fetchFn(`${adminBase}/load`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(buildConfig(routes, fallback)),
+        body: JSON.stringify(buildConfig(routes, fallback, admin)),
       })
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err)
@@ -216,12 +251,25 @@ export function createCaddyManager(runtime: ComputeRuntime, opts: CreateCaddyMan
 
   return {
     async ensureRunning(): Promise<void> {
+      // Written on every start, not only on create: the container keeps the
+      // bind to this path, and `docker start` makes Caddy re-read it, so a
+      // changed caddyAdminPort takes effect on the next daemon start without
+      // recreating anything. The exception is a hobby-caddy container made
+      // before this file was mounted at all (no bind, image default admin
+      // on 2019); that one has to be removed once, and the error below says
+      // so (issue #132).
+      const binds: Array<{ host: string; container: string }> = []
+      if (opts.caddyfilePath !== undefined) {
+        await mkdir(dirname(opts.caddyfilePath), { recursive: true })
+        await writeFile(opts.caddyfilePath, renderBootstrapCaddyfile(admin.host, admin.port), 'utf8')
+        binds.push({ host: opts.caddyfilePath, container: CADDY_CONFIG_PATH })
+      }
       await runtime.ensureCreated({
         name: CADDY_CONTAINER_NAME,
         image: CADDY_IMAGE,
         env: {},
         ports: [],
-        binds: [],
+        binds,
         network: 'host',
       })
       await runtime.start(CADDY_CONTAINER_NAME)
@@ -234,7 +282,10 @@ export function createCaddyManager(runtime: ComputeRuntime, opts: CreateCaddyMan
       if (!reachable) {
         throw new HobbyError(
           'runtime_unavailable',
-          `the caddy admin API never became reachable within ${ADMIN_READY_TIMEOUT_MS}ms of starting the container`
+          `the caddy admin API never became reachable at ${adminBase} within ${ADMIN_READY_TIMEOUT_MS}ms of starting the container`,
+          `caddyAdminPort is ${admin.port}. If the ${CADDY_CONTAINER_NAME} container was created by an older daemon it still ` +
+            `uses the image's default admin address (localhost:2019): remove it (docker rm -f ${CADDY_CONTAINER_NAME}) and ` +
+            'start the daemon again so it is recreated with the configured address.'
         )
       }
     },

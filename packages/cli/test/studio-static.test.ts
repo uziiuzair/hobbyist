@@ -329,3 +329,16 @@ test('index.html itself cannot be traversed to from a nested-looking path either
     assert.match(res.text, /Hobbyist Studio/)
   })
 })
+
+// Issue #117: a bundle file that does not exist is 404, not index.html as
+// 200. The SPA fallback is for pages; assets/ is where Vite puts files.
+test('a missing file under /assets/ is 404, never the SPA fallback', async () => {
+  const distDir = buildFixtureDist()
+  await withStudioServer(buildContext(), distDir, async (baseUrl) => {
+    const res = await rawCall(baseUrl, 'GET', '/assets/x.js')
+    assert.equal(res.status, 404)
+    assert.doesNotMatch(res.text, /Hobbyist Studio/)
+    // The real asset beside it is unaffected.
+    assert.equal((await rawCall(baseUrl, 'GET', '/assets/app.js')).status, 200)
+  })
+})

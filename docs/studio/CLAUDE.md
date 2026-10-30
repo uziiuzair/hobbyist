@@ -135,3 +135,16 @@ the file named.
 Tests for the Studio side are `packages/studio/test/errors.test.ts`,
 `format.test.ts`, `createProject.test.ts` and the login and 401 cases in
 `api.test.ts`.
+
+## Amendment, 2026-10-30: column type names (issue #116)
+
+`select current_user, x::bytea, pg_sleep(0)` showed `oid:19`, `oid:17` and
+`oid:2278` in the SQL view's column headers. `OID_NAMES`
+(`packages/pg/src/query.ts`) held seventeen types; it now holds every
+built-in type node-postgres itself knows (the `pg-types` builtins table,
+60 OIDs) under Postgres's own names as `format_type` prints them (`name`,
+`bytea`, `void`, `interval`, `inet`, `regclass`, `tsvector`, ...), plus the
+array types of the common scalars (`text[]`, `integer[]`, `uuid[]`,
+`jsonb[]`). An OID outside that set (a user-defined type, an enum, an
+uncommon array) still renders as `oid:N`, which is an honest "unlabeled"
+rather than a catalog lookup on every query.

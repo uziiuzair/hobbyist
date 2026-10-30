@@ -14,6 +14,7 @@ import {
   expectKind,
   guardFor,
   HobbyError,
+  isDiskFullError,
   resolvePgdataPath,
   validateName,
   type ActivityGuardResult,
@@ -306,7 +307,7 @@ export async function takeSnapshot(
     return manifest
   } catch (err: unknown) {
     await rm(partialDir, { recursive: true, force: true })
-    throw err
+    throw explainSnapshotFailure(err, partialDir)
   } finally {
     // Safe to await unguarded only because resume (above) already catches
     // every start() failure itself and returns failure strings rather than
@@ -318,6 +319,30 @@ export async function takeSnapshot(
     }
     release()
   }
+}
+
+// A full disk is the one failure a snapshot has that the operator can fix
+// and the daemon cannot (issue #139). cloneTree's copy, pg_basebackup's
+// unpack and the manifest write all raise it as a plain fs error (ENOSPC, or
+// EDQUOT under a quota), which toHobbyError would otherwise log and hand
+// back as "internal error". Named here instead: the path that ran out of
+// room, and what to do. Every other error passes through untouched. Where
+// the snapshot was being written is the thing to say, because the partial
+// directory has already been removed by the time this is thrown.
+export function explainSnapshotFailure(err: unknown, partialDir: string): unknown {
+  if (!isDiskFullError(err)) {
+    return err
+  }
+  const dest = (err as { dest?: unknown }).dest
+  const path = (err as { path?: unknown }).path
+  const where = typeof dest === 'string' ? dest : typeof path === 'string' ? path : partialDir
+  return new HobbyError(
+    'disk_full',
+    `no space left on device while writing ${where}`,
+    `the filesystem holding ${partialDir} is full. free space there, delete a snapshot you no longer need ` +
+      '(hobby snapshot ls, hobby snapshot rm), or move HOBBY_HOME to a bigger disk. nothing was kept: the ' +
+      'partial snapshot was removed. hobby init shows free space'
+  )
 }
 
 // Why a project cannot be snapshotted online, or null when it can. Read by
@@ -520,7 +545,7 @@ export async function takeOnlineSnapshot(
     return manifest
   } catch (err: unknown) {
     await rm(partialDir, { recursive: true, force: true })
-    throw err
+    throw explainSnapshotFailure(err, partialDir)
   } finally {
     for (const handle of handles) {
       ctx.activity.close(handle)

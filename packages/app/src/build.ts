@@ -2,36 +2,21 @@
 // hurting everything else on the box.
 //
 // `docs/compute/CLAUDE.md` asked what stops a build from starving the box
-// that is also serving a database. The answer is two boring mechanisms, both
-// here: one build at a time, globally, and hard caps on the build container.
-// A build that is slow is a nuisance. A build that makes a sleeping database
-// miss its wake budget is a broken promise, so a build always loses.
+// that is also serving a database. The honest answer, after issue #150, is
+// one mechanism: one build at a time, globally (core's withBuildLock, which
+// the worker kind shares since issue #83). The `--memory=2g` and
+// `--cpu-shares=512` caps this file used to pass were accepted and ignored
+// by `docker build` under BuildKit, so they were a promise the box was not
+// keeping, and they are gone rather than kept for show.
 
 import { existsSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
-import { HobbyError, type BuildSpec, type ComputeRuntime } from '@hobby.sh/core'
+import { buildQueuedNote, HobbyError, withBuildLock, type BuildSpec, type ComputeRuntime } from '@hobby.sh/core'
 
-// Deliberately conservative and not configurable yet. `--cpu-shares` is a
-// relative weight against the default of 1024, so 512 means a build gets
-// roughly half the CPU of anything else contending, rather than a hard cap
-// that would make builds pointlessly slow on an idle box.
-export const BUILD_MEMORY = '2g'
-export const BUILD_CPU_SHARES = 512
-
-// Global, process-wide, not per project. Two concurrent builds on a five
-// dollar VPS is the case this exists for, and a per-project lock would not
-// prevent it. Serialised through a promise chain rather than a semaphore
-// because the daemon is one process and the queue depth is "however many
-// deploys the operator typed", not a number worth managing.
-let buildChain: Promise<unknown> = Promise.resolve()
-
-export function withBuildLock<T>(fn: () => Promise<T>): Promise<T> {
-  // Chained off a settled-either-way promise, so one failed build does not
-  // wedge every build after it.
-  const run = buildChain.then(fn, fn)
-  buildChain = run.catch(() => undefined)
-  return run
-}
+// Re-exported so existing imports from this package keep resolving; the
+// implementation moved to @hobby.sh/core (build-lock.ts) so the worker kind
+// could take the same lock without depending on the app package.
+export { withBuildLock }
 
 export interface AppSource {
   path: string
@@ -89,13 +74,16 @@ export async function buildAppImage(
     contextPath,
     dockerfile,
     tag: opts.tag,
-    memory: BUILD_MEMORY,
-    cpuShares: BUILD_CPU_SHARES,
     ...(opts.source.buildArgs === undefined || Object.keys(opts.source.buildArgs).length === 0
       ? {}
       : { buildArgs: opts.source.buildArgs }),
   }
   const build = runtime.build.bind(runtime)
-  const logs = await withBuildLock(() => build(spec))
-  return { tag: opts.tag, logs }
+  let queued = ''
+  const logs = await withBuildLock(() => build(spec), {
+    onWait: (buildsAhead) => {
+      queued = buildQueuedNote(buildsAhead)
+    },
+  })
+  return { tag: opts.tag, logs: `${queued}${logs}` }
 }

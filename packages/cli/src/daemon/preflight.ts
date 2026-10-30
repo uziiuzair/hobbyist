@@ -7,6 +7,13 @@
 // support reflinks" without guessing from a filesystem type name, which is
 // unreliable across XFS-with-reflinks-disabled, ext4, and every BSD variant
 // APFS reports itself as depending on OS version.
+//
+// What it checks is what `hobby daemon` will do (issue #108): every port the
+// daemon binds, on the host it binds it on, resolved the way startDaemon
+// resolves it; whether a daemon already holds the machine-wide lock; and
+// what Studio exposes. `hobby init` used to check proxyPort and studioPort
+// on loopback and say "host is ready" for a proxyHost the daemon then
+// refused, for a taken apiPort, and with a daemon already running.
 
 import { randomUUID } from 'node:crypto'
 import { rm, stat, statfs, writeFile } from 'node:fs/promises'
@@ -16,10 +23,20 @@ import { dirname, join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import type { DaemonContext } from './context.js'
+import { resolveProxyHosts } from './proxy-hosts.js'
+import { DAEMON_LOCK_PATH, inspectDaemonLock } from './single-instance.js'
 
 const execFileAsync = promisify(execFile)
 
-const PORT_PROBE_HOST = '127.0.0.1'
+// The address the daemon's own listeners bind (server.ts: the API and Studio
+// listener, the HTTP wake router and the queue endpoint are all loopback;
+// the queue endpoint adds docker bridge gateways on Linux, which nothing
+// else on the box contends for).
+const LOOPBACK = '127.0.0.1'
+
+// Caddy's listeners (caddy.ts's buildConfig: `:80` and `:443`, every
+// interface, from inside a host-network container).
+const CADDY_PORTS = [80, 443]
 
 // The same image packages/cli/src/daemon/caddy.ts's CaddyManager starts
 // once the daemon is actually running (its own CADDY_IMAGE constant). Kept
@@ -45,6 +62,26 @@ const HOST_NETWORKING_CONNECT_TIMEOUT_MS = 1_500
 // must not hang `hobby init`.
 const HOST_NETWORKING_PROBE_TIMEOUT_MS = 5_000
 
+// How long a connect probe (checkPortListening) waits for an answer.
+const CONNECT_PROBE_TIMEOUT_MS = 500
+
+// One port the daemon (or Caddy on its behalf) will bind, and what the
+// probe found there.
+export interface PortCheck {
+  port: number
+  // The address the daemon will bind it on, which is the address it was
+  // probed on. `0.0.0.0` for proxyHost "all".
+  host: string
+  // Something else is already listening there.
+  bound: boolean
+  // The probe could neither bind the port nor learn that it was taken: the
+  // errno it got instead (EADDRNOTAVAIL for an address this machine does
+  // not have, ENOTFOUND for a hostname that does not resolve, EACCES for a
+  // privileged port as a non-root user). The daemon's own bind would fail
+  // the same way. null when the port is simply free or simply bound.
+  error: string | null
+}
+
 // Linux's f_type for tmpfs (TMPFS_MAGIC in linux/magic.h). macOS reports a
 // different type space, so this only ever matches on Linux, which is also
 // where a HOBBY_HOME can land on tmpfs.
@@ -65,10 +102,38 @@ export interface PreflightReport {
     // be read.
     tmpfs: boolean
   }
+  // How proxyHost resolved, the way startDaemon resolves it
+  // (proxy-hosts.ts's resolveProxyHosts). `hosts` is null and `error` is
+  // the daemon's own refusal when it cannot: "tailnet" with no tailscaled.
+  proxyHost: { setting: string; hosts: string[] | null; error: string | null }
   ports: {
-    proxy: { port: number; bound: boolean }
-    studio: { port: number; bound: boolean }
+    // The wire-protocol proxy, on the first resolved proxy host (the
+    // tailnet address for "tailnet", so a stale or wrong address is caught;
+    // loopback when resolution failed, so the port itself is still checked).
+    proxy: PortCheck
+    // The daemon API, which also serves Studio. Loopback.
+    api: PortCheck
+    // The HTTP wake router. Loopback.
+    http: PortCheck
+    // The queue endpoint. Loopback.
+    queue: PortCheck
+    // 80 and 443, which Caddy binds on every interface, checked by
+    // connecting rather than binding (a non-root process cannot bind a
+    // privileged port to find out whether it is free). Only when caddy is
+    // enabled; null otherwise, so a check that did not run never reads as
+    // one that passed.
+    caddy: PortCheck[] | null
   }
+  // The machine-wide daemon lock (single-instance.ts). null when no lock
+  // file exists. `self` is true when the lock belongs to the process
+  // answering, which is what GET /v1/preflight served by a running daemon
+  // sees: the ports above being bound is then expected, not a conflict.
+  daemon: { pid: number; home: string; startedAt: string; running: boolean; self: boolean } | null
+  // What Studio exposes (ADR 0008: `hobby init` states plainly what is
+  // about to be reachable). `listen` is where the daemon serves it;
+  // `publicHost` is the hostname Caddy publishes it on, or null when
+  // nothing off this box reaches it.
+  studio: { listen: string; publicHost: string | null }
   // Only meaningful when caddy is enabled, so it is null when it is not
   // rather than a fabricated "true": a check that did not run must not
   // read as a check that passed.
@@ -123,27 +188,58 @@ async function detectReflinkSupport(dir: string): Promise<boolean> {
   }
 }
 
-// Binds a throwaway server to the port and immediately releases it.
-// EADDRINUSE means something else is already listening; any other outcome
-// means the port is free. This is the only reliable, cross-platform way to
-// answer "is this port already bound" without a native syscall binding, and
-// releasing the socket the instant it binds leaves no observable trace.
-function isPortBound(port: number, host: string): Promise<boolean> {
+// Binds a throwaway server to the port on the given host and immediately
+// releases it. EADDRINUSE means something else is already listening; a
+// clean bind means the port is free; any other error means the daemon's own
+// bind would fail the same way, and is reported as such rather than folded
+// into "free" (which the first version of this did, and which is how
+// `hobby init` said ready for HOBBY_PROXY_HOST=bogus). Releasing the socket
+// the instant it binds leaves no observable trace.
+export function checkPortBindable(port: number, host: string): Promise<PortCheck> {
   return new Promise((resolve) => {
     const server = net.createServer()
     server.once('error', (err: NodeJS.ErrnoException) => {
-      resolve(err.code === 'EADDRINUSE')
+      if (err.code === 'EADDRINUSE') {
+        resolve({ port, host, bound: true, error: null })
+      } else {
+        resolve({ port, host, bound: false, error: err.code ?? err.message })
+      }
     })
     server.once('listening', () => {
-      server.close(() => resolve(false))
+      server.close(() => resolve({ port, host, bound: false, error: null }))
     })
     server.listen(port, host)
   })
 }
 
-// Same bind-then-release trick as isPortBound above, but returns the port
-// the OS actually assigned rather than a boolean: the host-networking probe
-// below needs a genuinely free admin port to hand the throwaway Caddy
+// The other way to ask "is something on this port": connect to it. Used for
+// 80 and 443, which a non-root daemon cannot bind even to probe (EACCES on
+// Linux for ports under 1024) but which Caddy, root inside its container,
+// will. A refused connection means nothing is listening; an accepted one
+// means something is. Anything else (a timeout, an unreachable address) is
+// reported as the error it was.
+export function checkPortListening(port: number, host: string): Promise<PortCheck> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ port, host })
+    const finish = (result: PortCheck): void => {
+      socket.destroy()
+      resolve(result)
+    }
+    socket.setTimeout(CONNECT_PROBE_TIMEOUT_MS, () => finish({ port, host, bound: false, error: 'ETIMEDOUT' }))
+    socket.once('connect', () => finish({ port, host, bound: true, error: null }))
+    socket.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'ECONNREFUSED') {
+        finish({ port, host, bound: false, error: null })
+      } else {
+        finish({ port, host, bound: false, error: err.code ?? err.message })
+      }
+    })
+  })
+}
+
+// Same bind-then-release trick as checkPortBindable above, but returns the
+// port the OS actually assigned rather than a result: the host-networking
+// probe below needs a genuinely free admin port to hand the throwaway Caddy
 // container before that container exists. Port 0 rather than a fixed
 // literal, so two concurrent preflight calls (Studio's setup screen can
 // poll this endpoint repeatedly) never race each other for the same port.
@@ -215,9 +311,9 @@ async function probeHostNetworking(ctx: DaemonContext): Promise<boolean> {
   const token = randomUUID()
   const caddyfilePath = join(tmpdir(), `.hobby-preflight-caddyfile-${token}`)
   const containerName = `hobby-preflight-hostnet-${token}`
-  const adminPort = await reserveEphemeralPort(PORT_PROBE_HOST)
+  const adminPort = await reserveEphemeralPort(LOOPBACK)
   try {
-    await writeFile(caddyfilePath, `{\n\tadmin ${PORT_PROBE_HOST}:${adminPort}\n}\n`)
+    await writeFile(caddyfilePath, `{\n\tadmin ${LOOPBACK}:${adminPort}\n}\n`)
     await ctx.runtime.ensureCreated({
       name: containerName,
       image: HOST_NETWORKING_PROBE_IMAGE,
@@ -228,7 +324,7 @@ async function probeHostNetworking(ctx: DaemonContext): Promise<boolean> {
     })
     await ctx.runtime.start(containerName)
     return await waitForHttpReachable(
-      `http://${PORT_PROBE_HOST}:${adminPort}/config/`,
+      `http://${LOOPBACK}:${adminPort}/config/`,
       HOST_NETWORKING_CONNECT_TIMEOUT_MS
     )
   } finally {
@@ -271,22 +367,59 @@ async function detectHostNetworking(ctx: DaemonContext): Promise<boolean> {
   return withTimeout(probeHostNetworking(ctx), HOST_NETWORKING_PROBE_TIMEOUT_MS, false)
 }
 
-export async function runPreflight(ctx: DaemonContext): Promise<PreflightReport> {
+// Exactly startDaemon's resolution (proxy-hosts.ts), with its one refusal
+// turned into a reported error rather than a thrown one: preflight reports,
+// it does not refuse.
+async function describeProxyHost(ctx: DaemonContext): Promise<PreflightReport['proxyHost']> {
+  const setting = ctx.config.proxyHost.trim()
+  try {
+    return { setting, hosts: await resolveProxyHosts(ctx), error: null }
+  } catch (err) {
+    return { setting, hosts: null, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+// The proxy is probed on the address the daemon will actually bind, and the
+// one most likely to be wrong: for "tailnet" that is the tailnet address,
+// not the loopback half, since loopback is also covered by the three
+// daemon ports beside it.
+function proxyProbeHost(proxyHost: PreflightReport['proxyHost']): string {
+  if (proxyHost.hosts === null || proxyHost.hosts.length === 0) {
+    return LOOPBACK
+  }
+  return proxyHost.hosts[proxyHost.hosts.length - 1] as string
+}
+
+export interface PreflightOptions {
+  // The daemon lock to inspect. Tests point this at a file of their own so a
+  // daemon running on the developer's box never leaks into a result.
+  lockPath?: string
+}
+
+export async function runPreflight(ctx: DaemonContext, opts: PreflightOptions = {}): Promise<PreflightReport> {
   const probeDir = await nearestExistingDir(ctx.paths.home)
+  const proxyHost = await describeProxyHost(ctx)
 
   // Gated on caddyEnabled before the container ever starts, not after: a
   // Promise.resolve(null) here is what keeps a disabled caddy from ever
   // asking ctx.runtime to do anything at all, which is exactly what the
   // "check does not run" test below asserts.
-  const [runtimeAvailable, reflinkSupported, fsStats, proxyBound, studioBound, hostNetworkingSupported] =
+  const [runtimeAvailable, reflinkSupported, fsStats, proxy, api, http, queue, caddy, hostNetworkingSupported] =
     await Promise.all([
       ctx.runtime.available(),
       detectReflinkSupport(probeDir),
       statfs(probeDir),
-      isPortBound(ctx.config.proxyPort, PORT_PROBE_HOST),
-      isPortBound(ctx.config.studioPort, PORT_PROBE_HOST),
+      checkPortBindable(ctx.config.proxyPort, proxyProbeHost(proxyHost)),
+      checkPortBindable(ctx.config.apiPort, LOOPBACK),
+      checkPortBindable(ctx.config.httpPort, LOOPBACK),
+      checkPortBindable(ctx.config.queuePort, LOOPBACK),
+      ctx.config.caddyEnabled
+        ? Promise.all(CADDY_PORTS.map((port) => checkPortListening(port, LOOPBACK)))
+        : Promise.resolve(null),
       ctx.config.caddyEnabled ? detectHostNetworking(ctx) : Promise.resolve(null),
     ])
+
+  const lock = inspectDaemonLock(opts.lockPath ?? DAEMON_LOCK_PATH)
 
   return {
     runtimeAvailable,
@@ -296,9 +429,15 @@ export async function runPreflight(ctx: DaemonContext): Promise<PreflightReport>
       freeBytes: fsStats.bavail * fsStats.bsize,
       tmpfs: fsStats.type === TMPFS_MAGIC,
     },
-    ports: {
-      proxy: { port: ctx.config.proxyPort, bound: proxyBound },
-      studio: { port: ctx.config.studioPort, bound: studioBound },
+    proxyHost,
+    ports: { proxy, api, http, queue, caddy },
+    daemon:
+      lock === null
+        ? null
+        : { pid: lock.pid, home: lock.home, startedAt: lock.startedAt, running: lock.running, self: lock.self },
+    studio: {
+      listen: `${LOOPBACK}:${ctx.config.apiPort}`,
+      publicHost: ctx.config.caddyEnabled ? ctx.config.caddyStudioHost : null,
     },
     hostNetworking: hostNetworkingSupported === null ? null : { supported: hostNetworkingSupported },
   }

@@ -4,6 +4,7 @@
 // image, which is what the real-Docker run in the milestone report is for.
 
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
@@ -31,6 +32,7 @@ import {
   parseWranglerManifest,
   stripJsonComments,
 } from '../src/manifest.js'
+import { withBuildLock } from '@hobby.sh/core'
 import { nodeBuiltinExternals, renderWorkerDockerfile, MINIFLARE_VERSION, RUNNER_SOURCE, WORKER_CONTEXT_EXCLUDES } from '../src/runtime-image.js'
 import {
   buildRunnerManifest,
@@ -1494,4 +1496,72 @@ test('a worker whose container exits on boot fails fast with the exit code and i
     }
   )
   assert.equal(probes, 1)
+})
+
+// --- the runner's shutdown (issue #95) --------------------------------------
+
+// The runner is a JS string inside a TS template literal, so a syntax error
+// in it only ever surfaced inside the container, at the first wake. This
+// hands the exact bytes the Dockerfile embeds to node's own parser.
+test('RUNNER_SOURCE parses as an ES module', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-runner-check-'))
+  const file = join(dir, 'runner.mjs')
+  writeFileSync(file, RUNNER_SOURCE)
+  execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' })
+})
+
+test('the runner replaces the SIGTERM and SIGINT listeners miniflare registers, and exits 0 after dispose', () => {
+  // Miniflare's bundle installs `onSignalTerm() { runCallbacks(); process.exit(128 + 15) }`
+  // at import time; appended behind it, our handler never ran and every
+  // sleep was Exited (143). Reproduced in docker against the pinned
+  // miniflare; see docs/compute/CLAUDE.md.
+  assert.match(RUNNER_SOURCE, /for \(const signal of \['SIGTERM', 'SIGINT'\]\) \{\s*process\.removeAllListeners\(signal\)\s*process\.on\(signal, shutdown\)/)
+  assert.match(RUNNER_SOURCE, /await mf\.dispose\(\)\s*process\.exit\(0\)/)
+  // And a deadline under worker.ts's STOP_TIMEOUT_SEC (10s), so a hung
+  // dispose still ends as an exit this process chose rather than a SIGKILL.
+  assert.match(RUNNER_SOURCE, /SHUTDOWN_DEADLINE_MS = 8000/)
+})
+
+// --- worker builds take the global build lock (issue #83) --------------------
+
+test('a worker build waits for a build already holding the global lock, and says so in its logs', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const order: string[] = []
+
+  // Something else (an app deploy, in the report) holds the lock.
+  const held = withBuildLock(async () => {
+    order.push('start:app')
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    order.push('end:app')
+  })
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const realBuild = runtime.build!.bind(runtime)
+  runtime.build = async (spec) => {
+    order.push('start:worker')
+    return realBuild(spec)
+  }
+
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(),
+    databaseResourceId: null,
+  })
+  await held
+
+  assert.deepEqual(order, ['start:app', 'end:app', 'start:worker'], 'the worker build must not start until the lock is free')
+  assert.match(created.logs ?? '', /^hobby: build queued behind another build; one image builds at a time on this box\n/)
+})
+
+test('a worker build with nothing ahead of it is not told it queued', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const created = await createWorkerResource(deps, {
+    project,
+    name: 'api',
+    sourcePath: workerSource(),
+    databaseResourceId: null,
+  })
+  assert.doesNotMatch(created.logs ?? '', /queued behind/)
 })

@@ -241,16 +241,29 @@ test('GET /v1/preflight reports runtime, filesystem and port shape without mutat
     const body = res.body as {
       runtimeAvailable: boolean
       filesystem: { path: string; reflinkSupported: boolean; freeBytes: number }
-      ports: { proxy: { port: number; bound: boolean }; studio: { port: number; bound: boolean } }
+      ports: Record<'proxy' | 'api' | 'http' | 'queue', { port: number; host: string; bound: boolean; error: string | null }> & {
+        caddy: unknown
+      }
+      proxyHost: { setting: string; hosts: string[] | null; error: string | null }
+      studio: { listen: string; publicHost: string | null }
     }
     assert.equal(body.runtimeAvailable, true) // createFakeRuntime().available() always resolves true
     assert.equal(typeof body.filesystem.path, 'string')
     assert.equal(typeof body.filesystem.reflinkSupported, 'boolean')
     assert.equal(typeof body.filesystem.freeBytes, 'number')
+    // Every port the daemon binds, on the host it binds it on (issue
+    // #108); studioPort is gone from the report because nothing listens on
+    // it. Studio is served on apiPort, which is what `studio.listen` says.
     assert.equal(body.ports.proxy.port, 5432)
-    assert.equal(body.ports.studio.port, 8443)
+    assert.equal(body.ports.api.port, 7432)
+    assert.equal(body.ports.http.port, 7433)
+    assert.equal(body.ports.api.host, '127.0.0.1')
     assert.equal(typeof body.ports.proxy.bound, 'boolean')
-    assert.equal(typeof body.ports.studio.bound, 'boolean')
+    assert.equal(body.ports.caddy, null, 'caddy is off in testConfig, so 80/443 are not checked')
+    assert.equal(body.proxyHost.error, null)
+    assert.deepEqual(body.proxyHost.hosts, ['127.0.0.1'])
+    assert.equal(body.studio.listen, '127.0.0.1:7432')
+    assert.equal(body.studio.publicHost, null)
   })
 })
 
@@ -1093,12 +1106,19 @@ test('POST /v1/projects/:name/eject for an unknown project returns 404 project_n
   })
 })
 
-test('an unknown route returns 400 usage', async () => {
+// Issue #117: a route that does not exist is 404 not_found, not 400 usage,
+// both under /v1/ and outside it.
+test('an unknown route returns 404 not_found', async () => {
   await withServer(buildContext(), async (baseUrl) => {
     const res = await call(baseUrl, 'GET', '/v1/not-a-real-route')
-    assert.equal(res.status, 400)
-    const body = res.body as { error: { code: string } }
-    assert.equal(body.error.code, 'usage')
+    assert.equal(res.status, 404)
+    const body = res.body as { error: { code: string; message: string } }
+    assert.equal(body.error.code, 'not_found')
+    assert.match(body.error.message, /unknown route: GET \/v1\/not-a-real-route/)
+
+    const outside = await call(baseUrl, 'GET', '/studio/logout')
+    assert.equal(outside.status, 404)
+    assert.equal((outside.body as { error: { code: string } }).error.code, 'not_found')
   })
 })
 

@@ -359,3 +359,64 @@ never thrown.
 
 Not verified against a real docker daemon in this change; every path above
 runs against `createFakeRuntime` in the package tests.
+
+## Amendment, 2026-10-30: build caps are not enforced, worker builds take the lock, workers exit 0 on sleep (issues #150, #83, #95)
+
+**The build caps were never real under BuildKit (issue #150).** The body
+above says builds are "capped at `--memory=2g` and `--cpu-shares=512`", and
+the Phase 2 spec says a build "always loses". Measured on 2026-10-30 on an
+Apple Silicon Mac, Docker Engine 28.4.0 with buildx v0.28.0 (OrbStack): a
+Dockerfile whose `RUN` printed `/sys/fs/cgroup/memory.max` and
+`cpu.weight`, built with `docker build --memory 128m --cpu-shares 512`,
+printed `max` and `100`, the defaults. The flags are accepted and ignored;
+`docker build --help` under buildx does not list them. The same build with
+`DOCKER_BUILDKIT=0` printed `134217728` and `20`, so only the legacy builder
+honours them, and that builder prints `DEPRECATED: The legacy builder is
+deprecated and will be removed in a future release` on every build and
+cannot build a Dockerfile that uses BuildKit syntax (`# syntax=`, `RUN
+--mount`), which real Next.js Dockerfiles do. The QA lane (issue #150) saw
+the same on Docker 29.4.
+
+So the flags are gone rather than kept as a false promise: `BuildSpec`
+(`packages/core/src/runtime.ts`) no longer has `memory` or `cpuShares`,
+`createDockerRuntime().build` (`packages/core/src/docker.ts`) passes
+neither, and `BUILD_MEMORY` / `BUILD_CPU_SHARES` are deleted from
+`packages/app/src/build.ts` and `packages/worker/src/worker.ts`. **A build
+is not capped.** It has whatever memory and CPU the box has, and a build
+that needs more than the box can give fails or starves the box, exactly as
+the apps guide on the site already warned. The one mechanism that does hold
+is the next paragraph. No buildx builder with `--driver-opt` limits was
+added: it would mean a second builder, `--load` on every build and a
+separate image cache, and the right answer for a 1 GB box is still to build
+elsewhere.
+
+**Worker builds take the global build lock (issue #83).** `withBuildLock`
+moved from `packages/app/src/build.ts` to `@hobby.sh/core`
+(`packages/core/src/build-lock.ts`, re-exported by the app package), because
+the worker package could not import it from the app package and so
+`buildWorkerImage` (`packages/worker/src/runtime-image.ts`) called
+`runtime.build` directly: a worker deploy started during a 47 s Next.js
+build finished in 3 s beside it. Both kinds now build through the one lock,
+and a build that had to wait prepends `hobby: build queued behind another
+build; one image builds at a time on this box` to its logs
+(`buildQueuedNote`), which is what the spec's "queues and says so" meant.
+`withBuildLock` takes an `onWait(buildsAhead)` callback for that, and
+`pendingBuilds()` reports the queue depth.
+
+**Worker containers exit 0 on sleep (issue #95).** Every sleep ended as
+`Exited (143)`, which is death by SIGTERM with no handler, although
+`RUNNER_SOURCE` has had a SIGTERM handler that disposes Miniflare since the
+first worker commit. Reproduced on 2026-10-30 in `node:22-bookworm-slim`
+with `miniflare@4.20260730.0` under `docker stop`: the first SIGTERM
+listener on the process is one Miniflare's bundle installs at import time,
+`function onSignalTerm() { runCallbacks(); process.exit(128 + 15); }`,
+which exits synchronously before the runner's own handler, appended after
+it, reaches its first `await`. The runner's handler never ran at all, so
+`mf.dispose()` never ran, so Durable Object sqlite was never closed. The
+runner now replaces the listeners (`process.removeAllListeners(signal)`
+before `process.on(signal, shutdown)`) and the same container exits 0 with
+`dispose finished` logged. A deadline of 8 s (under `STOP_TIMEOUT_SEC`, 10
+s) turns a hung dispose into a logged exit 1 rather than a SIGKILL. The
+runner is a JS string inside a TS template literal, so
+`packages/worker/test/worker.test.ts` now writes it out and runs `node
+--check` on it.

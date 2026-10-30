@@ -99,10 +99,11 @@ test('creating an app from a Dockerfile builds, proves it serves, and leaves it 
   assert.equal((await runtime.inspect(app.config.containerName)).running, false)
 })
 
-// A build always loses to whatever else is on the box, and a build that is
-// capped is the difference between a slow deploy and a database missing its
-// wake budget.
-test('a build is capped and serialised', async () => {
+// No caps reach the runtime any more (issue #150): `docker build --memory`
+// and `--cpu-shares` are accepted and ignored under BuildKit, so passing
+// them promised a limit the box was not enforcing. The build lock below is
+// the one real mechanism, and it is pinned separately.
+test('a build carries no memory or cpu caps, since BuildKit would ignore them', async () => {
   const deps = buildDeps()
   const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
   const project = makeProject(deps.store)
@@ -117,8 +118,9 @@ test('a build is capped and serialised', async () => {
     databaseResourceId: null,
   })
 
-  assert.equal(runtime._builds[0]?.memory, '2g')
-  assert.equal(runtime._builds[0]?.cpuShares, 512)
+  assert.equal(runtime._builds.length, 1)
+  assert.equal('memory' in (runtime._builds[0] ?? {}), false)
+  assert.equal('cpuShares' in (runtime._builds[0] ?? {}), false)
 })
 
 test('the build lock serialises overlapping builds', async () => {

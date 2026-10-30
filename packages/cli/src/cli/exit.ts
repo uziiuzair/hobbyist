@@ -31,6 +31,10 @@ const EXIT_CODE_BY_ERROR: Record<ErrorCode, number> = {
   // means.
   project_not_found: EXIT_NOT_FOUND,
   resource_not_found: EXIT_NOT_FOUND,
+  // A route that does not exist (issue #117). Only ever seen when the CLI
+  // and the daemon disagree about the API, which is exactly "no such
+  // thing" from a script's point of view.
+  not_found: EXIT_NOT_FOUND,
 
   // The two "that name/state is already taken" codes.
   name_taken: EXIT_CONFLICT,
@@ -65,6 +69,14 @@ const EXIT_CODE_BY_ERROR: Record<ErrorCode, number> = {
   // "operation failed" is the closest honest bucket until Studio's operator
   // credential (M4) gives this code a real meaning worth a code of its own.
   unauthorized: EXIT_OPERATION_FAILED,
+  // Inside a login backoff window (issue #117). Nothing the user typed is
+  // wrong and nothing is missing; the operation did not happen and will
+  // once the window passes, so this is exit 1 rather than a seventh code
+  // scripts would have to learn.
+  too_many_attempts: EXIT_OPERATION_FAILED,
+  // The filesystem under HOBBY_HOME is full (issue #139). The daemon tried,
+  // cleaned up, and could not finish: exit 1.
+  disk_full: EXIT_OPERATION_FAILED,
   // A resource row naming a kind this daemon has no handler for. The user
   // did nothing wrong and the thing exists, so neither 2 nor 3 fits: the
   // daemon simply cannot act on it.

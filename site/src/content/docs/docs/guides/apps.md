@@ -121,6 +121,14 @@ Next.js monorepo that copies the whole repository into the image does not fit
 a 1GB VPS; [Next.js on Hobby](/docs/guides/nextjs/) has the shape that does,
 and the way to build elsewhere when it still does not.
 
+Two things to know about that. Builds are not capped: `docker build` under
+BuildKit accepts `--memory` and `--cpu-shares` and ignores them (measured;
+see `docs/compute/CLAUDE.md`), so Hobby no longer passes them and a build
+that needs more than the box has will fail or starve the box. And one image
+builds at a time, apps and workers alike: a deploy that starts while another
+build is running waits for it, and its build output begins with `hobby: build
+queued behind another build`.
+
 ## Create now, deploy later
 
 ```sh

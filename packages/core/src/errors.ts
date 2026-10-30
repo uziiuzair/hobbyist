@@ -23,6 +23,18 @@ export type ErrorCode =
   // The user's Dockerfile or wrangler manifest failed to build. Distinct
   // from wake_failed, which is about a built thing refusing to serve.
   | 'build_failed'
+  // The caller is inside a login or bearer-token backoff window (issue
+  // #117). Distinct from `unauthorized` so a client never tells a throttled
+  // user that a correct password is wrong: 429, with the seconds to wait in
+  // the message and a Retry-After header where the transport allows one.
+  | 'too_many_attempts'
+  // No route matches the method and path (issue #117). Distinct from
+  // `usage` (400), which is a malformed request to a route that exists.
+  | 'not_found'
+  // A write hit ENOSPC or EDQUOT (issue #139). The filesystem under
+  // HOBBY_HOME is full, which is not a daemon fault and not something a
+  // retry fixes until space is freed. 507 Insufficient Storage.
+  | 'disk_full'
   | 'internal'
 
 const HTTP_STATUS_BY_CODE: Record<ErrorCode, number> = {
@@ -40,7 +52,33 @@ const HTTP_STATUS_BY_CODE: Record<ErrorCode, number> = {
   unauthorized: 401,
   unknown_kind: 500,
   build_failed: 422,
+  too_many_attempts: 429,
+  not_found: 404,
+  disk_full: 507,
   internal: 500,
+}
+
+// Errno codes that mean "the filesystem has no room", on the two shapes
+// Node reports them in: a plain fs error (`err.code === 'ENOSPC'`) and a
+// child process whose stderr carried the message (cp on darwin, tar). One
+// predicate for every writer that wants to turn a full disk into a
+// disk_full HobbyError rather than an internal error.
+export function isDiskFullError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) {
+    return false
+  }
+  const code = (err as { code?: unknown }).code
+  if (code === 'ENOSPC' || code === 'EDQUOT') {
+    return true
+  }
+  const text = [
+    (err as { message?: unknown }).message,
+    (err as { stderr?: unknown }).stderr,
+    (err as { hint?: unknown }).hint,
+  ]
+    .filter((part): part is string => typeof part === 'string')
+    .join('\n')
+  return /no space left on device|disk quota exceeded/i.test(text)
 }
 
 export class HobbyError extends Error {

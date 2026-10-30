@@ -73,13 +73,6 @@ const CONTAINER_PORT = 8787
 
 const STOP_TIMEOUT_SEC = 10
 
-// Same caps as an app build, and for the same reason. A worker build is
-// heavier than most (it installs miniflare, which pulls the workerd binary),
-// which makes it more important that it loses to anything else on the box,
-// not less.
-const BUILD_MEMORY = '2g'
-const BUILD_CPU_SHARES = 512
-
 function workerHostname(project: string, resource: string, domain: string): string {
   return `${resource}.${project}.${domain}`.toLowerCase()
 }
@@ -615,8 +608,6 @@ export async function createWorkerResource(
     contextPath: build.contextPath,
     dockerfilePath,
     tag,
-    memory: BUILD_MEMORY,
-    cpuShares: BUILD_CPU_SHARES,
   })
 
   const config: WorkerConfig = {
@@ -903,8 +894,6 @@ export async function deployWorker(
       contextPath: build.contextPath,
       dockerfilePath,
       tag,
-      memory: BUILD_MEMORY,
-      cpuShares: BUILD_CPU_SHARES,
     })
 
     const config: WorkerConfig = {

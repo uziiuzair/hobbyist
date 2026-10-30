@@ -16,7 +16,7 @@
 
 import type { Project } from '@hobby.sh/core'
 import { DEFAULT_CONSUMER_OPTIONS } from '@hobby.sh/queue'
-import type { PreflightReport } from '../daemon/preflight.js'
+import type { PortCheck, PreflightReport } from '../daemon/preflight.js'
 import { formatRetryDelay } from '../daemon/wake-backoff.js'
 import type { WireResource, WireSnapshotManifest } from '../daemon/wire.js'
 import type { QueueListEntry, QueueMessage } from './client.js'
@@ -222,6 +222,15 @@ export function renderQueueMessageLine(message: QueueMessage, now: number = Date
 // belongs on stderr (io.err) instead, so it never corrupts the output of
 // anyone piping or parsing `hobby init`'s stdout. See reflinkWarning below
 // and its caller in commands.ts's cmdInit.
+// One line per port the daemon will bind, in the order the daemon binds
+// them, each naming the host it is probed on (issue #108). "already in use"
+// and "cannot bind" are the two outcomes that stop `hobby daemon`, and
+// preflightBlockers below turns each into a reason the host is not ready.
+function portLine(label: string, check: PortCheck): string {
+  const state = check.error !== null ? `cannot bind (${check.error})` : check.bound ? 'already in use' : 'free'
+  return `${label} port ${check.port} on ${check.host}: ${state}`
+}
+
 export function renderPreflight(report: PreflightReport): string[] {
   const lines: string[] = []
   lines.push(`container runtime: ${report.runtimeAvailable ? 'available' : 'NOT AVAILABLE'}`)
@@ -230,9 +239,100 @@ export function renderPreflight(report: PreflightReport): string[] {
       report.filesystem.reflinkSupported ? 'supported' : 'NOT supported'
     }, ${formatBytes(report.filesystem.freeBytes)} free`
   )
-  lines.push(`proxy port ${report.ports.proxy.port}: ${report.ports.proxy.bound ? 'already in use' : 'free'}`)
-  lines.push(`studio port ${report.ports.studio.port}: ${report.ports.studio.bound ? 'already in use' : 'free'}`)
+  if (report.proxyHost.error !== null) {
+    lines.push(`proxy host "${report.proxyHost.setting}": ${report.proxyHost.error}`)
+  }
+  lines.push(portLine('proxy', report.ports.proxy))
+  lines.push(portLine('api (daemon API and studio)', report.ports.api))
+  lines.push(portLine('http', report.ports.http))
+  lines.push(portLine('queue', report.ports.queue))
+  for (const check of report.ports.caddy ?? []) {
+    lines.push(portLine('caddy', check))
+  }
+  if (report.daemon !== null && report.daemon.running && !report.daemon.self) {
+    lines.push(
+      `daemon: already running (pid ${report.daemon.pid}), serving ${report.daemon.home} since ${report.daemon.startedAt}; ` +
+        'the ports above are its'
+    )
+  }
+  lines.push(studioExposureNote(report))
   return lines
+}
+
+// ADR 0008: "`hobby init` states plainly what is about to be reachable from
+// the internet." Studio is served on the daemon's loopback API port and
+// reaches the network only through Caddy, so there are exactly three
+// honest sentences, one per configuration (issue #108).
+export function studioExposureNote(report: PreflightReport): string {
+  const served = `studio: served on ${report.studio.listen}`
+  if (report.studio.publicHost !== null) {
+    return (
+      `${served}, published by caddy at https://${report.studio.publicHost}. ` +
+      'That is reachable from the internet, behind the operator password (hobby studio passwd).'
+    )
+  }
+  if (report.ports.caddy !== null) {
+    return (
+      `${served}, loopback only. caddy is on but no HOBBY_CADDY_STUDIO_HOST is set, so nothing off this box ` +
+      'reaches studio; set one to publish it. https://hobbyist.sh/docs/reference/configuration/'
+    )
+  }
+  return (
+    `${served}, loopback only. nothing off this box reaches studio; use an ssh tunnel or tailscale serve, or ` +
+    'enable caddy with a hostname. https://hobbyist.sh/docs/guides/tailscale-and-tunnels/'
+  )
+}
+
+// The reasons `hobby daemon` would refuse to start on this host, one per
+// line, or an empty list when it would not (issue #108). cmdInit prints
+// these to stderr and withholds "host is ready". A port the daemon itself
+// already holds (report.daemon.self, Studio asking a running daemon) is not
+// a conflict and is not listed. A running daemon that is not this process
+// is reported by cmdInit on its own, not here: it is a reason nothing needs
+// starting, not a reason the host is broken.
+export function preflightBlockers(report: PreflightReport): string[] {
+  const reasons: string[] = []
+  if (report.daemon?.self === true) {
+    return reasons
+  }
+  if (report.proxyHost.error !== null) {
+    reasons.push(
+      `proxyHost "${report.proxyHost.setting}" cannot be used: ${report.proxyHost.error}. ` +
+        'hobby daemon will refuse to start until it is changed.'
+    )
+  }
+  const checks: Array<[string, PortCheck]> = [
+    ['proxy', report.ports.proxy],
+    ['api', report.ports.api],
+    ['http', report.ports.http],
+    ['queue', report.ports.queue],
+    ...(report.ports.caddy ?? []).map((check): [string, PortCheck] => ['caddy', check]),
+  ]
+  for (const [label, check] of checks) {
+    if (check.error !== null) {
+      reasons.push(
+        `${label} port ${check.port} cannot be bound on ${check.host} (${check.error}); hobby daemon would fail the same way`
+      )
+    } else if (check.bound) {
+      reasons.push(`${label} port ${check.port} on ${check.host} is already in use by something else`)
+    }
+  }
+  return reasons
+}
+
+// Below this, a snapshot or an image build is likely to end in ENOSPC
+// (issue #139 saw it at 330 MB). A note, not a blocker: the host works,
+// and the figure is about what the next write will find.
+const LOW_DISK_BYTES = 1024 * 1024 * 1024
+
+export function diskWarning(report: PreflightReport): string | null {
+  if (report.filesystem.freeBytes >= LOW_DISK_BYTES) {
+    return null
+  }
+  return (
+    `note: only ${formatBytes(report.filesystem.freeBytes)} free under ${report.filesystem.path}. ` +
+    'a snapshot, a branch or an image build is likely to fail with "no space left on device" before long.'
+  )
 }
 
 // null when there is nothing to warn about. Always routed to io.err by the

@@ -20,3 +20,5 @@ export * from './sqlite.js'
 // Shared by the three daemon loops that sleep between ticks (hibernator,
 // alarm mirror, queue tick). See the file for the memory leak it replaced.
 export * from './stop-signal.js'
+// The global image build lock, shared by the app and worker kinds (issue #83).
+export * from './build-lock.js'
