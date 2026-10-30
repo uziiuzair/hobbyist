@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { resolvePaths } from '@hobby.sh/core'
 import { cmdUpdate } from '../src/cli/commands.js'
+import { EXIT_UPDATE_AVAILABLE } from '../src/cli/exit.js'
 import type { Io } from '../src/cli/main.js'
 
 function git(cwd: string, ...args: string[]): string {
@@ -63,9 +64,9 @@ test('update --check works from a checkout that is not on a tag', async () => {
   git(src, 'commit', '--quiet', '-m', 'past the release')
 
   const { io, out } = captureIo()
-  const code = await cmdUpdate(io, resolvePaths({ HOBBY_HOME: home }), { check: true })
+  const code = await cmdUpdate(io, resolvePaths({ HOBBY_HOME: home }), { check: true }, null)
 
-  assert.equal(code, 0)
+  assert.equal(code, EXIT_UPDATE_AVAILABLE, "a newer tag exists, so --check exits 6 (issue #136)")
   assert.deepEqual(out, ['v0.0.2'])
 })
 
@@ -74,7 +75,7 @@ test('update says already on the newest tag when it is', async () => {
   git(src, 'checkout', '--quiet', 'v0.0.2')
 
   const { io, out } = captureIo()
-  const code = await cmdUpdate(io, resolvePaths({ HOBBY_HOME: home }), {})
+  const code = await cmdUpdate(io, resolvePaths({ HOBBY_HOME: home }), {}, null)
 
   assert.equal(code, 0)
   assert.deepEqual(out, ['already on v0.0.2'])
@@ -87,14 +88,14 @@ test('a final release outranks every pre-release of the same version, whatever o
   git(src, 'checkout', '--quiet', 'v0.1.0-alpha.4')
 
   const { io, out } = captureIo()
-  const code = await cmdUpdate(io, resolvePaths({ HOBBY_HOME: home }), { check: true })
+  const code = await cmdUpdate(io, resolvePaths({ HOBBY_HOME: home }), { check: true }, null)
 
-  assert.equal(code, 0)
+  assert.equal(code, EXIT_UPDATE_AVAILABLE, "a newer tag exists, so --check exits 6 (issue #136)")
   assert.deepEqual(out, ['v0.1.0'])
 
   // And a box already on the final is left there, not moved onto alpha.10.
   git(src, 'checkout', '--quiet', 'v0.1.0')
   const again = captureIo()
-  assert.equal(await cmdUpdate(again.io, resolvePaths({ HOBBY_HOME: home }), {}), 0)
+  assert.equal(await cmdUpdate(again.io, resolvePaths({ HOBBY_HOME: home }), {}, null), 0)
   assert.deepEqual(again.out, ['already on v0.1.0'])
 })

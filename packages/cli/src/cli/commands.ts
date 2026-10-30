@@ -11,7 +11,8 @@ import { spawn, spawnSync } from 'node:child_process'
 import { hostname } from 'node:os'
 import { existsSync } from 'node:fs'
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
-import { basename, join as joinPath, resolve as resolvePath } from 'node:path'
+import { basename, dirname, join as joinPath, resolve as resolvePath } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   assertSocketPathFits,
   DEFAULT_POSTGRES_NAME,
@@ -32,15 +33,16 @@ import { startDaemon } from '../daemon/server.js'
 import { MIN_PASSWORD_LENGTH, hasOperatorCredential, setOperatorPassword } from '../daemon/studio/auth.js'
 import { issueToken, readTokens, revokeToken } from '../daemon/studio/tokens.js'
 import type { WireResource } from '../daemon/wire.js'
-import { createRemoteClient, DaemonUnreachableError, type Api, type IgnoredKey } from './client.js'
+import { createRemoteClient, DaemonUnreachableError, type Api, type IgnoredKey, type RawResponse } from './client.js'
 import { CLI_VERSION } from '../version.js'
-import { forgetRemote, listRemotes, saveRemote } from './remote.js'
-import { exitCodeForError } from './exit.js'
+import { activeRemote, forgetRemote, listRemotes, saveRemote } from './remote.js'
+import { EXIT_UPDATE_AVAILABLE, exitCodeForError } from './exit.js'
 import {
   branchCopyNote,
   hostNetworkingWarning,
   proxyBindNote,
   reflinkWarning,
+  tmpfsWarning,
   renderDuration,
   renderPreflight,
   renderQueueLine,
@@ -272,6 +274,10 @@ export async function cmdInit(io: Io, paths: Paths, config: HobbyConfig, json: b
   const warning = reflinkWarning(report)
   if (warning !== null) {
     io.err(warning)
+  }
+  const tmpfs = tmpfsWarning(report)
+  if (tmpfs !== null) {
+    io.err(tmpfs)
   }
 
   const hostNetworkingIssue = hostNetworkingWarning(report)
@@ -1156,7 +1162,13 @@ export async function cmdBranch(c: Ctx, positionals: string[], flags: Flags): Pr
       c.io.out(`  ${renderResourceLine(resource, Date.now(), result.project.name)}`)
     }
     if (result.paused.length > 0 && result.pausedMs !== null) {
-      c.io.out(`${source} was paused for ${result.pausedMs}ms while ${result.paused.join(', ')} was cloned`)
+      // Pausing stops the container, which ends every open session on it,
+      // idle ones included (issue #177). Said plainly: an app pool pointed
+      // at the source just lost its connections and will reconnect.
+      c.io.out(
+        `${source} was paused for ${result.pausedMs}ms while ${result.paused.join(', ')} was cloned; ` +
+          'any open connections to it were closed and will need to reconnect'
+      )
     }
     c.io.out(`connect with: hobby connect ${result.project.name}`)
   }
@@ -1323,10 +1335,32 @@ export function connectionEnv(connectionString: string): Record<string, string> 
 // process-listing tools can see. The rest of the environment (io.env) is
 // inherited so the user's own psql settings (PAGER, PSQLRC, PGSSLMODE, and
 // so on) still apply; only the five PG* connection variables are forced.
+// The remote this CLI is talking to, or null. Tolerates a Ctx with no real
+// paths (command tests build one with `{}`), since a note about the remote
+// must never be the reason a command fails.
+function currentRemote(c: Ctx): { url: string } | null {
+  try {
+    return typeof c.paths?.home === 'string' ? activeRemote(c.paths, c.io.env) : null
+  } catch {
+    return null
+  }
+}
+
 export async function cmdConnect(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const target = targetOrLinked(c, positionals, 'usage: hobby connect <target>')
   const { resource } = await resolveTarget(c.api, target, c.config.project)
   const { connectionString, tailnetConnectionString, publicConnectionString } = await c.api.getConnection(resource.id)
+
+  // A remote daemon with the default proxyHost hands back 127.0.0.1, which
+  // from this machine points at this machine (issue #113). Say so rather
+  // than let psql fail on it.
+  const remote = currentRemote(c)
+  if (remote !== null && /@(127\.0\.0\.1|localhost|\[::1\]):/.test(connectionString) && !tailnetConnectionString && !publicConnectionString) {
+    c.io.err(
+      `note: this address is loopback on ${remote.url}, not reachable from here. ` +
+        'set proxyHost on that box (tailnet, or an address) for one that is. https://hobbyist.sh/docs/reference/configuration/'
+    )
+  }
 
   if (flags.json) {
     c.io.out(
@@ -1824,6 +1858,8 @@ export async function cmdEject(c: Ctx, positionals: string[], flags: Flags): Pro
   // missing file can only ever mean "this project has no queue named that."
   const queues = result.queues ?? []
   if (queues.length > 0) {
+    // Said before the write, not after the compose file (issue #138).
+    c.io.err(`writing queue backlogs to ${resolvePath(c.io.cwd, 'queues')}/`)
     await mkdir(resolvePath(c.io.cwd, 'queues'), { recursive: true })
     for (const queue of queues) {
       await writeFile(resolvePath(c.io.cwd, 'queues', `${queue.name}.jsonl`), queue.jsonl, 'utf8')
@@ -1967,6 +2003,16 @@ export async function cmdSnapshotTake(c: Ctx, positionals: string[], flags: Flag
       `${result.snapshot.clone === 'reflink' ? 'reflink clone' : 'full copy'}${online ? ', online (nothing paused)' : ''}`
   )
   c.io.out(`  ${result.dir}`)
+  // A quiesced snapshot stopped every postgres that was running, which ends
+  // its open sessions, idle ones included (issue #177). Name them, and the
+  // flag that avoids it.
+  const paused = result.snapshot.resources.filter((r) => r.stateAtSnapshot === 'running' && r.method !== 'basebackup')
+  if (!online && paused.length > 0) {
+    c.io.out(
+      `  paused ${paused.map((r) => r.name).join(', ')} for the clone, which closed any open connections; ` +
+        '`hobby snapshot --online` copies a running postgres without pausing it'
+    )
+  }
   // Said once, here, because it is the one visible difference an online
   // snapshot makes later: the restored database's first start replays WAL
   // from backup_label before it answers (basebackupPostgres, basebackup.ts).
@@ -2229,8 +2275,23 @@ export function cmdStudio(
   paths: Paths,
   config: HobbyConfig,
   openBrowser: BrowserOpener = defaultOpenBrowser,
-  json: boolean = false
+  json: boolean = false,
+  remoteUrl: string | null = null
 ): number {
+  // Logged in to a remote, Studio is that box's (issue #112): the daemon
+  // serving the API serves Studio on the same origin. The local credential
+  // check does not apply; the remote asks for its own password.
+  if (remoteUrl !== null) {
+    if (json) {
+      io.out(JSON.stringify({ url: remoteUrl, remote: true }))
+      return 0
+    }
+    io.out(remoteUrl)
+    io.err("(the studio of the box you are logged in to; `hobby logout` to use this machine's)")
+    openBrowser(remoteUrl)
+    return 0
+  }
+
   const url =
     config.caddyEnabled && config.caddyStudioHost !== null
       ? `https://${config.caddyStudioHost}`
@@ -2298,16 +2359,38 @@ export async function cmdLogin(
 
   const name = flagString(flags, 'name') ?? `${hostname()}-${Date.now().toString(36)}`
 
+  // Unauthenticated by definition: this is the call that gets the credential,
+  // so it goes through a transport with no token attached. Built BEFORE the
+  // prompt, because createRemoteClient is what refuses a plain-http address
+  // off loopback, and asking for a password only to refuse to send it was
+  // the wrong order (issue #113).
+  const anon = createRemoteClient(origin, '')
+
   io.err(`password for ${origin}: `)
   const password = await io.readLine({ silent: true })
   if (password.length === 0) {
     throw new HobbyError('usage', 'no password given')
   }
 
-  // Unauthenticated by definition: this is the call that gets the credential,
-  // so it goes through a transport with no token attached.
-  const anon = createRemoteClient(origin, '')
-  const res = await anon.request('POST', '/studio/token', { password, name })
+  let res: RawResponse
+  try {
+    res = await anon.request('POST', '/studio/token', { password, name })
+  } catch (err) {
+    // A bare host defaults to https; a daemon serving plain http answers the
+    // TLS handshake with bytes OpenSSL reports as "wrong version number".
+    // Name the likely fix instead of the raw error (issue #113).
+    if (err instanceof DaemonUnreachableError && /wrong version number|ssl|tls|EPROTO/i.test(err.message)) {
+      const loopback = url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1'
+      throw new HobbyError(
+        'usage',
+        `${origin} does not speak https`,
+        loopback
+          ? `did you mean http://${url.host}? plain http is accepted for a loopback address`
+          : 'plain http is only accepted for a loopback address; put the daemon behind https (hobby\'s Caddy, or a tunnel that ends on this machine) and try again'
+      )
+    }
+    throw err
+  }
 
   if (res.status === 401) {
     throw new HobbyError('unauthorized', 'invalid credentials', 'the password is the one set by `hobby studio passwd` on that box')
@@ -2522,8 +2605,21 @@ export async function cmdVersion(c: Ctx, flags: Flags): Promise<number> {
   return 0
 }
 
-export async function cmdUpdate(io: Io, paths: Paths, flags: Flags): Promise<number> {
-  const src = process.env.HOBBY_SRC_DIR ?? joinPath(paths.home, 'src')
+// The checkout this CLI runs from: this file is packages/cli/dist/src/cli/
+// commands.js, four levels under the repo root. A hand install (`git clone
+// && ./install.sh`) points the launcher at that clone, which is not
+// $HOBBY_HOME/src (issue #136), so the running checkout is what `hobby
+// update` should update. Null when this code is not inside a git checkout.
+export function runningCheckout(): string | null {
+  const root = resolvePath(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..')
+  return existsSync(joinPath(root, '.git')) && existsSync(joinPath(root, 'install.sh')) ? root : null
+}
+
+export async function cmdUpdate(io: Io, paths: Paths, flags: Flags, checkout: string | null = runningCheckout()): Promise<number> {
+  // HOBBY_SRC_DIR wins when set, then the checkout the launcher runs from,
+  // then the web installer's default; one of the three is where this code
+  // came from.
+  const src = process.env.HOBBY_SRC_DIR ?? checkout ?? joinPath(paths.home, 'src')
 
   if (!existsSync(joinPath(src, '.git'))) {
     throw new HobbyError(
@@ -2542,7 +2638,9 @@ export async function cmdUpdate(io: Io, paths: Paths, flags: Flags): Promise<num
     return (res.stdout || '').trim()
   }
 
-  const before = git(['rev-parse', '--short', 'HEAD'])
+  // A tag when on one, else the short sha, so "updated X -> Y" compares like
+  // with like (issue #136).
+  const before = git(['describe', '--tags', '--always'])
 
   io.err('==> Fetching releases')
   // --force because the remote decides what a tag points at. Without it, a tag
@@ -2580,8 +2678,10 @@ export async function cmdUpdate(io: Io, paths: Paths, flags: Flags): Promise<num
   }
 
   if (flags['check'] === true) {
+    // A distinct exit code, so a script can tell "update available" from
+    // "current" without parsing (issue #136): 0 is current, this is not.
     io.out(flags.json === true ? JSON.stringify({ current, latest, updateAvailable: true }) : latest)
-    return 0
+    return EXIT_UPDATE_AVAILABLE
   }
 
   // Tracked modifications only. `bun install` leaves an untracked bun.lock in
@@ -2604,7 +2704,13 @@ export async function cmdUpdate(io: Io, paths: Paths, flags: Flags): Promise<num
   git(['checkout', '--quiet', latest])
 
   io.err('==> Rebuilding')
-  const build = spawnSync(joinPath(src, 'install.sh'), [], { stdio: 'inherit', cwd: src, env: process.env })
+  // HOBBY_INSTALL_QUIET skips the first-install welcome text the script
+  // otherwise prints after a rebuild (issue #136).
+  const build = spawnSync(joinPath(src, 'install.sh'), [], {
+    stdio: 'inherit',
+    cwd: src,
+    env: { ...process.env, HOBBY_INSTALL_QUIET: '1' },
+  })
   if (build.status !== 0) {
     // The checkout has already moved, so say so: leaving someone believing
     // they are still on the old version would be worse than the failure.

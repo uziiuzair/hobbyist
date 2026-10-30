@@ -8,7 +8,7 @@
 
 import { resolveConfig, resolvePaths, HobbyError } from '@hobby.sh/core'
 import { createApi, createRemoteClient, DaemonUnreachableError } from './client.js'
-import { activeRemote } from './remote.js'
+import { activeRemote, type RemoteCredential } from './remote.js'
 import {
   cmdConnect,
   cmdDaemon,
@@ -326,6 +326,9 @@ function handleError(err: unknown, io: Io, json: boolean): number {
 
 export async function run(argv: string[], io: Io): Promise<number> {
   const json = argv.includes('--json')
+  // Set inside the try once the local-only verbs are out of the way, and
+  // read by the catch below to explain a rejected token (issue #113).
+  let remote: RemoteCredential | null = null
   try {
     const [argv0, ...rest] = argv
     // `--version` is the spelling every other CLI answers to, so it is an
@@ -393,8 +396,21 @@ export async function run(argv: string[], io: Io): Promise<number> {
 
     // Local by definition: both manage this box's own files and neither
     // should ever be reachable with a token from another machine.
+    // Read here, before the two verbs below, because both are local-only
+    // operations that used to run silently against this machine while
+    // every other verb went to the remote (issue #112).
+    remote = activeRemote(paths, io.env)
+
     if (cmd === 'token') {
       const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+      if (remote !== null) {
+        const sub = positionals.join(' ')
+        throw new HobbyError(
+          'usage',
+          `token management is local to the box that holds the tokens, and you are logged in to ${remote.url}`,
+          `run \`hobby token ${sub}\` on that box, or \`hobby logout\` to manage this machine's tokens`
+        )
+      }
       return await cmdToken(io, paths, positionals, flags)
     }
     if (cmd === 'update') {
@@ -418,13 +434,12 @@ export async function run(argv: string[], io: Io): Promise<number> {
       if (sub !== undefined) {
         throw new UsageError(`unknown studio subcommand: ${sub}`)
       }
-      return cmdStudio(io, paths, config, undefined, Boolean(flags.json))
+      return cmdStudio(io, paths, config, undefined, Boolean(flags.json), remote?.url ?? null)
     }
 
     // ADR 0018: the same Api over either transport. A configured remote wins;
     // with none, this is the unix socket exactly as before, so a local install
     // behaves identically to how it always has.
-    const remote = activeRemote(paths, io.env)
     const api = remote === null ? createApi(paths.socketPath) : createApi(createRemoteClient(remote.url, remote.token))
     const ctx: Ctx = { io, api, paths, config }
 
@@ -549,6 +564,19 @@ export async function run(argv: string[], io: Io): Promise<number> {
       }
     }
   } catch (err) {
+    // A revoked or expired token used to surface as a bare "authentication
+    // required" (issue #113). Name the box and the way back in.
+    if (remote !== null && err instanceof HobbyError && err.code === 'unauthorized') {
+      return handleError(
+        new HobbyError(
+          'unauthorized',
+          `${remote.url} rejected this machine's token (revoked on that box, or never valid there)`,
+          `run \`hobby login ${remote.url}\` again to get a new one, or \`hobby logout\` to stop using that box`
+        ),
+        io,
+        json
+      )
+    }
     return handleError(err, io, json)
   }
 }

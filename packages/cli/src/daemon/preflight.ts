@@ -45,6 +45,11 @@ const HOST_NETWORKING_CONNECT_TIMEOUT_MS = 1_500
 // must not hang `hobby init`.
 const HOST_NETWORKING_PROBE_TIMEOUT_MS = 5_000
 
+// Linux's f_type for tmpfs (TMPFS_MAGIC in linux/magic.h). macOS reports a
+// different type space, so this only ever matches on Linux, which is also
+// where a HOBBY_HOME can land on tmpfs.
+const TMPFS_MAGIC = 0x01021994
+
 export interface PreflightReport {
   runtimeAvailable: boolean
   filesystem: {
@@ -55,6 +60,10 @@ export interface PreflightReport {
     path: string
     reflinkSupported: boolean
     freeBytes: number
+    // statfs says the home is on tmpfs, so every data directory is in RAM
+    // and gone at the next reboot (issue #138). False when the type cannot
+    // be read.
+    tmpfs: boolean
   }
   ports: {
     proxy: { port: number; bound: boolean }
@@ -285,6 +294,7 @@ export async function runPreflight(ctx: DaemonContext): Promise<PreflightReport>
       path: probeDir,
       reflinkSupported,
       freeBytes: fsStats.bavail * fsStats.bsize,
+      tmpfs: fsStats.type === TMPFS_MAGIC,
     },
     ports: {
       proxy: { port: ctx.config.proxyPort, bound: proxyBound },

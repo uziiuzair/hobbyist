@@ -93,14 +93,23 @@ if [ -d "$SRC_DIR/.git" ]; then
 
     HOBBY_SRC_DIR=~/somewhere-else bash <(curl -fsSL https://hobby.sh/install)" ;;
   esac
-  git -C "$SRC_DIR" fetch --quiet origin "$REPO_REF" || die "could not fetch from $REPO_URL."
-  git -C "$SRC_DIR" reset --quiet --hard "origin/$REPO_REF" || die "could not update $SRC_DIR."
+  # A ref can be a branch or a tag (the docs promise both). `origin/<ref>`
+  # only ever exists for a branch, so a tag re-run used to die with
+  # "ambiguous argument 'origin/v0.1.0'" (issue #135). Fetch tags too, then
+  # reset to the tag if that is what the ref names.
+  git -C "$SRC_DIR" fetch --quiet --tags origin "$REPO_REF" || die "could not fetch from $REPO_URL."
+  if git -C "$SRC_DIR" rev-parse --quiet --verify "refs/tags/$REPO_REF^{commit}" >/dev/null 2>&1; then
+    TARGET="refs/tags/$REPO_REF"
+  else
+    TARGET="origin/$REPO_REF"
+  fi
+  git -C "$SRC_DIR" -c advice.detachedHead=false reset --quiet --hard "$TARGET" || die "could not update $SRC_DIR."
 else
   [ -e "$SRC_DIR" ] && die "$SRC_DIR exists and is not a git checkout." \
     "Move it aside, or set HOBBY_SRC_DIR to install somewhere else."
   printf '%s==>%s Cloning into %s\n' "$BOLD" "$RESET" "$SRC_DIR"
   mkdir -p "$(dirname "$SRC_DIR")"
-  git clone --quiet --branch "$REPO_REF" "$REPO_URL" "$SRC_DIR" \
+  git -c advice.detachedHead=false clone --quiet --branch "$REPO_REF" "$REPO_URL" "$SRC_DIR" \
     || die "could not clone $REPO_URL." "Check the network and try again."
 fi
 

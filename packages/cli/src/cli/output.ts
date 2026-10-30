@@ -288,9 +288,21 @@ export function proxyBindNote(proxyHost: string, tlsHostname: string | null = nu
 // `hobby branch` says it at the moment it applies, and two copies of the
 // advice would drift.
 const REFLINK_REMEDY =
-  'this is expected on ext4, the default on many cheap VPS images. ' +
-  'if you want cheap copies, put $HOBBY_HOME on XFS, ZFS or APFS. ' +
+  'this is expected on ext4, the default on many cheap VPS images, and on XFS formatted with reflink=0. ' +
+  'if you want cheap copies, put $HOBBY_HOME on XFS with reflink=1 (the mkfs.xfs default since 2019), ZFS or APFS. ' +
   'https://hobbyist.sh/docs/reference/filesystems/'
+
+// tmpfs is RAM: a HOBBY_HOME there loses every data directory at reboot.
+// Said at `hobby init`, the one moment the user is choosing the path.
+export function tmpfsWarning(report: PreflightReport): string | null {
+  if (!report.filesystem.tmpfs) {
+    return null
+  }
+  return (
+    `warning: ${report.filesystem.path} is on tmpfs, which lives in memory. ` +
+    'every database here is lost at the next reboot. set HOBBY_HOME to a path on a real disk before creating anything.'
+  )
+}
 
 export function reflinkWarning(report: PreflightReport): string | null {
   if (report.filesystem.reflinkSupported) {

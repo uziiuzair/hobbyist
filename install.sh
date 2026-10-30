@@ -64,6 +64,15 @@ have unzip || die "unzip is not installed." \
   Fedora or RHEL:    sudo dnf install -y unzip
   macOS:             already present"
 
+# bun's installer is fetched with curl (the "Runtime" step below), so a box
+# without curl fails there with bun's own wording (issue #138).
+have curl || die "curl is not installed." \
+  "bun's installer is fetched with it.
+
+  Debian or Ubuntu:  sudo apt-get install -y curl
+  Fedora or RHEL:    sudo dnf install -y curl
+  macOS:             already present"
+
 # Docker is not optional and not deferrable: every resource hobby manages is a
 # container, so an install that "succeeds" without it produces a daemon that
 # cannot do the one thing it exists for.
@@ -247,6 +256,12 @@ step "Preparing the host"
 # Done
 # ---------------------------------------------------------------------------
 
+# `hobby update` re-runs this script to rebuild and prints its own summary, so
+# the welcome below is for a first install only (issue #136).
+if [ -n "${HOBBY_INSTALL_QUIET:-}" ]; then
+  exit 0
+fi
+
 printf '\n%shobby is installed.%s\n\n' "$BOLD" "$RESET"
 
 if [ -n "$PATH_WARNING" ]; then
@@ -267,4 +282,12 @@ cat <<EOF
 
   Leaving is one command too: ${DIM}hobby eject blog${RESET} hands you a
   docker-compose.yml and the data directory, and does not hold on.
+
+  Optional: ${DIM}hobby connect${RESET} opens psql when it is on PATH
+  (Debian or Ubuntu: sudo apt-get install -y postgresql-client; macOS:
+  brew install libpq). Without it, it prints the connection string.
+
+  On a server, run the daemon as a service instead of ${DIM}hobby daemon &${RESET},
+  which dies with your ssh session: see scripts/hobby.service, or
+  https://hobbyist.sh/docs/install/#keeping-the-daemon-running
 EOF
