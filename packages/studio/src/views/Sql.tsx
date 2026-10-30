@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import * as api from "../api.js";
 import { formatSince } from "../lib/format.js";
+import { describeError } from "../lib/errors.js";
 import { useResource } from "../lib/useResource.js";
 import { useWakeAwareRun } from "../lib/useWaking.js";
 import { WakingBanner } from "../components/WakingBanner.js";
@@ -80,8 +81,9 @@ export function Sql({
       };
       setHistory(pushHistory(window.localStorage, entry));
     } catch (err) {
-      const message =
-        err instanceof api.ApiError ? err.message : "query failed";
+      // The message plus the hint, which for a statement Postgres rejected
+      // is the SQLSTATE (packages/pg/src/query.ts, toQueryError).
+      const message = describeError(err, "query failed");
       setQueryError(message);
       setResult(null);
       const entry: HistoryEntry = {

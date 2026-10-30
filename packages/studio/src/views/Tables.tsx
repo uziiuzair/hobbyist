@@ -3,6 +3,7 @@ import * as api from "../api.js";
 import { navigate } from "../lib/router.js";
 import { useResource } from "../lib/useResource.js";
 import { useWakeAwareRun } from "../lib/useWaking.js";
+import { describeError } from "../lib/errors.js";
 import { WakingBanner } from "../components/WakingBanner.js";
 import { Workbench } from "../components/Workbench.js";
 import { SpotRows } from "../components/Spot.js";
@@ -98,9 +99,7 @@ export function Tables({
           setQueryMs(Date.now() - startedAt);
         })
         .catch((err: unknown) =>
-          setRowsError(
-            err instanceof api.ApiError ? err.message : "query failed",
-          ),
+          setRowsError(describeError(err, "query failed")),
         );
     },
     [resource, active, tables, run],
@@ -220,9 +219,7 @@ export function Tables({
       setEditing(null);
       setSaveError(null);
     } catch (err) {
-      setSaveError(
-        err instanceof api.ApiError ? err.message : "failed to save the edit",
-      );
+      setSaveError(describeError(err, "failed to save the edit"));
     }
   }
 
