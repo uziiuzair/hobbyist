@@ -29,6 +29,41 @@ export function formatSince(iso: string | null | undefined): string {
   return new Date(then).toLocaleDateString()
 }
 
+// A configured duration, rendered exactly (issue #126). A sleep timeout is a
+// number the operator typed (`hobby unpin blog --sleep-after 30`), so the
+// page has to say the number back: 30 is "30 seconds", not the "1 minute"
+// that Math.round(30 / 60) produced, and 90 is "1 minute 30 seconds". Units
+// that are zero are left out, so 3600 is "1 hour" and 60 is "1 minute".
+// formatSince above stays coarse on purpose; it describes an elapsed time,
+// this describes a setting.
+export function formatDuration(totalSeconds: number): string {
+  const parts = durationParts(totalSeconds)
+  if (parts.length === 0) return '0 seconds'
+  return parts.map(([n, unit]) => `${n} ${unit}${n === 1 ? '' : 's'}`).join(' ')
+}
+
+// The same breakdown in the compact form a stat row has room for: "30s",
+// "1m 30s", "1h".
+export function formatDurationShort(totalSeconds: number): string {
+  const parts = durationParts(totalSeconds)
+  if (parts.length === 0) return '0s'
+  return parts.map(([n, unit]) => `${n}${unit[0]}`).join(' ')
+}
+
+type DurationUnit = 'hour' | 'minute' | 'second'
+
+function durationParts(totalSeconds: number): Array<[number, DurationUnit]> {
+  const whole = Math.max(0, Math.floor(Number.isFinite(totalSeconds) ? totalSeconds : 0))
+  const hours = Math.floor(whole / 3600)
+  const minutes = Math.floor((whole % 3600) / 60)
+  const seconds = whole % 60
+  const parts: Array<[number, DurationUnit]> = []
+  if (hours > 0) parts.push([hours, 'hour'])
+  if (minutes > 0) parts.push([minutes, 'minute'])
+  if (seconds > 0) parts.push([seconds, 'second'])
+  return parts
+}
+
 export interface WireResource {
   state: string
   sizeBytes?: number

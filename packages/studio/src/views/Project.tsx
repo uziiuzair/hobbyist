@@ -3,7 +3,13 @@ import type { FormEvent } from "react";
 import type { Project as ProjectModel, Resource } from "@hobby.sh/core";
 import * as api from "../api.js";
 import { navigate } from "../lib/router.js";
-import { formatBytes, formatSince, readStats } from "../lib/format.js";
+import {
+  formatBytes,
+  formatDuration,
+  formatDurationShort,
+  formatSince,
+  readStats,
+} from "../lib/format.js";
 import { State } from "../components/State.js";
 import { Modal } from "../components/Modal.js";
 import { ActivityChart } from "../components/ActivityChart.js";
@@ -146,10 +152,9 @@ export function Project({
     );
   }
 
-  const idleMinutes =
-    project.sleepAfterSeconds === null
-      ? null
-      : Math.round(project.sleepAfterSeconds / 60);
+  // Rendered exactly, never rounded to a minute: 30 seconds is what the
+  // operator set, so 30 seconds is what the page says (issue #126).
+  const sleepAfter = project.sleepAfterSeconds;
   const selected = resources.find((r) => r.id === focus) ?? resources[0];
 
   return (
@@ -158,9 +163,9 @@ export function Project({
         <div>
           <h1 className="page-title">{project.name}</h1>
           <p className="page-sub">
-            {idleMinutes === null
+            {sleepAfter === null
               ? "Pinned awake, never sleeps on its own"
-              : `Sleeps after ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"} with nothing connected`}
+              : `Sleeps after ${formatDuration(sleepAfter)} with nothing connected`}
           </p>
         </div>
         <div className="page-actions">
@@ -277,7 +282,11 @@ export function Project({
 
             <Row
               label="Sleeps after"
-              value={idleMinutes === null ? "Never" : `${idleMinutes} min idle`}
+              value={
+                sleepAfter === null
+                  ? "Never"
+                  : `${formatDurationShort(sleepAfter)} idle`
+              }
             />
             {/* Data directory is a postgres-only fact: an app or a worker has
                 no PGDATA, and since the resource model was widened for Phase 2
