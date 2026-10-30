@@ -31,18 +31,57 @@ function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
-test('login posts to /studio/login with the credential body', async () => {
+test('login posts to /studio/login with the password alone', async () => {
   const calls = installFakeFetch(() => jsonResponse(200, {}))
-  await api.login('operator', 'hunter2')
+  await api.login('correct horse battery staple')
   assert.equal(calls.length, 1)
   assert.equal(calls[0]?.url, '/studio/login')
   assert.equal(calls[0]?.method, 'POST')
-  // The username is sent and the daemon does not read it: its login handler
-  // (packages/cli/src/daemon/studio/routes.ts) destructures `password` alone,
-  // because Studio has one operator credential and no user table. The field
-  // is asserted here so that the day a second reader appears, this test says
-  // what the wire already carried rather than looking like a new addition.
-  assert.deepEqual(calls[0]?.body, { username: 'operator', password: 'hunter2' })
+  // Password only (issue #123): the daemon's login handler
+  // (packages/cli/src/daemon/studio/routes.ts, loginHandler) reads `password`
+  // and nothing else, because Studio has one operator credential and no
+  // user table. A username used to travel here and was never read.
+  assert.deepEqual(calls[0]?.body, { password: 'correct horse battery staple' })
+})
+
+// Issue #124: a 401 from an authenticated route reaches the registered
+// handler so the auth provider can return to the login page. The login route
+// is excluded, because a wrong password is a 401 that belongs to the form.
+test('a 401 on an authenticated route calls the onUnauthorized handler, and the login route does not', async () => {
+  installFakeFetch(() =>
+    jsonResponse(401, { error: { code: 'unauthorized', message: 'authentication required' } }),
+  )
+  let fired = 0
+  const off = api.onUnauthorized(() => {
+    fired += 1
+  })
+  try {
+    await assert.rejects(() => api.listProjects(), (err: unknown) => err instanceof api.ApiError && err.code === 'unauthorized')
+    assert.equal(fired, 1)
+
+    await assert.rejects(() => api.login('wrong password here'), (err: unknown) => err instanceof api.ApiError && err.status === 401)
+    assert.equal(fired, 1, 'a failed login is not a lost session')
+  } finally {
+    off()
+  }
+
+  // Unsubscribed: a later 401 is the caller's own error again.
+  await assert.rejects(() => api.listProjects())
+  assert.equal(fired, 1)
+})
+
+test('a non-401 failure never calls the onUnauthorized handler', async () => {
+  installFakeFetch(() => jsonResponse(400, { error: { code: 'usage', message: 'bad', hint: 'SQLSTATE 42601' } }))
+  let fired = 0
+  const off = api.onUnauthorized(() => {
+    fired += 1
+  })
+  try {
+    await assert.rejects(() => api.runQuery('res-1', 'selec 1'), (err: unknown) => err instanceof api.ApiError && err.hint === 'SQLSTATE 42601')
+  } finally {
+    off()
+  }
+  assert.equal(fired, 0)
 })
 
 test('logout posts to /studio/logout', async () => {

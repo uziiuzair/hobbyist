@@ -27,7 +27,7 @@ import { findAccountItem, findProjectItem } from "./nav.js";
 import { useAuth } from "./providers/auth-provider.js";
 
 export function App() {
-  const { session, handleLoggedIn, handleLogout } = useAuth();
+  const { session, notice, handleLoggedIn, handleLogout } = useAuth();
 
   const segments = useHashRoute();
 
@@ -76,7 +76,8 @@ export function App() {
     );
   }
 
-  if (session === "anonymous") return <Login onLoggedIn={handleLoggedIn} />;
+  if (session === "anonymous")
+    return <Login onLoggedIn={handleLoggedIn} notice={notice} />;
 
   // #/projects/:name/:section, or #/projects/:name/resources/:resource/:view.
   // "resources" is the one segment in that position that is not a section, so

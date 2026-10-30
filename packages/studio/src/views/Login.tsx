@@ -4,8 +4,20 @@ import { cn } from "../utils/cn.js";
 import { CopyCode } from "../components/reusable/copy-code.js";
 import { Button } from "../components/reusable/button.js";
 
-export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
-  const [username, setUsername] = useState<string>("");
+// Password only (issue #123). Studio has one operator credential and no
+// accounts (ADR 0008), and the daemon's login handler reads nothing but
+// `password`, so a username field was a question with no reader. The form
+// submits on Enter whenever the password is non-empty, which is what a
+// single-field form is expected to do.
+export function Login({
+  onLoggedIn,
+  notice = null,
+}: {
+  onLoggedIn: () => void;
+  // Why the login page is showing, when there is a reason worth stating
+  // (a session that ended underneath the app, see auth-provider.tsx).
+  notice?: string | null;
+}) {
   const [password, setPassword] = useState<string>("");
 
   const [loading, setLoading] = useState<boolean>(false);
@@ -16,17 +28,12 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   ): Promise<void> {
     event.preventDefault();
     if (password.length === 0 || loading) return;
-    if (username.length === 0) {
-      setError("Username is required");
-      return;
-    }
 
     setLoading(true);
     setError(null);
 
     try {
-      // Attempt login
-      await api.login(username, password);
+      await api.login(password);
 
       onLoggedIn();
     } catch (err) {
@@ -39,12 +46,6 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
       setLoading(false);
     }
   }
-
-  const handleClearForm = () => {
-    setUsername("");
-    setPassword("");
-    setError(null);
-  };
 
   return (
     <div className="login-wrap">
@@ -64,29 +65,21 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
         </div>
         <div className={cn("card", "p-4.5")}>
           <div className="stack">
-            <div className="field">
-              <label htmlFor="email">Username / Email</label>
-              <input
-                id="email"
-                className="input"
-                type="text"
-                autoFocus
-                autoComplete="current-username"
-                placeholder="Enter your username or email"
-                value={username}
-                onChange={(event) => setUsername(event.target.value)}
-              />
-            </div>
+            {notice !== null && (
+              <div className="notice" role="status">
+                {notice}
+              </div>
+            )}
 
             <div className="field">
-              <label htmlFor="password">Password</label>
+              <label htmlFor="password">Operator password</label>
               <input
                 id="password"
                 className="input"
                 type="password"
                 autoFocus
                 autoComplete="current-password"
-                placeholder="Enter your password"
+                placeholder="Enter the operator password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
               />
@@ -94,16 +87,6 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
             {error !== null && <div className="error-text">{error}</div>}
 
             <div className="flex items-center gap-2 justify-end pt-2">
-              <Button
-                variant="ghost"
-                disabled={
-                  loading || password.length === 0 || username.length === 0
-                }
-                onClick={handleClearForm}
-              >
-                Clear form
-              </Button>
-
               <Button
                 type="submit"
                 variant="primary"
@@ -118,7 +101,7 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
 
         <p className={cn("dim", "text-xs mt-3.5 leading-normal")}>
           Set on the box with <CopyCode>hobby studio passwd</CopyCode>. There is
-          no reset link and no recovery, on purpose.
+          no username, no reset link and no recovery, on purpose.
         </p>
       </form>
     </div>

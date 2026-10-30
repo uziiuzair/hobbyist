@@ -15,11 +15,13 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { resolvePaths, type HobbyConfig, type Paths } from '@hobby.sh/core'
 import {
+  MIN_PASSWORD_LENGTH,
   cmdStudio,
   cmdStudioPasswd,
   hasOperatorCredential,
   readOperatorCredential,
   run,
+  setOperatorPassword,
   verifyPassword,
   type Io,
 } from '../src/index.js'
@@ -110,7 +112,7 @@ test('main.ts never declares a --password flag for `studio passwd`, so argv cann
 
 test('cmdStudioPasswd rejects mismatched entries and writes nothing', async () => {
   const paths = tmpPaths()
-  const { io, errLines } = fakeIo(['first entry', 'a different second entry'])
+  const { io, errLines } = fakeIo(['the first entry here', 'a different second entry'])
 
   const code = await cmdStudioPasswd(io, paths)
 
@@ -133,18 +135,63 @@ test('cmdStudioPasswd rejects an empty password without writing a credential', a
   assert.equal(hasOperatorCredential(paths), false)
 })
 
+// Issue #127: `printf 'x\nx\n' | hobby studio passwd` used to set a one
+// character password on the network-exposed operator credential. The CLI
+// refuses before the confirm prompt (so readLine is called exactly once,
+// which the fakeIo's input queue proves: a second read would throw), and
+// the refusal names the floor so the user knows what to type instead.
+test('cmdStudioPasswd refuses a password shorter than MIN_PASSWORD_LENGTH before asking to confirm', async () => {
+  const paths = tmpPaths()
+  const short = 'x'.repeat(MIN_PASSWORD_LENGTH - 1)
+  const { io, errLines } = fakeIo([short])
+
+  const code = await cmdStudioPasswd(io, paths)
+
+  assert.equal(code, 1)
+  assert.equal(hasOperatorCredential(paths), false)
+  assert.match(errLines.join('\n'), new RegExp(`at least ${MIN_PASSWORD_LENGTH} characters`))
+})
+
+test('cmdStudioPasswd accepts a password of exactly MIN_PASSWORD_LENGTH characters', async () => {
+  const paths = tmpPaths()
+  const exact = 'x'.repeat(MIN_PASSWORD_LENGTH)
+  const { io } = fakeIo([exact, exact])
+
+  const code = await cmdStudioPasswd(io, paths)
+
+  assert.equal(code, 0)
+  assert.equal(hasOperatorCredential(paths), true)
+})
+
+// The server side of the same floor: setOperatorPassword is the only
+// function that writes the credential, and it enforces the constant itself
+// rather than trusting its callers to have checked, so a future caller that
+// skips the CLI's courtesy check still cannot store a short password.
+test('setOperatorPassword refuses a password shorter than MIN_PASSWORD_LENGTH', async () => {
+  const paths = tmpPaths()
+  await assert.rejects(
+    () => setOperatorPassword(paths, 'x'.repeat(MIN_PASSWORD_LENGTH - 1)),
+    (err: unknown) =>
+      err instanceof Error &&
+      new RegExp(`at least ${MIN_PASSWORD_LENGTH} characters`).test(err.message) &&
+      (err as { code?: string }).code === 'usage'
+  )
+  assert.equal(hasOperatorCredential(paths), false)
+  assert.equal(MIN_PASSWORD_LENGTH, 12)
+})
+
 test('cmdStudioPasswd overwrites a previously set credential', async () => {
   const paths = tmpPaths()
-  await cmdStudioPasswd(fakeIo(['first password', 'first password']).io, paths)
+  await cmdStudioPasswd(fakeIo(['first password here', 'first password here']).io, paths)
 
-  const { io } = fakeIo(['second password', 'second password'])
+  const { io } = fakeIo(['second password here', 'second password here'])
   const code = await cmdStudioPasswd(io, paths)
   assert.equal(code, 0)
 
   const stored = readOperatorCredential(paths)
   assert.ok(stored !== null)
-  assert.equal(await verifyPassword('second password', stored as string), true)
-  assert.equal(await verifyPassword('first password', stored as string), false)
+  assert.equal(await verifyPassword('second password here', stored as string), true)
+  assert.equal(await verifyPassword('first password here', stored as string), false)
 })
 
 test('cmdStudio names `hobby studio passwd` and never opens a browser when no credential is set', () => {

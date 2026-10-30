@@ -398,7 +398,7 @@ test('only a hash is stored, so the token file is not a list of live credentials
 
 test('a garbage bearer header is refused rather than throwing', async () => {
   const ctx = buildContext()
-  await setOperatorPassword(ctx.paths, 'pw')
+  await setOperatorPassword(ctx.paths, 'correct horse battery staple')
   await withStudioServer(ctx, async (baseUrl) => {
     for (const header of ['', 'Bearer', 'Bearer   ', 'Basic abc', 'Bearer not-a-token']) {
       const res = await call(baseUrl, 'GET', '/v1/projects', { headers: { authorization: header } })

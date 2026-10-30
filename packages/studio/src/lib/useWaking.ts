@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Resource } from '@hobby.sh/core'
 import { getResource } from '../api.js'
+import { isWakeFailure } from './errors.js'
 
 export type WakingPhase = 'idle' | 'waking' | 'running' | 'error'
 
@@ -122,7 +123,13 @@ export function useWakeAwareRun(onWoke?: () => void): { snapshot: WakingSnapshot
         const elapsed = Date.now() - anchor
         // A failed wake keeps its narrative. Clearing it here left the user with
         // a bare error and no account of the twenty seconds that preceded it.
-        if (settle()) setSnapshot({ phase: 'error', elapsedMs: elapsed, resourceState: null })
+        // Only a failed wake, though: this used to mark every rejection as
+        // `error`, so a typo in the SQL editor announced that the database
+        // "did not come up" while the status line said Awake (issue #120).
+        // The daemon's error code is what separates the two, see errors.ts.
+        if (settle()) {
+          setSnapshot(isWakeFailure(err) ? { phase: 'error', elapsedMs: elapsed, resourceState: null } : IDLE)
+        }
         // Still refresh: a failed wake usually leaves the resource in a state
         // worth seeing, and showing the old one would be a second lie.
         if (startedAsleep) wokeRef.current?.()

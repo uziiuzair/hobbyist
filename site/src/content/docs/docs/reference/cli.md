@@ -505,7 +505,8 @@ prints `{ url }` and opens nothing.
 
 ### `hobby studio passwd`
 
-Sets the operator password. The prompt never echoes.
+Sets the operator password. The prompt never echoes. A password shorter than
+12 characters is refused before the confirm prompt, and nothing is changed.
 
 ## Snapshots
 

@@ -12,18 +12,30 @@ type SessionState = "checking" | "anonymous" | "authenticated";
 
 interface AuthContextType {
   session: SessionState;
+  /**
+   * Why the login page is showing, when it is showing for a reason other
+   * than "nobody has signed in yet". Null on a fresh visit.
+   */
+  notice: string | null;
   handleLoggedIn: () => void;
   handleLogout: () => void;
 }
 
+// Shown on the login page after a 401 from inside the app (issue #124). The
+// two causes are indistinguishable from the browser, so the note names both.
+export const SESSION_LOST_NOTICE =
+  "Your session ended, because it expired or the daemon restarted. Sign in again to continue.";
+
 const AuthContext = createContext<AuthContextType>({
   session: "checking",
+  notice: null,
   handleLoggedIn: () => {},
   handleLogout: () => {},
 });
 
 export const AuthProvider = ({ children }: { children?: React.ReactNode }) => {
   const [session, setSession] = useState<SessionState>("checking");
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -35,9 +47,24 @@ export const AuthProvider = ({ children }: { children?: React.ReactNode }) => {
   }, []);
 
   /**
+   * A 401 from any authenticated API call drops the session and returns to
+   * the login page with a note, instead of leaving the shell up with a bare
+   * "authentication required" box in it. api.ts excludes the login route
+   * itself, so a wrong password never trips this.
+   */
+  useEffect(() => {
+    return api.onUnauthorized(() => {
+      setNotice(SESSION_LOST_NOTICE);
+      setSession("anonymous");
+      navigate("/");
+    });
+  }, []);
+
+  /**
    * Handles the login event.
    */
   const handleLoggedIn = useCallback(() => {
+    setNotice(null);
     setSession("authenticated");
     navigate("/");
   }, []);
@@ -56,6 +83,7 @@ export const AuthProvider = ({ children }: { children?: React.ReactNode }) => {
         // watches `session` and drops its own on the way to "anonymous",
         // which keeps each one responsible for what it fetched instead of
         // this callback growing a line per provider.
+        setNotice(null);
         setSession("anonymous");
         navigate("/");
       });
@@ -65,6 +93,7 @@ export const AuthProvider = ({ children }: { children?: React.ReactNode }) => {
     <AuthContext.Provider
       value={{
         session: session,
+        notice: notice,
         handleLoggedIn: handleLoggedIn,
         handleLogout: handleLogout,
       }}

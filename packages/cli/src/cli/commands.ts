@@ -29,7 +29,7 @@ import { runPreflight } from '../daemon/preflight.js'
 import { reconcile } from '../daemon/reconcile.js'
 import { acquireDaemonLock } from '../daemon/single-instance.js'
 import { startDaemon } from '../daemon/server.js'
-import { hasOperatorCredential, setOperatorPassword } from '../daemon/studio/auth.js'
+import { MIN_PASSWORD_LENGTH, hasOperatorCredential, setOperatorPassword } from '../daemon/studio/auth.js'
 import { issueToken, readTokens, revokeToken } from '../daemon/studio/tokens.js'
 import type { WireResource } from '../daemon/wire.js'
 import { createRemoteClient, DaemonUnreachableError, type Api, type IgnoredKey } from './client.js'
@@ -2150,8 +2150,19 @@ export async function cmdStudioPasswd(io: Io, paths: Paths): Promise<number> {
 
   io.out('set the studio operator password. it is stored only on this box, in')
   io.out(`${paths.home}, and is never sent anywhere else.`)
-  io.out('password:')
+  io.out(`password (at least ${MIN_PASSWORD_LENGTH} characters):`)
   const first = await io.readLine({ silent: true })
+
+  // Refused before the confirm prompt, so nobody types a too-short password
+  // twice only to be told it was never going to be accepted. The length
+  // itself comes from auth.ts's MIN_PASSWORD_LENGTH, the same constant
+  // setOperatorPassword enforces below, so this check can never be looser
+  // than the one that writes the credential (issue #127).
+  if (first.length > 0 && first.length < MIN_PASSWORD_LENGTH) {
+    io.err(`password must be at least ${MIN_PASSWORD_LENGTH} characters (got ${first.length}), nothing was changed`)
+    return 1
+  }
+
   io.out('confirm password:')
   const second = await io.readLine({ silent: true })
 
@@ -2161,9 +2172,9 @@ export async function cmdStudioPasswd(io: Io, paths: Paths): Promise<number> {
   }
 
   // setOperatorPassword itself throws HobbyError('usage', ...) for an empty
-  // password, which main.ts's handleError renders the same way any other
-  // usage error is rendered; there is no separate empty-password check to
-  // keep in sync with that one.
+  // or too-short password, which main.ts's handleError renders the same way
+  // any other usage error is rendered; the length check above is a courtesy
+  // that saves the confirm prompt, not a second source of truth.
   await setOperatorPassword(paths, first)
   io.out('studio operator password set.')
   return 0

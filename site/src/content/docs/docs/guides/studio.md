@@ -18,7 +18,9 @@ hobby studio           # prints the URL, and opens it
 ```
 
 The password prompt never echoes what you type, so the credential does not
-appear on screen, in scrollback, or in a terminal recording.
+appear on screen, in scrollback, or in a terminal recording. It has to be at
+least 12 characters; a shorter one is refused and nothing is changed. There is
+no username: the login page asks for the password alone.
 
 Studio is served by the daemon itself, on `apiPort` (7432 by default), bound to
 `127.0.0.1` only. There is no separate Studio server: `studioPort` exists in the
