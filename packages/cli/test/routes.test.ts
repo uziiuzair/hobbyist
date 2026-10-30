@@ -374,12 +374,37 @@ test('POST /v1/projects/:name/sleep-policy pins and unpins a project', async () 
   })
 })
 
-test('POST /v1/projects/:name/sleep-policy without the field returns 400 usage', async () => {
-  await withServer(buildContext(), async (baseUrl) => {
+// Issue #110: an absent field means the daemon's own default, so `hobby
+// unpin` with no flag lands on the box-wide value rather than the CLI's.
+test('POST /v1/projects/:name/sleep-policy without the field applies the daemon default', async () => {
+  const ctx = buildContext()
+  ctx.config = { ...ctx.config, sleepAfterSeconds: 600 }
+  await withServer(ctx, async (baseUrl) => {
+    await call(baseUrl, 'POST', '/v1/projects', { name: 'blog', sleepAfterSeconds: null })
+    const res = await call(baseUrl, 'POST', '/v1/projects/blog/sleep-policy', {})
+    assert.equal(res.status, 200)
+    assert.equal((res.body as { project: { sleepAfterSeconds: number | null } }).project.sleepAfterSeconds, 600)
+  })
+})
+
+test('POST /v1/projects/:name/sleep-policy without the field on a box whose default is null returns 400 usage', async () => {
+  const ctx = buildContext()
+  ctx.config = { ...ctx.config, sleepAfterSeconds: null }
+  await withServer(ctx, async (baseUrl) => {
     await call(baseUrl, 'POST', '/v1/projects', { name: 'blog' })
     const res = await call(baseUrl, 'POST', '/v1/projects/blog/sleep-policy', {})
     assert.equal(res.status, 400)
     assert.equal((res.body as { error: { code: string } }).error.code, 'usage')
+  })
+})
+
+// Issue #111: the list response carries the daemon's default, so `hobby ls`
+// can mark the projects that differ from it.
+test('GET /v1/projects reports the daemon default idle threshold', async () => {
+  await withServer(buildContext(), async (baseUrl) => {
+    const res = await call(baseUrl, 'GET', '/v1/projects')
+    assert.equal(res.status, 200)
+    assert.equal((res.body as { defaultSleepAfterSeconds: number | null }).defaultSleepAfterSeconds, 300)
   })
 })
 
@@ -2197,5 +2222,104 @@ test('GET /v1/projects/:name/crons lists schedules of deployed workers only, wit
 
     const missing = await call(baseUrl, 'GET', '/v1/projects/nope/crons')
     assert.equal(missing.status, 404)
+  })
+})
+
+// Issue #94: the daemon says where an app or worker is reached, because
+// only it knows whether Caddy is on. Issue #93: the build output rides on
+// the create response as it already did on deploy.
+test('POST .../resources and .../deploy carry a url that follows caddyEnabled', async () => {
+  const plain = buildContext()
+  await withServer(plain, async (baseUrl) => {
+    await call(baseUrl, 'POST', '/v1/projects', { name: 'blog' })
+    const res = await call(baseUrl, 'POST', '/v1/projects/blog/resources', { kind: 'app', name: 'site' })
+    assert.equal(res.status, 201)
+    const body = res.body as { url: string; logs: string }
+    assert.equal(body.url, 'http://site.blog.localhost:7433')
+    assert.equal(body.logs, '')
+
+    const pg = await call(baseUrl, 'POST', '/v1/projects/blog/resources', { kind: 'postgres', name: 'db' })
+    assert.equal('url' in (pg.body as object), false, 'a postgres has no URL')
+  })
+
+  const caddy = buildContext()
+  caddy.config = { ...caddy.config, caddyEnabled: true }
+  await withServer(caddy, async (baseUrl) => {
+    await call(baseUrl, 'POST', '/v1/projects', { name: 'blog' })
+    const res = await call(baseUrl, 'POST', '/v1/projects/blog/resources', { kind: 'worker', name: 'api' })
+    assert.equal((res.body as { url: string }).url, 'https://api.blog.localhost')
+  })
+})
+
+// Issue #81: a redeploy applies containerPort and the bound database, by id
+// or by name, and refuses a name that is not a postgres in the project.
+test('POST /v1/resources/:id/deploy applies containerPort and database to an app', async () => {
+  const runtime = createFakeRuntime()
+  const ctx = buildContext(runtime)
+  // The app kind's readiness seam, passed structurally through the
+  // context the same way AppDeps.appProbeFactory is in app.test.ts.
+  ;(ctx as DaemonContext & { appProbeFactory?: () => () => Promise<boolean> }).appProbeFactory = () => async () => true
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const db = ctx.store.createResource({ projectId: project.id, kind: 'postgres', name: 'primary', config: samplePostgresConfig() })
+  const other = ctx.store.createResource({ projectId: project.id, kind: 'queue', name: 'jobs', config: { dbPath: '/x', retentionSeconds: 1, consumerResourceId: null } as never })
+  const app = ctx.store.createResource({ projectId: project.id, kind: 'app', name: 'site', config: sampleUndeployedAppConfig() })
+  ctx.store.setResourceState(app.id, 'undeployed')
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-deploy-port-'))
+  writeFileSync(join(dir, 'Dockerfile'), 'FROM scratch\n')
+
+  await withServer(ctx, async (baseUrl) => {
+    const byName = await call(baseUrl, 'POST', `/v1/resources/${app.id}/deploy`, {
+      source: { path: dir },
+      containerPort: 8080,
+      database: 'primary',
+    })
+    assert.equal(byName.status, 200, JSON.stringify(byName.body))
+    const after = ctx.store.getResource(app.id)
+    assert.ok(after !== null && after.kind === 'app')
+    assert.equal(after.config.containerPort, 8080)
+    assert.equal(after.config.databaseResourceId, db.id)
+    assert.equal((byName.body as { url: string }).url, 'http://site.blog.hobby.local:7433')
+
+    // Nothing given keeps both.
+    const kept = await call(baseUrl, 'POST', `/v1/resources/${app.id}/deploy`, {})
+    assert.equal(kept.status, 200)
+    const unchanged = ctx.store.getResource(app.id)
+    assert.ok(unchanged !== null && unchanged.kind === 'app')
+    assert.equal(unchanged.config.containerPort, 8080)
+    assert.equal(unchanged.config.databaseResourceId, db.id)
+
+    // null unbinds; a non-postgres is refused before anything builds.
+    const builds = runtime._builds.length
+    const unbound = await call(baseUrl, 'POST', `/v1/resources/${app.id}/deploy`, { databaseResourceId: null })
+    assert.equal(unbound.status, 200)
+    assert.equal((ctx.store.getResource(app.id) as { config: { databaseResourceId: string | null } }).config.databaseResourceId, null)
+    const refused = await call(baseUrl, 'POST', `/v1/resources/${app.id}/deploy`, { database: other.name })
+    assert.equal(refused.status, 400)
+    const missing = await call(baseUrl, 'POST', `/v1/resources/${app.id}/deploy`, { database: 'ghost' })
+    assert.equal(missing.status, 404)
+    assert.equal(runtime._builds.length, builds + 1, 'the two refusals built nothing')
+  })
+})
+
+// Issue #114: `hobby rm` of a resource leaves no empty directory behind. The
+// kind removes what it owns; the empty shell is the route's.
+test('DELETE /v1/resources/:id removes the resource directory once it is empty', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resourceDir = ctx.paths.resourceDir('blog', 'primary')
+  mkdirSync(resourceDir, { recursive: true })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig({ dataDir: join(resourceDir, 'pgdata') }),
+  })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'DELETE', `/v1/resources/${resource.id}`)
+    assert.equal(res.status, 200)
+    assert.equal(existsSync(resourceDir), false, 'the empty resource directory is gone')
+    assert.equal(existsSync(join(ctx.paths.projectsDir, 'blog')), true, 'the project still exists, so its directory stays')
   })
 })

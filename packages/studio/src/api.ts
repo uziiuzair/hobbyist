@@ -240,6 +240,9 @@ export interface DeployResult {
   image: string;
   logs: string;
   ignored?: Array<{ key: string; reason: string }>;
+  // Where the resource is reached, computed by the daemon from whether
+  // Caddy is on (issue #94). Absent from a daemon older than the field.
+  url?: string;
 }
 
 export function deployResource(

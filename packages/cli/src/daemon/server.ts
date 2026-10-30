@@ -18,7 +18,7 @@ import { chmod, rm } from 'node:fs/promises'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import net from 'node:net'
 import { promisify } from 'node:util'
-import { HobbyError, type ProxyTlsConfig, type Resource } from '@hobby.sh/core'
+import { assertSocketPathFits, HobbyError, type ProxyTlsConfig, type Resource } from '@hobby.sh/core'
 import { startAlarmMirror } from '@hobby.sh/do'
 import { startHttpRouter, startPgProxy, TLS_ASK_PATH, type ProxyTlsFiles } from '@hobby.sh/proxy'
 import { startQueueTick } from '@hobby.sh/queue'
@@ -436,6 +436,11 @@ export async function startDaemon(
   opts: StartDaemonOptions
 ): Promise<{ close(): Promise<void> }> {
   warnOnUnrecognizedCaddyEnabled()
+
+  // Before anything binds: a socket path past sun_path's limit fails inside
+  // listen() with a bare EINVAL and a stack (issue #107), and the message
+  // that names HOBBY_HOME has to come from somewhere that knows the cause.
+  assertSocketPathFits(opts.socketPath)
 
   await removeStaleSocketIfAny(opts.socketPath)
 

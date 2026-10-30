@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import {
   createFakeRuntime,
+  HobbyError,
   openStore,
   resolvePaths,
   type HobbyConfig,
@@ -135,6 +136,24 @@ test('daemon close() stops the sleepy project and never calls stop on the pinned
     await daemon.close()
     assert.deepEqual(stopped, [sleepy.id])
     assert.equal(ctx.store.getResource(pinned.id)?.state, 'running')
+  } finally {
+    ctx.store.close()
+  }
+})
+
+// Issue #107: a socket path past sun_path's limit is refused before listen()
+// can fail with a bare EINVAL, with the fix named.
+test('startDaemon refuses a socket path longer than a unix socket allows', async () => {
+  const ctx = buildContext(recordingKinds([]))
+  const socketPath = join(tmpdir(), 'a'.repeat(110), 'hobby.sock')
+  try {
+    await assert.rejects(startDaemon(ctx, { socketPath, apiPort: null }), (err: unknown) => {
+      assert.ok(err instanceof HobbyError)
+      assert.equal(err.code, 'usage')
+      assert.match(err.message, /bytes long/)
+      assert.match(err.hint ?? '', /HOBBY_HOME/)
+      return true
+    })
   } finally {
     ctx.store.close()
   }
