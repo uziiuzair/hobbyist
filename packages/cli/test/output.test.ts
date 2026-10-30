@@ -659,7 +659,7 @@ function sampleReport(overrides: Partial<PreflightReport> = {}): PreflightReport
   const free = (port: number, host = '127.0.0.1') => ({ port, host, bound: false, error: null })
   return {
     runtimeAvailable: true,
-    filesystem: { path: '/home/u/.hobby', reflinkSupported: true, freeBytes: 50 * 1024 * 1024 * 1024 },
+    filesystem: { path: '/home/u/.hobby', reflinkSupported: true, freeBytes: 50 * 1024 * 1024 * 1024, tmpfs: false },
     proxyHost: { setting: '127.0.0.1', hosts: ['127.0.0.1'], error: null },
     ports: { proxy: free(5432), api: free(7432), http: free(7433), queue: free(7434), caddy: null },
     daemon: null,
@@ -754,7 +754,7 @@ test('studioExposureNote has one sentence per configuration', () => {
 
 test('diskWarning speaks up under a gigabyte and stays quiet above it', () => {
   assert.equal(diskWarning(sampleReport()), null)
-  const low = sampleReport({ filesystem: { path: '/mnt/small', reflinkSupported: false, freeBytes: 330 * 1024 * 1024 } })
+  const low = sampleReport({ filesystem: { path: '/mnt/small', reflinkSupported: false, freeBytes: 330 * 1024 * 1024, tmpfs: false } })
   assert.match(diskWarning(low) ?? '', /only 330\.0 MB free under \/mnt\/small/)
   assert.match(diskWarning(low) ?? '', /no space left on device/)
 })
