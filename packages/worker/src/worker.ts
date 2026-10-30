@@ -30,6 +30,8 @@ import {
   type WorkerConfig,
   type WorkerResource,
   allocateHostPort,
+  pruneImageTags,
+  removeImageTags,
 } from '@hobby.sh/core'
 import { assertWorkerConfig } from './assert-config.js'
 import { findWranglerManifest, type WranglerManifest } from './manifest.js'
@@ -482,8 +484,15 @@ export function resolveBuildContext(sourcePath: string, context: string | null |
   return { contextPath, workerDir: workerDir === '' ? '.' : workerDir }
 }
 
+// The repository every tag of one worker lands under; destroyWorker removes
+// everything under it and deployWorker prunes it (issue #84), the same
+// split as the app kind's buildRepository and buildTag.
+export function workerRepository(project: string, resource: string): string {
+  return `hobby/${project}-${resource}-worker`
+}
+
 export function workerTag(project: string, resource: string, at: number): string {
-  return `hobby/${project}-${resource}-worker:${Math.floor(at / 1000)}`
+  return `${workerRepository(project, resource)}:${Math.floor(at / 1000)}`
 }
 
 // Writes the generated Dockerfile somewhere we own, never into the user's
@@ -669,6 +678,16 @@ export async function createWorkerResource(
     await stopWorker(deps, resource)
   } catch (err) {
     deps.store.setResourceState(resource.id, 'failed')
+    // startWorker created the container; a `failed` row is outside the
+    // hibernator's gate, so nothing else would ever remove it (issue #80).
+    // Same best-effort cleanup createAppResource does, and deployWorker's
+    // wasUndeployed branch already did for a first deploy into a row.
+    try {
+      await deps.runtime.stop(containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+      await deps.runtime.remove(containerName)
+    } catch {
+      // Deliberately swallowed: the readiness error is the one to keep.
+    }
     throw err
   }
 
@@ -771,14 +790,14 @@ export async function destroyWorker(deps: WorkerDeps, resource: WorkerResource):
   }
   // A null image means an undeployed worker never built one in the first
   // place, which is a normal thing to destroy, not a bug: there is simply
-  // nothing to remove.
+  // nothing to remove. Every tag under the worker's repository goes, not
+  // just the one the config names (issue #84): each deploy kept the
+  // previous tag for rollback, and rm used to leave those behind.
   const image = resource.config.image
-  if (image !== null && deps.runtime.removeImage !== undefined) {
-    try {
-      await deps.runtime.removeImage(image)
-    } catch (err) {
-      failures.push(`remove image: ${errorMessage(err)}`)
-    }
+  if (image !== null) {
+    const project = deps.store.getProject(resource.projectId)
+    const repository = project === null ? image.slice(0, image.lastIndexOf(':')) : workerRepository(project.name, resource.name)
+    failures.push(...(await removeImageTags(deps.runtime, repository, image)))
   }
 
   // The state and Durable Object directories are deliberately LEFT ON DISK.
@@ -846,7 +865,11 @@ export function resolveWorkerSourcePath(resource: WorkerResource, projectName: s
 export async function deployWorker(
   deps: WorkerDeps,
   resource: WorkerResource,
-  opts: { sourcePath?: string; env?: Record<string, string>; context?: string | null } = {}
+  // databaseResourceId given replaces the bound database (issue #81:
+  // `hobby deploy --database` on a redeploy used to be dropped); absent
+  // keeps it. The container is replaced on every deploy, so the hyperdrive
+  // binding changes with it.
+  opts: { sourcePath?: string; env?: Record<string, string>; context?: string | null; databaseResourceId?: ResourceId | null } = {}
 ): Promise<DeployWorkerResult> {
   const project = deps.store.getProject(resource.projectId)
   if (project === null) {
@@ -903,6 +926,7 @@ export async function deployWorker(
       controlPort: resource.config.controlPort,
       queueToken: resource.config.queueToken,
       ...(opts.env === undefined ? {} : { env: opts.env }),
+      ...(opts.databaseResourceId === undefined ? {} : { databaseResourceId: opts.databaseResourceId }),
       manifest: {
         source: { path: sourcePath, manifest: found.file, ...(context === null ? {} : { context: build.contextPath }) },
         compatibilityDate: manifest.compatibilityDate,
@@ -931,6 +955,12 @@ export async function deployWorker(
 
     await startWorker(deps, updated)
     await stopWorker(deps, updated)
+
+    // Only once the new image has proven it serves: tags older than the
+    // few kept for rollback go (issue #84). Logged, never thrown.
+    for (const failure of await pruneImageTags(deps.runtime, workerRepository(project.name, resource.name), tag)) {
+      console.error(`worker ${resource.name}: ${failure}`)
+    }
 
     const final = deps.store.getResource(resource.id)
     if (final === null || final.kind !== 'worker') {

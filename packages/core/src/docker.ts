@@ -412,6 +412,22 @@ export function createDockerRuntime(exec: ExecFn = defaultExec, spawnFn: SpawnFn
       }
     },
 
+    // Every tag under one repository (issue #84). `docker images <repo>`
+    // filters by repository name exactly, so `hobby/blog-web` never lists
+    // `hobby/blog-web-worker`'s tags. A dangling layer shows as `<none>`
+    // and is dropped: it is not a tag anything can remove by name.
+    async listImages(repository: string): Promise<string[]> {
+      try {
+        const { stdout } = await exec('docker', ['images', '--format', '{{.Repository}}:{{.Tag}}', repository])
+        return stdout
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0 && !line.includes('<none>'))
+      } catch (err) {
+        throw toRuntimeUnavailable('docker images', err)
+      }
+    },
+
     // Best effort, and a missing image is success. Called when an app is
     // destroyed, so that destroying a resource does not silently leave its
     // built layers on the disk forever.

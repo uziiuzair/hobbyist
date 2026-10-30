@@ -466,7 +466,7 @@ test('GET /v1/projects on the studio-fronted listener requires a session, and th
 
     const authed = await call(baseUrl, 'GET', '/v1/projects', { cookie })
     assert.equal(authed.status, 200)
-    assert.deepEqual(authed.body, { projects: [] })
+    assert.deepEqual(authed.body, { projects: [], defaultSleepAfterSeconds: 300 })
   })
 })
 
@@ -620,7 +620,7 @@ test('the same normalized path IS served, with a session, so the gate matches wh
     // direction (denying a path the router serves) would be a bug too.
     const res = await rawCall(baseUrl, 'GET', '/.//v1/projects', { cookie })
     assert.equal(res.status, 200)
-    assert.deepEqual(res.body, { projects: [] })
+    assert.deepEqual(res.body, { projects: [], defaultSleepAfterSeconds: 300 })
   })
 })
 

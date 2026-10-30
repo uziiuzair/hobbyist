@@ -163,3 +163,55 @@ CLI's six exit codes (`packages/cli/src/cli/exit.ts`, `EXIT_CODE_BY_ERROR`),
 and the fact that `site/scripts/check-cli-reference.mjs` now compares flags
 per verb and the exit code table as well as the verb list, so a flag added to
 a `parseArgs` spec without a line on the page fails CI.
+
+## Amendment, 2026-10-30: CLI papercuts (issues #97, #106, #107, #109, #110, #111, #114, #103)
+
+`parseArgs` (`packages/cli/src/cli/main.ts`) treats a single-dash token as a
+flag: `-h` sets `help` (an alias for `--help`, which `run` already handles
+before the verb's parse), any other `-x` is `unknown flag: -x`, and a
+negative number stays a positional. Before this `hobby logs -h` reached the
+daemon as the target `-h` and `hobby ls -j` ignored `-j`.
+
+`readFileConfig` (`packages/core/src/config.ts`) wraps `JSON.parse` and
+throws `HobbyError('usage', 'hobby.json at <absolute path> is not valid
+JSON: <parse message>')`. `assertSocketPathFits` in the same file refuses a
+socket path over `SOCKET_PATH_MAX_BYTES` (103, the macOS `sun_path` limit
+less the NUL) naming the path, its length and `HOBBY_HOME`; `cmdInit`
+(`commands.ts`) and `startDaemon` (`packages/cli/src/daemon/server.ts`)
+both call it, so `hobby init` fails where `hobby daemon` used to fail with
+a raw `listen EINVAL`. No `HOBBY_SOCKET` override was added.
+
+Under `--json`, `handleError` (`main.ts`) prints every failure as the API
+envelope `{"error":{"code","message","hint"}}` on stderr, one line, exit
+code unchanged; `errorEnvelope` (`commands.ts`) is the one place that
+builds it, and `daemon_unreachable` is its one code that is not a core
+`ErrorCode`. `hobby token rm`, `hobby logout`, `hobby update` (both
+`--check` and "already on") and `hobby studio` print a JSON object under the
+flag; `hobby studio` reads its subcommand from the positionals, so
+`hobby studio --json` is the verb with a flag, and `studio passwd` accepts
+and ignores `--json`.
+
+`cmdUnpin` with no `--sleep-after` sends no field (`setSleepPolicy`,
+`client.ts`, omits it for `undefined`), and `setSleepPolicyRoute`
+(`packages/cli/src/daemon/routes.ts`) fills `ctx.config.sleepAfterSeconds`,
+the daemon's own default; it refuses with `usage` when that default is
+null. The CLI's own `sleepAfterSeconds` is no longer consulted. `GET
+/v1/projects` carries `defaultSleepAfterSeconds` so `cmdLs` can print
+`(pinned)` for a null threshold and `(sleeps after Ns)` for one that differs
+from it (`sleepPolicyTrailer`, `output.ts`); a daemon without the field gets
+only the pin marker. `cmdPin` fetches the project after setting the policy
+and prints `pinned: it will not sleep once woken` when any resource is not
+running. Pin still wakes nothing.
+
+`renderResourceLine` (`output.ts`) ends a postgres line with `connect: hobby
+connect <project>/<name>` (the project name is a new third argument, which
+`cmdLs` passes) instead of `port <hostPort>`; `hostPort` stays in `--json`
+as `config.hostPort`. `destroyResourceRoute` removes the resource's
+directory with a non-recursive `rmdir` once the kind has torn down what it
+owns, so only an empty shell goes and a worker's kept `do/` and `state/`
+stay; `deleteProjectRoute` tries the same on the project directory when a
+teardown step failed and the recursive removal was skipped. `cmdConnect`
+without psql prints the connection string, then install hints for Homebrew's
+`libpq` and Debian's `postgresql-client`, and exits 1 as before. The third
+bullet of #114 (a manual sleep clearing a wake refusal) is in PR #213's
+`stopResourceRoute`, not here.

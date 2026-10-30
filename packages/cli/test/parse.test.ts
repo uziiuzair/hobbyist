@@ -179,3 +179,17 @@ test('parseEnvAssignments: first = splits, keys are validated, no quote strippin
   assert.throws(() => parseEnvAssignments(['NOEQ']), /NOEQ/)
   assert.throws(() => parseEnvAssignments(['1A=2']), /not a valid variable name/)
 })
+
+// Issue #97: `hobby logs -h` used to reach the daemon as the target `-h`,
+// and `hobby ls -j` silently ignored `-j`.
+test('parseArgs: a single-dash token is a flag, -h is help, anything else is unknown', () => {
+  assert.deepEqual(parseArgs(['blog', '-h'], { bool: ['json'] }), { positionals: ['blog'], flags: { help: true } })
+  assert.throws(() => parseArgs(['-j'], { bool: ['json'] }), (err: unknown) => {
+    assert.ok(err instanceof UsageError)
+    assert.equal(err.message, 'unknown flag: -j')
+    return true
+  })
+  assert.throws(() => parseArgs(['blog', '-x'], {}), UsageError)
+  // A negative number is a value, not a flag, and a lone dash is a positional.
+  assert.deepEqual(parseArgs(['-5', '-'], {}).positionals, ['-5', '-'])
+})

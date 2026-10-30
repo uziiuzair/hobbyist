@@ -762,6 +762,102 @@ test('an app source names its Dockerfile relative to the context and carries bui
   assert.equal(runtime._builds[1]?.dockerfile, join(root, 'deploy', 'admin.Dockerfile'))
 })
 
+// Issue #80: a first deploy whose readiness probe fails used to leave its
+// container running for good: a `failed` row is outside the hibernator's
+// gate, so nothing else ever stopped it.
+test('a create that fails readiness stops and removes the container it started', async () => {
+  const deps = buildDeps({ appProbeFactory: () => async () => false })
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+
+  await assert.rejects(
+    () =>
+      createAppResource(deps, {
+        project,
+        name: 'web',
+        source: sourceDir(),
+        image: null,
+        containerPort: 3000,
+        env: {},
+        databaseResourceId: null,
+      }),
+    /did not start listening/
+  )
+
+  const row = deps.store.listResources(project.id)[0]
+  assert.ok(row !== undefined && row.kind === 'app')
+  assert.equal(row.state, 'failed')
+  assert.equal((await runtime.inspect(row.config.containerName)).exists, false, 'no container is left behind')
+})
+
+// Issue #84: every tag the app ever built goes with it, and a deploy keeps
+// only the newest three.
+test('destroy removes every tag under the app repository, and deploy prunes to the newest three', async () => {
+  let at = 1_754_870_400_000
+  const deps = buildDeps({ now: () => at })
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const source = sourceDir()
+
+  let app = await createAppResource(deps, { project, name: 'web', source, image: null, containerPort: 3000, env: {}, databaseResourceId: null })
+  for (let i = 0; i < 4; i++) {
+    at += 1000
+    app = (await deployApp(deps, app)).resource
+  }
+  const tags = [...runtime._images].filter((tag) => tag.startsWith('hobby/blog-web:')).sort()
+  assert.deepEqual(tags, [
+    buildTag('blog', 'web', at - 2000),
+    buildTag('blog', 'web', at - 1000),
+    buildTag('blog', 'web', at),
+  ])
+  assert.equal(app.config.image, buildTag('blog', 'web', at))
+
+  await destroyApp(deps, app)
+  assert.deepEqual([...runtime._images].filter((tag) => tag.startsWith('hobby/blog-web:')), [])
+})
+
+// Issue #81: a redeploy applies a new port and database binding, and keeps
+// both when neither is given.
+test('deploy applies containerPort and databaseResourceId, and keeps them when absent', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const app = await createAppResource(deps, { project, name: 'web', source: sourceDir(), image: null, containerPort: 3000, env: {}, databaseResourceId: null })
+
+  const changed = await deployApp(deps, app, { containerPort: 8080, databaseResourceId: 'db-1' as never })
+  assert.equal(changed.resource.config.containerPort, 8080)
+  assert.equal(changed.resource.config.databaseResourceId, 'db-1')
+  const spec = (deps.runtime as ReturnType<typeof createFakeRuntime>)._specs.get(app.config.containerName)
+  assert.equal(spec?.env['PORT'], '8080', 'the container is told the new port')
+
+  const kept = await deployApp(deps, changed.resource, {})
+  assert.equal(kept.resource.config.containerPort, 8080)
+  assert.equal(kept.resource.config.databaseResourceId, 'db-1')
+
+  const unbound = await deployApp(deps, kept.resource, { databaseResourceId: null })
+  assert.equal(unbound.resource.config.databaseResourceId, null)
+})
+
+// Issue #93: the build output of a first deploy is handed back, since the
+// return type is the resource alone.
+test('createAppResource hands the build output to onBuildLogs', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  let logs = ''
+  await createAppResource(deps, {
+    project,
+    name: 'web',
+    source: sourceDir(),
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+    onBuildLogs: (built) => {
+      logs = built
+    },
+  })
+  assert.match(logs, /fake build of hobby\/blog-web:/)
+})
+
 // Issue #55: a container that exits on boot is reported after one poll, with
 // its exit code and the last lines it printed, not as a 30 second readiness
 // timeout that blames a loopback bind.

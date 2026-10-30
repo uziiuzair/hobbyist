@@ -64,7 +64,7 @@ hobby ls
 
 ```
 blog
-  primary  postgres  running  port 15432
+  primary  postgres  running  connect: hobby connect blog/primary
 ```
 
 It says `running` because `hobby connect` just woke it. Had you run `hobby ls`
@@ -72,6 +72,13 @@ straight after `hobby new`, it would have said `sleeping`: a new database is
 booted once so it is initialised and then stopped cleanly, on purpose, so that
 its first real start is not a crash recovery (`createPostgres`,
 `packages/pg/src/postgres.ts`). Asleep is the resting state of everything here.
+
+The line says how to reach it rather than naming a port. The port you dial is
+the proxy's, 5432, which is in the connection string and is what makes wake
+work. The container also has a host port of its own (`hobby ls --json` shows
+it as `config.hostPort`), but connecting there goes around the wake router:
+it fails while the database sleeps, and an idle session on it is ended by
+hibernation.
 
 The port on that line is the resource's own host port, allocated from the
 15432 to 25432 range postgres uses (apps and workers have ranges of their own)

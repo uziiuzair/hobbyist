@@ -13,14 +13,17 @@ import { existsSync } from 'node:fs'
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, join as joinPath, resolve as resolvePath } from 'node:path'
 import {
+  assertSocketPathFits,
   DEFAULT_POSTGRES_NAME,
   HobbyError,
   parseTarget,
   resolvePgdataPath,
+  type ErrorCode,
   type HobbyConfig,
   type Paths,
   type Project,
 } from '@hobby.sh/core'
+import { findWranglerManifest } from '@hobby.sh/worker'
 import { createDaemonContext } from '../daemon/context.js'
 import { runPreflight } from '../daemon/preflight.js'
 import { reconcile } from '../daemon/reconcile.js'
@@ -45,6 +48,7 @@ import {
   renderQueueTuningLine,
   renderResourceLine,
   renderSnapshotLine,
+  sleepPolicyTrailer,
 } from './output.js'
 
 // Io is defined in main.ts, which owns run() and is the file the brief
@@ -66,6 +70,16 @@ export class UsageError extends Error {}
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+// The daemon API's error envelope (HobbyError.toWire, packages/core/src/errors.ts)
+// as one JSON line, for every failure printed under --json (issue #109):
+// main.ts's handleError for anything thrown, and the two commands below
+// that report a failure with a return code rather than a throw (cmdStudio,
+// cmdLogout). `daemon_unreachable` is the one code that is not an
+// ErrorCode, since it is the client's own condition (exit 5, exit.ts).
+export function errorEnvelope(code: ErrorCode | 'daemon_unreachable', message: string, hint?: string): string {
+  return JSON.stringify({ error: hint === undefined ? { code, message } : { code, message, hint } })
 }
 
 // Owner-only, on both ~/.hobby and ~/.hobby/projects. Everything under
@@ -229,6 +243,10 @@ export async function resolveQueueTarget(
 // out as an open question in docs/cli/CLAUDE.md, not something this task
 // resolves.
 export async function cmdInit(io: Io, paths: Paths, config: HobbyConfig, json: boolean): Promise<number> {
+  // The same check startDaemon makes before it binds (issue #107): a
+  // HOBBY_HOME deep enough to push the socket past sun_path used to pass
+  // init and fail the daemon with a raw EINVAL.
+  assertSocketPathFits(paths.socketPath)
   await ensurePrivateDir(paths.home)
   await ensurePrivateDir(paths.projectsDir)
 
@@ -373,8 +391,31 @@ export function detectDeployKind(files: { dockerfile: boolean; wrangler: boolean
     return 'app'
   }
   throw new UsageError(
-    'nothing to deploy here: expected a Dockerfile (for an app) or wrangler.toml / wrangler.jsonc (for a worker)'
+    'nothing to deploy here: expected a Dockerfile (for an app) or wrangler.toml, wrangler.jsonc or wrangler.json (for a worker)'
   )
+}
+
+// The three spellings findWranglerManifest (packages/worker/src/manifest.ts)
+// reads. Detection used to check only the first two, so a directory with
+// just a wrangler.json was "nothing to deploy here" while `--kind worker`
+// deployed it fine (issue #77).
+const WRANGLER_FILES = ['wrangler.toml', 'wrangler.jsonc', 'wrangler.json']
+
+function hasWranglerManifest(dir: string): boolean {
+  return WRANGLER_FILES.some((file) => existsSync(joinPath(dir, file)))
+}
+
+// The `name` field of the manifest in `dir`, or undefined when there is
+// none or the manifest does not parse. A worker's resource name defaults
+// to it, as wrangler's does (issue #87); a manifest the daemon would refuse
+// is left for the daemon to refuse, with its own message, rather than
+// reported here as a naming problem.
+function workerNameFromManifest(dir: string): string | undefined {
+  try {
+    return findWranglerManifest(dir).manifest.name ?? undefined
+  } catch {
+    return undefined
+  }
 }
 
 export interface DeployTarget {
@@ -531,6 +572,57 @@ function printIgnored(c: Ctx, ignored: IgnoredKey[] | undefined): void {
   }
 }
 
+// The build output, on stderr so `--json` stdout stays the object. On
+// failure the daemon puts the whole `docker build` output in the hint of
+// its `build_failed` error (packages/core/src/docker.ts), and it used to
+// reach the terminal only as one long `hint:` line; here it is printed as a
+// block and the hint shortened to point at it (issue #93). On success it
+// is printed only under --verbose, since a working build's output is noise
+// most of the time.
+function printBuildOutput(c: Ctx, logs: string | undefined): void {
+  if (logs === undefined || logs.trim().length === 0) {
+    return
+  }
+  c.io.err('build output:')
+  for (const line of logs.trimEnd().split('\n')) {
+    c.io.err(`  ${line}`)
+  }
+}
+
+async function reportingBuildFailure<T>(c: Ctx, json: boolean, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (err) {
+    if (!json && err instanceof HobbyError && err.code === 'build_failed' && err.hint !== undefined && err.hint.trim().length > 0) {
+      printBuildOutput(c, err.hint)
+      throw new HobbyError(err.code, err.message, 'the build output is above')
+    }
+    throw err
+  }
+}
+
+// A project this deploy created and then failed to put anything into is
+// removed again (issue #80): `hobby deploy --name j` into a project that
+// did not exist used to leave an empty `qacomp7` behind after the name was
+// refused. Only when the project is still empty: a failed first deploy that
+// left a `failed` row is something the user retries, not something to
+// delete from under them. Same shape as cmdNew's rollback, including the
+// rule that the original failure is the one reported.
+async function removeProjectIfEmpty(c: Ctx, projectName: string): Promise<void> {
+  try {
+    const detail = await c.api.getProject(projectName)
+    if (detail.resources.length > 0) {
+      return
+    }
+    await c.api.deleteProject(projectName)
+  } catch (cleanupErr) {
+    c.io.err(
+      `could not remove the project ${projectName} this deploy created: ${errorMessage(cleanupErr)}. ` +
+        `remove it with: hobby rm ${projectName}`
+    )
+  }
+}
+
 export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const parsed = parseDeploy(positionals, flags)
   const path = resolvePath(c.io.cwd, parsed.path)
@@ -539,12 +631,60 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
   // a brand new project named after the directory, which is the one thing a
   // user who just linked the directory cannot have meant.
   const projectName = parsed.project ?? c.config.project ?? basename(path)
-  const name = parsed.name ?? basename(path)
+  const json = flags.json === true
 
   const portFlag = typeof flags['port'] === 'string' ? Number(flags['port']) : undefined
   if (portFlag !== undefined && !Number.isInteger(portFlag)) {
     throw new UsageError(`--port must be a whole number, got ${String(flags['port'])}`)
   }
+
+  // The kind first, from flags and the directory alone: nothing below that
+  // talks to the daemon needs to run for a directory with neither a
+  // Dockerfile nor a manifest, and a worker's name depends on knowing it
+  // is a worker.
+  const kindFlag = typeof flags['kind'] === 'string' ? flags['kind'] : undefined
+  if (kindFlag !== undefined && kindFlag !== 'app' && kindFlag !== 'worker') {
+    throw new UsageError(`unknown --kind: ${kindFlag}. Expected app or worker.`)
+  }
+  // --dockerfile names a file relative to [path], which is the build
+  // context (issue #146): a monorepo deploys each of its apps from the root
+  // with its own Dockerfile, which the single `<path>/Dockerfile` check
+  // could not express. --build-arg is repeatable and persisted with the
+  // source, so a redeploy rebuilds with the same values. --context is the
+  // worker-side answer to the same problem (issue #147): the directory
+  // holding the manifest stays [path], and the install runs from the root.
+  const dockerfileFlag = flagString(flags, 'dockerfile')
+  const buildArgs = parseEnvAssignments(flagList(flags, 'build-arg'))
+  const contextFlag = flagString(flags, 'context')
+  const kind =
+    kindFlag ??
+    detectDeployKind({
+      dockerfile: existsSync(joinPath(path, dockerfileFlag ?? 'Dockerfile')),
+      wrangler: hasWranglerManifest(path),
+    })
+  if (kind === 'worker' && (dockerfileFlag !== undefined || Object.keys(buildArgs).length > 0)) {
+    throw new UsageError('--dockerfile and --build-arg are for apps. A worker is built from its wrangler manifest.')
+  }
+  if (kind === 'app' && contextFlag !== undefined) {
+    throw new UsageError(
+      '--context is for workers. For an app, [path] is the build context: pass the root as the path and --dockerfile for the file.'
+    )
+  }
+  const context = contextFlag === undefined ? undefined : resolvePath(c.io.cwd, contextFlag)
+  // Only what was given goes on the wire, so a redeploy that names neither
+  // keeps the Dockerfile, build args and context the resource was last
+  // built with (readSourceInput, packages/cli/src/daemon/routes.ts).
+  const source = {
+    path,
+    ...(dockerfileFlag === undefined ? {} : { dockerfile: dockerfileFlag }),
+    ...(Object.keys(buildArgs).length === 0 ? {} : { buildArgs }),
+    ...(context === undefined ? {} : { context }),
+  }
+
+  // --name, then for a worker the manifest's own `name`, as wrangler names
+  // it (issue #87), then the directory's basename.
+  const explicitName = flagString(flags, 'name')
+  const name = explicitName ?? (kind === 'worker' ? workerNameFromManifest(path) : undefined) ?? parsed.name ?? basename(path)
 
   // A read, never a write: whether the project exists yet, and whether it
   // already holds a resource by this name, has to be known before anything
@@ -566,12 +706,11 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     projectExists = false
   }
 
-  // Checked before kind detection ever touches the filesystem: whatever is
-  // in the directory, `hobby deploy` can only ever produce an app or a
-  // worker, so a name already held by anything else (a postgres, today the
-  // only other kind) is decidable without looking. This is what lets a
-  // deploy onto a name held by a different kind refuse rather than silently
-  // replacing it, per this task's own rule.
+  // Whatever is in the directory, `hobby deploy` can only ever produce an
+  // app or a worker, so a name already held by anything else (a postgres,
+  // today the only other kind) is refused before anything is sent. This is
+  // what lets a deploy onto a name held by a different kind refuse rather
+  // than silently replacing it, per this task's own rule.
   if (existing !== undefined && existing.kind !== 'app' && existing.kind !== 'worker') {
     throw deployKindConflict(projectName, name, existing.kind)
   }
@@ -582,45 +721,6 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
   // missing or malformed file leaves no empty project behind.
   let env = await envFromFlags(c, flags)
   let envSource: string | undefined
-
-  const kindFlag = typeof flags['kind'] === 'string' ? flags['kind'] : undefined
-  if (kindFlag !== undefined && kindFlag !== 'app' && kindFlag !== 'worker') {
-    throw new UsageError(`unknown --kind: ${kindFlag}. Expected app or worker.`)
-  }
-  // --dockerfile names a file relative to [path], which is the build
-  // context (issue #146): a monorepo deploys each of its apps from the root
-  // with its own Dockerfile, which the single `<path>/Dockerfile` check
-  // could not express. --build-arg is repeatable and persisted with the
-  // source, so a redeploy rebuilds with the same values. --context is the
-  // worker-side answer to the same problem (issue #147): the directory
-  // holding the manifest stays [path], and the install runs from the root.
-  const dockerfileFlag = flagString(flags, 'dockerfile')
-  const buildArgs = parseEnvAssignments(flagList(flags, 'build-arg'))
-  const contextFlag = flagString(flags, 'context')
-  const kind =
-    kindFlag ??
-    detectDeployKind({
-      dockerfile: existsSync(joinPath(path, dockerfileFlag ?? 'Dockerfile')),
-      wrangler: existsSync(joinPath(path, 'wrangler.toml')) || existsSync(joinPath(path, 'wrangler.jsonc')),
-    })
-  if (kind === 'worker' && (dockerfileFlag !== undefined || Object.keys(buildArgs).length > 0)) {
-    throw new UsageError('--dockerfile and --build-arg are for apps. A worker is built from its wrangler manifest.')
-  }
-  if (kind === 'app' && contextFlag !== undefined) {
-    throw new UsageError(
-      '--context is for workers. For an app, [path] is the build context: pass the root as the path and --dockerfile for the file.'
-    )
-  }
-  const context = contextFlag === undefined ? undefined : resolvePath(c.io.cwd, contextFlag)
-  // Only what was given goes on the wire, so a redeploy that names neither
-  // keeps the Dockerfile, build args and context the resource was last
-  // built with (readSourceInput, packages/cli/src/daemon/routes.ts).
-  const source = {
-    path,
-    ...(dockerfileFlag === undefined ? {} : { dockerfile: dockerfileFlag }),
-    ...(Object.keys(buildArgs).length === 0 ? {} : { buildArgs }),
-    ...(context === undefined ? {} : { context }),
-  }
 
   // The rarer half of the same rule, now that the deploy's own kind is
   // known: an app redeployed as though it were a worker, or the reverse,
@@ -635,7 +735,7 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
   // `vars`, and saying so is the difference between "hobby forgot" and
   // "hobby is deliberately not touching this" (issue #152). On stderr so
   // `--json` stdout stays the object.
-  if (kind === 'app' && (existsSync(joinPath(path, 'wrangler.toml')) || existsSync(joinPath(path, 'wrangler.jsonc')))) {
+  if (kind === 'app' && hasWranglerManifest(path)) {
     c.io.err('note: the wrangler manifest beside this Dockerfile is not read for an app; its vars do not reach the container. Use --env-file.')
   }
 
@@ -649,39 +749,13 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     envSource = DEV_VARS
   }
 
-  // A project is created on first deploy rather than required up front. The
-  // alternative, making the user run `hobby new` first, means two commands
-  // for the thing CLAUDE.md promises takes one.
-  if (!projectExists) {
-    await c.api.createProject(projectName)
-  }
-
-  if (existing !== undefined) {
-    // `env` omitted keeps whatever the app already has; sent, it replaces
-    // the whole set (deployApp, packages/app/src/app.ts).
-    const result = await c.api.deployResource(existing.id, {
-      source,
-      ...(env === undefined ? {} : { env }),
-    })
-    if (flags.json) {
-      c.io.out(JSON.stringify({ resource: result.resource, image: result.image, ignored: result.ignored ?? [] }, null, 2))
-      return 0
-    }
-    c.io.out(`deployed ${projectName}/${name}`)
-    c.io.out(`  image     ${result.image}`)
-    c.io.out(`  url       https://${hostnameOf(result.resource)}`)
-    printEnvCount(c, env, envSource)
-    printIgnored(c, result.ignored)
-    c.io.out('')
-    c.io.out('It is asleep. The first request wakes it.')
-    return 0
-  }
-
   // --database binds a sibling postgres, which is how an app gets DATABASE_URL
   // (packages/app/src/app.ts's resolveDatabaseUrl). The daemon route has always
   // accepted databaseResourceId and the CLI had no way to send it, so an app
   // could not be pointed at its own project's database without editing state
-  // by hand.
+  // by hand. Resolved before the project is created, because a database in a
+  // project that does not exist yet cannot be found, and the lookup against
+  // an existing project must not leave a new one behind if it fails.
   let databaseResourceId: string | undefined
   const databaseFlag = flagString(flags, 'database')
   if (databaseFlag !== undefined) {
@@ -695,38 +769,98 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
     databaseResourceId = database.id
   }
 
-  const { resource, ignored } = await c.api.createResource(
-    projectName,
-    kind === 'worker'
-      ? {
-          kind: 'worker',
-          name,
-          source,
-          ...(databaseResourceId === undefined ? {} : { databaseResourceId }),
-          ...(env === undefined ? {} : { env }),
-        }
-      : {
-          kind: 'app',
-          name,
-          source,
-          ...(portFlag === undefined ? {} : { port: portFlag }),
-          ...(databaseResourceId === undefined ? {} : { databaseResourceId }),
-          ...(env === undefined ? {} : { env }),
-        }
-  )
-
-  if (flags.json) {
-    c.io.out(JSON.stringify({ resource, ignored: ignored ?? [] }, null, 2))
-    return 0
+  // A project is created on first deploy rather than required up front. The
+  // alternative, making the user run `hobby new` first, means two commands
+  // for the thing CLAUDE.md promises takes one.
+  if (!projectExists) {
+    await c.api.createProject(projectName)
   }
-  c.io.out(`deployed ${projectName}/${name}`)
-  c.io.out(`  image     ${imageLine(resource.config.image)}`)
-  c.io.out(`  url       https://${hostnameOf(resource)}`)
-  printEnvCount(c, env, envSource)
-  printIgnored(c, ignored)
-  c.io.out('')
-  c.io.out('It is asleep. The first request wakes it.')
-  return 0
+
+  try {
+    if (existing !== undefined) {
+      // `env` omitted keeps whatever the app already has; sent, it replaces
+      // the whole set (deployApp, packages/app/src/app.ts). The same for
+      // --port and --database (issue #81): both used to be accepted and
+      // dropped on a redeploy, so the obvious fix for a wrong port did
+      // nothing.
+      const result = await reportingBuildFailure(c, json, () =>
+        c.api.deployResource(existing.id, {
+          source,
+          ...(env === undefined ? {} : { env }),
+          ...(portFlag === undefined ? {} : { containerPort: portFlag }),
+          ...(databaseResourceId === undefined ? {} : { databaseResourceId }),
+        })
+      )
+      if (json) {
+        c.io.out(
+          JSON.stringify(
+            { resource: result.resource, image: result.image, url: result.url ?? null, ignored: result.ignored ?? [] },
+            null,
+            2
+          )
+        )
+        return 0
+      }
+      if (flags.verbose === true) {
+        printBuildOutput(c, result.logs)
+      }
+      c.io.out(`deployed ${projectName}/${name}`)
+      c.io.out(`  image     ${result.image}`)
+      c.io.out(`  url       ${result.url ?? `https://${hostnameOf(result.resource)}`}`)
+      printEnvCount(c, env, envSource)
+      printIgnored(c, result.ignored)
+      c.io.out('')
+      c.io.out('It is asleep. The first request wakes it.')
+      return 0
+    }
+
+    const created = await reportingBuildFailure(c, json, () =>
+      c.api.createResource(
+        projectName,
+        kind === 'worker'
+          ? {
+              kind: 'worker',
+              name,
+              source,
+              ...(databaseResourceId === undefined ? {} : { databaseResourceId }),
+              ...(env === undefined ? {} : { env }),
+            }
+          : {
+              kind: 'app',
+              name,
+              source,
+              ...(portFlag === undefined ? {} : { port: portFlag }),
+              ...(databaseResourceId === undefined ? {} : { databaseResourceId }),
+              ...(env === undefined ? {} : { env }),
+            }
+      )
+    )
+    const { resource, ignored } = created
+
+    if (json) {
+      c.io.out(JSON.stringify({ resource, url: created.url ?? null, ignored: ignored ?? [] }, null, 2))
+      return 0
+    }
+    if (flags.verbose === true) {
+      printBuildOutput(c, created.logs)
+    }
+    c.io.out(`deployed ${projectName}/${name}`)
+    c.io.out(`  image     ${imageLine(resource.config.image)}`)
+    // The daemon says where it is reached (issue #94): `https://` only with
+    // Caddy on, otherwise the HTTP router's own port. The fallback is for a
+    // daemon older than the field.
+    c.io.out(`  url       ${created.url ?? `https://${hostnameOf(resource)}`}`)
+    printEnvCount(c, env, envSource)
+    printIgnored(c, ignored)
+    c.io.out('')
+    c.io.out('It is asleep. The first request wakes it.')
+    return 0
+  } catch (err) {
+    if (!projectExists) {
+      await removeProjectIfEmpty(c, projectName)
+    }
+    throw err
+  }
 }
 
 // `hobby env set|ls|unset`: variables and secrets on an app or a worker
@@ -1039,7 +1173,7 @@ export async function cmdBranch(c: Ctx, positionals: string[], flags: Flags): Pr
 }
 
 export async function cmdLs(c: Ctx, flags: Flags): Promise<number> {
-  const { projects } = await c.api.listProjects()
+  const { projects, defaultSleepAfterSeconds } = await c.api.listProjects()
   // GET /v1/projects alone has no resource state; "everything, with sleep
   // state" (docs/cli/CLAUDE.md) means fetching each project's detail too.
   // No single route already returns this, so --json prints this aggregated
@@ -1067,13 +1201,19 @@ export async function cmdLs(c: Ctx, flags: Flags): Promise<number> {
     // with no such field at all: strict inequality against null read that
     // `undefined` as released and labelled every project on the box as handed
     // over. Loose null here is the one place it is the correct operator.
-    c.io.out(project.releasedAt != null ? `${project.name}  (released, not managed)` : project.name)
+    //
+    // The sleep policy trailer (issue #111) compares against the daemon's
+    // own default, which it reports on the list response; a daemon older
+    // than that field gets only the pin marker, never a guess from this
+    // process's config (issue #110).
+    const released = project.releasedAt != null ? `${project.name}  (released, not managed)` : project.name
+    c.io.out(`${released}${sleepPolicyTrailer(project, defaultSleepAfterSeconds)}`)
     if (resources.length === 0) {
       c.io.out('  (no resources)')
       continue
     }
     for (const resource of resources) {
-      c.io.out(`  ${renderResourceLine(resource)}`)
+      c.io.out(`  ${renderResourceLine(resource, Date.now(), project.name)}`)
     }
   }
   return 0
@@ -1206,8 +1346,14 @@ export async function cmdConnect(c: Ctx, positionals: string[], flags: Flags): P
   if (result.error) {
     const err = result.error as NodeJS.ErrnoException
     if (err.code === 'ENOENT') {
+      // The string is still the useful part, and works with any client.
+      // How to get psql, by platform (issue #114): Homebrew's libpq is
+      // keg-only, so installing it is not enough on its own.
       c.io.out(connectionString)
       c.io.err('psql was not found on PATH')
+      c.io.err('hint: install it and run this again, or paste the connection string above into any postgres client:')
+      c.io.err('  macOS:          brew install libpq && brew link --force libpq   (or add $(brew --prefix libpq)/bin to PATH)')
+      c.io.err('  Debian/Ubuntu:  sudo apt install postgresql-client')
       return 1
     }
     throw err
@@ -1278,6 +1424,15 @@ export async function cmdPin(c: Ctx, positionals: string[], flags: Flags): Promi
 
   if (flags.json) {
     c.io.out(JSON.stringify(result))
+    return 0
+  }
+  // Pinning changes what the hibernator may do from now on and wakes
+  // nothing, so "pinned awake" is only true of a project whose resources
+  // are all running. Anything asleep stays asleep until something connects,
+  // and the line says so rather than claiming otherwise (issue #111).
+  const { resources } = await c.api.getProject(name)
+  if (resources.some((resource) => resource.state !== 'running')) {
+    c.io.out(`project ${name}: pinned: it will not sleep once woken`)
   } else {
     c.io.out(renderSleepPolicyLine(result.project))
   }
@@ -1287,22 +1442,15 @@ export async function cmdPin(c: Ctx, positionals: string[], flags: Flags): Promi
 export async function cmdUnpin(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const name = targetOrLinked(c, positionals, 'usage: hobby unpin <project> [--sleep-after <seconds>]')
   const raw = flagString(flags, 'sleep-after')
-  let sleepAfterSeconds: number
-  if (raw === undefined) {
-    // No flag: fall back to the box-wide default the project would have been
-    // created with. If that default is itself null, the box is configured to
-    // never sleep anything, and silently writing null here would make unpin
-    // a no-op that reports success; asking for an explicit value is the
-    // honest move. `== null` on purpose: a config that never resolved the
-    // field (a partial test config) must land here too, not send undefined
-    // over the wire.
-    if (c.config.sleepAfterSeconds == null) {
-      throw new UsageError(
-        'this box has no default idle threshold (sleepAfterSeconds is null in config), so pass one: hobby unpin <project> --sleep-after <seconds>'
-      )
-    }
-    sleepAfterSeconds = c.config.sleepAfterSeconds
-  } else {
+  // No flag sends no value, and the daemon applies its own box-wide default
+  // (setSleepPolicyRoute, packages/cli/src/daemon/routes.ts), which is what
+  // "back to the box-wide default" means. This process's own
+  // sleepAfterSeconds is resolved from its env and cwd and may not match
+  // the daemon's (issue #110). A daemon whose default is itself null
+  // refuses and asks for an explicit value, so unpin never silently
+  // becomes a no-op that reports success.
+  let sleepAfterSeconds: number | undefined
+  if (raw !== undefined) {
     sleepAfterSeconds = Number(raw)
     if (!Number.isInteger(sleepAfterSeconds) || sleepAfterSeconds <= 0) {
       throw new UsageError('--sleep-after must be a positive whole number of seconds')
@@ -2065,7 +2213,13 @@ function defaultOpenBrowser(url: string): void {
 // at the daemon's own loopback listener (config.apiPort): the daemon serves
 // both the API and Studio's built bundle on that same port
 // (packages/cli/src/daemon/studio/routes.ts's createStudioApp).
-export function cmdStudio(io: Io, paths: Paths, config: HobbyConfig, openBrowser: BrowserOpener = defaultOpenBrowser): number {
+export function cmdStudio(
+  io: Io,
+  paths: Paths,
+  config: HobbyConfig,
+  openBrowser: BrowserOpener = defaultOpenBrowser,
+  json: boolean = false
+): number {
   const url =
     config.caddyEnabled && config.caddyStudioHost !== null
       ? `https://${config.caddyStudioHost}`
@@ -2078,11 +2232,23 @@ export function cmdStudio(io: Io, paths: Paths, config: HobbyConfig, openBrowser
     // never reveals whether one exists), so opening it here would just be a
     // confusing dead end. Naming the fix directly is what the brief asks
     // for instead of a page nobody can get past.
-    io.err('no studio password has been set yet, so signing in could never succeed.')
-    io.err('hint: run `hobby studio passwd`, then `hobby studio` again.')
+    const message = 'no studio password has been set yet, so signing in could never succeed.'
+    const hint = 'run `hobby studio passwd`, then `hobby studio` again.'
+    if (json) {
+      io.err(errorEnvelope('usage', message, hint))
+    } else {
+      io.err(message)
+      io.err(`hint: ${hint}`)
+    }
     return 1
   }
 
+  // --json is for a script, which wants the URL and not a browser window
+  // opening on whatever desktop the script runs on (issue #109).
+  if (json) {
+    io.out(JSON.stringify({ url }))
+    return 0
+  }
   io.out(url)
   openBrowser(url)
   return 0
@@ -2157,11 +2323,15 @@ export async function cmdLogin(
 
 // `hobby logout [url]`: forget a remote. The token stays valid on the box
 // until it is revoked there, and this says so rather than implying otherwise.
-export function cmdLogout(io: Io, paths: Paths, positionals: string[]): number {
+export function cmdLogout(io: Io, paths: Paths, positionals: string[], flags: Flags = {}): number {
   const forgotten = forgetRemote(paths, positionals[0] ?? null)
   if (forgotten === null) {
-    io.err('not logged in to anything')
+    io.err(flags.json === true ? errorEnvelope('usage', 'not logged in to anything') : 'not logged in to anything')
     return 1
+  }
+  if (flags.json === true) {
+    io.out(JSON.stringify({ forgotten, tokenStillValid: true }))
+    return 0
   }
   io.out(`forgot ${forgotten}`)
   io.out(`the token is still valid on that box. revoke it there with \`hobby token rm\` if it should not be.`)
@@ -2283,6 +2453,10 @@ export async function cmdToken(
     if (!revokeToken(paths, name)) {
       throw new HobbyError('resource_not_found', `no token named ${name}`, 'run `hobby token ls` to see them')
     }
+    if (flags.json === true) {
+      io.out(JSON.stringify({ revoked: name }))
+      return 0
+    }
     io.out(`revoked ${name}`)
     io.out('any machine holding it is locked out immediately.')
     return 0
@@ -2386,13 +2560,16 @@ export async function cmdUpdate(io: Io, paths: Paths, flags: Flags): Promise<num
   // needed moving back onto a release.
   const described = spawnSync('git', ['-C', src, 'describe', '--tags', '--exact-match'], { encoding: 'utf8' })
   const current = described.status === 0 ? (described.stdout || '').trim() : null
+  // The same object either way under --json (issue #109), so a script
+  // reads `updateAvailable` rather than parsing a bare tag or the words
+  // "already on". `current` is null on a checkout that is not on a tag.
   if (current === latest) {
-    io.out(`already on ${latest}`)
+    io.out(flags.json === true ? JSON.stringify({ current, latest, updateAvailable: false }) : `already on ${latest}`)
     return 0
   }
 
   if (flags['check'] === true) {
-    io.out(latest)
+    io.out(flags.json === true ? JSON.stringify({ current, latest, updateAvailable: true }) : latest)
     return 0
   }
 
@@ -2427,6 +2604,10 @@ export async function cmdUpdate(io: Io, paths: Paths, flags: Flags): Promise<num
     )
   }
 
+  if (flags.json === true) {
+    io.out(JSON.stringify({ updated: true, from: before, to: latest }))
+    return 0
+  }
   io.out(`updated ${before} -> ${latest}`)
   io.out('restart the daemon for it to take effect.')
   return 0

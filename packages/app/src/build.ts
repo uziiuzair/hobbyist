@@ -57,12 +57,20 @@ export function resolveSource(source: AppSource): { contextPath: string; dockerf
   return { contextPath, dockerfile }
 }
 
+// The repository every tag of one app lands under. Named separately from
+// buildTag because destroyApp removes everything under it and deployApp
+// prunes it (issue #84): both need the repository, not a tag.
+export function buildRepository(project: string, resource: string): string {
+  return `hobby/${project}-${resource}`
+}
+
 // A tag that is unique per build and sortable by time. The previous tag is
 // deliberately not deleted here: a deploy that builds successfully and then
 // fails to serve needs an image to roll back to, and the only one guaranteed
-// to have served is the one before it.
+// to have served is the one before it. Once the new one has served,
+// deployApp keeps the newest few and removes the rest (pruneImageTags).
 export function buildTag(project: string, resource: string, at: number): string {
-  return `hobby/${project}-${resource}:${Math.floor(at / 1000)}`
+  return `${buildRepository(project, resource)}:${Math.floor(at / 1000)}`
 }
 
 export async function buildAppImage(

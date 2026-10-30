@@ -163,6 +163,10 @@ export interface VersionResponse {
 }
 export interface ProjectsResponse {
   projects: Project[]
+  // The daemon's own default idle threshold (null when the box never
+  // sleeps anything), so `hobby ls` can mark the projects that differ from
+  // it (issue #111). Absent from a daemon older than this field.
+  defaultSleepAfterSeconds?: number | null
 }
 export interface ProjectResponse {
   project: Project
@@ -183,6 +187,11 @@ export interface IgnoredKey {
 export interface ResourceResponse {
   resource: WireResource
   ignored?: IgnoredKey[]
+  // Where an app or worker is reached, computed by the daemon from whether
+  // Caddy is on (issue #94); absent for a postgres and from older daemons.
+  url?: string
+  // The build output, when a source was built (issue #93).
+  logs?: string
 }
 // POST /v1/resources/:id/stop. `endedConnections` is how many proxied
 // sessions the stop cut off, `wasBusy` whether the kind's activity guard
@@ -340,7 +349,9 @@ export interface Api {
   // the project awake, a positive number is its own idle threshold.
   createProject(name: string, sleepAfterSeconds?: number | null): Promise<ProjectResponse>
   // The same value, changed after creation. POST /v1/projects/:name/sleep-policy.
-  setSleepPolicy(project: string, sleepAfterSeconds: number | null): Promise<ProjectResponse>
+  // Undefined sends no field, and the daemon applies its own default
+  // (issue #110): the box-wide value, not this process's.
+  setSleepPolicy(project: string, sleepAfterSeconds: number | null | undefined): Promise<ProjectResponse>
   getProject(name: string): Promise<ProjectDetailResponse>
   // A new project whose postgres resources start from a clone of the
   // source's data. allowPause is the pinned-project guard's override.
@@ -379,9 +390,13 @@ export interface Api {
     // replaces them wholesale (deployApp, deployWorker). source.dockerfile
     // and source.buildArgs absent keep what the app was last built with;
     // source.context absent keeps a worker's, null clears it.
+    // containerPort and databaseResourceId absent keep the resource's
+    // (issue #81); null for the database unbinds it.
     input?: {
       source?: { path: string; dockerfile?: string; buildArgs?: Record<string, string>; context?: string | null }
       env?: Record<string, string>
+      containerPort?: number
+      databaseResourceId?: string | null
     }
   ): Promise<ResourceResponse & { image: string; logs: string }>
   getResource(id: string): Promise<ResourceResponse>
@@ -510,7 +525,12 @@ export function createApi(transport: string | DaemonClient): Api {
         sleepAfterSeconds === undefined ? { name } : { name, sleepAfterSeconds }
       ),
     setSleepPolicy: (project, sleepAfterSeconds) =>
-      call(client, 'POST', `/v1/projects/${p(project)}/sleep-policy`, { sleepAfterSeconds }),
+      call(
+        client,
+        'POST',
+        `/v1/projects/${p(project)}/sleep-policy`,
+        sleepAfterSeconds === undefined ? {} : { sleepAfterSeconds }
+      ),
     getProject: (name) => call(client, 'GET', `/v1/projects/${p(name)}`),
     branchProject: (source, name, opts) =>
       call(

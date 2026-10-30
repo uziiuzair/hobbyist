@@ -12,7 +12,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { HobbyError, resolveConfig } from '../src/index.js'
+import { assertSocketPathFits, HobbyError, resolveConfig, resolvePaths, SOCKET_PATH_MAX_BYTES } from '../src/index.js'
 
 const cwd = mkdtempSync(join(tmpdir(), 'hobby-config-test-'))
 
@@ -157,4 +157,45 @@ test('a non-numeric port variable is refused by name instead of reaching Node as
   assert.throws(() => resolveConfig({ env: { HOBBY_PROXY_PORT: 'abc' }, cwd }), /HOBBY_PROXY_PORT must be a whole number/)
   assert.throws(() => resolveConfig({ env: { HOBBY_API_PORT: '70000' }, cwd }), /HOBBY_API_PORT/)
   assert.equal(resolveConfig({ env: { HOBBY_PROXY_PORT: '15432' }, cwd }).proxyPort, 15432)
+})
+
+// Issue #106: a malformed hobby.json used to break every command with a bare
+// JSON.parse message that named neither the file nor where it was found.
+test('a malformed hobby.json is a usage error naming the file', () => {
+  const fileCwd = mkdtempSync(join(tmpdir(), 'hobby-config-file-test-'))
+  writeFileSync(join(fileCwd, 'hobby.json'), '{project: "x"}')
+
+  assert.throws(
+    () => resolveConfig({ env: {}, cwd: fileCwd }),
+    (err: unknown) => {
+      assert.ok(err instanceof HobbyError)
+      assert.equal(err.code, 'usage')
+      assert.match(err.message, /hobby\.json at .*hobby\.json is not valid JSON: /)
+      assert.ok(err.message.includes(join(fileCwd, 'hobby.json')))
+      return true
+    }
+  )
+})
+
+// Issue #107: sun_path is 104 bytes on macOS, and a HOBBY_HOME deep enough to
+// overflow it used to pass `hobby init` and fail `hobby daemon` with a raw
+// listen EINVAL.
+test('assertSocketPathFits refuses a socket path over 103 bytes and names the fix', () => {
+  assert.equal(SOCKET_PATH_MAX_BYTES, 103)
+  assertSocketPathFits(resolvePaths({ HOBBY_HOME: '/tmp/short' }).socketPath)
+
+  const deep = `/tmp/${'a'.repeat(110)}`
+  const { socketPath } = resolvePaths({ HOBBY_HOME: deep })
+  assert.throws(
+    () => assertSocketPathFits(socketPath),
+    (err: unknown) => {
+      assert.ok(err instanceof HobbyError)
+      assert.equal(err.code, 'usage')
+      assert.ok(err.message.includes(socketPath))
+      assert.ok(err.message.includes(`${Buffer.byteLength(socketPath)} bytes`))
+      assert.ok(err.message.includes('103'))
+      assert.match(err.hint ?? '', /HOBBY_HOME/)
+      return true
+    }
+  )
 })

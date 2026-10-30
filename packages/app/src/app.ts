@@ -24,8 +24,10 @@ import {
   type ResourceId,
   type Store,
   allocateHostPort,
+  pruneImageTags,
+  removeImageTags,
 } from '@hobby.sh/core'
-import { buildAppImage, buildTag, type AppSource } from './build.js'
+import { buildAppImage, buildRepository, buildTag, type AppSource } from './build.js'
 import { logTail, tcpProbe, waitListening, type WaitReadyResult } from './readiness.js'
 
 export interface AppDeps {
@@ -218,6 +220,11 @@ export interface CreateAppOptions {
   containerPort: number
   env: Record<string, string>
   databaseResourceId: ResourceId | null
+  // Handed the build output when a source was built. The return type is the
+  // resource alone and every caller reads it as one, so the logs travel by
+  // callback rather than widening it (issue #93: `hobby deploy --verbose`
+  // prints them on a first deploy too).
+  onBuildLogs?: (logs: string) => void
 }
 
 export async function createAppResource(deps: AppDeps, opts: CreateAppOptions): Promise<AppResource> {
@@ -287,6 +294,7 @@ export async function createAppResource(deps: AppDeps, opts: CreateAppOptions): 
       tag: buildTag(opts.project.name, opts.name, now()),
     })
     image = built.tag
+    opts.onBuildLogs?.(built.logs)
   }
   // The xor check above guarantees one of opts.source/opts.image was set:
   // if source was given, the build above just set image; otherwise
@@ -344,6 +352,14 @@ export async function createAppResource(deps: AppDeps, opts: CreateAppOptions): 
     if (!(err instanceof HobbyError && (err.code === 'wake_timeout' || err.code === 'wake_failed'))) {
       deps.store.setResourceState(resource.id, 'failed')
     }
+    // The container was created and started inside this try, and nothing
+    // else will ever stop it: a `failed` resource is outside the
+    // hibernator's `running` gate, and the app is not serving anyway. A
+    // wrongport app that ignored $PORT used to sit in `docker ps` for hours
+    // after its first deploy failed (issue #80), the same leak deployApp's
+    // wasUndeployed branch already closes for a first deploy into an
+    // existing row. Best effort: the readiness error is the one to keep.
+    await removeContainerQuietly(deps, containerName)
     throw err
   }
 
@@ -352,6 +368,16 @@ export async function createAppResource(deps: AppDeps, opts: CreateAppOptions): 
     throw new HobbyError('internal', `app ${resource.id} vanished immediately after creation`)
   }
   return final
+}
+
+async function removeContainerQuietly(deps: AppDeps, containerName: string): Promise<void> {
+  try {
+    await deps.runtime.stop(containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+    await deps.runtime.remove(containerName)
+  } catch {
+    // Deliberately swallowed: a failure to clean up must not mask the
+    // deploy error the user actually needs to see.
+  }
 }
 
 function defaultProbeFactory(_deps: AppDeps): (config: AppConfig) => () => Promise<boolean> {
@@ -428,19 +454,20 @@ export async function destroyApp(deps: AppDeps, resource: AppResource): Promise<
     failures.push(`remove container: ${errorMessage(err)}`)
   }
 
-  // Only an image WE built. A user-supplied image reference may be shared
+  // Only images WE built. A user-supplied image reference may be shared
   // with anything else on the box, including their own work outside hobby,
   // and deleting it would be reaching well outside what destroying one
   // resource means. A null image means an undeployed app never built one in
   // the first place, which is a normal thing to destroy, not a bug: there is
-  // simply nothing to remove.
+  // simply nothing to remove. Every tag under the app's repository goes,
+  // not just the one the config names: each deploy built a new tag and
+  // kept the previous for rollback, and `hobby rm` used to leave all but
+  // the last behind (issue #84).
   const image = resource.config.image
-  if (resource.config.source !== null && image !== null && deps.runtime.removeImage !== undefined) {
-    try {
-      await deps.runtime.removeImage(image)
-    } catch (err) {
-      failures.push(`remove image: ${errorMessage(err)}`)
-    }
+  if (resource.config.source !== null && image !== null) {
+    const project = deps.store.getProject(resource.projectId)
+    const repository = project === null ? image.slice(0, image.lastIndexOf(':')) : buildRepository(project.name, resource.name)
+    failures.push(...(await removeImageTags(deps.runtime, repository, image)))
   }
 
   deps.store.deleteResource(resource.id)
@@ -470,7 +497,17 @@ export interface DeployAppResult {
 export async function deployApp(
   deps: AppDeps,
   resource: AppResource,
-  opts: { source?: AppSource; env?: Record<string, string> } = {}
+  // containerPort and databaseResourceId: given, they replace the app's
+  // (issue #81: `hobby deploy --port` and `--database` on a redeploy used
+  // to be silently dropped); absent, the app keeps what it had. The
+  // container is replaced on every deploy anyway, so both take effect at
+  // once, PORT and DATABASE_URL included (containerSpec).
+  opts: {
+    source?: AppSource
+    env?: Record<string, string>
+    containerPort?: number
+    databaseResourceId?: ResourceId | null
+  } = {}
 ): Promise<DeployAppResult> {
   const project = deps.store.getProject(resource.projectId)
   if (project === null) {
@@ -527,6 +564,8 @@ export async function deployApp(
       image: built.tag,
       source,
       ...(opts.env === undefined ? {} : { env: opts.env }),
+      ...(opts.containerPort === undefined ? {} : { containerPort: opts.containerPort }),
+      ...(opts.databaseResourceId === undefined ? {} : { databaseResourceId: opts.databaseResourceId }),
     }
     replaced = true
     deps.store.updateResourceConfig(resource.id, config)
@@ -549,6 +588,14 @@ export async function deployApp(
     await deps.runtime.stop(config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
     deps.store.setResourceState(resource.id, 'sleeping')
     deps.activity?.reset(resource.id)
+
+    // Only once the new image has proven it serves: the tags older than
+    // the few kept for rollback go (issue #84). Logged, never thrown: the
+    // deploy succeeded, and a layer left on disk is not a reason to say
+    // otherwise.
+    for (const failure of await pruneImageTags(deps.runtime, buildRepository(project.name, resource.name), built.tag)) {
+      console.error(`app ${resource.name}: ${failure}`)
+    }
 
     const final = deps.store.getResource(resource.id)
     if (final === null || final.kind !== 'app') {

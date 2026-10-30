@@ -630,7 +630,7 @@ test('issue #10 backoff: `hobby ls` and --json show a refused resource and when 
     // 30s, or 29s if a second boundary passed since the failure; never more.
     assert.match(
       line,
-      /^\s+primary {2}postgres {2}failed {2}port 25559 {2}\(wake refused, retry in (29|30)s: container exited immediately: exec format error\)$/
+      /^\s+primary {2}postgres {2}failed {2}connect: hobby connect blog\/primary {2}\(wake refused, retry in (29|30)s: container exited immediately: exec format error\)$/
     )
     const other = human.out.find((l) => l.includes('other')) ?? ''
     assert.doesNotMatch(other, /wake refused|last wake failed/)

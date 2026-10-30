@@ -6,7 +6,15 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { createDockerRuntime, createFakeRuntime, mergeTimestampedLogs, type ExecFn, type SpawnedProcess } from '../src/index.js'
+import {
+  createDockerRuntime,
+  createFakeRuntime,
+  mergeTimestampedLogs,
+  pruneImageTags,
+  removeImageTags,
+  type ExecFn,
+  type SpawnedProcess,
+} from '../src/index.js'
 import type { ContainerSpec } from '../src/index.js'
 
 interface RecordedCall {
@@ -500,4 +508,62 @@ test('a tar that fails fails the build with tar\'s own words, not docker\'s', as
     runtime.build!({ contextPath: '/work', dockerfile: '/gen/.hobby.Dockerfile', tag: 't', exclude: ['node_modules'] }),
     (err: unknown) => err instanceof Error && /assemble the build context/.test(err.message) && /Permission denied/.test(String((err as { hint?: string }).hint))
   )
+})
+
+// Issue #84: every tag under a resource's repository, for rm and for the
+// post-deploy prune.
+test('listImages asks docker for one repository and drops dangling <none> rows', async () => {
+  const calls: RecordedCall[] = []
+  const exec: ExecFn = async (cmd, args) => {
+    calls.push({ cmd, args })
+    return { stdout: 'hobby/blog-web:1700000002\nhobby/blog-web:1700000001\nhobby/blog-web:<none>\n', stderr: '' }
+  }
+  const runtime = createDockerRuntime(exec)
+  const tags = await runtime.listImages!('hobby/blog-web')
+  assert.deepEqual(calls[0]?.args, ['images', '--format', '{{.Repository}}:{{.Tag}}', 'hobby/blog-web'])
+  assert.deepEqual(tags, ['hobby/blog-web:1700000002', 'hobby/blog-web:1700000001'])
+})
+
+test('pruneImageTags keeps the newest three by timestamp and never the current image', async () => {
+  const runtime = createFakeRuntime()
+  for (const at of [1, 2, 3, 4, 5]) runtime._images.add(`hobby/blog-web:${at}`)
+  runtime._images.add('hobby/blog-web-worker:1')
+  runtime._images.add('hobby/blog-web:latest')
+
+  const failures = await pruneImageTags(runtime, 'hobby/blog-web', 'hobby/blog-web:5')
+  assert.deepEqual(failures, [])
+  assert.deepEqual(
+    [...runtime._images].sort(),
+    ['hobby/blog-web-worker:1', 'hobby/blog-web:3', 'hobby/blog-web:4', 'hobby/blog-web:5', 'hobby/blog-web:latest'].sort()
+  )
+
+  // The current image is kept even when it is not among the newest.
+  const again = createFakeRuntime()
+  for (const at of [1, 2, 3, 4, 5]) again._images.add(`hobby/blog-web:${at}`)
+  await pruneImageTags(again, 'hobby/blog-web', 'hobby/blog-web:1')
+  assert.equal(again._images.has('hobby/blog-web:1'), true)
+  assert.equal(again._images.has('hobby/blog-web:2'), false)
+})
+
+test('removeImageTags removes every tag under the repository, and only the named one without listImages', async () => {
+  const runtime = createFakeRuntime()
+  for (const at of [1, 2, 3]) runtime._images.add(`hobby/blog-web:${at}`)
+  runtime._images.add('hobby/blog-api:1')
+  assert.deepEqual(await removeImageTags(runtime, 'hobby/blog-web', 'hobby/blog-web:3'), [])
+  assert.deepEqual([...runtime._images], ['hobby/blog-api:1'])
+
+  const older = createFakeRuntime()
+  for (const at of [1, 2, 3]) older._images.add(`hobby/blog-web:${at}`)
+  delete (older as { listImages?: unknown }).listImages
+  assert.deepEqual(await removeImageTags(older, 'hobby/blog-web', 'hobby/blog-web:3'), [])
+  assert.deepEqual([...older._images].sort(), ['hobby/blog-web:1', 'hobby/blog-web:2'])
+
+  // A failing removal is reported, not thrown.
+  const failing = createFakeRuntime()
+  failing._images.add('hobby/blog-web:1')
+  failing.removeImage = async () => {
+    throw new Error('image is in use')
+  }
+  const failures = await removeImageTags(failing, 'hobby/blog-web', null)
+  assert.deepEqual(failures, ['remove image hobby/blog-web:1: image is in use'])
 })

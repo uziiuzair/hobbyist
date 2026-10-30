@@ -11,7 +11,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
+import { rm, rmdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   DEFAULT_PORT_BIND,
@@ -24,6 +24,7 @@ import {
   type PostgresResource,
   type QueueConfig,
   type QueueResource,
+  type ResourceId,
   type SqliteDatabase,
   type Store,
   type WorkerResource,
@@ -260,25 +261,83 @@ async function createProjectRoute(ctx: DaemonContext, req: IncomingMessage): Pro
 // project was created with the box-wide default and nothing could change it
 // afterward. This route makes "this one project never sleeps, the rest of
 // the box does" reachable without touching the wedge for any other project.
+//
+// An absent field means the daemon's own default (ctx.config.sleepAfterSeconds),
+// the same rule createProjectRoute applies, so `hobby unpin` with no
+// --sleep-after sends nothing and gets the box-wide value rather than
+// whatever the CLI process resolved from its own env and cwd (issue #110).
+// A box whose default is itself null has nothing to fall back to, and
+// writing null would make unpin a no-op that reports success, so that one
+// case asks for an explicit value.
 async function setSleepPolicyRoute(ctx: DaemonContext, req: IncomingMessage, name: string): Promise<RouteResult> {
   const project = getProjectByNameOrThrow(ctx, name)
   const body = await readJsonBody(req)
   const fields = isRecord(body) ? body : {}
+  let sleepAfterSeconds: number | null
   if (!('sleepAfterSeconds' in fields)) {
+    if (ctx.config.sleepAfterSeconds === null) {
+      throw new HobbyError(
+        'usage',
+        'this box has no default idle threshold (sleepAfterSeconds is null in the daemon config), so pass one',
+        'hobby unpin <project> --sleep-after <seconds>, or POST { "sleepAfterSeconds": number }'
+      )
+    }
+    sleepAfterSeconds = ctx.config.sleepAfterSeconds
+  } else {
+    // parseSleepAfterSeconds returns undefined only for an absent field,
+    // and the `in` check above has already handled that, so this is
+    // number | null.
+    sleepAfterSeconds = parseSleepAfterSeconds(fields['sleepAfterSeconds'], 'POST /v1/projects/:name/sleep-policy') ?? null
+  }
+  ctx.store.setProjectSleepAfterSeconds(project.id, sleepAfterSeconds)
+  return { status: 200, body: { project: ctx.store.getProject(project.id) } }
+}
+
+// What a browser or curl reaches an app or worker at. With Caddy, its
+// hostname over TLS; without, the daemon's own HTTP router on httpPort,
+// which is the only thing listening (issue #94: the CLI used to print an
+// https:// URL that refused connections on every box with Caddy off, which
+// is the default).
+function publicUrl(ctx: DaemonContext, resource: Resource): string | undefined {
+  if (resource.kind !== 'app' && resource.kind !== 'worker') {
+    return undefined
+  }
+  const { hostname } = resource.config
+  return ctx.config.caddyEnabled ? `https://${hostname}` : `http://${hostname}:${ctx.config.httpPort}`
+}
+
+// The database a create or deploy body binds, by id (`databaseResourceId`)
+// or by name within the project (`database`), as `hobby deploy --database`
+// names it. Absent is undefined (keep what is there, for a deploy); an
+// explicit null unbinds. A name or id that is not a postgres in this
+// project is refused before anything is built.
+function readDatabaseBinding(ctx: DaemonContext, project: Project, fields: Record<string, unknown>): ResourceId | null | undefined {
+  const byId = fields['databaseResourceId']
+  const byName = fields['database']
+  if (byId === undefined && byName === undefined) {
+    return undefined
+  }
+  if (byId === null || byName === null) {
+    return null
+  }
+  const resources = ctx.store.listResources(project.id)
+  const match =
+    typeof byId === 'string'
+      ? resources.find((r) => r.id === byId)
+      : typeof byName === 'string'
+        ? resources.find((r) => r.name === byName)
+        : undefined
+  if (match === undefined) {
     throw new HobbyError(
-      'usage',
-      'sleepAfterSeconds is required',
-      'POST /v1/projects/:name/sleep-policy expects { "sleepAfterSeconds": number | null }'
+      'resource_not_found',
+      `no resource ${typeof byName === 'string' ? `named ${byName}` : String(byId)} in project ${project.name}`,
+      `--database names a postgres resource in the same project; run \`hobby ls\` to see them`
     )
   }
-  const sleepAfterSeconds = parseSleepAfterSeconds(
-    fields['sleepAfterSeconds'],
-    'POST /v1/projects/:name/sleep-policy'
-  )
-  // parseSleepAfterSeconds returns undefined only for an absent field, and
-  // the `in` check above has already rejected that, so this is number | null.
-  ctx.store.setProjectSleepAfterSeconds(project.id, sleepAfterSeconds ?? null)
-  return { status: 200, body: { project: ctx.store.getProject(project.id) } }
+  if (match.kind !== 'postgres') {
+    throw new HobbyError('usage', `--database must name a postgres resource, and ${match.name} is a ${match.kind}`)
+  }
+  return match.id
 }
 
 async function getProjectRoute(ctx: DaemonContext, name: string): Promise<RouteResult> {
@@ -348,6 +407,11 @@ async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<Rou
     } catch (err) {
       failures.push(`remove ${projectDir}: ${errorMessage(err)}`)
     }
+  } else {
+    // Something was left for manual cleanup, so the tree stays. The one
+    // exception is a project directory that is already empty, which is
+    // only a leftover (issue #114).
+    await removeDirIfEmpty(projectDir)
   }
 
   ctx.store.deleteProject(project.id)
@@ -671,7 +735,7 @@ async function createResourceRoute(
   ctx: DaemonContext,
   req: IncomingMessage,
   projectName: string
-): Promise<{ resource: Resource; ignored: IgnoredKey[] }> {
+): Promise<{ resource: Resource; ignored: IgnoredKey[]; logs: string }> {
   const project = getProjectByNameOrThrow(ctx, projectName)
   const body = await readJsonBody(req)
   const fields = isRecord(body) ? body : {}
@@ -687,7 +751,7 @@ async function createResourceRoute(
   }
 
   if (kind === 'postgres') {
-    return { resource: await createPostgres(ctx, { project, name }), ignored: [] }
+    return { resource: await createPostgres(ctx, { project, name }), ignored: [], logs: '' }
   }
 
   if (kind === 'app') {
@@ -699,6 +763,10 @@ async function createResourceRoute(
     const databaseResourceId =
       typeof fields['databaseResourceId'] === 'string' ? fields['databaseResourceId'] : null
 
+    // The build output rides on the response the same way a redeploy's
+    // does (deployResourceRoute), so `hobby deploy --verbose` can print it
+    // on a first deploy too (issue #93).
+    let logs = ''
     const resource = await createAppResource(ctx, {
       project,
       name,
@@ -707,8 +775,11 @@ async function createResourceRoute(
       containerPort,
       env: validatedEnv(readStringMap(fields['env'])),
       databaseResourceId,
+      onBuildLogs: (built) => {
+        logs = built
+      },
     })
-    return { resource, ignored: [] }
+    return { resource, ignored: [], logs }
   }
 
   if (kind === 'worker') {
@@ -754,11 +825,11 @@ async function createResourceRoute(
       console.error(`worker ${name}: ignoring ${line}`)
     }
     await syncWorkerQueueBindings(ctx, project, result.resource)
-    return { resource: result.resource, ignored: ignoredEntries(result.ignored) }
+    return { resource: result.resource, ignored: ignoredEntries(result.ignored), logs: result.logs }
   }
 
   if (kind === 'queue') {
-    return { resource: await createQueueResource(ctx, project, name), ignored: [] }
+    return { resource: await createQueueResource(ctx, project, name), ignored: [], logs: '' }
   }
 
   throw new HobbyError(
@@ -969,12 +1040,23 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
   const source = isRecord(body) ? readSourceInput(body) : null
 
   if (resource.kind === 'app') {
+    const fields = isRecord(body) ? body : {}
     // Only a present field replaces the app's env. An absent one keeps it,
-    // so a plain redeploy never wipes variables set on an earlier one.
-    const env = isRecord(body) && 'env' in body ? validatedEnv(readStringMap(body['env'])) : undefined
+    // so a plain redeploy never wipes variables set on an earlier one. The
+    // same rule for the port and the bound database (issue #81): `hobby
+    // deploy --port 8080` onto an existing app used to be dropped on the
+    // floor, and the redeploy failed again on the old port.
+    const env = 'env' in fields ? validatedEnv(readStringMap(fields['env'])) : undefined
+    const rawPort = fields['containerPort'] ?? fields['port']
+    if (rawPort !== undefined && !(typeof rawPort === 'number' && Number.isInteger(rawPort) && rawPort > 0)) {
+      throw new HobbyError('usage', 'containerPort must be a positive whole number', 'the port the process listens on inside the container')
+    }
+    const databaseResourceId = readDatabaseBinding(ctx, getOwningProjectOrThrow(ctx, resource), fields)
     const result = await deployApp(ctx, resource, {
       ...(source === null ? {} : { source: appSourceFrom(source, resource.config.source) }),
       ...(env === undefined ? {} : { env }),
+      ...(rawPort === undefined ? {} : { containerPort: rawPort as number }),
+      ...(databaseResourceId === undefined ? {} : { databaseResourceId }),
     })
     // A deploy that proved the new code serves is as good as `hobby wake`
     // for the refusal's purposes (issue #57): whatever the last wake failed
@@ -988,6 +1070,7 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
         resource: await toWireResource(ctx, result.resource),
         image: result.image,
         logs: result.logs,
+        url: publicUrl(ctx, result.resource),
       },
     }
   }
@@ -1014,10 +1097,12 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
     // Same contract as the app branch above: a present `env` replaces the
     // worker's set (WorkerConfig.env), an absent one keeps it.
     const env = isRecord(body) && 'env' in body ? validatedEnv(readStringMap(body['env'])) : undefined
+    const databaseResourceId = readDatabaseBinding(ctx, project, isRecord(body) ? body : {})
     const result = await deployWorker(ctx, resource, {
       ...(source === null ? {} : { sourcePath: source.path }),
       ...(source?.context === undefined ? {} : { context: source.context }),
       ...(env === undefined ? {} : { env }),
+      ...(databaseResourceId === undefined ? {} : { databaseResourceId }),
     })
     for (const line of describeIgnored(result.ignored)) {
       console.error(`worker ${resource.name}: ignoring ${line}`)
@@ -1038,6 +1123,7 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
         image: result.image,
         ignored: ignoredEntries(result.ignored),
         logs: result.logs,
+        url: publicUrl(ctx, result.resource),
       },
     }
   }
@@ -1046,6 +1132,19 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
     'usage',
     `resource ${resource.name} is a ${resource.kind}, and only an app or a worker can be deployed`
   )
+}
+
+// The directory a resource's parts lived under, once its kind has removed
+// what it owns. Non-recursive on purpose: rmdir only succeeds on an empty
+// directory, so a worker's deliberately kept do/ and state/ (destroyWorker)
+// stay exactly where they are, and only the empty shell `hobby rm` used to
+// leave behind goes (issue #114). Best effort, never a failure of the rm.
+async function removeDirIfEmpty(path: string): Promise<void> {
+  try {
+    await rmdir(path)
+  } catch {
+    // Not empty, not there, or not ours to remove: all fine.
+  }
 }
 
 // The three lifecycle routes are kind-agnostic and were the last places in
@@ -1143,6 +1242,7 @@ async function destroyResourceRoute(ctx: DaemonContext, id: string): Promise<Rou
   }
   ctx.store.setResourceState(resource.id, 'destroying')
   await ctx.kinds.get(resource.kind).destroy(ctx, resource)
+  await removeDirIfEmpty(ctx.paths.resourceDir(owner.name, resource.name))
   return { status: 200, body: { deleted: true } }
 }
 
@@ -2571,7 +2671,16 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
 
   if (segments[1] === 'projects') {
     if (segments.length === 2) {
-      if (method === 'GET') return { status: 200, body: { projects: ctx.store.listProjects() } }
+      // defaultSleepAfterSeconds is the daemon's own default, so a client
+      // can say which projects differ from it (issue #111: `hobby ls`
+      // marks a pinned project and a non-default threshold) without
+      // guessing from its own config, which may not match (issue #110).
+      if (method === 'GET') {
+        return {
+          status: 200,
+          body: { projects: ctx.store.listProjects(), defaultSleepAfterSeconds: ctx.config.sleepAfterSeconds },
+        }
+      }
       if (method === 'POST') return { status: 201, body: { project: await createProjectRoute(ctx, req) } }
     }
 
@@ -2584,9 +2693,15 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
     if (segments.length === 4 && method === 'POST' && segments[3] === 'resources') {
       const name = decodeURIComponent(segments[2] as string)
       const created = await createResourceRoute(ctx, req, name)
+      const url = publicUrl(ctx, created.resource)
       return {
         status: 201,
-        body: { resource: await toWireResource(ctx, created.resource), ignored: created.ignored },
+        body: {
+          resource: await toWireResource(ctx, created.resource),
+          ignored: created.ignored,
+          logs: created.logs,
+          ...(url === undefined ? {} : { url }),
+        },
       }
     }
 

@@ -15,7 +15,7 @@ import { test } from 'node:test'
 import { run, type Io } from '../src/cli/main.js'
 import { CLI_VERSION } from '../src/version.js'
 import { connectionEnv } from '../src/cli/commands.js'
-import { formatBytes, renderResourceLine } from '../src/cli/output.js'
+import { formatBytes, renderResourceLine, sleepPolicyTrailer } from '../src/cli/output.js'
 
 function makeIo(env: NodeJS.ProcessEnv): { io: Io; outLines: string[]; errLines: string[] } {
   const outLines: string[] = []
@@ -378,7 +378,10 @@ test('hobby ls renders each resource\'s state, and a compute resource\'s hostnam
     const { io, outLines } = makeIo({ HOBBY_HOME: home })
     const code = await run(['ls'], io)
     assert.equal(code, 0)
-    assert.ok(outLines.some((l) => l.includes('primary') && l.includes('sleeping') && l.includes('15432')))
+    // Issue #103: the connect hint, not the container's own host port, which
+    // bypasses the wake router.
+    assert.ok(outLines.some((l) => l.includes('primary') && l.includes('sleeping') && l.includes('connect: hobby connect blog/primary')))
+    assert.ok(!outLines.some((l) => l.includes('15432')), 'the direct host port is --json only')
     assert.ok(
       outLines.some((l) => l.includes('site') && l.includes('undeployed') && l.includes('blog-site.hobby.local'))
     )
@@ -388,7 +391,7 @@ test('hobby ls renders each resource\'s state, and a compute resource\'s hostnam
   }
 })
 
-test('renderResourceLine includes name, kind, state and port', () => {
+test('renderResourceLine includes name, kind, state and the connect hint, never the host port', () => {
   const line = renderResourceLine({
     id: randomUUID(),
     projectId: randomUUID(),
@@ -415,7 +418,8 @@ test('renderResourceLine includes name, kind, state and port', () => {
   assert.match(line, /primary/)
   assert.match(line, /postgres/)
   assert.match(line, /sleeping/)
-  assert.match(line, /15432/)
+  assert.match(line, /connect: hobby connect primary$/)
+  assert.doesNotMatch(line, /15432/)
 })
 
 // Issue #10's backoff made visible. `now` is injected so the countdown is
@@ -449,7 +453,7 @@ test('renderResourceLine shows a refused wake with its countdown and a short las
     refusedPostgres({ failures: 3, retryAt: '2026-09-19T12:03:12.000Z', lastError: 'docker start failed' }),
     now
   )
-  assert.equal(line, 'primary  postgres  failed  port 15432  (wake refused, retry in 3m 12s: docker start failed)')
+  assert.equal(line, 'primary  postgres  failed  connect: hobby connect primary  (wake refused, retry in 3m 12s: docker start failed)')
 })
 
 test('renderResourceLine shortens a long last error and says when the retry time has passed', () => {
@@ -462,11 +466,94 @@ test('renderResourceLine shortens a long last error and says when the retry time
     refusedPostgres({ failures: 2, retryAt: '2026-09-19T11:59:00.000Z', lastError: 'docker start failed' }),
     now
   )
-  assert.equal(due, 'primary  postgres  failed  port 15432  (last wake failed 2 times, retried on the next connection: docker start failed)')
+  assert.equal(due, 'primary  postgres  failed  connect: hobby connect primary  (last wake failed 2 times, retried on the next connection: docker start failed)')
 })
 
 test('renderResourceLine prints no refusal trailer when there is none', () => {
-  assert.equal(renderResourceLine(refusedPostgres(null)), 'primary  postgres  failed  port 15432')
+  assert.equal(renderResourceLine(refusedPostgres(null)), 'primary  postgres  failed  connect: hobby connect primary')
+  // With the project known (cmdLs passes it), the hint is the full target.
+  assert.equal(renderResourceLine(refusedPostgres(null), Date.now(), 'blog'), 'primary  postgres  failed  connect: hobby connect blog/primary')
+})
+
+// Issue #111: the project line marks a pin, and a threshold that differs
+// from the daemon's default; the default itself is not worth a word.
+test('sleepPolicyTrailer marks pinned and non-default projects only', () => {
+  assert.equal(sleepPolicyTrailer({ sleepAfterSeconds: null }, 300), '  (pinned)')
+  assert.equal(sleepPolicyTrailer({ sleepAfterSeconds: 120 }, 300), '  (sleeps after 120s)')
+  assert.equal(sleepPolicyTrailer({ sleepAfterSeconds: 300 }, 300), '')
+  // A daemon that does not report its default: only the pin is shown.
+  assert.equal(sleepPolicyTrailer({ sleepAfterSeconds: 120 }, undefined), '')
+  assert.equal(sleepPolicyTrailer({ sleepAfterSeconds: null }, undefined), '  (pinned)')
+  // A box that pins everything by default: a number on a project differs.
+  assert.equal(sleepPolicyTrailer({ sleepAfterSeconds: 120 }, null), '  (sleeps after 120s)')
+})
+
+// Issue #109: under --json an error is the API envelope on stderr, one
+// line, whatever threw it; the exit code is unchanged.
+test('--json prints errors as the API envelope on stderr', async () => {
+  const home = tempHome()
+  const socketPath = join(home, 'hobby.sock')
+  const server = createServer((req, res) => {
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: { code: 'project_not_found', message: 'no project named nope', hint: 'hobby ls' } }))
+  })
+  await listen(server, socketPath)
+  try {
+    // A daemon error, passed through verbatim.
+    const daemon = makeIo({ HOBBY_HOME: home })
+    assert.equal(await run(['wake', 'nope', '--json'], daemon.io), 3)
+    assert.deepEqual(daemon.outLines, [])
+    assert.deepEqual(JSON.parse(daemon.errLines.join('\n')), {
+      error: { code: 'project_not_found', message: 'no project named nope', hint: 'hobby ls' },
+    })
+
+    // A usage error from the parser itself.
+    const usage = makeIo({ HOBBY_HOME: home })
+    assert.equal(await run(['ls', '--json', '--nope'], usage.io), 2)
+    assert.deepEqual(JSON.parse(usage.errLines.join('\n')), { error: { code: 'usage', message: 'unknown flag: --nope' } })
+
+    // A verb with no data of its own still answers in JSON.
+    const logout = makeIo({ HOBBY_HOME: home })
+    assert.equal(await run(['logout', '--json'], logout.io), 1)
+    assert.deepEqual(JSON.parse(logout.errLines.join('\n')), { error: { code: 'usage', message: 'not logged in to anything' } })
+  } finally {
+    await close(server)
+    rmSync(home, { recursive: true, force: true })
+  }
+
+  // No daemon at all: the client-side condition, with its own code.
+  const gone = makeIo({ HOBBY_HOME: tempHome() })
+  assert.equal(await run(['ls', '--json'], gone.io), 5)
+  const envelope = JSON.parse(gone.errLines.join('\n')) as { error: { code: string; hint: string } }
+  assert.equal(envelope.error.code, 'daemon_unreachable')
+  assert.match(envelope.error.hint, /hobby daemon/)
+})
+
+// Issue #97: `-h` is help for every verb, and any other short flag is a
+// usage error rather than a target or a no-op.
+test('a single-dash flag is help or an error, never a target', async () => {
+  const help = makeIo({ HOBBY_HOME: tempHome() })
+  assert.equal(await run(['logs', '-h'], help.io), 0)
+  assert.ok(help.outLines.some((line) => line.includes('hobby logs <target>')))
+
+  const unknown = makeIo({ HOBBY_HOME: tempHome() })
+  assert.equal(await run(['ls', '-j'], unknown.io), 2)
+  assert.deepEqual(unknown.errLines, ['unknown flag: -j'])
+})
+
+// Issue #109: `hobby studio --json` is the verb with a flag, not an unknown
+// subcommand.
+test('hobby studio --json is parsed as a flag', async () => {
+  const home = tempHome()
+  const { io, errLines } = makeIo({ HOBBY_HOME: home })
+  // No credential in a fresh home, so the answer is the envelope, not
+  // "unknown studio subcommand: --json".
+  assert.equal(await run(['studio', '--json'], io), 1)
+  const envelope = JSON.parse(errLines.join('\n')) as { error: { code: string; message: string } }
+  assert.equal(envelope.error.code, 'usage')
+  assert.match(envelope.error.message, /no studio password/)
+  rmSync(home, { recursive: true, force: true })
 })
 
 // Issue #96: every verb used to answer `--help` with `unknown flag: --help`
