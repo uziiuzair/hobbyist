@@ -1,6 +1,10 @@
 # `docs/mcp/` the MCP server
 
-**Status:** PROPOSED. Nothing built.
+**Status:** BUILT. Eighteen tools registered in `packages/mcp/src/server.ts`
+over the daemon API on the unix socket, mirroring the CLI verbs for projects,
+databases, env and queues; no deploy tool, and `hobby_new` creates only
+postgres. The body below is the original scope guard and still governs the
+folder.
 
 Exposes the `hobby` verbs to agents over MCP, so provisioning a database is
 something an assistant can do directly rather than by shelling out and parsing

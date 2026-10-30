@@ -2,7 +2,8 @@
 
 **Status:** FIRST VERSION BUILT, 2026-09-19 (issue #19). `hobby branch` works for
 projects holding only postgres resources, by cloning stopped data directories.
-Not yet run against real Docker, and nothing is benchmarked. The PostgreSQL 18
+Run against real Docker on ext4 on 2026-10-16 (see the amendment at the end);
+clone times on a reflink filesystem are still unmeasured. The PostgreSQL 18
 `CREATE DATABASE` path below is NOT built.
 
 Instant database branches, the way Neon does them, without a storage engine.
@@ -142,3 +143,25 @@ anything.
   wanted at all.
 - What a branch should record about its source, if anything, once there is a
   reason to list branches.
+
+## Amendment, 2026-10-30: it has met Docker (issue #181)
+
+"Never run against real Docker" above stopped being true on 2026-10-16. The QA
+ops lane ran `hobby branch qaopsa qaopsabr` against a real dockerd inside an
+Ubuntu 24.04 container (docker-in-docker, on an Apple M5 Pro host), on ext4:
+the branch was created in 0.9 seconds end to end, the CLI printed the
+full-copy warning that ext4 earns, and `hobby connect qaopsabr` reached the
+branch. The pg lane did the same on macOS (APFS, OrbStack).
+
+What that does and does not settle:
+
+- **Run against Docker: yes.** Both the sleeping-source path and the warning.
+- **Benchmarked: no.** 0.9 seconds for a freshly initialised database on ext4
+  is a smoke test, not a clone timing. The benchmark convention (filesystem,
+  disk, dataset size) is still owed, and the reflink path has no number at
+  all. Until it has one, "instant" on XFS, ZFS or APFS is the filesystem's
+  claim, not this project's.
+- **Linux ownership: still open.** The Linux run was as root inside a
+  container, where the daemon can read anything. The EACCES exposure described
+  above, a daemon running as an ordinary user reading a PGDATA the postgres
+  uid owns, has not been exercised either way.

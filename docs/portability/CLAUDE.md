@@ -1,6 +1,11 @@
 # `docs/portability/` eject and the right to leave
 
-**Status:** PROPOSED. Nothing built. **M1**, not last.
+**Status:** BUILT. `hobby eject <project>`, `hobby eject --release` and
+`hobby adopt` are `ejectRoute` and `adoptRoute` in
+`packages/cli/src/daemon/routes.ts`, rendering the compose file with
+`renderCompose` there; the postgres, app, worker and queue kinds all eject
+(`packages/cli/test/eject-compute.test.ts`). Verified end to end against real
+Docker on 2026-08-08. The body below is the original scope guard.
 
 The capability that makes the entire project honest.
 

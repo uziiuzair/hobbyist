@@ -1,6 +1,11 @@
 # `docs/studio/` the web UI
 
-**Status:** PROPOSED. Nothing built. Lands at **M4**, after waking feels good.
+**Status:** BUILT, alpha. The React app is `packages/studio/src`
+(`App.tsx`, `Workbench.tsx`, `ResourcePage.tsx`), served by the daemon on the
+loopback API listener (`packages/cli/src/daemon/studio/static.ts`) behind the
+operator credential (`studio/auth.ts`, `studio/session.ts`) and, since ADR
+0018, API tokens (`studio/tokens.ts`). Browsing, SQL and schema work; it
+cannot create an app or worker. The body below is the original scope guard.
 
 The dashboard. Managed platforms are chosen because provisioning is one click and
 the database is legible without leaving the browser. This is our version of that,
