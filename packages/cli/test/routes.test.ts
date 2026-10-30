@@ -2335,3 +2335,34 @@ test('POST /v1/resources/:id/deploy clears a wake refusal once the new code has 
     await new Promise<void>((resolve) => listener.close(() => resolve()))
   }
 })
+
+// Issue #114: a manual `hobby sleep` clears the refusal a failed wake left,
+// so `hobby ls` stops saying "wake refused" about a resource the user has
+// just handled by hand.
+test('POST /v1/resources/:id/stop clears a wake refusal', async () => {
+  const base = createFakeRuntime()
+  const runtime: ComputeRuntime = {
+    ...base,
+    async start(): Promise<void> {
+      throw new Error('exec format error')
+    },
+  }
+  const ctx = buildContext(runtime)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig(),
+  })
+  await runtime.ensureCreated({ name: resource.config.containerName, image: 'postgres:18-alpine', env: {}, ports: [], binds: [] })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+  await assert.rejects(getOrCreateWake(ctx)(resource.id))
+  assert.equal(isWakeRefused(ctx, resource.id), true)
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/stop`)
+    assert.equal(res.status, 200)
+    assert.equal(isWakeRefused(ctx, resource.id), false)
+  })
+})

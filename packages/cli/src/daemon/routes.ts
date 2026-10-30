@@ -1214,6 +1214,11 @@ async function stopResourceRoute(ctx: DaemonContext, req: IncomingMessage, id: s
   }
 
   await ctx.kinds.get(resource.kind).stop(ctx, resource)
+  // A manual sleep is someone looking at the resource, the same signal an
+  // explicit `hobby wake` is (issue #114): the refusal a failed wake left
+  // should not outlive it, or `hobby ls` keeps saying "wake refused" about a
+  // resource the user just handled.
+  clearWakeRefusal(ctx, resource.id)
   console.error(`sleep: ${label} (${resource.kind}) stopped by request${force ? ' (--force)' : ''}`)
   return {
     status: 200,
