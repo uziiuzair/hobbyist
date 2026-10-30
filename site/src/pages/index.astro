@@ -96,15 +96,13 @@ const working = [
   { what: 'Serverless functions', state: 'running', note: 'Including stored state that survives being switched off and on again.' },
   { what: 'Taking your data out', state: 'running', note: 'One command hands you your files and a docker-compose.yml that runs them anywhere.' },
   { what: 'The dashboard', state: 'starting', note: 'Browse tables, run SQL, read your schema. It works, and it is the newest part here. Reach it over Tailscale or a tunnel rather than putting it on the open internet.' },
-  { what: 'AI agent tools', state: 'starting', note: 'Fourteen tools so Claude or another agent can manage your projects. Databases only for now.' },
+  { what: 'AI agent tools', state: 'starting', note: 'Eighteen tools so Claude or another agent can manage your projects. Databases and queues; it cannot deploy code yet.' },
+  { what: 'Backups', state: 'starting', note: 'Snapshot a whole project and restore it, into a copy or in place. On the same disk, so it is not an offsite backup; pg_dump still is.' },
+  { what: 'Instant project copies', state: 'starting', note: 'Branch a project from a copy of its data to experiment against. Nearly instant on XFS, ZFS or a Mac; a real copy on ext4.' },
+  { what: 'Running the commands from your laptop', state: 'starting', note: 'Log in to a box once and every hobby command runs against it.' },
 ]
 
 const broken = [
-  {
-    what: 'Sending jobs to a queue, on Linux',
-    note: 'Reading jobs works everywhere. Sending one from inside a container fails on Linux because of a networking flag that never got passed. It is written down and unfixed, not undiscovered.',
-    href: 'https://github.com/uziiuzair/hobbyist/blob/main/docs/queues/CLAUDE.md',
-  },
   {
     what: 'HTTPS certificates get re-issued',
     note: 'Certificates are not saved between restarts of the web front door, so restarting it asks for new ones. Let’s Encrypt limits how often you can do that.',
@@ -118,9 +116,8 @@ const broken = [
 ]
 
 const unbuilt = [
-  { what: 'Backups', note: 'Written and tested inside the daemon, and not yet connected to any command you can type. Until it is, back up with pg_dump.' },
-  { what: 'Instant project copies', note: 'Clone a whole project to experiment against real data. Designed, not built.' },
-  { what: 'Deploying from your laptop', note: 'Today the commands have to run on the machine itself. Log in over SSH, or use the dashboard.' },
+  { what: 'Scheduled backups', note: 'You can take a snapshot by hand. Nothing takes one for you on a schedule yet, and nothing copies it off the box.' },
+  { what: 'Proof that sending jobs to a queue works on Linux', note: 'The networking fix is in the code and has run on a Mac. Nobody has re-run it on a Linux box yet, which is the machine the bug was about.' },
   { what: 'File storage', note: 'An S3-style bucket for images and uploads. Planned, not started.' },
 ]
 ---
