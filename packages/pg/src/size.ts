@@ -31,6 +31,7 @@ export async function getDatabaseSize(
     user: config.superuser,
     password: config.password,
     database: config.database,
+    application_name: 'hobby',
     connectionTimeoutMillis: connectionTimeoutMs,
   })
 

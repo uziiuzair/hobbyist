@@ -9,7 +9,9 @@ sidebar:
 
 Every verb below appears in `printHelp` (`packages/cli/src/cli/main.ts`). A
 script in `site/scripts/check-cli-reference.mjs` runs in CI and fails if this
-page lists a verb the binary does not have, or omits one it does.
+page lists a verb the binary does not have, omits one it does, leaves out a
+flag a verb's `parseArgs` spec accepts, or leaves an exit code defined in
+`packages/cli/src/cli/exit.ts` out of the table at the bottom.
 
 Three conventions apply throughout:
 
@@ -70,12 +72,23 @@ Takes no flags.
 
 ## Projects and resources
 
-### `hobby new <name> [--empty]`
+### `hobby new <name> [--empty] [--pin]`
 
-Creates a project, puts a `postgres` resource named `primary` in it, waits for
-that database to accept queries, and prints a connection string.
+Creates a project, puts a `postgres` resource named `primary` in it, boots that
+database once so it is initialised, and prints a connection string. The new
+database is then left `sleeping`, deliberately: a clean stop is what keeps its
+first real start out of crash recovery (`createPostgres`,
+`packages/pg/src/postgres.ts`). The first connection wakes it.
 
 `--empty` creates the project with nothing in it.
+
+`--pin` creates the project pinned, so it never auto-sleeps, the same state
+`hobby pin` puts an existing project in. Without it the project takes the
+box-wide `sleepAfterSeconds` at the moment it is created; see
+[configuration](/docs/reference/configuration/#settings) for what that means
+when the default later changes.
+
+Accepts `--json`.
 
 ### `hobby ls`
 
@@ -105,6 +118,11 @@ blog  (pinned)
   site     app       sleeping  site.blog.example.com
   api      app       failed  api.blog.example.com  (wake refused, retry in 3m 12s: docker start failed)
 ```
+
+The port is the resource's own host port, allocated from a range that tells
+you the kind: 15432 to 25432 for postgres, 25433 to 35432 for apps, 35433 to
+45432 for workers. See
+[port allocation](/docs/reference/configuration/#port-allocation).
 
 With `--json`, the same thing is the resource's `wakeRefusal` field:
 `{ failures, retryAt, lastError }`, or `null`.
@@ -258,9 +276,13 @@ hint on installing it (`brew install libpq` and link or add it to `PATH` on
 macOS, `apt install postgresql-client` on Debian and Ubuntu), and the exit
 code is 1.
 
-### `hobby sleep <target>`
+### `hobby sleep <target> [--force]`
 
-Stops the resource now, rather than waiting for it to go idle. Accepts `--json`.
+Stops the resource now, rather than waiting for it to go idle. Refused while
+the resource is in use: a database with a running query or an open session
+(proxied or direct), a worker with a queue batch in flight or an alarm due
+within 30 seconds. `--force` stops it anyway and reports what it interrupted;
+an interrupted queue batch is redelivered. Accepts `--json`.
 
 ### `hobby wake <target>`
 
@@ -307,7 +329,10 @@ Tails the resource's logs.
 
 ### `hobby queue ls [project]`
 
-Every queue, with depth and its bound consumer, or a note that it has none.
+Every queue, with depth, oldest message age, its bound consumer (or a note that
+it has none), dead letter queue and retention. Under a queue with a consumer, a
+second line shows the tuning in force: batch size and timeout, retries, retry
+delay.
 
 ### `hobby queue create <name> --project <p>`
 
@@ -317,7 +342,9 @@ A queue with no consumer bound yet. Bind one through a worker's own
 ### `hobby queue peek <target> [--limit n]`
 
 The oldest messages, **without leasing them**, so looking does not change what
-the consumer will receive.
+the consumer will receive. A message out with the consumer is marked `leased`,
+one not yet visible is marked `delayed` with the time until it is, and a dead
+letter says how many deliveries failed before it landed.
 
 ### `hobby queue send <target> <json>`
 
@@ -334,8 +361,9 @@ Destroys the queue, with confirmation.
 
 ### `hobby queue set <target> --retention <seconds>`
 
-Changes how long messages are kept. Note that
-[retention never sweeps a queue with no drainable consumer](/docs/guides/queues/#retention-has-a-gap-too).
+Changes how long messages are kept, from 60 seconds to 14 days, and echoes the
+value applied. Applies to every queue, including dead letter queues and queues
+with no consumer.
 
 ## Cron triggers
 
@@ -550,11 +578,22 @@ Manages a released project again.
 
 ## Exit codes
 
-| Code | Means |
-|---|---|
-| `0` | Success |
-| `2` | Usage error: an unknown flag, a missing argument |
-| non-zero | The operation failed, or the daemon could not be reached |
+Six codes a script can branch on. The mapping from the daemon's error codes to
+these lives in one table, `EXIT_CODE_BY_ERROR` in `packages/cli/src/cli/exit.ts`,
+which TypeScript refuses to compile if the daemon grows an error code with no
+exit code.
+
+| Code | Means | Daemon error codes that produce it |
+|---|---|---|
+| `0` | Success | |
+| `1` | The daemon tried and the operation did not succeed | `wake_failed`, `wake_timeout`, `not_ready`, `runtime_unavailable`, `unauthorized`, `unknown_kind`, `internal` |
+| `2` | Usage: something you typed, or wrote in a Dockerfile or wrangler manifest, has to change | `usage`, `invalid_name`, `ambiguous_target`, `build_failed`, plus an unknown flag or a missing argument caught before any request is made |
+| `3` | Not found | `project_not_found`, `resource_not_found` |
+| `4` | Conflict: the name or state is already taken | `name_taken`, `conflict` |
+| `5` | The daemon could not be reached at all | none: this is a client-side condition, the socket refused or does not exist |
 
 A daemon that cannot be reached says so and suggests `hobby init` then
-`hobby daemon`, rather than failing with a bare status.
+`hobby daemon`, rather than failing with a bare status. Two verbs return `1`
+for a reason of their own rather than through that table: `hobby snapshot
+restore` when something that was running did not come back on the restored
+data, and a confirmation prompt that did not match.

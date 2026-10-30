@@ -6,7 +6,7 @@
 // a fake wake with no workerd in the loop.
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
@@ -18,6 +18,7 @@ import {
   enqueue,
   hasOutstandingLease,
   peek,
+  sweepRetention,
   type ConsumerOptions,
   type DeliveryResult,
   type LeasedBatch,
@@ -307,4 +308,102 @@ test('a queue excluded from the drainable list, as for a consumer with no deploy
   const db = openQueueDb(undeployed.dbPath)
   assert.equal(depth(db), 5, "the undeployed consumer's queue still holds every message")
   db.close()
+})
+
+// Issue #157: retry_delay is counted from when the delivery result came back,
+// not from the start of the tick. A handler that takes most of the lease to
+// answer must still get the full configured delay before the next attempt.
+test('a retry delay is counted from when the delivery result came back, not from the start of the tick', async () => {
+  const options: ConsumerOptions = { ...DEFAULT_CONSUMER_OPTIONS, maxBatchSize: 1, maxRetries: 5, retryDelaySeconds: 2 }
+  const queue = makeQueue({ options })
+  seed(queue.dbPath, 1)
+  const h = harness({ 'consumer-1': 'running' })
+
+  // A fake clock the delivery advances by 10 seconds, standing in for a slow
+  // handler: the tick read `now` once at NOW + 1000, the result arrives at
+  // NOW + 11000.
+  let clock = NOW + 1000
+  h.setDeliver(async () => {
+    clock += 10_000
+    return { outcome: 'exception', retryBatch: { retry: false }, retryMessages: [] }
+  })
+
+  await tickOnce([queue], { wake: h.wake, deliver: h.deliver, stateOf: h.stateOf, now: () => clock })
+
+  const db = openQueueDb(queue.dbPath)
+  const [row] = peek(db, 1, clock)
+  db.close()
+  assert.ok(row !== undefined)
+  assert.equal(row.state, 'delayed')
+  assert.equal(row.visibleAtMs, NOW + 11_000 + 2000, 'two seconds after the result came back, not after the tick began')
+})
+
+// Issue #168: a dead letter keeps its identity. Same id, original enqueue
+// time and the failed attempt count travel with it; attempts restarts so a
+// consumer of the dead letter queue gets its own retry budget.
+test('a dead lettered message keeps its id, original timestamp and failed attempt count, and its retention clock restarts', async () => {
+  const dir = tempDir()
+  const options: ConsumerOptions = { ...DEFAULT_CONSUMER_OPTIONS, maxBatchSize: 1, maxRetries: 0 }
+  const queue = makeQueue({
+    dbPath: join(dir, 'main.sqlite'),
+    deadLetterDbPath: join(dir, 'dlq.sqlite'),
+    options,
+  })
+  const [originalId] = seed(queue.dbPath, 1, NOW)
+  const h = harness({ 'consumer-1': 'running' })
+  h.setDeliver(async () => ({ outcome: 'exception', retryBatch: { retry: false }, retryMessages: [] }))
+
+  const deadLetteredAt = NOW + 2000
+  await tickOnce([queue], { wake: h.wake, deliver: h.deliver, stateOf: h.stateOf, now: () => deadLetteredAt })
+
+  const dlqPath = queue.deadLetterDbPath
+  assert.ok(dlqPath !== null)
+  const dlq = openQueueDb(dlqPath)
+  const [row] = peek(dlq, 1, deadLetteredAt)
+  assert.ok(row !== undefined)
+  assert.equal(row.id, originalId, 'the same id, so the failure can be traced back')
+  assert.equal(row.timestampMs, NOW, 'the original enqueue time')
+  assert.equal(row.failedAttempts, 1, 'one delivery failed before it landed here')
+  assert.equal(row.attempts, 0, 'a consumer of the dead letter queue starts fresh')
+  assert.equal(row.deadLetteredAtMs, deadLetteredAt)
+  assert.equal(row.state, 'ready')
+
+  // Retention counts from when it landed here, not from NOW: with a 60s
+  // retention, 61s after the ORIGINAL enqueue it is still here, and 61s
+  // after it was dead lettered it is gone.
+  assert.equal(sweepRetention(dlq, 60, NOW + 61_000), 0)
+  assert.equal(sweepRetention(dlq, 60, deadLetteredAt + 61_000), 1)
+  dlq.close()
+})
+
+// Issue #167: a queue nobody consumes (a dead letter queue, a producer-only
+// queue) is still swept for retention, through the retention list the join
+// hands the tick alongside the drainable one.
+test('a retention-only queue is swept on schedule even though nothing drains it', async () => {
+  const dir = tempDir()
+  const dbPath = join(dir, 'dlq.sqlite')
+  seed(dbPath, 2, NOW)
+  const h = harness({})
+
+  await tickOnce([], { wake: h.wake, deliver: h.deliver, stateOf: h.stateOf, now: () => NOW + 61_000 }, [
+    { resourceId: 'dlq-1', queueName: 'dlq', dbPath, retentionSeconds: 60 },
+  ])
+
+  const db = openQueueDb(dbPath)
+  assert.equal(depth(db), 0, 'both messages aged out')
+  db.close()
+  assert.deepEqual(h.delivered, [], 'nothing was ever delivered')
+  assert.deepEqual(h.woken, [], 'nothing was ever woken')
+})
+
+test('a retention-only queue whose file does not exist yet is left alone, and the file is not created', async () => {
+  const dir = tempDir()
+  const dbPath = join(dir, 'never-sent-to.sqlite')
+  const h = harness({})
+
+  await tickOnce([], { wake: h.wake, deliver: h.deliver, stateOf: h.stateOf, now: () => NOW }, [
+    { resourceId: 'q-1', queueName: 'q', dbPath, retentionSeconds: 60 },
+  ])
+
+  assert.equal(existsSync(dbPath), false)
 })

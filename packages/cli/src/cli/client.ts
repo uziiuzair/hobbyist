@@ -193,6 +193,14 @@ export interface ResourceResponse {
   // The build output, when a source was built (issue #93).
   logs?: string
 }
+// POST /v1/resources/:id/stop. `endedConnections` is how many proxied
+// sessions the stop cut off, `wasBusy` whether the kind's activity guard
+// said it was mid-work; both only ever non-zero or true under --force,
+// since the route refuses otherwise (issue #162).
+export interface StopResponse extends ResourceResponse {
+  endedConnections?: number
+  wasBusy?: boolean
+}
 // GET /v1/projects/:name/crons (packages/cli/src/daemon/crons.ts, listCrons).
 export interface CronListEntry {
   worker: string
@@ -263,6 +271,14 @@ export interface QueueMessage {
   attempts: number
   contentType: string
   body: unknown
+  // ready: waiting for the next batch; leased: out with the consumer;
+  // delayed: not visible until visibleAtMs (a delayed send or a retry).
+  state: 'ready' | 'leased' | 'delayed'
+  visibleAtMs: number
+  // Set only on a dead letter: when it landed in this queue, and how many
+  // deliveries failed in the source queue first.
+  deadLetteredAtMs: number | null
+  failedAttempts: number | null
 }
 export interface QueuePeekResponse {
   messages: QueueMessage[]
@@ -391,7 +407,7 @@ export interface Api {
   ): Promise<EnvResponse>
   deleteResource(id: string): Promise<DeletedResponse>
   startResource(id: string): Promise<ResourceResponse>
-  stopResource(id: string): Promise<ResourceResponse>
+  stopResource(id: string, opts?: { force?: boolean }): Promise<StopResponse>
   getConnection(id: string): Promise<ConnectionResponse>
   getLogs(id: string, tail?: number): Promise<LogsResponse>
   eject(project: string, opts?: { release?: boolean }): Promise<EjectResponse>
@@ -530,7 +546,7 @@ export function createApi(transport: string | DaemonClient): Api {
     setEnv: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/env`, input),
     deleteResource: (id) => call(client, 'DELETE', `/v1/resources/${p(id)}`),
     startResource: (id) => call(client, 'POST', `/v1/resources/${p(id)}/start`),
-    stopResource: (id) => call(client, 'POST', `/v1/resources/${p(id)}/stop`),
+    stopResource: (id, opts) => call(client, 'POST', `/v1/resources/${p(id)}/stop`, opts?.force === true ? { force: true } : {}),
     getConnection: (id) => call(client, 'GET', `/v1/resources/${p(id)}/connection`),
     getLogs: (id, tail) =>
       call(client, 'GET', `/v1/resources/${p(id)}/logs${tail === undefined ? '' : `?tail=${tail}`}`),

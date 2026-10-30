@@ -1,6 +1,10 @@
 # `docs/cli/` the `hobby` binary
 
-**Status:** PROPOSED. Nothing built.
+**Status:** BUILT. Thirty verbs in the `USAGE` table of
+`packages/cli/src/cli/main.ts`, documented at
+`site/src/content/docs/docs/reference/cli.md` and checked against the source
+in CI. The body below is the original scope guard; where it has drifted from
+what shipped, the dated amendments at the end say so.
 
 The single user-facing entry point. Every capability in this repo is reachable
 through `hobby`, and nothing is reachable any other way. There is no web
@@ -17,7 +21,7 @@ so the command has to be exceptional.
 ## The shape
 
 ```
-hobby init                       prepare the host, check the filesystem, start the daemon
+hobby init                       prepare the host, check the filesystem, say how to start the daemon
 hobby new <name>                 project + postgres + connection string, one command
 hobby ls                         everything, with sleep state
 hobby pg create --project <p>    the explicit form, for a second database
@@ -128,6 +132,37 @@ stderr. `createResourceRoute` and `deployResourceRoute`
 the list under `--json`. The response shape for `ignored` changed from a
 list of keys to a list of objects; Studio's `DeployResult` type was updated
 and nothing in Studio read the field.
+
+## Amendment, 2026-10-30: where the body above has drifted (issues #142, #145)
+
+Three statements in the body were true when written and are not now. They
+are left in place as the record and corrected here.
+
+- **`hobby init` does not start the daemon.** It prepares the host, runs the
+  preflight, and ends with `host is ready. run \`hobby daemon\` to start the
+  daemon.` (`cmdInit`, `packages/cli/src/cli/commands.ts`). The daemon is
+  started by `hobby daemon` in the foreground, or by an init system. The shape
+  table above now says so.
+- **The binary runs on Node, not Bun.** `packages/cli/bin/hobby.js` begins
+  `#!/usr/bin/env node`, and the install script builds with `tsc`. ADR 0006
+  chose Bun as runtime and compiler and, in the same breath, required the code
+  to be written against Node-compatible APIs precisely so the runtime could be
+  swapped; that is what happened. ADR 0006 is immutable and stands as the
+  record of the original choice; the shipped runtime is Node.
+- **There are no configuration flags.** "Config resolution: flags, then env,
+  then project file, then global defaults" describes `resolveConfig`'s
+  signature, which accepts `flags`, but its one caller
+  (`packages/cli/src/cli/main.ts`) passes `{ env, cwd }`. Resolution is
+  `HOBBY_*` environment, then a `hobby.json` found walking up from the
+  working directory, then `DEFAULT_CONFIG` (`packages/core/src/config.ts`).
+  Flags that exist on verbs (`--sleep-after`, `--port`, `--pin`) act on one
+  project or resource, never on the daemon's config.
+
+Two things the body does not mention that the reference page now does: the
+CLI's six exit codes (`packages/cli/src/cli/exit.ts`, `EXIT_CODE_BY_ERROR`),
+and the fact that `site/scripts/check-cli-reference.mjs` now compares flags
+per verb and the exit code table as well as the verb list, so a flag added to
+a `parseArgs` spec without a line on the page fails CI.
 
 ## Amendment, 2026-10-30: CLI papercuts (issues #97, #106, #107, #109, #110, #111, #114, #103)
 

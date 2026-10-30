@@ -1460,3 +1460,38 @@ test('deployWorker applies databaseResourceId and keeps it when absent', async (
   const unbound = await deployWorker(deps, kept.resource, { databaseResourceId: null })
   assert.equal(unbound.resource.config.databaseResourceId, null)
 })
+
+// Issue #55: a runner that exits at init is reported after one poll with
+// its exit code and what it printed, not as a readiness timeout.
+test('a worker whose container exits on boot fails fast with the exit code and its last log lines', async () => {
+  const runtime = createFakeRuntime()
+  runtime.logs = async (): Promise<string> => 'Error: Cannot find module "./missing.js"\n'
+  let probes = 0
+  const deps = buildDeps({
+    runtime,
+    config: { ...testConfig(), wakeTimeoutMs: 10_000, readinessPollMs: 5 },
+    workerProbeFactory: (config) => async () => {
+      probes++
+      runtime._state.set(config.containerName, { exists: true, running: false, exitCode: 1 })
+      return false
+    },
+  })
+  const project = makeProject(deps.store)
+  await assert.rejects(
+    () =>
+      createWorkerResource(deps, {
+        project,
+        name: 'api',
+        sourcePath: workerSource(),
+        databaseResourceId: null,
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof HobbyError)
+      assert.equal(err.code, 'wake_failed')
+      assert.match(err.message, /exited with code 1/)
+      assert.match(err.hint ?? '', /Cannot find module/)
+      return true
+    }
+  )
+  assert.equal(probes, 1)
+})

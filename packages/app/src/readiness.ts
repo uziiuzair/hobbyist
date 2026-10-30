@@ -6,6 +6,7 @@
 // the outside until you try to connect.
 
 import net from 'node:net'
+import type { ContainerStatus } from '@hobby.sh/core'
 
 export interface TcpProbeOptions {
   host: string
@@ -83,15 +84,30 @@ export interface WaitReadyResult {
   ready: boolean
   waitedMs: number
   attempts: number
+  // Set when the wait ended early because the container stopped running
+  // (issue #55): a process that crashed on boot is never going to listen,
+  // and waiting out the whole timeout for it cost 30 seconds on every deploy
+  // and every first request. Absent on success and on a plain timeout.
+  exited?: { exitCode: number | null }
 }
 
-// Polls until the probe says yes or the budget runs out. `now` and `sleepFor`
-// are injectable for the same reason they are in @hobby.sh/pg's waitReady:
-// the whole timeout path is testable with no real waiting.
+// Whether a container that was started has since stopped. `exists` guards
+// against reading a container that was never created as "exited".
+export function hasExited(status: ContainerStatus): boolean {
+  return status.exists && !status.running
+}
+
+// Polls until the probe says yes, the container exits, or the budget runs
+// out. `now` and `sleepFor` are injectable for the same reason they are in
+// @hobby.sh/pg's waitReady: the whole timeout path is testable with no real
+// waiting.
 export async function waitListening(opts: {
   probe: () => Promise<boolean>
   pollMs: number
   timeoutMs: number
+  // Consulted after each failed probe. Omitted by callers that have no
+  // container to ask about (tests of the loop itself).
+  status?: () => Promise<ContainerStatus>
   now?: () => number
   sleepFor?: (ms: number) => Promise<void>
 }): Promise<WaitReadyResult> {
@@ -106,9 +122,33 @@ export async function waitListening(opts: {
     if (await opts.probe()) {
       return { ready: true, waitedMs: now() - started, attempts }
     }
+    if (opts.status !== undefined) {
+      // Best effort: an inspect that fails says nothing about the process,
+      // so the loop keeps polling as it did before this check existed.
+      const status = await opts.status().catch(() => null)
+      if (status !== null && hasExited(status)) {
+        return { ready: false, waitedMs: now() - started, attempts, exited: { exitCode: status.exitCode } }
+      }
+    }
     if (now() >= deadline) {
       return { ready: false, waitedMs: now() - started, attempts }
     }
     await sleepFor(opts.pollMs)
+  }
+}
+
+// The last lines a container printed, for the hint of a crash error. Best
+// effort and bounded: a runtime that cannot produce logs yields an empty
+// string, never a second error on top of the crash.
+export async function logTail(
+  logs: (name: string, opts: { tail: number }) => Promise<string>,
+  containerName: string,
+  lines: number = 20
+): Promise<string> {
+  try {
+    const text = await logs(containerName, { tail: lines })
+    return text.trim()
+  } catch {
+    return ''
   }
 }

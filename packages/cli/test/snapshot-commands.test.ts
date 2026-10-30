@@ -52,6 +52,15 @@ function fakeCtx(typed: string[] = []): { ctx: Ctx; calls: string[]; out: string
       calls.push(`deleteSnapshot ${id}`)
       return { deleted: true as const }
     },
+    // Only `blog` exists. A restore of a deleted project's snapshot asks
+    // this to decide which sentence to print (issue #181).
+    async getProject(name: string) {
+      calls.push(`getProject ${name}`)
+      if (name !== 'blog') {
+        throw new HobbyError('project_not_found', `no project ${name}`)
+      }
+      return { project: { id: 'p1', name }, resources: [] }
+    },
   }
   const ctx = {
     io: {
@@ -101,9 +110,19 @@ test('hobby snapshot --json prints exactly the API response', async () => {
 })
 
 test('hobby snapshot restore defaults to a new project and never asks', async () => {
-  const { ctx, calls } = fakeCtx()
+  const { ctx, calls, out } = fakeCtx()
   assert.equal(await cmdSnapshot(ctx, ['restore', 'blog', ID], {}), 0)
-  assert.deepEqual(calls, ['listSnapshots blog', `restoreSnapshot ${ID} {"allowPause":false}`])
+  assert.deepEqual(calls, ['listSnapshots blog', `restoreSnapshot ${ID} {"allowPause":false}`, 'getProject blog'])
+  assert.ok(out.some((line) => line.includes('blog is untouched')))
+})
+
+test('hobby snapshot restore of a deleted project does not call it untouched', async () => {
+  const { ctx, out } = fakeCtx()
+  // listSnapshots answers for a deleted project (snapshots outlive it), so
+  // the only thing that differs is what the CLI says about the original.
+  assert.equal(await cmdSnapshot(ctx, ['restore', 'gone', ID], {}), 0)
+  assert.ok(!out.some((line) => line.includes('is untouched')))
+  assert.ok(out.some((line) => line.includes('gone itself no longer exists')))
 })
 
 test('hobby snapshot restore --in-place asks for the project name, and a wrong answer restores nothing', async () => {

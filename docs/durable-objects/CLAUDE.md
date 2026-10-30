@@ -88,3 +88,24 @@ it. It does not call the hibernator.
 - **Does the mirror survive a Miniflare version bump?** The layout is upstream
   experimental. The schema assertion turns a break into a loud failure, but the
   policy for what to do next is not written down.
+
+## Amendment, 2026-10-30: `hobby do` does not exist, and what the mirror reads (issue #171)
+
+**There is no `hobby do` verb.** `specs/2026-08-10-the-alarm-mirror-and-object-catalog.md`
+mentions `hobby do ls`, `hobby do inspect` and `hobby do rm` as consumers of
+the object catalog. The spec is a dated artifact and stays as written; none of
+the three is built, and the `USAGE` table in `packages/cli/src/cli/main.ts`
+has no `do` verb. Durable Object storage is reached only through the worker
+that owns it. If a listing is ever wanted, it is a new verb and a new route,
+not a gap in an existing one.
+
+**The mirror reads `_cf_ALARM` in the namespace's `metadata.sqlite`**, not
+`_cf_METADATA` key 1 in each object's own file. Both exist and agree
+(`alarms.test.ts` pins that), and the comment in `packages/do/src/alarms.ts`
+gives the three reasons for reading the namespace copy: it is what
+`AlarmScheduler` reloads on restart, so it decides what actually fires; it is
+one file per namespace instead of one per object; and it is the only place an
+object's human name is stored. The public guide
+(`site/src/content/docs/docs/guides/durable-objects.md`) said the opposite
+and has been corrected. The QA queues lane confirmed the on-disk shape on
+2026-10-19: a `_cf_ALARM` row of `actor_id|scheduled_time|actor_name`.

@@ -30,7 +30,7 @@ import {
 } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
 import { DEFAULT_CONSUMER_OPTIONS, leaseBatch, openQueueDb, queueDbPath } from '@hobby.sh/queue'
-import { createDefaultKindRegistry } from '../src/daemon/context.js'
+import { createDefaultKindRegistry, getOrCreateWake, isWakeRefused } from '../src/daemon/context.js'
 import { createApp, createProxyDeps, reconcile, type DaemonContext } from '../src/index.js'
 import { syncWorkerQueueBindings } from '../src/daemon/routes.js'
 import { CLI_VERSION } from '../src/version.js'
@@ -2321,5 +2321,338 @@ test('DELETE /v1/resources/:id removes the resource directory once it is empty',
     assert.equal(res.status, 200)
     assert.equal(existsSync(resourceDir), false, 'the empty resource directory is gone')
     assert.equal(existsSync(join(ctx.paths.projectsDir, 'blog')), true, 'the project still exists, so its directory stays')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Queue fixes, 2026-10-30: issues #156, #165, #166, #170.
+// ---------------------------------------------------------------------------
+
+// Issue #156: a dead letter queue a consumer still routes to cannot be
+// deleted, whether the relationship is read from the consumer's deployed
+// manifest or from the stored QueueConfig of the queue it consumes. Before
+// this, `hobby queue rm` removed it and the next dead letter silently
+// recreated the file.
+test('DELETE /v1/resources/:id refuses to delete a queue that is still some consumer\'s dead letter queue', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const worker = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'cons',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({
+        queues: { producers: [], consumers: [consumerEntry('work', { deadLetterQueue: 'work-dlq' })] },
+      }),
+    }),
+  }) as WorkerResource
+  await syncWorkerQueueBindings(ctx, project, worker)
+  const dlq = ctx.store.getResourceByName(project.id, 'work-dlq')
+  assert.ok(dlq !== null && dlq.kind === 'queue')
+
+  await withServer(ctx, async (baseUrl) => {
+    const refused = await call(baseUrl, 'DELETE', `/v1/resources/${dlq.id}`)
+    assert.equal(refused.status, 400)
+    const body = refused.body as { error: { code: string; message: string; hint?: string } }
+    assert.match(body.error.message, /dead letter queue/)
+    assert.match(body.error.message, /cons/, 'the refusal names the consumer')
+    assert.match(body.error.hint ?? '', /dead_letter_queue/)
+    assert.equal((await call(baseUrl, 'GET', `/v1/resources/${dlq.id}`)).status, 200, 'nothing was torn down')
+
+    // The stored relationship alone, with the manifest no longer naming it,
+    // still protects it: the broker routes by the stored config.
+    ctx.store.updateResourceConfig(worker.id, {
+      ...worker.config,
+      manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [consumerEntry('work')] } }),
+    })
+    const stillRefused = await call(baseUrl, 'DELETE', `/v1/resources/${dlq.id}`)
+    assert.equal(stillRefused.status, 400)
+
+    // Once the source queue stops routing to it, the delete goes through.
+    const work = ctx.store.getResourceByName(project.id, 'work')
+    assert.ok(work !== null && work.kind === 'queue')
+    ctx.store.updateResourceConfig(work.id, { ...work.config, deadLetterQueue: null })
+    assert.equal((await call(baseUrl, 'DELETE', `/v1/resources/${dlq.id}`)).status, 200)
+  })
+})
+
+// Issue #166: the manifest replaces the stored tuning on every deploy, so a
+// key deleted from wrangler.toml falls back to the broker's default rather
+// than staying in force forever.
+test('syncWorkerQueueBindings clears a tuning key and a dead letter queue the redeployed manifest no longer sets', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const first = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'api',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({
+        queues: {
+          producers: [],
+          consumers: [consumerEntry('jobs', { retryDelaySeconds: 2, maxRetries: 7, deadLetterQueue: 'jobs-dlq' })],
+        },
+      }),
+    }),
+  }) as WorkerResource
+  await syncWorkerQueueBindings(ctx, project, first)
+
+  let queue = ctx.store.getResourceByName(project.id, 'jobs')
+  assert.ok(queue !== null && queue.kind === 'queue')
+  assert.equal(queue.config.retryDelaySeconds, 2)
+  assert.equal(queue.config.deadLetterQueue, 'jobs-dlq')
+
+  // Redeploy with retry_delay and dead_letter_queue deleted, max_retries kept.
+  const redeployed = ctx.store.getResource(first.id) as WorkerResource
+  ctx.store.updateResourceConfig(first.id, {
+    ...redeployed.config,
+    manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [consumerEntry('jobs', { maxRetries: 7 })] } }),
+  })
+  await syncWorkerQueueBindings(ctx, project, ctx.store.getResource(first.id) as WorkerResource)
+
+  queue = ctx.store.getResourceByName(project.id, 'jobs')
+  assert.ok(queue !== null && queue.kind === 'queue')
+  assert.equal(queue.config.retryDelaySeconds, null, 'removed from the manifest, so back to the default')
+  assert.equal(queue.config.deadLetterQueue, null, 'removed from the manifest, so no longer routed')
+  assert.equal(queue.config.maxRetries, 7, 'still set, still in force')
+  assert.equal(queue.config.consumerResourceId, first.id)
+  ctx.store.close()
+})
+
+// Issue #165: the enqueue route accepts a body larger than the daemon's
+// general 64 KB request limit, so the documented 128000 byte message limit
+// is reachable from the CLI, and an oversized message gets the broker's own
+// refusal naming the limit instead of a reset socket.
+test('POST /v1/resources/:id/queue/messages accepts a 100 KB message and refuses a 130 KB one with the real limit', async () => {
+  const ctx = buildContext()
+  ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+
+  await withServer(ctx, async (baseUrl) => {
+    const created = await call(baseUrl, 'POST', '/v1/projects/blog/resources', { kind: 'queue', name: 'jobs' })
+    const queueId = (created.body as { resource: QueueResourceBody }).resource.id
+
+    const ok = await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/messages`, { body: { x: 'a'.repeat(100_000) } })
+    assert.equal(ok.status, 201)
+
+    const tooBig = await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/messages`, {
+      body: { x: 'a'.repeat(130_000) },
+    })
+    assert.equal(tooBig.status, 400)
+    const body = tooBig.body as { error: { code: string; message: string } }
+    assert.equal(body.error.code, 'usage')
+    assert.match(body.error.message, /128000/, 'the message limit, not the request limit, is what the user reads')
+  })
+})
+
+// A body over the general limit on an ordinary route is still refused, but
+// with a 400 that reaches the client rather than a destroyed socket.
+test('an oversized body on an ordinary route gets a 400 naming the limit, not a reset connection', async () => {
+  const ctx = buildContext()
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', '/v1/projects', { name: 'x'.repeat(70_000) })
+    assert.equal(res.status, 400)
+    const body = res.body as { error: { message: string; hint?: string } }
+    assert.match(body.error.message, /too large/)
+    assert.match(body.error.hint ?? '', /65536/)
+  })
+})
+
+// Issue #170: peek reports each message's state and when it becomes visible,
+// so a leased or delayed message is not shown as if it were simply waiting.
+test('GET /v1/resources/:id/queue/messages reports ready, delayed and leased states', async () => {
+  const ctx = buildContext()
+  ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+
+  await withServer(ctx, async (baseUrl) => {
+    const created = await call(baseUrl, 'POST', '/v1/projects/blog/resources', { kind: 'queue', name: 'jobs' })
+    const queueId = (created.body as { resource: QueueResourceBody }).resource.id
+    await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/messages`, { body: 'now' })
+    await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/messages`, { body: 'later', delaySeconds: 600 })
+
+    const db = openQueueDb(queueDbPath(ctx.paths, 'blog', 'jobs'))
+    try {
+      // Lease the one ready message, as the tick would.
+      const batch = leaseBatch(db, { ...DEFAULT_CONSUMER_OPTIONS, maxBatchSize: 1 }, Date.now())
+      assert.equal(batch?.messages.length, 1)
+    } finally {
+      db.close()
+    }
+
+    const peeked = await call(baseUrl, 'GET', `/v1/resources/${queueId}/queue/messages`)
+    const messages = (peeked.body as { messages: Array<{ body: unknown; state: string; visibleAtMs: number; deadLetteredAtMs: unknown }> }).messages
+    assert.equal(messages.length, 2)
+    assert.equal(messages[0]?.body, 'now')
+    assert.equal(messages[0]?.state, 'leased')
+    assert.equal(messages[1]?.body, 'later')
+    assert.equal(messages[1]?.state, 'delayed')
+    assert.ok((messages[1]?.visibleAtMs ?? 0) > Date.now() + 500_000)
+    assert.equal(messages[0]?.deadLetteredAtMs, null)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Wake path fixes, 2026-10-30: issues #57, #73, #162.
+// ---------------------------------------------------------------------------
+
+// Issue #162 and #73: `hobby sleep` consults the same guards the hibernator
+// does, and open proxied sessions count. Without --force the stop is refused
+// with a reason; with it, the response says what was interrupted.
+test('POST /v1/resources/:id/stop refuses a worker with a queue batch in flight unless forced', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const worker = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'cons',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [consumerEntry('work')] } }),
+    }),
+  }) as WorkerResource
+  await syncWorkerQueueBindings(ctx, project, worker)
+  await ctx.runtime.ensureCreated({ name: worker.config.containerName, image: 'x', env: {}, ports: [], binds: [] })
+  await ctx.runtime.start(worker.config.containerName)
+  ctx.store.setResourceState(worker.id, 'running')
+
+  // A batch out with the consumer, exactly as the tick leaves it.
+  const db = openQueueDb(queueDbPath(ctx.paths, 'blog', 'work'))
+  try {
+    const { enqueue, encodeBody } = await import('@hobby.sh/queue')
+    enqueue(db, [{ body: encodeBody({ n: 1 }), contentType: 'json' }], Date.now())
+    assert.ok(leaseBatch(db, DEFAULT_CONSUMER_OPTIONS, Date.now()) !== null)
+  } finally {
+    db.close()
+  }
+
+  await withServer(ctx, async (baseUrl) => {
+    const refused = await call(baseUrl, 'POST', `/v1/resources/${worker.id}/stop`)
+    assert.equal(refused.status, 409)
+    const body = refused.body as { error: { code: string; message: string; hint?: string } }
+    assert.equal(body.error.code, 'conflict')
+    assert.match(body.error.message, /blog\/cons is in use: a queue batch is in flight/)
+    assert.match(body.error.hint ?? '', /hobby sleep blog\/cons --force/)
+    assert.equal(ctx.store.getResource(worker.id)?.state, 'running', 'nothing was stopped')
+
+    const forced = await call(baseUrl, 'POST', `/v1/resources/${worker.id}/stop`, { force: true })
+    assert.equal(forced.status, 200)
+    const forcedBody = forced.body as { resource: { state: string }; wasBusy: boolean; endedConnections: number }
+    assert.equal(forcedBody.resource.state, 'sleeping')
+    assert.equal(forcedBody.wasBusy, true)
+    assert.equal(forcedBody.endedConnections, 0)
+  })
+})
+
+test('POST /v1/resources/:id/stop refuses a database with an open proxied session unless forced, and counts what it ended', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig(),
+  })
+  ctx.store.setResourceState(resource.id, 'running')
+  const session = ctx.activity.open(resource.id)
+
+  await withServer(ctx, async (baseUrl) => {
+    const refused = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/stop`)
+    assert.equal(refused.status, 409)
+    assert.match((refused.body as { error: { message: string } }).error.message, /1 open session through the proxy would be terminated/)
+
+    const forced = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/stop`, { force: true })
+    assert.equal(forced.status, 200)
+    const body = forced.body as { resource: { state: string }; endedConnections: number; wasBusy: boolean }
+    assert.equal(body.resource.state, 'sleeping')
+    assert.equal(body.endedConnections, 1)
+    // The postgres guard cannot reach a fake container, and an unreachable
+    // guard never blocks a manual sleep (the person asking can see it).
+    assert.equal(body.wasBusy, false)
+
+    // Idle and unused: no force needed.
+    ctx.activity.close(session)
+    ctx.store.setResourceState(resource.id, 'running')
+    const plain = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/stop`)
+    assert.equal(plain.status, 200)
+    assert.equal((plain.body as { endedConnections: number }).endedConnections, 0)
+  })
+})
+
+// Issue #57: a successful deploy clears the wake refusal a failed wake left,
+// the same way an explicit `hobby wake` does, so the first request after a
+// fixed redeploy is served rather than refused until the backoff runs out.
+test('POST /v1/resources/:id/deploy clears a wake refusal once the new code has proven it serves', async () => {
+  const base = createFakeRuntime()
+  let startBroken = true
+  const runtime: ComputeRuntime = {
+    ...base,
+    async start(name: string): Promise<void> {
+      if (startBroken) throw new Error('exec format error')
+      await base.start(name)
+    },
+  }
+  const ctx = buildContext(runtime)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+
+  // Something real for the app's TCP readiness probe to reach: the fake
+  // runtime starts no process, so the port the app config publishes is
+  // served by this test instead.
+  const listener = createServer((_req, res) => res.end('ok'))
+  await new Promise<void>((resolve) => listener.listen(0, '127.0.0.1', () => resolve()))
+  const hostPort = (listener.address() as AddressInfo).port
+  const app = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'app',
+    name: 'web',
+    config: sampleUndeployedAppConfig({ image: 'hobby/blog-web:1', hostPort, containerPort: 3000 }),
+  })
+  await runtime.ensureCreated({ name: app.config.containerName, image: 'hobby/blog-web:1', env: {}, ports: [], binds: [] })
+  ctx.store.setResourceState(app.id, 'sleeping')
+
+  // A failed automatic wake leaves a refusal behind.
+  await assert.rejects(getOrCreateWake(ctx)(app.id))
+  assert.equal(isWakeRefused(ctx, app.id), true)
+
+  const source = mkdtempSync(join(tmpdir(), 'hobby-deploy-clears-'))
+  writeFileSync(join(source, 'Dockerfile'), 'FROM scratch\n')
+  startBroken = false
+  try {
+    await withServer(ctx, async (baseUrl) => {
+      const res = await call(baseUrl, 'POST', `/v1/resources/${app.id}/deploy`, { source: { path: source } })
+      assert.equal(res.status, 200, JSON.stringify(res.body))
+      assert.equal((res.body as { resource: { state: string } }).resource.state, 'sleeping')
+      assert.equal(isWakeRefused(ctx, app.id), false, 'the deploy cleared the refusal')
+    })
+  } finally {
+    await new Promise<void>((resolve) => listener.close(() => resolve()))
+  }
+})
+
+// Issue #114: a manual `hobby sleep` clears the refusal a failed wake left,
+// so `hobby ls` stops saying "wake refused" about a resource the user has
+// just handled by hand.
+test('POST /v1/resources/:id/stop clears a wake refusal', async () => {
+  const base = createFakeRuntime()
+  const runtime: ComputeRuntime = {
+    ...base,
+    async start(): Promise<void> {
+      throw new Error('exec format error')
+    },
+  }
+  const ctx = buildContext(runtime)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig(),
+  })
+  await runtime.ensureCreated({ name: resource.config.containerName, image: 'postgres:18-alpine', env: {}, ports: [], binds: [] })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+  await assert.rejects(getOrCreateWake(ctx)(resource.id))
+  assert.equal(isWakeRefused(ctx, resource.id), true)
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/stop`)
+    assert.equal(res.status, 200)
+    assert.equal(isWakeRefused(ctx, resource.id), false)
   })
 })

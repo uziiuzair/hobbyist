@@ -343,7 +343,34 @@ export async function startPostgres(deps: PgDeps, resource: PostgresResource): P
     pollMs: deps.config.readinessPollMs,
     timeoutMs: deps.config.wakeTimeoutMs,
     probe,
+    status: () => deps.runtime.inspect(resource.config.containerName),
   })
+  // Errors name the project and resource (issue #58), the same way the
+  // refusal path already does, not the resource UUID nobody can find in
+  // `hobby ls`.
+  const label = `${deps.store.getProject(resource.projectId)?.name ?? resource.projectId}/${resource.name}`
+
+  // The container exited before postgres ever answered (issue #55): a data
+  // directory it refuses, a config error, a wrong image. Reported after one
+  // poll with the exit code and the last lines it printed, instead of a
+  // timeout 30 seconds later that blames the wrong thing.
+  if (!result.ready && result.exited !== undefined) {
+    deps.store.setResourceState(resource.id, 'failed')
+    let tail = ''
+    try {
+      tail = (await deps.runtime.logs(resource.config.containerName, { tail: 20 })).trim()
+    } catch {
+      // Best effort: the crash is the error, not the missing log.
+    }
+    const code = result.exited.exitCode
+    throw new HobbyError(
+      'wake_failed',
+      `postgres ${label} exited${code === null ? '' : ` with code ${code}`} after ${result.waitedMs}ms, before it accepted connections`,
+      tail.length === 0
+        ? 'the container crashed on boot and printed nothing; `hobby logs` shows anything it prints on the next attempt'
+        : `the container crashed on boot. the last lines it printed:\n${tail}`
+    )
+  }
 
   // A server that answered with an error is a different failure from one
   // that never answered, and it is reported as one: wake_failed rather than
@@ -359,7 +386,7 @@ export async function startPostgres(deps: PgDeps, resource: PostgresResource): P
     deps.store.setResourceState(resource.id, 'failed')
     throw new HobbyError(
       'wake_failed',
-      `postgres for resource ${resource.id} is up but refused its readiness probe: ${result.broken}`,
+      `postgres ${label} is up but refused its readiness probe: ${result.broken}`,
       `answered after ${result.waitedMs}ms across ${result.attempts} attempts; fix the cause, then \`hobby wake\` retries it${portNote}`
     )
   }
@@ -369,8 +396,8 @@ export async function startPostgres(deps: PgDeps, resource: PostgresResource): P
     deps.store.setResourceState(resource.id, 'failed')
     throw new HobbyError(
       'wake_timeout',
-      `postgres for resource ${resource.id} did not become ready within ${deps.config.wakeTimeoutMs}ms`,
-      `waited ${result.waitedMs}ms across ${result.attempts} attempts${portNote}`
+      `postgres ${label} did not become ready within ${deps.config.wakeTimeoutMs}ms`,
+      `waited ${result.waitedMs}ms across ${result.attempts} attempts${portNote}; HOBBY_WAKE_TIMEOUT_MS sets how long a wake may take`
     )
   }
 

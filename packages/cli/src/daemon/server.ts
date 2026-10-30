@@ -28,7 +28,7 @@ import { createCaddyManager, type CaddyManager } from './caddy.js'
 import { createHttpProxyDeps, createProxyDeps, getOrCreateWake, type DaemonContext } from './context.js'
 import { startHibernator } from './hibernator.js'
 import { startQueueEndpoint } from './queue-endpoint.js'
-import { drainableQueues, queueDeliverFn, queueStateOf } from './queues.js'
+import { drainableQueues, queueDeliverFn, queueStateOf, retentionTargets } from './queues.js'
 import { handleRequest } from './routes.js'
 import { createStudioApp } from './studio/routes.js'
 import { parseTailscaleIp } from './tailnet.js'
@@ -615,9 +615,18 @@ export async function startDaemon(
   // comes due; workerd's own scheduler reloads every pending row at startup
   // and fires it, so being awake at the deadline is the whole contribution.
   // See docs/durable-objects/.
+  // An alarm coming due is activity (issue #160), whether the worker was
+  // asleep (the wake below starts its idle clock) or already running (the
+  // mirror's wake is then a no-op and this touch is what resets the clock):
+  // a worker that fires an alarm every few minutes should not sleep and
+  // rewake around each one.
+  const wakeForAlarm = getOrCreateWake(ctx)
   const alarmMirror = startAlarmMirror({
     namespaces: () => durableObjectNamespaces(ctx),
-    wake: getOrCreateWake(ctx),
+    wake: async (resourceId: string): Promise<void> => {
+      await wakeForAlarm(resourceId)
+      ctx.activity.touch(resourceId)
+    },
     intervalMs: ALARM_MIRROR_TICK_MS,
   })
 
@@ -670,6 +679,10 @@ export async function startDaemon(
   // exactly one start.
   const queueTick = startQueueTick({
     queues: () => drainableQueues(ctx),
+    // Every other queue in a managed project, swept for retention only
+    // (issue #167): a dead letter queue or a producer-only queue has no
+    // consumer to deliver to, but its messages still age out on schedule.
+    retention: () => retentionTargets(ctx),
     wake: getOrCreateWake(ctx),
     deliver: queueDeliverFn(ctx),
     stateOf: queueStateOf(ctx),
@@ -685,7 +698,13 @@ export async function startDaemon(
     workers: () => scheduledWorkers(ctx),
     wake: getOrCreateWake(ctx),
     stateOf: queueStateOf(ctx),
-    fire: postScheduled,
+    // A cron firing is activity too (issue #160), for the same reason a
+    // queue delivery is.
+    fire: async (firing) => {
+      const outcome = await postScheduled(firing)
+      ctx.activity.touch(firing.worker.resourceId)
+      return outcome
+    },
     state: cronState(ctx),
     intervalMs: ALARM_MIRROR_TICK_MS,
   })

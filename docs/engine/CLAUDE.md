@@ -1,6 +1,11 @@
 # `docs/engine/` Postgres instance lifecycle
 
-**Status:** PROPOSED. Nothing built.
+**Status:** BUILT. `createPostgres`, `startPostgres`, `stopPostgres` and
+`createPostgresFromClone` in `packages/pg/src/postgres.ts`, over the
+`ComputeRuntime` interface (`packages/core/src/runtime.ts`) whose one real
+implementation is `createDockerRuntime` (`packages/core/src/docker.ts`). The
+body below is the original scope guard; the dated amendments at the end record
+what changed after it was built.
 
 Owns the answer to "is there a Postgres running, and where does its data live."
 Create, start, stop, destroy. Data directory layout. The container runtime
@@ -88,3 +93,21 @@ every failure hint pointed at them. Both streams are now requested with
 `--timestamps` and merged on the timestamp (`mergeTimestampedLogs`), then
 the prefix is stripped, so the result reads in order as `docker logs` does
 at a terminal.
+
+## Amendment, 2026-10-30: sleeping stops, it does not remove (issue #145)
+
+The status line above used to read "PROPOSED. Nothing built" long after the
+engine was in daily use; corrected today. One behaviour worth writing down
+because two site pages had it wrong: **a sleeping resource's container is
+stopped, not removed.** `stopPostgres` (`packages/pg/src/postgres.ts`) calls
+`ComputeRuntime.stop`, which is `docker stop -t <timeout>`
+(`packages/core/src/docker.ts`); `remove` exists on the same interface and is
+reached only from destroy. So a sleeping database keeps its container name,
+its network membership and its published port, and a wake is `docker start`
+on the existing container, which is what keeps the cold start inside budget.
+The same holds for `app` and `worker`.
+
+A new postgres is also born asleep: `createPostgres` boots it once so initdb
+and `CREATE DATABASE` run, then stops it cleanly, so that the first real start
+is never a crash recovery. `hobby new` therefore prints a connection string
+for a database that is `sleeping`, and the first connection wakes it.

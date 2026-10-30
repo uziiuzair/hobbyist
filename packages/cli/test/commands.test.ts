@@ -25,6 +25,7 @@ import {
   cmdQueueRm,
   cmdQueueSend,
   cmdQueueSet,
+  cmdSleep,
   cmdUnpin,
   resolveTarget,
   UsageError,
@@ -865,11 +866,16 @@ test('hobby queue set sends the retention value to the resolved queue', async ()
     },
     async setRetention(id: string, retentionSeconds: number) {
       calls.push({ id, retentionSeconds })
-      return { resource: queueResource({ }) }
+      const resource = queueResource({})
+      if (resource.kind === 'queue') {
+        resource.config.retentionSeconds = retentionSeconds
+      }
+      return { resource }
     },
   }
+  const out: string[] = []
   const ctx = {
-    io: { out: () => {}, err: () => {}, env: {}, cwd: '/tmp', readLine: async () => '' },
+    io: { out: (s: string) => out.push(s), err: () => {}, env: {}, cwd: '/tmp', readLine: async () => '' },
     api: api as unknown as Api,
     paths: {} as Ctx['paths'],
     config: {} as Ctx['config'],
@@ -879,6 +885,44 @@ test('hobby queue set sends the retention value to the resolved queue', async ()
 
   assert.equal(code, 0)
   assert.deepEqual(calls, [{ id: 'jobs-id', retentionSeconds: 3600 }])
+  // Issue #170: the new value is echoed, not a generic resource line.
+  assert.deepEqual(out, ['jobs  retention 1h'])
+})
+
+// Issue #170: `hobby queue ls` shows retention on every queue and, under a
+// queue with a consumer, the tuning the tick actually uses, defaults
+// resolved the same way the daemon resolves them.
+test('hobby queue ls shows retention, and the effective consumer tuning under a consumed queue', async () => {
+  const out: string[] = []
+  const consumed = queueResource({ name: 'jobs' })
+  if (consumed.kind === 'queue') {
+    consumed.config.maxBatchSize = null
+    consumed.config.maxBatchTimeoutSeconds = 30
+    consumed.config.maxRetries = null
+    consumed.config.retryDelaySeconds = 120
+  }
+  const entries: QueueListEntry[] = [
+    { resource: consumed, depth: 1, oldestMessageAgeSeconds: 5, consumer: workerResource({ name: 'api', deployed: true }) },
+    { resource: queueResource({ name: 'jobs-dlq' }), depth: 0, oldestMessageAgeSeconds: null, consumer: null },
+  ]
+  const api = {
+    async listQueues(_project: string) {
+      return { queues: entries }
+    },
+  }
+  const ctx = {
+    io: { out: (s: string) => out.push(s), err: () => {}, env: {}, cwd: '/tmp', readLine: async () => '' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  assert.equal(await cmdQueueLs(ctx, ['blog'], {}), 0)
+  assert.equal(out[0], 'blog')
+  assert.ok(out[1]?.includes('jobs  depth 1') && out[1]?.includes('retention 4d'), out[1])
+  assert.equal(out[2], '      batch 5 msgs or 30s  retries 2  retry delay 2m', 'null keys print the broker defaults')
+  assert.ok(out[3]?.startsWith('  jobs-dlq') && out[3]?.includes('retention 4d'), out[3])
+  assert.equal(out.length, 4, 'no tuning line under a queue nobody consumes')
 })
 
 // Issue #98: `hobby link` wrote a hobby.json and then every verb but
@@ -1383,4 +1427,43 @@ test('hobby connect without psql on PATH prints the connection string and an ins
   assert.equal(err[0], 'psql was not found on PATH')
   assert.ok(err.some((line) => line.includes('brew install libpq')))
   assert.ok(err.some((line) => line.includes('apt install postgresql-client')))
+})
+
+// Issue #162: `hobby sleep --force` passes force through, and what the stop
+// interrupted is reported on stderr.
+test('hobby sleep passes --force to the stop route and reports terminated sessions', async () => {
+  const calls: Array<{ id: string; opts: unknown }> = []
+  const out: string[] = []
+  const err: string[] = []
+  const api = {
+    async getProject(_name: string) {
+      return {
+        project: { id: 'p1', name: 'blog' },
+        resources: [{ ...queueResource(), kind: 'postgres', name: 'primary', id: 'primary-id', config: { hostPort: 15432 } }],
+      }
+    },
+    async stopResource(id: string, opts: unknown) {
+      calls.push({ id, opts })
+      return {
+        resource: { id, projectId: 'p1', kind: 'postgres', name: 'primary', state: 'sleeping', config: { hostPort: 15432 }, sizeBytes: null, connectionCount: 0, lastActiveAt: null, createdAt: new Date('2026-01-01') },
+        endedConnections: 2,
+        wasBusy: false,
+      }
+    },
+  }
+  const ctx = {
+    io: { out: (s: string) => out.push(s), err: (s: string) => err.push(s), env: {}, cwd: '/tmp', readLine: async () => '' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  const code = await cmdSleep(ctx, ['blog/primary'], { force: true })
+  assert.equal(code, 0)
+  assert.deepEqual(calls, [{ id: 'primary-id', opts: { force: true } }])
+  assert.deepEqual(err, ['terminated 2 open sessions'])
+  assert.ok(out[0]?.startsWith('primary  postgres  sleeping'))
+
+  await cmdSleep(ctx, ['blog/primary'], {})
+  assert.deepEqual(calls[1]?.opts, { force: false })
 })

@@ -41,9 +41,11 @@ import {
   hostNetworkingWarning,
   proxyBindNote,
   reflinkWarning,
+  renderDuration,
   renderPreflight,
   renderQueueLine,
   renderQueueMessageLine,
+  renderQueueTuningLine,
   renderResourceLine,
   renderSnapshotLine,
   sleepPolicyTrailer,
@@ -1360,17 +1362,37 @@ export async function cmdConnect(c: Ctx, positionals: string[], flags: Flags): P
 }
 
 async function cmdSleepWake(c: Ctx, verb: 'sleep' | 'wake', positionals: string[], flags: Flags): Promise<number> {
-  const target = targetOrLinked(c, positionals, `usage: hobby ${verb} <target>`)
+  const target = targetOrLinked(c, positionals, `usage: hobby ${verb} <target>${verb === 'sleep' ? ' [--force]' : ''}`)
   const { resource } = await resolveTarget(c.api, target, c.config.project)
   // The API says start/stop because those are mechanical container
   // operations; the CLI says wake/sleep because that is the domain, per the
   // brief. This is the one place that translation happens.
-  const result = verb === 'sleep' ? await c.api.stopResource(resource.id) : await c.api.startResource(resource.id)
+  //
+  // `hobby sleep` without --force is refused by the daemon while the
+  // resource is mid-work or has sessions open (issue #162); the refusal
+  // names --force. With it, what was interrupted is reported on stderr.
+  if (verb === 'wake') {
+    const result = await c.api.startResource(resource.id)
+    if (flags.json) {
+      c.io.out(JSON.stringify(result))
+    } else {
+      c.io.out(renderResourceLine(result.resource))
+    }
+    return 0
+  }
 
+  const result = await c.api.stopResource(resource.id, { force: flags.force === true })
   if (flags.json) {
     c.io.out(JSON.stringify(result))
-  } else {
-    c.io.out(renderResourceLine(result.resource))
+    return 0
+  }
+  c.io.out(renderResourceLine(result.resource))
+  const ended = result.endedConnections ?? 0
+  if (ended > 0) {
+    c.io.err(`terminated ${ended} open ${ended === 1 ? 'session' : 'sessions'}`)
+  }
+  if (result.wasBusy === true) {
+    c.io.err('it was mid-work when stopped; interrupted work is retried where the kind supports it (queue batches are redelivered)')
   }
   return 0
 }
@@ -1549,6 +1571,10 @@ export async function cmdQueueLs(c: Ctx, positionals: string[], flags: Flags): P
     c.io.out(project)
     for (const entry of queues) {
       c.io.out(`  ${renderQueueLine(entry)}`)
+      const tuning = renderQueueTuningLine(entry)
+      if (tuning !== null) {
+        c.io.out(`      ${tuning}`)
+      }
     }
   }
   return 0
@@ -1730,7 +1756,11 @@ export async function cmdQueueSet(c: Ctx, positionals: string[], flags: Flags): 
   if (flags.json) {
     c.io.out(JSON.stringify(result))
   } else {
-    c.io.out(renderResourceLine(result.resource))
+    // Echo the value that was set (issue #170), not the generic resource
+    // line, which said "jobs  queue  running" and left the user to trust
+    // that something changed.
+    const applied = result.resource.kind === 'queue' ? result.resource.config.retentionSeconds : retentionSeconds
+    c.io.out(`${result.resource.name}  retention ${renderDuration(applied)}`)
   }
   return 0
 }
@@ -1808,19 +1838,23 @@ export async function cmdEject(c: Ctx, positionals: string[], flags: Flags): Pro
     }
     c.io.err('')
   }
-  c.io.err('data directories:')
-  for (const dir of result.dataDirs) {
-    c.io.err(`  ${dir}`)
-  }
-  // Each directory above is the postgres home directory the compose file
-  // mounts, not PGDATA itself: postgres 18's image places the real data
-  // directory in a subdirectory named after the major version (see
-  // docs/decisions/0003's 2026-08-07 amendment). A stock `postgres` binary,
-  // or pg_dump/pg_ctl run by hand outside Hobbyist, must point at that
-  // subdirectory, not the directory listed above.
-  c.io.err('a stock postgres binary or pg_ctl points at the subdirectory beneath each one, for example:')
-  for (const dir of result.dataDirs) {
-    c.io.err(`  ${resolvePgdataPath(dir)}`)
+  // A queue-only project has no data directory to list (issue #169), so the
+  // two headings below would otherwise print with nothing under them.
+  if (result.dataDirs.length > 0) {
+    c.io.err('data directories:')
+    for (const dir of result.dataDirs) {
+      c.io.err(`  ${dir}`)
+    }
+    // Each directory above is the postgres home directory the compose file
+    // mounts, not PGDATA itself: postgres 18's image places the real data
+    // directory in a subdirectory named after the major version (see
+    // docs/decisions/0003's 2026-08-07 amendment). A stock `postgres` binary,
+    // or pg_dump/pg_ctl run by hand outside Hobbyist, must point at that
+    // subdirectory, not the directory listed above.
+    c.io.err('a stock postgres binary or pg_ctl points at the subdirectory beneath each one, for example:')
+    for (const dir of result.dataDirs) {
+      c.io.err(`  ${resolvePgdataPath(dir)}`)
+    }
   }
   if (release) {
     c.io.err(
@@ -1882,6 +1916,20 @@ export async function cmdAdopt(c: Ctx, positionals: string[], flags: Flags): Pro
 // an error anyone should be able to make by pasting the wrong line from
 // `hobby snapshot ls`, and naming the project is also what gives the
 // in-place confirmation prompt something meaningful to ask for.
+// Whether the project a snapshot was taken of still exists. Only the
+// not-found answer is swallowed: any other failure is the daemon's to report.
+async function projectExists(c: Ctx, name: string): Promise<boolean> {
+  try {
+    await c.api.getProject(name)
+    return true
+  } catch (err) {
+    if (err instanceof HobbyError && err.code === 'project_not_found') {
+      return false
+    }
+    throw err
+  }
+}
+
 async function snapshotOfProject(c: Ctx, project: string, id: string): Promise<void> {
   const { snapshots } = await c.api.listSnapshots(project)
   if (!snapshots.some((snapshot) => snapshot.snapshotId === id)) {
@@ -2017,8 +2065,13 @@ export async function cmdSnapshotRestore(c: Ctx, positionals: string[], flags: F
 
   if (inPlace) {
     c.io.out(`restored ${project} in place from snapshot ${id}`)
-  } else {
+  } else if (await projectExists(c, project)) {
     c.io.out(`restored snapshot ${id} into new project ${result.project.name}. ${project} is untouched`)
+  } else {
+    // Snapshots outlive their project (listSnapshotsRoute answers for a
+    // deleted one), so this is an ordinary way to arrive here, and "is
+    // untouched" would describe a project that no longer exists (issue #181).
+    c.io.out(`restored snapshot ${id} into new project ${result.project.name}. ${project} itself no longer exists; the snapshot outlived it`)
   }
   for (const resource of result.resources) {
     c.io.out(`  ${renderResourceLine(resource)}`)

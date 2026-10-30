@@ -9,6 +9,7 @@ export {
   tickOnce,
   type DrainableQueue,
   type QueueTickOptions,
+  type RetentionTarget,
 } from './tick.js'
 export {
   MAX_BATCH_BYTES,
@@ -35,6 +36,9 @@ export {
   MAX_RETENTION_SECONDS,
   expireLeases,
   sweepRetention,
+  insertDeadLetter,
   peek,
+  type PeekedMessage,
+  type PeekedState,
   purge,
 } from './broker.js'

@@ -3,12 +3,15 @@
 # Ground truth is packages/cli/src/daemon/routes.ts (dispatch, one manual
 # match per route) and packages/cli/src/daemon/wire.ts (what a resource
 # looks like once it leaves the process). This file is derived from those
-# two files at main dadf477 and must be re-derived when they change; it is
-# documentation, not a schema the daemon enforces.
+# two files, plus packages/cli/src/daemon/studio/routes.ts for the /studio
+# routes and the authentication gate, and must be re-derived when they
+# change (last re-derived 2026-10-30, issue #143); it is documentation, not
+# a schema the daemon enforces.
 #
-# Not documented here: the queue endpoint (branch `queues`, unmerged at the
-# time of writing) and the wake router's proxy ports (5432/HTTP), which
-# speak Postgres wire protocol and plain HTTP respectively, not this API.
+# Not documented here: the queue producer endpoint on queuePort (a container's
+# producer shim speaks to it with a per-queue bearer token, ADR 0013) and the
+# wake router's proxy ports (5432/HTTP), which speak Postgres wire protocol
+# and plain HTTP respectively, not this API.
 
 openapi: 3.1.0
 info:
@@ -18,11 +21,24 @@ info:
     The only control surface. CLI, Studio and MCP are three clients of this
     one API; none of them touches Postgres or Docker directly.
 
-    Listeners: the daemon answers on loopback (`apiPort`, default 7432) with
-    no auth, because local shell access is the root of trust (ADR 0008).
-    The same routes fronted through the Studio listener are gated by the
-    operator session cookie; only `/studio/login`, `/studio/logout`,
-    `/studio/session` and `/v1/health` answer unauthenticated there.
+    Listeners. The unix socket (`~/.hobby/hobby.sock`, the CLI's and MCP's
+    transport) is unauthenticated: filesystem permissions are the whole
+    story. The loopback TCP listener (`apiPort`, default 7432), which also
+    serves Studio and is what Caddy or a tailnet exposes, is gated
+    (`isAuthenticated`, packages/cli/src/daemon/studio/routes.ts): every
+    `/v1` route there needs either the operator session cookie
+    (`hobby_studio_session`, set by POST /studio/login) or an API token as
+    `Authorization: Bearer <token>` (ADR 0018). Only `/studio/login`,
+    `/studio/logout`, `/studio/session`, `/studio/token` and `/v1/health`
+    answer unauthenticated there (`UNAUTHENTICATED_PATHS`). A request that
+    fails the gate gets 401 `{ "error": { "code": "unauthorized", "message":
+    "authentication required" } }`.
+
+    Tokens are minted by `hobby token create` on the box (a file under
+    `~/.hobby`, never a route) or by POST /studio/token with the operator
+    password (what `hobby login` calls). `hobby token ls` and `hobby token
+    rm` are likewise local file operations with no route, so a leaked token
+    cannot list or mint others.
 
     Every error is the one envelope: `{ "error": { "code", "message",
     "hint"? } }`. Codes map to statuses as: project_not_found and
@@ -40,7 +56,15 @@ info:
     promise).
 servers:
   - url: http://127.0.0.1:7432
-    description: daemon loopback API (default apiPort)
+    description: daemon loopback API (default apiPort). Gated, see below.
+  - url: http://localhost
+    description: the unix socket at ~/.hobby/hobby.sock, ungated. The host part is ignored.
+
+# Applies to every /v1 route on the loopback listener. Not to the unix
+# socket, and not to the /studio routes, which each say what they need.
+security:
+  - sessionCookie: []
+  - bearerToken: []
 
 paths:
   /v1/health:
@@ -53,6 +77,19 @@ paths:
               schema:
                 type: object
                 properties: { status: { const: ok } }
+
+  /v1/version:
+    get:
+      summary: "The daemon's build version (CLI_VERSION, packages/cli/src/version.ts). Its own route rather than a field on /v1/health because health answers unauthenticated on the studio listener and a build number should not."
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version]
+                properties:
+                  version: { type: string }
 
   /v1/preflight:
     get:
@@ -134,7 +171,7 @@ paths:
 
   /v1/projects/{name}/resources:
     post:
-      summary: Create a resource. Kind-discriminated body; postgres needs only a name, app needs a source XOR image, worker needs a source directory holding a wrangler manifest.
+      summary: "Create a resource. Kind-discriminated body; postgres and queue need only a name, app takes a source or a prebuilt image or neither (a record with no code, ADR 0014), worker takes a source directory holding a wrangler manifest or neither. A queue is created with no consumer; a worker's manifest binds one."
       parameters: [{ $ref: "#/components/parameters/projectName" }]
       requestBody:
         content:
@@ -157,20 +194,29 @@ paths:
                       properties:
                         path: { type: string }
                         dockerfile: { type: string, default: Dockerfile }
-                    image: { type: string, description: "Prebuilt image; exactly one of source and image" }
+                        buildArgs: { type: object, additionalProperties: { type: string }, description: "docker build --build-arg values, persisted for redeploys, redacted on the wire" }
+                    image: { type: string, description: "Prebuilt image reference; at most one of source and image. No CLI verb sends this, and no route changes it afterwards" }
                     port: { type: integer, default: 3000, description: "Container port, handed to the process as $PORT" }
                     env: { type: object, additionalProperties: { type: string } }
                     databaseResourceId: { type: string, description: "Sibling postgres id; expanded to DATABASE_URL at start" }
                 - type: object
-                  required: [kind, name, source]
+                  required: [kind, name]
                   properties:
                     kind: { const: worker }
                     name: { type: string }
                     source:
                       type: object
                       required: [path]
-                      properties: { path: { type: string } }
+                      properties:
+                        path: { type: string, description: "The directory holding the wrangler manifest" }
+                        context: { type: [string, "null"], description: "The build context when it is not path: a workspace root to install from. null clears a stored one" }
+                    env: { type: object, additionalProperties: { type: string } }
                     databaseResourceId: { type: string }
+                - type: object
+                  required: [kind, name]
+                  properties:
+                    kind: { const: queue }
+                    name: { type: string }
       responses:
         "201":
           content:
@@ -179,6 +225,14 @@ paths:
                 type: object
                 properties:
                   resource: { $ref: "#/components/schemas/WireResource" }
+                  ignored:
+                    type: array
+                    description: "Worker only; wrangler keys read and not acted on, each { key, reason }. Empty for other kinds."
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string }
+                        reason: { type: string }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
@@ -228,6 +282,87 @@ paths:
                 properties:
                   project: { $ref: "#/components/schemas/Project" }
         "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{name}/branch:
+    post:
+      summary: "Make a new project from a clone of this one's postgres data directories (branchProject, packages/cli/src/daemon/branch.ts). A sleeping source is cloned as it rests; an awake one is quiesced and resumed, and the pause is reported. Refused for a source holding an app, worker or queue, a released source, a resource mid-transition or failed, a taken name, or a pinned source that is awake unless allowPause. The branch starts asleep, unpinned, with the box-wide sleep policy."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, description: "The new project's name" }
+                allowPause: { type: boolean, default: false, description: "Accept stopping a pinned, awake source for the copy" }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+                  resources: { type: array, items: { $ref: "#/components/schemas/WireResource" } }
+                  clone: { type: string, enum: [reflink, copy], description: "copy if any resource degraded to a byte copy (ext4)" }
+                  paused: { type: array, items: { type: string }, description: "Names of the source's resources stopped for the clone and started again; empty for a sleeping source" }
+                  pausedMs: { type: [integer, "null"], description: "How long the source was paused; an upper bound that includes the idle check" }
+                  resumeFailures: { type: array, items: { type: string }, description: "Source resources that did not start again after the copy" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{name}/crons:
+    get:
+      summary: "Every worker cron trigger in the project ([triggers] crons in the wrangler manifest), with its next and last firing (listCrons, packages/cli/src/daemon/crons.ts). Read-only; the scheduler is not driven through the API."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  crons:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        worker: { type: string, description: "The worker resource's name" }
+                        resourceId: { type: string }
+                        cron: { type: string, description: "The schedule as written in the manifest" }
+                        nextAt: { type: string, format: date-time }
+                        lastAt: { type: [string, "null"], format: date-time }
+                        lastOutcome:
+                          type: [object, "null"]
+                          properties:
+                            outcome: { type: string, enum: [ok, exception, unreachable, wake_failed] }
+                            detail: { type: string }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{name}/queues:
+    get:
+      summary: "The project's queues with depth, the age of the oldest message, and the bound consumer (listQueuesRoute)."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queues:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        resource: { $ref: "#/components/schemas/WireQueueResource" }
+                        depth: { type: integer }
+                        oldestMessageAgeSeconds: { type: [integer, "null"], description: "null when the queue is empty" }
+                        consumer: { oneOf: [{ $ref: "#/components/schemas/WireResource" }, { type: "null" }], description: "The bound consumer worker, null when none" }
         "404": { $ref: "#/components/responses/Error" }
 
   /v1/projects/{name}/adopt:
@@ -475,9 +610,119 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
 
+  /v1/resources/{id}/env:
+    post:
+      summary: "Change an app's or worker's variables without a rebuild (envRoute). `unset` is applied first, then `set`; `replace` swaps the whole set and is what --env-file sends. The new values are read at the next start: a running resource is stopped and its container removed, so the next request wakes it with them. Postgres answers usage. Values are never returned."
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                set: { type: object, additionalProperties: { type: string } }
+                unset: { type: array, items: { type: string } }
+                replace: { type: object, additionalProperties: { type: string }, description: "When present, the complete new set; set and unset then apply on top of it" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resource: { $ref: "#/components/schemas/WireResource" }
+                  keys: { type: array, items: { type: string }, description: "The variable names now set, sorted. Never the values" }
+                  stopped: { type: boolean, description: "Whether a running resource was stopped so the change takes effect" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/resources/{id}/queue/messages:
+    get:
+      summary: "Peek at the oldest messages without leasing them (peekQueueRoute), so looking does not change what the consumer receives. Queue resources only."
+      parameters:
+        - $ref: "#/components/parameters/resourceId"
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 10, minimum: 1 }
+          description: "How many. Anything that is not a positive number means the default of 10 (DEFAULT_PEEK_LIMIT)"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items: { $ref: "#/components/schemas/QueueMessage" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: "Enqueue one message (enqueueRoute). The body is any JSON value and is stored as contentType json. A message for a sleeping consumer wakes it on the next delivery tick."
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { description: "Any JSON value" }
+                delaySeconds: { type: integer, minimum: 0, maximum: 86400, description: "Whole seconds before the message becomes deliverable (MAX_DELAY_SECONDS, packages/queue/src/broker.ts)" }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, description: "The message id" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: "Delete every message in the queue (purgeQueueRoute). A queue whose database file does not exist yet reports 0."
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  purged: { type: integer, description: "How many messages were deleted" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/resources/{id}/queue/retention:
+    post:
+      summary: "Change how long messages are kept (setRetentionRoute). Cloudflare's own bounds: 60 seconds to 14 days. Note that retention is swept only for a queue with a drainable consumer, so it does not empty a dead letter queue."
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [retentionSeconds]
+              properties:
+                retentionSeconds: { type: integer, minimum: 60, maximum: 1209600 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resource: { $ref: "#/components/schemas/WireQueueResource" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
   /studio/login:
     post:
-      summary: Operator sign-in. Sets the session cookie. Wrong password, unknown password and no-credential-yet all fail with the same generic message; repeated failures are throttled per source.
+      summary: "Operator sign-in. Sets the session cookie (hobby_studio_session). Wrong password, unknown password and no-credential-yet all fail with the same generic message; repeated failures are throttled per source address. Unauthenticated by necessity."
+      security: []
       requestBody:
         content:
           application/json:
@@ -486,18 +731,60 @@ paths:
               required: [password]
               properties: { password: { type: string } }
       responses:
-        "200": { description: "Session cookie set" }
+        "200":
+          description: "Session cookie set"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { ok: { type: boolean, const: true } }
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
 
   /studio/logout:
     post:
-      summary: Revoke the session; the cookie stops authenticating immediately.
+      summary: Revoke the session and clear the cookie; it stops authenticating immediately.
+      security: []
       responses:
-        "200": { description: "Revoked" }
+        "200":
+          description: "Revoked"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { ok: { type: boolean, const: true } }
+
+  /studio/token:
+    post:
+      summary: "Issue an API token for another machine, the CLI's half of login (tokenHandler, ADR 0018). Same password, same throttle and same indistinguishable failure as /studio/login. Deliberately not reachable with a token: a token cannot mint another. The plaintext is returned once and only an argon2id hash is stored."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, name]
+              properties:
+                password: { type: string }
+                name: { type: string, description: "A label so the token can be revoked by name with hobby token rm; hobby login defaults it to the hostname" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, name]
+                properties:
+                  token: { type: string, description: "The plaintext token. Shown once" }
+                  name: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
 
   /studio/session:
     get:
-      summary: Whether the presented cookie authenticates. Unauthenticated by design (it is how the login screen decides to render).
+      summary: Whether the presented cookie authenticates. Unauthenticated by design (it is how the login screen decides to render). A bearer token is not consulted here.
+      security: []
       responses:
         "200":
           content:
@@ -507,6 +794,17 @@ paths:
                 properties: { authenticated: { type: boolean } }
 
 components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: hobby_studio_session
+      description: "Set by POST /studio/login (SESSION_COOKIE_NAME, packages/cli/src/daemon/studio/session.ts). Tried first because it is the cheap, in-memory check."
+    bearerToken:
+      type: http
+      scheme: bearer
+      description: "An API token from hobby token create or POST /studio/token, as `Authorization: Bearer <token>` (readBearerToken, studio/tokens.ts). Verified against the argon2id hashes stored on the box; revoked by hobby token rm."
+
   parameters:
     projectName:
       name: name
@@ -604,7 +902,37 @@ components:
         - $ref: "#/components/schemas/WirePostgresResource"
         - $ref: "#/components/schemas/WireAppResource"
         - $ref: "#/components/schemas/WireWorkerResource"
+        - $ref: "#/components/schemas/WireQueueResource"
       discriminator: { propertyName: kind }
+
+    WireQueueResource:
+      allOf:
+        - $ref: "#/components/schemas/ResourceCommon"
+        - type: object
+          properties:
+            kind: { const: queue }
+            config:
+              type: object
+              description: "QueueConfig (packages/core/src/types.ts). Holds no user secret; the queueToken a producer container presents to the daemon's enqueue listener is the one field redacted (wire.ts)."
+              properties:
+                retentionSeconds: { type: integer }
+                consumerResourceId: { type: [string, "null"], description: "The worker bound as consumer through its wrangler manifest, null when none" }
+                maxBatchSize: { type: [integer, "null"] }
+                maxBatchTimeoutSeconds: { type: [integer, "null"] }
+                maxRetries: { type: [integer, "null"] }
+                retryDelaySeconds: { type: [integer, "null"] }
+                deadLetterQueue: { type: [string, "null"] }
+                queueToken: { type: string, description: "Always <redacted>" }
+
+    QueueMessage:
+      description: "A message as peek returns it (toWireMessage, routes.ts): the stored body decoded back to the JSON value that was enqueued, or the raw string if it does not decode."
+      type: object
+      properties:
+        id: { type: string }
+        timestampMs: { type: integer, description: "When it was enqueued, milliseconds since the epoch" }
+        attempts: { type: integer, description: "Delivery attempts so far" }
+        contentType: { type: string, enum: [json, text, bytes, v8] }
+        body: { description: "The JSON value, or a string" }
 
     ResourceCommon:
       type: object

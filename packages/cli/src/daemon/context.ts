@@ -239,8 +239,16 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
       // is what makes this one wake path serve every kind: an app waking on
       // an HTTP request and a database waking on a connection are the same
       // call here, differing only in which handler answers it.
+      //
+      // One log line per wake and per failed wake (issue #73): before these,
+      // the daemon's output said nothing between its listen line and its
+      // exit, and "why did my database sleep, and did it wake?" had no
+      // answer anyone could read.
+      const label = `${ctx.store.getProject(resource.projectId)?.name ?? resource.projectId}/${resource.name}`
+      const startedAt = Date.now()
       try {
         await ctx.kinds.get(resource.kind).start(ctx, resource)
+        console.error(`wake: ${label} (${resource.kind}) woke in ${Date.now() - startedAt}ms`)
       } catch (err) {
         // Counted from the entry as it stands now, not the one read above:
         // an explicit start may have cleared it while this attempt ran, and
@@ -251,11 +259,16 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
         // wakeTimeoutMs, and measuring from its beginning would give it a
         // shorter rest than a start that failed at once.
         const failures = (refusals.get(resourceId)?.failures ?? 0) + 1
+        const lastError = redactWakeError(err instanceof Error ? err.message : String(err))
         refusals.set(resourceId, {
           failures,
           retryAt: now() + wakeRetryDelayMs(failures),
-          lastError: redactWakeError(err instanceof Error ? err.message : String(err)),
+          lastError,
         })
+        console.error(
+          `wake: ${label} (${resource.kind}) failed after ${Date.now() - startedAt}ms: ${lastError}; ` +
+            `automatic wakes are refused for ${formatRetryDelay(wakeRetryDelayMs(failures))}`
+        )
         throw err
       }
       refusals.delete(resourceId)
@@ -619,6 +632,7 @@ export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
   function targetFor(resource: PostgresResource, databaseSegmentIsResource: boolean): ProxyTarget {
     return {
       resourceId: resource.id,
+      label: `${ctx.store.getProject(resource.projectId)?.name ?? resource.projectId}/${resource.name}`,
       host: '127.0.0.1',
       port: resource.config.hostPort,
       state: resource.state,

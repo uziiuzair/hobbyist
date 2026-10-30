@@ -19,6 +19,7 @@ import {
   type ActivitySink,
   type ComputeRuntime,
   type ContainerSpec,
+  type ContainerStatus,
   type HobbyConfig,
   type Paths,
   type PostgresResource,
@@ -340,6 +341,32 @@ function notListening(config: WorkerConfig, waitedMs: number): HobbyError {
   )
 }
 
+// A container that exited before the control port ever answered (issue
+// #55): a runner that threw at init, a missing dependency, a module that
+// fails to load. Reported after one poll, not after the whole wakeTimeoutMs,
+// and as wake_failed rather than wake_timeout, with the last lines it
+// printed in the hint.
+async function exitedOnBoot(deps: WorkerDeps, config: WorkerConfig, result: ReadinessResult): Promise<HobbyError> {
+  const code = result.exited?.exitCode
+  let tail = ''
+  try {
+    tail = (await deps.runtime.logs(config.containerName, { tail: 20 })).trim()
+  } catch {
+    // Best effort: the crash is the error, not the missing log.
+  }
+  return new HobbyError(
+    'wake_failed',
+    `${config.containerName} exited${code === null || code === undefined ? '' : ` with code ${code}`} after ${result.waitedMs}ms, before it started serving`,
+    tail.length === 0
+      ? 'the worker crashed on boot and printed nothing. `hobby logs` shows anything it prints on the next attempt.'
+      : `the worker crashed on boot. the last lines it printed:\n${tail}`
+  )
+}
+
+async function notReady(deps: WorkerDeps, config: WorkerConfig, result: ReadinessResult): Promise<HobbyError> {
+  return result.exited !== undefined ? exitedOnBoot(deps, config, result) : notListening(config, result.waitedMs)
+}
+
 // Sends a real request and requires a real response. A plain TCP connect
 // cannot answer this against a published container port: Docker's port proxy
 // binds the host port the instant the container is created, so connect()
@@ -406,15 +433,29 @@ function defaultProbeFactory(): (config: WorkerConfig) => () => Promise<boolean>
   return (config: WorkerConfig) => httpProbe(config.controlPort, { method: 'GET', path: '/' })
 }
 
+interface ReadinessResult {
+  ready: boolean
+  waitedMs: number
+  // Set when the container stopped running before the probe ever passed
+  // (issue #55); see exitedOnBoot.
+  exited?: { exitCode: number | null }
+}
+
 async function waitListening(
   probe: () => Promise<boolean>,
-  opts: { pollMs: number; timeoutMs: number }
-): Promise<{ ready: boolean; waitedMs: number }> {
+  opts: { pollMs: number; timeoutMs: number; status?: () => Promise<ContainerStatus> }
+): Promise<ReadinessResult> {
   const started = Date.now()
   const deadline = started + opts.timeoutMs
   for (;;) {
     if (await probe()) {
       return { ready: true, waitedMs: Date.now() - started }
+    }
+    if (opts.status !== undefined) {
+      const status = await opts.status().catch(() => null)
+      if (status !== null && status.exists && !status.running) {
+        return { ready: false, waitedMs: Date.now() - started, exited: { exitCode: status.exitCode } }
+      }
     }
     if (Date.now() >= deadline) {
       return { ready: false, waitedMs: Date.now() - started }
@@ -702,6 +743,7 @@ export async function startWorker(deps: WorkerDeps, resource: WorkerResource): P
   const result = await waitListening(probe, {
     pollMs: deps.config.readinessPollMs,
     timeoutMs: deps.config.wakeTimeoutMs,
+    status: () => deps.runtime.inspect(resource.config.containerName),
   })
   if (!result.ready) {
     // Same as startPostgres's stopAfterFailedStart (#59): a container left
@@ -709,7 +751,7 @@ export async function startWorker(deps: WorkerDeps, resource: WorkerResource): P
     // times out again. Best effort, the readiness error is the one to keep.
     await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC }).catch(() => undefined)
     deps.store.setResourceState(resource.id, 'failed')
-    throw notListening(resource.config, result.waitedMs)
+    throw await notReady(deps, resource.config, result)
   }
 
   deps.store.setResourceState(resource.id, 'running')

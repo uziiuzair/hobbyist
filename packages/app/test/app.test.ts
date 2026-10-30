@@ -857,3 +857,47 @@ test('createAppResource hands the build output to onBuildLogs', async () => {
   })
   assert.match(logs, /fake build of hobby\/blog-web:/)
 })
+
+// Issue #55: a container that exits on boot is reported after one poll, with
+// its exit code and the last lines it printed, not as a 30 second readiness
+// timeout that blames a loopback bind.
+test('an app whose process exits on boot fails fast with the exit code and its last log lines', async () => {
+  const runtime = createFakeRuntime()
+  runtime.logs = async (): Promise<string> => 'boom: missing SECRET_KEY\n'
+  let probes = 0
+  const deps = buildDeps({
+    runtime,
+    config: testConfig({ wakeTimeoutMs: 10_000, readinessPollMs: 5 }),
+    appProbeFactory: (config) => async () => {
+      probes++
+      // The process died between the start and the first probe.
+      runtime._state.set(config.containerName, { exists: true, running: false, exitCode: 1 })
+      return false
+    },
+  })
+  const project = makeProject(deps.store)
+
+  const started = Date.now()
+  await assert.rejects(
+    () =>
+      createAppResource(deps, {
+        project,
+        name: 'crash',
+        source: null,
+        image: 'crash:latest',
+        containerPort: 3000,
+        env: {},
+        databaseResourceId: null,
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof HobbyError)
+      assert.equal(err.code, 'wake_failed')
+      assert.match(err.message, /exited with code 1/)
+      assert.match(err.hint ?? '', /missing SECRET_KEY/)
+      assert.doesNotMatch(err.hint ?? '', /0\.0\.0\.0/, 'the loopback hint is for a process that is alive and not listening')
+      return true
+    }
+  )
+  assert.equal(probes, 1, 'noticed on the first failed probe, not after the timeout')
+  assert.ok(Date.now() - started < 5000)
+})

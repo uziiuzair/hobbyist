@@ -40,8 +40,18 @@ your client                proxy                      daemon
     |<-- handshake done -----|                           |
 ```
 
-The client sees one slightly slow connection. It never sees an error, never
-retries, and never needs to know the database was not there a moment ago.
+The client sees one slightly slow connection. When the wake succeeds, which is
+the ordinary case, it sees no error, does not retry, and never needs to know
+the database was not there a moment ago.
+
+When the wake fails, the client does see an error, deliberately. A start that
+did not reach readiness within `wakeTimeoutMs`, or a container that will not
+boot, is answered with a Postgres error on the held connection rather than a
+hang, the resource is marked `failed`, and the daemon refuses further automatic
+wakes for a growing interval: 30 seconds after the first failure, doubling, up
+to 15 minutes (`WAKE_RETRY_BASE_MS` and `WAKE_RETRY_CAP_MS`,
+`packages/cli/src/daemon/wake-backoff.ts`). `hobby ls` shows the refusal and
+the retry time, `hobby logs` shows why, and `hobby wake` retries at once.
 
 Two properties of that diagram are load bearing:
 
