@@ -25,6 +25,7 @@ import {
   cmdQueueRm,
   cmdQueueSend,
   cmdQueueSet,
+  cmdSleep,
   cmdUnpin,
   resolveTarget,
   UsageError,
@@ -1193,4 +1194,43 @@ test('hobby cron ls lists each schedule with next and last, and says so when the
   assert.equal(await cmdCron(ctx, ['ls', 'blog', '--json'], { json: true }), 0)
   assert.equal((JSON.parse(out[0] as string) as { crons: unknown[] }).crons.length, 2)
   await assert.rejects(cmdCron(ctx, ['frob'], {}), UsageError)
+})
+
+// Issue #162: `hobby sleep --force` passes force through, and what the stop
+// interrupted is reported on stderr.
+test('hobby sleep passes --force to the stop route and reports terminated sessions', async () => {
+  const calls: Array<{ id: string; opts: unknown }> = []
+  const out: string[] = []
+  const err: string[] = []
+  const api = {
+    async getProject(_name: string) {
+      return {
+        project: { id: 'p1', name: 'blog' },
+        resources: [{ ...queueResource(), kind: 'postgres', name: 'primary', id: 'primary-id', config: { hostPort: 15432 } }],
+      }
+    },
+    async stopResource(id: string, opts: unknown) {
+      calls.push({ id, opts })
+      return {
+        resource: { id, projectId: 'p1', kind: 'postgres', name: 'primary', state: 'sleeping', config: { hostPort: 15432 }, sizeBytes: null, connectionCount: 0, lastActiveAt: null, createdAt: new Date('2026-01-01') },
+        endedConnections: 2,
+        wasBusy: false,
+      }
+    },
+  }
+  const ctx = {
+    io: { out: (s: string) => out.push(s), err: (s: string) => err.push(s), env: {}, cwd: '/tmp', readLine: async () => '' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  const code = await cmdSleep(ctx, ['blog/primary'], { force: true })
+  assert.equal(code, 0)
+  assert.deepEqual(calls, [{ id: 'primary-id', opts: { force: true } }])
+  assert.deepEqual(err, ['terminated 2 open sessions'])
+  assert.ok(out[0]?.startsWith('primary  postgres  sleeping'))
+
+  await cmdSleep(ctx, ['blog/primary'], {})
+  assert.deepEqual(calls[1]?.opts, { force: false })
 })

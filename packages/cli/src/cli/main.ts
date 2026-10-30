@@ -185,7 +185,7 @@ const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]>
   ['env', 'hobby env unset <target> K...', 'remove variables'],
   ['pg', 'hobby pg create --project <p> <name>', 'the explicit form, for a second database'],
   ['connect', 'hobby connect <target>', 'open psql against it'],
-  ['sleep', 'hobby sleep <target>', 'put it to sleep'],
+  ['sleep', 'hobby sleep <target> [--force]', 'put it to sleep; --force ends open sessions and in-flight work'],
   ['wake', 'hobby wake <target>', 'wake it back up'],
   ['pin', 'hobby pin <project>', 'never auto-sleep this project'],
   ['unpin', 'hobby unpin <project> [--sleep-after N]', 'auto-sleep it again'],
@@ -420,7 +420,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
         return await cmdConnect(ctx, positionals, flags)
       }
       case 'sleep': {
-        const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'force'] })
         return await cmdSleep(ctx, positionals, flags)
       }
       case 'wake': {

@@ -58,3 +58,36 @@ watcher that is itself a meaningful load has defeated its own purpose.
   weekend, but killing connections is rude and surprising.
 - What is the default idle threshold, and is it the same for a database someone
   is actively developing against as for one serving a deployed app?
+
+## Amendment, 2026-10-30: direct sessions, manual sleep, and a log line per sleep (issues #70, #73, #160, #162)
+
+- **An idle direct session counts as presence (#70).** `checkActiveQuery`
+  (`packages/pg/src/activity-guard.ts`) used to count only non-idle backends,
+  so a GUI client or a pooler connected straight to the container's port and
+  idle between queries was terminated mid-session, while the "In scope" list
+  above promised the guard protected exactly that person. It now counts every
+  client backend that is not hobby's own: the daemon's connections (the
+  guard, the readiness probe, the SQL route, the size query) set
+  `application_name = 'hobby'` and are excluded. This is the same reading a
+  proxied idle session already got, since the hibernator requires zero
+  proxied connections before it consults the guard at all. The cost is the
+  one the "Open questions" below already name: a session left open keeps the
+  database awake until it closes.
+- **Queue deliveries, cron firings and alarms are activity (#160).**
+  `queueDeliverFn` (`packages/cli/src/daemon/queues.ts`) touches the
+  consumer's idle clock after each delivered batch, `server.ts` touches it
+  after each cron firing and whenever the alarm mirror finds an alarm due.
+  A consumer fed one message every 12 seconds no longer sleeps and pays a
+  cold start between every pair.
+- **`hobby sleep` is guarded (#162, #73).** `stopResourceRoute`
+  (`packages/cli/src/daemon/routes.ts`) runs the kind's guard (`guardFor`) and
+  reads the proxied connection count before stopping. In use without
+  `--force` is a `conflict` naming what would be interrupted; `--force` stops
+  it and the response carries `endedConnections` and `wasBusy`, which the CLI
+  prints on stderr. An `unreachable` guard does not block a manual sleep,
+  unlike an automatic one.
+- **One log line per sleep, wake and failed wake (#73).** The hibernator
+  logs `project/name (kind) slept after Ns idle (threshold Ts)`; `buildWake`
+  (`packages/cli/src/daemon/context.ts`) logs `woke in Nms` and, on failure,
+  the redacted reason and how long automatic wakes are refused; a manual stop
+  logs too. Previously the daemon printed its listen line and nothing else.

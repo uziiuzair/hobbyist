@@ -72,12 +72,24 @@ function deadline(ms: number): Promise<void> {
 import type { ActivityGuardResult } from '@hobby.sh/core'
 export type { ActivityGuardResult }
 
+// Every client session that is not hobby's own counts, idle ones included
+// (issue #70). Before this, only a non-idle backend counted, so a GUI client
+// or a pooler connected straight to the container's port, idle between
+// queries, was cut off mid-session with "terminating connection due to
+// administrator command", while docs/hibernation/CLAUDE.md promised this
+// guard protected exactly that person. A proxied idle session already keeps
+// a database awake (the hibernator requires zero proxied connections), so
+// counting a direct idle session the same way is the consistent reading.
+// The daemon's own connections carry HOBBY_APPLICATION_NAME and are
+// excluded, alongside this guard's own backend.
+export const HOBBY_APPLICATION_NAME = 'hobby'
+
 const ACTIVE_QUERY_SQL = `
   SELECT count(*)::int AS active
   FROM pg_stat_activity
   WHERE backend_type = 'client backend'
     AND pid <> pg_backend_pid()
-    AND state IS DISTINCT FROM 'idle'
+    AND application_name IS DISTINCT FROM '${HOBBY_APPLICATION_NAME}'
 `
 
 export async function checkActiveQuery(
@@ -90,6 +102,7 @@ export async function checkActiveQuery(
     user: config.superuser,
     password: config.password,
     database: config.database,
+    application_name: HOBBY_APPLICATION_NAME,
     connectionTimeoutMillis: timeoutMs,
     query_timeout: GUARD_QUERY_TIMEOUT_MS,
     statement_timeout: GUARD_QUERY_TIMEOUT_MS,

@@ -209,9 +209,13 @@ reading a process list can see the password.
 
 If `psql` is not on `PATH`, the connection string is printed instead.
 
-### `hobby sleep <target>`
+### `hobby sleep <target> [--force]`
 
-Stops the resource now, rather than waiting for it to go idle. Accepts `--json`.
+Stops the resource now, rather than waiting for it to go idle. Refused while
+the resource is in use: a database with a running query or an open session
+(proxied or direct), a worker with a queue batch in flight or an alarm due
+within 30 seconds. `--force` stops it anyway and reports what it interrupted;
+an interrupted queue batch is redelivered. Accepts `--json`.
 
 ### `hobby wake <target>`
 
