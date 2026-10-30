@@ -40,6 +40,7 @@ import {
   cmdUnpin,
   cmdVersion,
   cmdWake,
+  errorEnvelope,
   UsageError,
   type Ctx,
   type Flags,
@@ -91,6 +92,12 @@ export interface FlagSpec {
 // text after `=`). Anything starting with `--` that is not declared throws
 // UsageError, which main.ts's dispatch maps to exit 2; there is no silent
 // fallthrough for an unrecognized flag.
+//
+// Single-dash tokens are flags too (issue #97): `hobby logs -h` used to
+// send `-h` to the daemon as a target, and `hobby ls -j` ignored `-j`. The
+// only short flag is `-h`, an alias for `--help`; every other `-x` is an
+// unknown flag. A negative number (`-5`) stays a positional, since it is a
+// value and nothing here declares short flags that could collide with one.
 export function parseArgs(args: string[], spec: FlagSpec): ParsedArgs {
   const boolFlags = new Set(spec.bool ?? [])
   const valueFlags = new Set(spec.value ?? [])
@@ -101,6 +108,13 @@ export function parseArgs(args: string[], spec: FlagSpec): ParsedArgs {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string
     if (!arg.startsWith('--')) {
+      if (arg.length > 1 && arg.startsWith('-') && !/^-\d/.test(arg)) {
+        if (arg === '-h') {
+          flags.help = true
+          continue
+        }
+        throw new UsageError(`unknown flag: ${arg}`)
+      }
       positionals.push(arg)
       continue
     }
@@ -178,6 +192,7 @@ const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]>
   ['deploy', 'hobby deploy <root> --dockerfile <f> --name <n>', 'an app from a monorepo: root as context, one Dockerfile each'],
   ['deploy', 'hobby deploy [path] --build-arg K=V', 'a docker build argument (repeatable)'],
   ['deploy', 'hobby deploy <dir> --context <root>', 'a worker inside a workspace: install from the root'],
+  ['deploy', 'hobby deploy [path] --verbose', 'the same, printing the build output when it succeeds too'],
   ['create', 'hobby create <kind> <name> --project <p>', 'a resource with no code yet'],
   ['env', 'hobby env set <target> K=V...', 'set variables on an app or worker, applied on its next wake'],
   ['env', 'hobby env set <target> --env-file <f>', 'the same, from a dotenv file'],
@@ -272,28 +287,45 @@ function isHelpFlag(arg: string): boolean {
   return arg === '--help' || arg === '-h'
 }
 
-function handleError(err: unknown, io: Io): number {
+// Under --json the error is one JSON line on stderr in the daemon API's own
+// envelope, `{"error":{"code","message","hint"}}` (HobbyError.toWire,
+// packages/core/src/errors.ts), so a script parses failures the same way
+// it parses the daemon's (issue #109). The exit code is unchanged either
+// way. `json` is whether `--json` appears anywhere in argv rather than the
+// verb's parsed flag, because the error may be the parse itself.
+function handleError(err: unknown, io: Io, json: boolean): number {
   if (err instanceof DaemonUnreachableError) {
-    io.err(err.message)
-    io.err('hint: is the daemon running? try `hobby init` then `hobby daemon`.')
+    const hint = 'is the daemon running? try `hobby init` then `hobby daemon`.'
+    if (json) {
+      io.err(errorEnvelope('daemon_unreachable', err.message, hint))
+    } else {
+      io.err(err.message)
+      io.err(`hint: ${hint}`)
+    }
     return EXIT_DAEMON_UNREACHABLE
   }
   if (err instanceof HobbyError) {
-    io.err(err.message)
-    if (err.hint !== undefined) {
-      io.err(`hint: ${err.hint}`)
+    if (json) {
+      io.err(JSON.stringify(err.toWire()))
+    } else {
+      io.err(err.message)
+      if (err.hint !== undefined) {
+        io.err(`hint: ${err.hint}`)
+      }
     }
     return exitCodeForError(err.code)
   }
   if (err instanceof UsageError) {
-    io.err(err.message)
+    io.err(json ? errorEnvelope('usage', err.message) : err.message)
     return EXIT_USAGE
   }
-  io.err(err instanceof Error ? err.message : String(err))
+  const message = err instanceof Error ? err.message : String(err)
+  io.err(json ? errorEnvelope('internal', message) : message)
   return EXIT_OPERATION_FAILED
 }
 
 export async function run(argv: string[], io: Io): Promise<number> {
+  const json = argv.includes('--json')
   try {
     const [argv0, ...rest] = argv
     // `--version` is the spelling every other CLI answers to, so it is an
@@ -351,8 +383,8 @@ export async function run(argv: string[], io: Io): Promise<number> {
       return await cmdLogin(io, paths, positionals, flags)
     }
     if (cmd === 'logout') {
-      const { positionals } = parseArgs(rest, {})
-      return cmdLogout(io, paths, positionals)
+      const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+      return cmdLogout(io, paths, positionals, flags)
     }
     if (cmd === 'remote') {
       const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
@@ -371,16 +403,22 @@ export async function run(argv: string[], io: Io): Promise<number> {
     }
 
     if (cmd === 'studio') {
-      const sub = rest[0]
+      // The subcommand is the first positional, not the first token, so
+      // `hobby studio --json` is the verb with a flag rather than "unknown
+      // studio subcommand: --json" (issue #109). passwd accepts --json and
+      // prints nothing for it: it has no data, only a prompt.
+      const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+      const sub = positionals[0]
       if (sub === 'passwd') {
-        parseArgs(rest.slice(1), {})
+        if (positionals.length > 1) {
+          throw new UsageError(`usage: hobby studio passwd (got: ${positionals.slice(1).join(' ')})`)
+        }
         return await cmdStudioPasswd(io, paths)
       }
       if (sub !== undefined) {
         throw new UsageError(`unknown studio subcommand: ${sub}`)
       }
-      parseArgs(rest, {})
-      return cmdStudio(io, paths, config)
+      return cmdStudio(io, paths, config, undefined, Boolean(flags.json))
     }
 
     // ADR 0018: the same Api over either transport. A configured remote wins;
@@ -445,7 +483,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
       }
       case 'deploy': {
         const { positionals, flags } = parseArgs(rest, {
-          bool: ['json'],
+          bool: ['json', 'verbose'],
           value: ['project', 'name', 'port', 'kind', 'database', 'env-file', 'dockerfile', 'context'],
           multi: ['env', 'build-arg'],
         })
@@ -511,7 +549,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
       }
     }
   } catch (err) {
-    return handleError(err, io)
+    return handleError(err, io, json)
   }
 }
 

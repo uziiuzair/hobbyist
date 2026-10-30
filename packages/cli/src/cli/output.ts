@@ -14,6 +14,7 @@
 // in the brief required it, and inventing a `new Date(x)` coercion here
 // would be more type-widening than the requirement is worth.
 
+import type { Project } from '@hobby.sh/core'
 import type { PreflightReport } from '../daemon/preflight.js'
 import { formatRetryDelay } from '../daemon/wake-backoff.js'
 import type { WireResource, WireSnapshotManifest } from '../daemon/wire.js'
@@ -30,8 +31,13 @@ export function formatBytes(bytes: number): string {
   return `${value.toFixed(1)} ${units[unitIndex]}`
 }
 
-// Postgres is reached on its own port through the proxy, so its line shows
-// that. An app or worker is reached by hostname instead (its port is an
+// Postgres is reached through the proxy, and its line says how: `hobby
+// connect <project>/<name>` (issue #103). It used to show the container's
+// own host port, which bypasses the wake router: a connection there fails
+// while the database sleeps, and an idle one is terminated by hibernation
+// (packages/pg/src/activity-guard.ts). The port is still in `--json` as
+// `config.hostPort`, for whoever knows what they are doing with it. An app
+// or worker is reached by hostname instead (its port is an
 // implementation detail nobody types), and an `undeployed` one (Task 4:
 // created with no source and nothing built yet) gets an explicit trailer,
 // because "no code yet" is the one piece of information this line exists to
@@ -48,13 +54,14 @@ export function formatBytes(bytes: number): string {
 // only as error text in whichever application happened to connect. `now` is
 // a parameter so the countdown is testable; it is a relative time rather
 // than a date, which is what this file's header asks of human output.
-export function renderResourceLine(resource: WireResource, now: number = Date.now()): string {
-  return `${renderResourceColumns(resource)}${wakeRefusalTrailer(resource, now)}`
+export function renderResourceLine(resource: WireResource, now: number = Date.now(), projectName?: string): string {
+  return `${renderResourceColumns(resource, projectName)}${wakeRefusalTrailer(resource, now)}`
 }
 
-function renderResourceColumns(resource: WireResource): string {
+function renderResourceColumns(resource: WireResource, projectName: string | undefined): string {
   if (resource.kind === 'postgres') {
-    return `${resource.name}  ${resource.kind}  ${resource.state}  port ${resource.config.hostPort}`
+    const target = projectName === undefined ? resource.name : `${projectName}/${resource.name}`
+    return `${resource.name}  ${resource.kind}  ${resource.state}  connect: hobby connect ${target}`
   }
   // A queue is reached by neither: no port anybody dials, no hostname
   // anybody types, so the line simply ends. Its own branch rather than a
@@ -68,6 +75,25 @@ function renderResourceColumns(resource: WireResource): string {
   }
   const trailer = resource.state === 'undeployed' ? '  (no code yet)' : ''
   return `${resource.name}  ${resource.kind}  ${resource.state}  ${resource.config.hostname}${trailer}`
+}
+
+// The project line's sleep policy, when it is worth a word (issue #111):
+// `(pinned)` for a null threshold, which `hobby ls` never showed, and the
+// threshold itself when it differs from the daemon's default. A project on
+// the box-wide default says nothing, so the common case stays one word.
+// `boxDefault` undefined means the daemon predates reporting it, and then
+// only the pin is shown: nothing here guesses what the default is.
+export function sleepPolicyTrailer(
+  project: Pick<Project, 'sleepAfterSeconds'>,
+  boxDefault: number | null | undefined
+): string {
+  if (project.sleepAfterSeconds === null) {
+    return '  (pinned)'
+  }
+  if (boxDefault !== undefined && project.sleepAfterSeconds !== boxDefault) {
+    return `  (sleeps after ${project.sleepAfterSeconds}s)`
+  }
+  return ''
 }
 
 // Long enough to recognise the failure ("exec format error", "did not become

@@ -66,8 +66,9 @@ function fakeCtx(
     failResource?: Error
     failDelete?: Error
     tailnetConnectionString?: string
-    existingResources?: Array<{ id: string; name: string; kind: string }>
+    existingResources?: Array<{ id: string; name: string; kind: string; state?: string }>
     cwd?: string
+    projectMissing?: boolean
   } = {}
 ): {
   ctx: Ctx
@@ -128,6 +129,12 @@ function fakeCtx(
       }
     },
     async getProject(name: string) {
+      // `projectMissing`: the project does not exist until this fake's
+      // createProject has been called for it, which is what lets a test
+      // drive cmdDeploy's create-the-project-first path.
+      if (opts.projectMissing === true && !recorded.created.includes(name)) {
+        throw new HobbyError('project_not_found', `no project named ${name}`)
+      }
       return {
         project: { id: 'p1', name, networkName: `hobby-${name}`, sleepAfterSeconds: 300, createdAt: new Date() },
         resources: opts.existingResources ?? [],
@@ -217,22 +224,28 @@ test('hobby unpin --sleep-after sends that threshold', async () => {
   assert.deepEqual(out, ['project prod: sleeps after 120s idle'])
 })
 
-test('hobby unpin without a flag falls back to the box default', async () => {
+// Issue #110: no flag sends no value, so the daemon's box-wide default
+// applies rather than whatever this process resolved from its own env and
+// cwd. The CLI's own config is deliberately not consulted at all.
+test('hobby unpin without a flag sends no threshold and lets the daemon default decide', async () => {
   const { ctx, recorded } = fakeCtx()
   ctx.config = { ...ctx.config, sleepAfterSeconds: 300 }
 
   const code = await cmdUnpin(ctx, ['prod'], {})
 
   assert.equal(code, 0)
-  assert.deepEqual(recorded.sleepPolicies, [{ project: 'prod', sleepAfterSeconds: 300 }])
+  assert.deepEqual(recorded.sleepPolicies, [{ project: 'prod', sleepAfterSeconds: undefined }])
 })
 
-test('hobby unpin refuses to guess when the box default is itself null', async () => {
-  const { ctx, recorded } = fakeCtx()
-  ctx.config = { ...ctx.config, sleepAfterSeconds: null }
+// Issue #111: pinning wakes nothing, so a project with anything asleep is
+// told it will not sleep once woken, rather than "pinned awake".
+test('hobby pin on a project with a sleeping resource says it will not sleep once woken', async () => {
+  const { ctx, out } = fakeCtx({ existingResources: [{ id: 'r1', name: 'primary', kind: 'postgres', state: 'sleeping' }] })
 
-  await assert.rejects(cmdUnpin(ctx, ['prod'], {}), UsageError)
-  assert.deepEqual(recorded.sleepPolicies, [], 'nothing was sent')
+  const code = await cmdPin(ctx, ['prod'], {})
+
+  assert.equal(code, 0)
+  assert.deepEqual(out, ['project prod: pinned: it will not sleep once woken'])
 })
 
 test('hobby unpin rejects a non-integer threshold', async () => {
@@ -377,7 +390,12 @@ test('hobby create makes a record and no container', async () => {
 // refusal is decidable before kind detection ever touches the filesystem,
 // see cmdDeploy's own comment on why that check runs first.
 test('deploying onto a name held by another kind refuses rather than replacing', async () => {
-  const { ctx } = fakeCtx({ existingResources: [{ id: 'x1', name: 'site', kind: 'postgres' }] })
+  // A real Dockerfile, since the kind is detected before the daemon is
+  // consulted: a directory with nothing to deploy is its own error.
+  const cwd = mkdtempSync(join(tmpdir(), 'hobby-kind-conflict-'))
+  mkdirSync(join(cwd, 'site'))
+  writeFileSync(join(cwd, 'site', 'Dockerfile'), 'FROM scratch\n')
+  const { ctx } = fakeCtx({ existingResources: [{ id: 'x1', name: 'site', kind: 'postgres' }], cwd })
 
   await assert.rejects(() => cmdDeploy(ctx, ['./site'], { project: 'blog' }), /is a postgres/)
 })
@@ -1193,4 +1211,176 @@ test('hobby cron ls lists each schedule with next and last, and says so when the
   assert.equal(await cmdCron(ctx, ['ls', 'blog', '--json'], { json: true }), 0)
   assert.equal((JSON.parse(out[0] as string) as { crons: unknown[] }).crons.length, 2)
   await assert.rejects(cmdCron(ctx, ['frob'], {}), UsageError)
+})
+
+// Issue #81: --port and --database used to be accepted and dropped on a
+// redeploy, so the obvious fix for a wrong port did nothing.
+test('hobby deploy --port and --database reach the redeploy as containerPort and databaseResourceId', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'hobby-redeploy-flags-'))
+  mkdirSync(join(cwd, 'site'))
+  writeFileSync(join(cwd, 'site', 'Dockerfile'), 'FROM scratch\n')
+  const { ctx, recorded } = fakeCtx({
+    cwd,
+    existingResources: [
+      { id: 'a1', name: 'site', kind: 'app' },
+      { id: 'db1', name: 'primary', kind: 'postgres' },
+    ],
+  })
+
+  assert.equal(await cmdDeploy(ctx, ['./site'], { project: 'blog', port: '8080', database: 'primary' }), 0)
+
+  assert.deepEqual(recorded.deploys, [
+    { id: 'a1', input: { source: { path: join(cwd, 'site') }, containerPort: 8080, databaseResourceId: 'db1' } },
+  ])
+})
+
+// Issue #87 and #77: a worker is named after its manifest's `name`, as
+// wrangler names it, and a directory with only a wrangler.json is a worker.
+test('hobby deploy names a worker after the manifest, and detects wrangler.json', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'hobby-worker-name-'))
+  mkdirSync(join(cwd, 'my-worker-dir'))
+  writeFileSync(
+    join(cwd, 'my-worker-dir', 'wrangler.json'),
+    JSON.stringify({ name: 'api', main: 'src/index.ts', compatibility_date: '2026-08-01' })
+  )
+  const { ctx, recorded } = fakeCtx({ cwd })
+
+  assert.equal(await cmdDeploy(ctx, ['./my-worker-dir'], { project: 'blog' }), 0)
+  assert.deepEqual(recorded.resources, ['blog/api'])
+  assert.equal(recorded.resourceBodies[0]?.body.kind, 'worker')
+
+  // --name still wins over the manifest.
+  recorded.resources.length = 0
+  assert.equal(await cmdDeploy(ctx, ['./my-worker-dir'], { project: 'blog', name: 'other' }), 0)
+  assert.deepEqual(recorded.resources, ['blog/other'])
+
+  // A manifest with no name falls back to the directory.
+  mkdirSync(join(cwd, 'nameless'))
+  writeFileSync(join(cwd, 'nameless', 'wrangler.toml'), 'main = "src/index.ts"\ncompatibility_date = "2026-08-01"\n')
+  recorded.resources.length = 0
+  assert.equal(await cmdDeploy(ctx, ['./nameless'], { project: 'blog' }), 0)
+  assert.deepEqual(recorded.resources, ['blog/nameless'])
+})
+
+// Issue #80: a deploy that created its project and then failed must not
+// leave the empty project behind. One that left a resource (a failed first
+// deploy with a row the user will retry) keeps it.
+test('hobby deploy removes a project it created when the deploy fails and left nothing in it', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'hobby-deploy-rollback-'))
+  mkdirSync(join(cwd, 'site'))
+  writeFileSync(join(cwd, 'site', 'Dockerfile'), 'FROM scratch\n')
+  const boom = new HobbyError('invalid_name', 'j is too short')
+
+  const empty = fakeCtx({ cwd, projectMissing: true, failResource: boom })
+  await assert.rejects(cmdDeploy(empty.ctx, ['./site'], { project: 'fresh', name: 'j' }), (err: unknown) => err === boom)
+  assert.deepEqual(empty.recorded.created, ['fresh'])
+  assert.deepEqual(empty.recorded.deleted, ['fresh'], 'the empty project this deploy created is removed again')
+
+  const occupied = fakeCtx({
+    cwd,
+    projectMissing: true,
+    failResource: boom,
+    existingResources: [{ id: 'a1', name: 'site', kind: 'app', state: 'failed' }],
+  })
+  await assert.rejects(cmdDeploy(occupied.ctx, ['./site'], { project: 'fresh' }))
+  assert.deepEqual(occupied.recorded.deleted, [], 'a project with a resource in it is left alone')
+
+  // An existing project is never touched by the rollback.
+  const existing = fakeCtx({ cwd, failResource: boom })
+  await assert.rejects(cmdDeploy(existing.ctx, ['./site'], { project: 'blog' }))
+  assert.deepEqual(existing.recorded.deleted, [])
+})
+
+// Issue #93: the build output reaches the terminal. On failure, as a block
+// on stderr with the hint pointing at it; on success, only under --verbose.
+test('hobby deploy prints the build output on a build failure, and on success only with --verbose', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'hobby-build-output-'))
+  mkdirSync(join(cwd, 'site'))
+  writeFileSync(join(cwd, 'site', 'Dockerfile'), 'FROM scratch\n')
+  const err: string[] = []
+  const out: string[] = []
+  let fail = true
+  const api = {
+    async getProject() {
+      return { project: { id: 'p1', name: 'blog' }, resources: [{ id: 'a1', name: 'site', kind: 'app' }] }
+    },
+    async deployResource() {
+      if (fail) {
+        throw new HobbyError('build_failed', 'docker build failed for hobby/blog-site:1', 'Step 1/3 : FROM scratch\nerror: boom\n')
+      }
+      return {
+        resource: { id: 'a1', kind: 'app', name: 'site', state: 'sleeping', config: { image: 'img:2', hostname: 'site.blog.localhost' } },
+        image: 'img:2',
+        logs: 'Step 1/3 : FROM scratch\nSuccessfully built abc\n',
+        url: 'http://site.blog.localhost:7433',
+      }
+    },
+  }
+  const ctx = {
+    io: { out: (s: string) => out.push(s), err: (s: string) => err.push(s), env: {}, cwd, readLine: async () => '' },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  await assert.rejects(cmdDeploy(ctx, ['./site'], { project: 'blog' }), (thrown: unknown) => {
+    assert.ok(thrown instanceof HobbyError)
+    assert.equal(thrown.code, 'build_failed')
+    assert.equal(thrown.hint, 'the build output is above')
+    return true
+  })
+  assert.deepEqual(err, ['build output:', '  Step 1/3 : FROM scratch', '  error: boom'])
+
+  // Under --json the error keeps its hint for the envelope, and nothing is
+  // printed as text.
+  err.length = 0
+  await assert.rejects(cmdDeploy(ctx, ['./site'], { project: 'blog', json: true }), (thrown: unknown) => {
+    assert.ok(thrown instanceof HobbyError)
+    assert.match(thrown.hint ?? '', /error: boom/)
+    return true
+  })
+  assert.deepEqual(err, [])
+
+  fail = false
+  assert.equal(await cmdDeploy(ctx, ['./site'], { project: 'blog' }), 0)
+  assert.deepEqual(err, [], 'a successful build is quiet by default')
+  // Issue #94: the URL is the daemon's, not a hard-coded https://.
+  assert.ok(out.includes('  url       http://site.blog.localhost:7433'))
+
+  err.length = 0
+  assert.equal(await cmdDeploy(ctx, ['./site'], { project: 'blog', verbose: true }), 0)
+  assert.deepEqual(err, ['build output:', '  Step 1/3 : FROM scratch', '  Successfully built abc'])
+})
+
+// Issue #114: without psql the connection string is still printed, and the
+// hint says how to install it.
+test('hobby connect without psql on PATH prints the connection string and an install hint, exit 1', async () => {
+  const out: string[] = []
+  const err: string[] = []
+  const api = {
+    async getProject() {
+      return { project: { id: 'p1', name: 'blog' }, resources: [{ id: 'r1', kind: 'postgres', name: 'primary' }] }
+    },
+    async getConnection() {
+      return { connectionString: 'postgres://postgres:secret@127.0.0.1:5432/blog' }
+    },
+  }
+  const ctx = {
+    io: {
+      out: (s: string) => out.push(s),
+      err: (s: string) => err.push(s),
+      env: { PATH: mkdtempSync(join(tmpdir(), 'hobby-no-psql-')) },
+      cwd: '/tmp',
+      readLine: async () => '',
+    },
+    api: api as unknown as Api,
+    paths: {} as Ctx['paths'],
+    config: {} as Ctx['config'],
+  } as Ctx
+
+  assert.equal(await cmdConnect(ctx, ['blog'], {}), 1)
+  assert.deepEqual(out, ['postgres://postgres:secret@127.0.0.1:5432/blog'])
+  assert.equal(err[0], 'psql was not found on PATH')
+  assert.ok(err.some((line) => line.includes('brew install libpq')))
+  assert.ok(err.some((line) => line.includes('apt install postgresql-client')))
 })
