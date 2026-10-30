@@ -183,7 +183,43 @@ function findConfigFile(cwd: string): string | null {
 function readFileConfig(cwd: string): Partial<HobbyConfig> {
   const path = findConfigFile(cwd)
   if (path === null) return {}
-  return JSON.parse(readFileSync(path, 'utf8')) as Partial<HobbyConfig>
+  const text = readFileSync(path, 'utf8')
+  try {
+    return JSON.parse(text) as Partial<HobbyConfig>
+  } catch (err) {
+    // Every command resolves config before it does anything, so a malformed
+    // hobby.json used to break all of them with a bare parse error that
+    // named neither the file nor where it was found (issue #106). The path is
+    // absolute because findConfigFile walks up from cwd: the broken file may
+    // be several directories above where the command ran.
+    throw new HobbyError(
+      'usage',
+      `hobby.json at ${resolve(path)} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      'fix the file, or delete it; `hobby link <project>` writes a fresh one'
+    )
+  }
+}
+
+// The unix socket the daemon listens on has to fit in sockaddr_un's
+// sun_path, which is 104 bytes on macOS and the BSDs (108 on Linux), one of
+// which is the terminating NUL. A HOBBY_HOME deep enough to push the socket
+// past that used to fail at `hobby daemon` with a raw `listen EINVAL` and a
+// stack, after `hobby init` had passed (issue #107). Checked at both, by
+// length in bytes, since the limit is bytes and a path may hold more than
+// ASCII. The smaller platform's limit is used everywhere: a HOBBY_HOME that
+// only works on Linux is a surprise waiting for the next box.
+export const SOCKET_PATH_MAX_BYTES = 103
+
+export function assertSocketPathFits(socketPath: string): void {
+  const length = Buffer.byteLength(socketPath, 'utf8')
+  if (length <= SOCKET_PATH_MAX_BYTES) {
+    return
+  }
+  throw new HobbyError(
+    'usage',
+    `the daemon socket path ${socketPath} is ${length} bytes long, and a unix socket path can be at most ${SOCKET_PATH_MAX_BYTES}`,
+    'set HOBBY_HOME to a shorter path; the socket lives at $HOBBY_HOME/hobby.sock'
+  )
 }
 
 // readFileConfig's cast above is unchecked: whatever JSON.parse produced is

@@ -120,6 +120,11 @@ export interface ComputeRuntime {
   // fails with a real error rather than the interface pretending.
   build?(spec: BuildSpec): Promise<string>
   removeImage?(tag: string): Promise<void>
+  // Every `repository:tag` the runtime holds under one repository, for the
+  // two callers that need more than the one tag a resource's config names:
+  // destroying a resource removes every tag it ever built, and a deploy
+  // prunes the ones older than the few kept for rollback (issue #84).
+  listImages?(repository: string): Promise<string[]>
 
   // Runs `command` inside the running container `name`. Optional for the
   // same reason build is: only the online snapshot needs it, and a future
@@ -238,6 +243,10 @@ export function createFakeRuntime(): ComputeRuntime & {
     async removeImage(tag: string): Promise<void> {
       images.delete(tag)
     },
+
+    async listImages(repository: string): Promise<string[]> {
+      return [...images].filter((tag) => tag.startsWith(`${repository}:`))
+    },
     // Exposed for the same reason _specs is: a network that is created and
     // never removed is invisible to every assertion unless a test can see the
     // set. That leak is exactly what eject --release had to stop doing.
@@ -308,4 +317,84 @@ function failedExec(error: HobbyError): ExecStream {
   const done = Promise.reject(error)
   done.catch(() => {})
   return { stdout: Readable.from([]), done, cancel(): void {} }
+}
+
+// The two image housekeeping steps the app and worker kinds share (issue
+// #84). Both are best effort by contract: they return what went wrong as
+// strings rather than throwing, because neither a deploy that just proved
+// its new image serves nor an rm that just tore its container down should
+// fail over a leftover layer on disk. The caller decides whether to log
+// them or collect them into its own failures list.
+//
+// A runtime without listImages (an older adapter, a microVM runtime with
+// no tag model) gets the previous behaviour: only `fallback`, the one tag
+// the resource's config names, is removed.
+export async function removeImageTags(
+  runtime: ComputeRuntime,
+  repository: string,
+  fallback: string | null
+): Promise<string[]> {
+  if (runtime.removeImage === undefined) {
+    return []
+  }
+  const failures: string[] = []
+  const tags = new Set<string>(fallback === null ? [] : [fallback])
+  if (runtime.listImages !== undefined) {
+    try {
+      for (const tag of await runtime.listImages(repository)) {
+        tags.add(tag)
+      }
+    } catch (err) {
+      failures.push(`list images ${repository}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  return [...failures, ...(await removeEach(runtime, [...tags]))]
+}
+
+// How many tags a deploy leaves behind. Three is the current image plus the
+// two before it: the rollback that deployApp and deployWorker perform
+// (issue #78) only ever reaches back one, and the second spare is for a
+// person doing it by hand.
+export const IMAGE_TAGS_TO_KEEP = 3
+
+// Removes every tag under `repository` except the newest `keep`, where
+// newest is by the tag's own value: buildTag and workerTag end every tag
+// with a unix timestamp in seconds, so a numeric sort of the part after the
+// last colon is a sort by build time. `current` is never removed, whatever
+// its position, since it is the image the resource is about to serve from.
+// A tag that does not end in a number is left alone: it was not built by
+// this project's tag scheme and nothing here knows what it is.
+export async function pruneImageTags(
+  runtime: ComputeRuntime,
+  repository: string,
+  current: string,
+  keep: number = IMAGE_TAGS_TO_KEEP
+): Promise<string[]> {
+  if (runtime.listImages === undefined || runtime.removeImage === undefined) {
+    return []
+  }
+  let tags: string[]
+  try {
+    tags = await runtime.listImages(repository)
+  } catch (err) {
+    return [`list images ${repository}: ${err instanceof Error ? err.message : String(err)}`]
+  }
+  const stamped = tags
+    .map((tag) => ({ tag, at: Number(tag.slice(tag.lastIndexOf(':') + 1)) }))
+    .filter((entry) => Number.isFinite(entry.at))
+    .sort((a, b) => b.at - a.at)
+  const stale = stamped.slice(keep).map((entry) => entry.tag).filter((tag) => tag !== current)
+  return removeEach(runtime, stale)
+}
+
+async function removeEach(runtime: ComputeRuntime, tags: string[]): Promise<string[]> {
+  const failures: string[] = []
+  for (const tag of tags) {
+    try {
+      await runtime.removeImage?.(tag)
+    } catch (err) {
+      failures.push(`remove image ${tag}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  return failures
 }
