@@ -299,3 +299,63 @@ the module header. `GET /v1/projects/:name/crons` and `hobby cron ls`
 Not done: a scheduled() run that outlasts the hibernation window with no
 other activity can be slept mid-run; the control request itself does not
 count as activity. Noted in the workers guide rather than fixed here.
+
+## Amendment, 2026-10-30: deploy papercuts (issues #81, #87, #77, #93, #94, #80, #84)
+
+`deployResourceRoute` (`packages/cli/src/daemon/routes.ts`) reads
+`containerPort` (or `port`) and `databaseResourceId` (or `database`, a name
+in the same project, resolved by `readDatabaseBinding`, which refuses a
+non-postgres with `usage` and an unknown one with `resource_not_found`
+before anything builds) and passes them to `deployApp`
+(`packages/app/src/app.ts`) and `deployWorker`
+(`packages/worker/src/worker.ts`), whose option objects grew the fields;
+absent keeps the stored value, null unbinds. `cmdDeploy`'s redeploy branch
+sends `--port` as `containerPort` and `--database` as `databaseResourceId`,
+resolved client-side exactly as the create branch does.
+
+`cmdDeploy` detects the kind before it talks to the daemon, from
+`hasWranglerManifest`, which checks `wrangler.toml`, `wrangler.jsonc` and
+`wrangler.json`, the three `findWranglerManifest` reads. A worker's name is
+`--name`, then the manifest's `name` (`workerNameFromManifest`), then the
+directory; a manifest the daemon would refuse is left for the daemon to
+refuse.
+
+Build output: on a `build_failed` error (`createDockerRuntime().build`,
+`packages/core/src/docker.ts`, puts the whole output in the hint)
+`reportingBuildFailure` in `commands.ts` prints it on stderr as a `build
+output:` block and rethrows with the hint `the build output is above`; under
+`--json` the error is untouched so the envelope carries the output. On
+success it is printed only with `--verbose` (a new bool flag on `deploy`).
+`createResourceRoute` now returns `logs` too: `createAppResource` hands them
+to a new optional `onBuildLogs` callback, since its return type is the
+resource alone, and `createWorkerResource` already returned them.
+
+`url`: `publicUrl` in `routes.ts` computes `https://<hostname>` when
+`ctx.config.caddyEnabled` and `http://<hostname>:<httpPort>` otherwise, on
+the create and deploy responses; `cmdDeploy` prints it and falls back to
+the old `https://` only for a daemon without the field. Studio's
+`DeployResult` type gained the optional field.
+
+`createAppResource`'s catch and `createWorkerResource`'s catch stop and
+remove the container best effort before rethrowing, since a `failed` row is
+outside the hibernator's gate and nothing else would ever stop it (the same
+cleanup `deployApp` and `deployWorker` already did for `wasUndeployed`).
+`cmdDeploy` deletes a project it created itself when the deploy fails and
+`getProject` shows it empty (`removeProjectIfEmpty`); one that received a
+`failed` row is kept for the retry.
+
+`ComputeRuntime.listImages?(repository)` (`packages/core/src/runtime.ts`)
+is implemented by the docker runtime as `docker images --format
+'{{.Repository}}:{{.Tag}}' <repository>` and by the fake from `_images`.
+`removeImageTags` and `pruneImageTags` (same file) are the shared
+best-effort steps: `destroyApp` and `destroyWorker` remove every tag under
+`buildRepository` (`packages/app/src/build.ts`, `hobby/<project>-<resource>`)
+and `workerRepository` (`worker.ts`, with a `-worker` suffix), falling back
+to the one configured tag on a runtime without `listImages`; after a
+successful deploy `IMAGE_TAGS_TO_KEEP` (3) newest tags by timestamp are
+kept, the current image always among them, and older ones removed. Failures
+are collected into the rm's existing failure list or logged on deploy,
+never thrown.
+
+Not verified against a real docker daemon in this change; every path above
+runs against `createFakeRuntime` in the package tests.

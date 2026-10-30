@@ -19,8 +19,17 @@ Three conventions apply throughout:
   one of that project's resources (see `hobby link` below).
 - **`--json`** is accepted by every command that returns data, and prints the
   same object the human output was rendered from, so the two cannot drift.
+  Under `--json`, a failure is one JSON line on stderr in the daemon API's own
+  envelope, `{"error":{"code","message","hint"}}`, whatever raised it; the
+  exit code is the same as without the flag. A daemon that cannot be reached
+  has the code `daemon_unreachable`.
 - **`--help`** (or `-h`) after any verb prints that verb's usage lines and exits
-  0, the same text `hobby help <verb>` prints.
+  0, the same text `hobby help <verb>` prints. `-h` is the only short flag:
+  any other single-dash token (`-j`, `-x`) is a usage error, never a target.
+
+A malformed `hobby.json` (the per-directory config `hobby link` writes) is a
+usage error naming the file's absolute path and the parse error, from every
+verb, since every verb reads it.
 
 ### `hobby help [verb]`
 
@@ -44,6 +53,11 @@ Prepares the host. Creates `~/.hobby`, checks that Docker is reachable, and
 inspects the filesystem for reflink support and the host networking Caddy would
 need. Warns rather than failing on either.
 
+It refuses a `HOBBY_HOME` so deep that the daemon's socket path
+(`$HOBBY_HOME/hobby.sock`) would exceed 103 bytes, the most a unix socket path
+can hold on macOS, and says what the length is and to use a shorter
+`HOBBY_HOME`. `hobby daemon` makes the same check before it binds.
+
 Accepts `--json`.
 
 ### `hobby daemon`
@@ -66,8 +80,17 @@ that database to accept queries, and prints a connection string.
 ### `hobby ls`
 
 Every project, with every resource and its sleep state. A released project is
-still listed, marked `(released, not managed)`. An `undeployed` app or worker is
-marked `(no code yet)`.
+still listed, marked `(released, not managed)`. A pinned project is marked
+`(pinned)`, and one whose idle threshold differs from the daemon's default is
+marked `(sleeps after Ns)`; a project on the default says nothing. An
+`undeployed` app or worker is marked `(no code yet)`.
+
+A Postgres line ends with how to reach it, `connect: hobby connect
+<project>/<name>`, rather than a port. The container's own host port is in
+`--json` as `config.hostPort`, and only there: a connection to it bypasses the
+wake router, so it fails while the database sleeps and an idle session on it
+is terminated by hibernation. Dial the proxy (the connection string `hobby
+connect` prints) instead.
 
 A resource whose last automatic wake failed is marked with when the daemon
 will try it again and a short form of the error. Until then a connection or
@@ -77,8 +100,8 @@ A successful wake resets it. `hobby wake` retries at once, and `hobby logs`
 shows why the start failed.
 
 ```
-blog
-  primary  postgres  running  port 15000
+blog  (pinned)
+  primary  postgres  running  connect: hobby connect blog/primary
   site     app       sleeping  site.blog.example.com
   api      app       failed  api.blog.example.com  (wake refused, retry in 3m 12s: docker start failed)
 ```
@@ -125,6 +148,11 @@ Accepts `--json`.
 ### `hobby rm <target> [--yes]`
 
 Destroys a resource, or a project, with confirmation. `--yes` skips the prompt.
+Every image tag an app or worker built goes with it, not only the one it was
+last serving from, and the resource's now-empty directory under
+`projects/<project>/<resource>/` is removed (a worker's deliberately kept
+`do/` and `state/` are not, so its directory stays while they do). Accepts
+`--json`, which prints `{ deleted: true }`.
 
 ## Code
 
@@ -138,15 +166,33 @@ Both present is an error rather than a guess.
 | Flag | What |
 |---|---|
 | `--project <p>` | Which project it belongs to |
-| `--name <n>` | The resource name |
-| `--port <n>` | The port your process listens on inside the container. Apps only |
+| `--name <n>` | The resource name. For a worker it defaults to the manifest's `name`, as wrangler names it, then to the directory |
+| `--port <n>` | The port your process listens on inside the container. Apps only. On a redeploy it replaces the stored port |
 | `--env-file <f>` | Variables from a dotenv file, replacing the resource's current set |
 | `--env K=V` | One variable, repeatable. Wins over the same key in `--env-file` |
 | `--dockerfile <f>` | The Dockerfile, relative to `[path]`, when it is not `<path>/Dockerfile`. Apps only |
 | `--build-arg K=V` | A `docker build --build-arg`, repeatable, persisted for redeploys. Apps only |
 | `--context <dir>` | The build context when it is not `[path]`: a workspace root the worker's install needs. Workers only |
+| `--database <r>` | A Postgres resource in the same project to bind as `DATABASE_URL` (apps) or the `DB` hyperdrive binding (workers). On a redeploy it replaces the stored binding |
 | `--kind app\|worker` | Only needed when the directory is ambiguous |
+| `--verbose` | Print the build output on stderr when the build succeeds too |
 | `--json` | Machine-readable output |
+
+The URL printed is the one that answers: `https://<hostname>` when Caddy is
+on, otherwise `http://<hostname>:<httpPort>` on the daemon's own HTTP router,
+which is the only listener on a box with Caddy off (the default). The daemon
+computes it and returns it as `url` on the create and deploy responses.
+
+When a build fails, its output is printed on stderr as a block before the
+error, which then points at it. A successful build is quiet unless
+`--verbose` is passed. After a successful deploy the newest three image tags
+under the resource's repository (`hobby/<project>-<resource>`, workers with a
+`-worker` suffix) are kept for rollback and older ones removed.
+
+A deploy that had to create its project and then fails before putting a
+resource in it removes that project again, so a refused name or a build error
+does not leave an empty project behind. A project that did get a resource,
+even a `failed` one, is kept for the retry.
 
 `[path]` is the build context for an app, so a monorepo deploys each app from
 the root with `--dockerfile` and `--name`. For a worker, `[path]` is the
@@ -207,7 +253,10 @@ reading a process list can see the password.
 `--json` prints `connectionString` and, when the daemon has a tailnet address,
 `tailnetConnectionString`.
 
-If `psql` is not on `PATH`, the connection string is printed instead.
+If `psql` is not on `PATH`, the connection string is printed instead, with a
+hint on installing it (`brew install libpq` and link or add it to `PATH` on
+macOS, `apt install postgresql-client` on Debian and Ubuntu), and the exit
+code is 1.
 
 ### `hobby sleep <target>`
 
@@ -228,13 +277,18 @@ thing on the box that has to answer instantly, or anything whose first request
 genuinely cannot afford to wait.
 
 Pinning is per project, not per box, so pinning your status page does not keep
-nine other projects awake with it. Accepts `--json`.
+nine other projects awake with it. It wakes nothing: a project with anything
+asleep is told `pinned: it will not sleep once woken`, and the first
+connection still pays the cold start. Accepts `--json`.
 
 ### `hobby unpin <project> [--sleep-after <seconds>]`
 
-Lets it sleep again. Without the flag it goes back to the box-wide default.
+Lets it sleep again. Without the flag it goes back to the box-wide default,
+meaning the daemon's: the CLI sends no value and the daemon fills in its own
+`sleepAfterSeconds`, so the result does not depend on the environment the
+CLI happened to run in.
 
-If the box-wide default is itself "never sleep", `unpin` refuses rather than
+If the daemon's default is itself "never sleep", `unpin` refuses rather than
 writing a value that would make it a no-op reporting success, and asks you for
 an explicit number.
 
@@ -319,7 +373,8 @@ to send in cleartext.
 ### `hobby logout [url]`
 
 Forgets a remote on this machine. The token stays valid on the box until you
-revoke it there with `hobby token rm`, and the output says so.
+revoke it there with `hobby token rm`, and the output says so. Accepts
+`--json`, which prints `{ forgotten, tokenStillValid: true }`.
 
 ### `hobby remote ls`
 
@@ -375,7 +430,8 @@ containing anything usable.
 
 ### `hobby token rm <name>`
 
-Revokes it. Any machine holding it is locked out on its next request.
+Revokes it. Any machine holding it is locked out on its next request. Accepts
+`--json`, which prints `{ revoked: name }`.
 
 ## Updating
 
@@ -388,6 +444,10 @@ Moves the checkout to the newest release tag and rebuilds it by re-running
 hobby update           # update to the newest tag
 hobby update --check   # print the newest tag and change nothing
 ```
+
+Accepts `--json`: `--check` and "already on" both print
+`{ current, latest, updateAvailable }` (`current` is null on a checkout that
+is not on a tag), and an update prints `{ updated: true, from, to }`.
 
 It refuses if the checkout has *tracked* modifications rather than discarding
 them. Untracked files do not block it, which matters because `bun install`
@@ -412,7 +472,8 @@ updates normally.
 ### `hobby studio`
 
 Prints the Studio URL and opens it. Prints the public host instead of the
-loopback URL when one is configured through Caddy.
+loopback URL when one is configured through Caddy. Accepts `--json`, which
+prints `{ url }` and opens nothing.
 
 ### `hobby studio passwd`
 

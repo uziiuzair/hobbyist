@@ -64,13 +64,15 @@ hobby ls
 
 ```
 blog
-  primary  postgres  running  port 15000
+  primary  postgres  running  connect: hobby connect blog/primary
 ```
 
-The port on that line is the resource's own host port, allocated from the
-15000 to 19999 range for a direct connection to the container. It is not the
-port you normally dial: that is the proxy on 5432, which is what makes wake
-work.
+The line says how to reach it rather than naming a port. The port you dial is
+the proxy's, 5432, which is in the connection string and is what makes wake
+work. The container also has a host port of its own (`hobby ls --json` shows
+it as `config.hostPort`), but connecting there goes around the wake router:
+it fails while the database sleeps, and an idle session on it is ended by
+hibernation.
 
 Leave it alone for five minutes and look again. The state becomes `sleeping` and
 the container is gone. That default lives in `sleepAfterSeconds` and is
