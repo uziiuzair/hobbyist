@@ -208,9 +208,13 @@ shape redacts its values like an app's (`redactConfig`,
 `packages/cli/src/daemon/wire.ts`).
 
 `POST /v1/resources/:id/env` (`envRoute`, `packages/cli/src/daemon/routes.ts`)
-takes `{ set, unset, replace }`, persists to config, and stops a running
-resource so the next wake reads the new values; nothing is rebuilt, because
-both kinds build their container environment at every start. It returns key
+takes `{ set, unset, replace }`, persists to config, stops a running
+resource, and removes its container so the next wake creates one from the
+new config; nothing is rebuilt. (Amended 2026-10-30 after running it: both
+kinds hand the environment to docker at container creation and both start
+paths call `ensureCreated`, a no-op for an existing container, so a stopped
+container restarted on the next wake came back with the old values. The
+route removes it now.) It returns key
 names and `stopped`, never values. Keys are validated against the POSIX name
 rule at the route, not only in the CLI, since MCP and raw POSTs reach it too.
 

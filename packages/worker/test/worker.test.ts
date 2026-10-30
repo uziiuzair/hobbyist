@@ -1389,3 +1389,14 @@ test('the runner accepts POST /scheduled and the control worker calls scheduled(
   assert.match(RUNNER_SOURCE, /env\.USER\.scheduled\(/)
   assert.match(RUNNER_SOURCE, /scheduledTime: payload\.scheduledTime/)
 })
+
+// A missing workerd binary (npm silently skipping a platform-specific optional
+// dependency it could not download) used to produce an image that built, was
+// cached, and died at every wake. The build now proves the runtime loads.
+test('the generated Dockerfile proves miniflare loads before the image is tagged', () => {
+  const dockerfile = renderWorkerDockerfile({ main: 'src/index.ts' })
+  const install = dockerfile.indexOf('npm install --omit=dev')
+  const check = dockerfile.indexOf(`RUN node -e "require('miniflare')"`)
+  assert.ok(install !== -1 && check > install, 'the load check follows the install')
+  assert.ok(check < dockerfile.indexOf('COPY --from=build'), 'and precedes the bundle copy, so a code change does not re-run it')
+})

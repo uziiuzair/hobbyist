@@ -2086,6 +2086,9 @@ test('POST /v1/resources/:id/env merges set and unset into config, stops a runni
     assert.deepEqual(body.keys, ['API_KEY', 'KEEP'])
     assert.equal(body.stopped, true)
     assert.equal(body.resource.state, 'sleeping')
+    // The container is gone, not just stopped: its environment was fixed at
+    // creation, so the next wake has to create it again from the new config.
+    assert.equal((await runtime.inspect(config.containerName)).exists, false)
     assert.deepEqual(body.resource.config.env, { API_KEY: '<redacted>', KEEP: '<redacted>' })
     assert.ok(!JSON.stringify(res.body).includes('sk-secret'))
 
