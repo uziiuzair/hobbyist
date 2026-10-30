@@ -244,6 +244,15 @@ const QUEUE_SHIM_SOURCE = `${CODEC_SOURCE_JS}
 
 export default function makeBinding(env) {
   async function post(messages) {
+    if (!env.HOBBY_QUEUE_URL || !env.HOBBY_QUEUE_TOKEN) {
+      // An ejected worker: hobby's compose output strips the endpoint and
+      // the token (routes.ts's renderCompose), because the broker does not
+      // leave with the stack. Said plainly rather than failing on a fetch to
+      // a null URL.
+      throw new Error(
+        'queue ' + env.HOBBY_QUEUE_NAME + ' has no broker: this worker runs outside hobby, and the hobby queue broker is not part of an ejected stack'
+      )
+    }
     const res = await fetch(env.HOBBY_QUEUE_URL, {
       method: 'POST',
       headers: {
@@ -253,7 +262,19 @@ export default function makeBinding(env) {
       body: JSON.stringify({ queue: env.HOBBY_QUEUE_NAME, messages }),
     })
     if (!res.ok) {
-      throw new Error('enqueue failed: ' + res.status)
+      // The daemon answers every refusal with { error: { message, hint } }
+      // (HobbyError.toWire), and the message names the limit that was hit,
+      // for example "a message is at most 128000 bytes, got 133120". Carry
+      // it through rather than a bare status (issue #164).
+      let detail = ''
+      try {
+        const payload = await res.json()
+        const error = payload && payload.error
+        if (error && typeof error.message === 'string') {
+          detail = ': ' + error.message + (typeof error.hint === 'string' ? ' (' + error.hint + ')' : '')
+        }
+      } catch {}
+      throw new Error('enqueue failed: ' + res.status + detail)
     }
     return await res.json()
   }

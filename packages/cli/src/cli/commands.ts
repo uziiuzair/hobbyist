@@ -38,9 +38,11 @@ import {
   hostNetworkingWarning,
   proxyBindNote,
   reflinkWarning,
+  renderDuration,
   renderPreflight,
   renderQueueLine,
   renderQueueMessageLine,
+  renderQueueTuningLine,
   renderResourceLine,
   renderSnapshotLine,
 } from './output.js'
@@ -1401,6 +1403,10 @@ export async function cmdQueueLs(c: Ctx, positionals: string[], flags: Flags): P
     c.io.out(project)
     for (const entry of queues) {
       c.io.out(`  ${renderQueueLine(entry)}`)
+      const tuning = renderQueueTuningLine(entry)
+      if (tuning !== null) {
+        c.io.out(`      ${tuning}`)
+      }
     }
   }
   return 0
@@ -1582,7 +1588,11 @@ export async function cmdQueueSet(c: Ctx, positionals: string[], flags: Flags): 
   if (flags.json) {
     c.io.out(JSON.stringify(result))
   } else {
-    c.io.out(renderResourceLine(result.resource))
+    // Echo the value that was set (issue #170), not the generic resource
+    // line, which said "jobs  queue  running" and left the user to trust
+    // that something changed.
+    const applied = result.resource.kind === 'queue' ? result.resource.config.retentionSeconds : retentionSeconds
+    c.io.out(`${result.resource.name}  retention ${renderDuration(applied)}`)
   }
   return 0
 }
@@ -1660,19 +1670,23 @@ export async function cmdEject(c: Ctx, positionals: string[], flags: Flags): Pro
     }
     c.io.err('')
   }
-  c.io.err('data directories:')
-  for (const dir of result.dataDirs) {
-    c.io.err(`  ${dir}`)
-  }
-  // Each directory above is the postgres home directory the compose file
-  // mounts, not PGDATA itself: postgres 18's image places the real data
-  // directory in a subdirectory named after the major version (see
-  // docs/decisions/0003's 2026-08-07 amendment). A stock `postgres` binary,
-  // or pg_dump/pg_ctl run by hand outside Hobbyist, must point at that
-  // subdirectory, not the directory listed above.
-  c.io.err('a stock postgres binary or pg_ctl points at the subdirectory beneath each one, for example:')
-  for (const dir of result.dataDirs) {
-    c.io.err(`  ${resolvePgdataPath(dir)}`)
+  // A queue-only project has no data directory to list (issue #169), so the
+  // two headings below would otherwise print with nothing under them.
+  if (result.dataDirs.length > 0) {
+    c.io.err('data directories:')
+    for (const dir of result.dataDirs) {
+      c.io.err(`  ${dir}`)
+    }
+    // Each directory above is the postgres home directory the compose file
+    // mounts, not PGDATA itself: postgres 18's image places the real data
+    // directory in a subdirectory named after the major version (see
+    // docs/decisions/0003's 2026-08-07 amendment). A stock `postgres` binary,
+    // or pg_dump/pg_ctl run by hand outside Hobbyist, must point at that
+    // subdirectory, not the directory listed above.
+    c.io.err('a stock postgres binary or pg_ctl points at the subdirectory beneath each one, for example:')
+    for (const dir of result.dataDirs) {
+      c.io.err(`  ${resolvePgdataPath(dir)}`)
+    }
   }
   if (release) {
     c.io.err(

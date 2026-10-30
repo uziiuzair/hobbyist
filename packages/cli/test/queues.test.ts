@@ -24,7 +24,7 @@ import {
   type WorkerManifest,
 } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
-import { drainableQueues, queueDeliverFn, queueStateOf } from '../src/daemon/queues.js'
+import { drainableQueues, queueDeliverFn, queueStateOf, retentionTargets } from '../src/daemon/queues.js'
 import { createDefaultKindRegistry, type DaemonContext } from '../src/daemon/context.js'
 
 const homes: string[] = []
@@ -288,4 +288,35 @@ test('queueDeliverFn never reaches the network for a consumer that no longer res
   } finally {
     ctx.store.close()
   }
+})
+
+// Issue #167: every queue drainableQueues leaves out is still swept for
+// retention, dead letter queues above all, so what `hobby queue set
+// --retention` promises holds for a queue nobody consumes.
+test('retentionTargets lists the queues drainableQueues leaves out, and nothing it includes', () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'chat', sleepAfterSeconds: 300 })
+  const worker = ctx.store.createResource({ projectId: project.id, kind: 'worker', name: 'api', config: workerConfig() })
+  ctx.store.createResource({
+    projectId: project.id,
+    kind: 'queue',
+    name: 'jobs',
+    config: queueConfig({ consumerResourceId: worker.id, deadLetterQueue: 'jobs-dlq' }),
+  })
+  ctx.store.createResource({ projectId: project.id, kind: 'queue', name: 'jobs-dlq', config: queueConfig({ retentionSeconds: 3600 }) })
+  const released = ctx.store.createProject({ name: 'gone', sleepAfterSeconds: 300 })
+  ctx.store.createResource({ projectId: released.id, kind: 'queue', name: 'orphan', config: queueConfig() })
+  ctx.store.setProjectReleased(released.id, new Date())
+
+  const drained = drainableQueues(ctx).map((q) => q.queueName)
+  assert.deepEqual(drained, ['jobs'])
+
+  const targets = retentionTargets(ctx)
+  assert.deepEqual(
+    targets.map((t) => ({ name: t.queueName, retention: t.retentionSeconds })),
+    [{ name: 'jobs-dlq', retention: 3600 }],
+    'the dead letter queue is swept; the drained queue and the released project are not'
+  )
+  assert.ok(targets[0]?.dbPath.endsWith(join('jobs-dlq', 'queue', 'messages.sqlite')), 'the dead letter queue\'s own file')
+  ctx.store.close()
 })

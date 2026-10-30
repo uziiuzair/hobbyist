@@ -28,7 +28,7 @@ import { createCaddyManager, type CaddyManager } from './caddy.js'
 import { createHttpProxyDeps, createProxyDeps, getOrCreateWake, type DaemonContext } from './context.js'
 import { startHibernator } from './hibernator.js'
 import { startQueueEndpoint } from './queue-endpoint.js'
-import { drainableQueues, queueDeliverFn, queueStateOf } from './queues.js'
+import { drainableQueues, queueDeliverFn, queueStateOf, retentionTargets } from './queues.js'
 import { handleRequest } from './routes.js'
 import { createStudioApp } from './studio/routes.js'
 import { parseTailscaleIp } from './tailnet.js'
@@ -665,6 +665,10 @@ export async function startDaemon(
   // exactly one start.
   const queueTick = startQueueTick({
     queues: () => drainableQueues(ctx),
+    // Every other queue in a managed project, swept for retention only
+    // (issue #167): a dead letter queue or a producer-only queue has no
+    // consumer to deliver to, but its messages still age out on schedule.
+    retention: () => retentionTargets(ctx),
     wake: getOrCreateWake(ctx),
     deliver: queueDeliverFn(ctx),
     stateOf: queueStateOf(ctx),

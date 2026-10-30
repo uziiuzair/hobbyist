@@ -112,23 +112,6 @@ Every one of these is from a Mac, like every other measurement in this repo.
   every end-to-end run passed on macOS. **Established by reading the code, not
   by running it: no Linux box has been touched.**
 
-- **Retention never sweeps a queue with no drainable consumer, which includes
-  every dead letter queue.** `sweepRetention` has exactly one caller,
-  `tickOneQueue` (`packages/queue/src/tick.ts`), and `drainableQueues`
-  (`packages/cli/src/daemon/queues.ts`) excludes any queue whose consumer is
-  null, undeployed or released. A dead letter queue is auto-created with
-  `consumerResourceId: null`, so **dead letters are kept forever**. Three places
-  claim otherwise, including this file's own earlier wording and the comment on
-  `QueueConfig`. No data is lost and the depth is visible in `hobby queue ls`,
-  but it is unbounded disk growth on a one-box product.
-
-- **Consumer tuning keys are sticky across redeploys.** `syncWorkerQueueBindings`
-  (`packages/cli/src/daemon/routes.ts`) writes each key only when the manifest
-  value is non-null, so deleting `max_batch_timeout` or `dead_letter_queue` from
-  a wrangler file and redeploying leaves the old value in force forever.
-  `QueueConfig`'s own comment states the opposite. Undiscoverable, because
-  nothing prints effective tuning values, so fix these two together.
-
 - **The readiness probe writes a stack trace into every worker's log on every
   start.** `defaultProbeFactory` (`packages/worker/src/worker.ts`) POSTs an
   empty body to the control port, and `CONTROL_SOURCE`
@@ -137,11 +120,12 @@ Every one of these is from a Mac, like every other measurement in this repo.
   is one) but it means a real control channel failure and a routine startup
   look identical in `hobby logs`. Smallest fix: read the body as text and
   answer an empty one as a readiness ping without logging.
-- **Nothing prints a consumer's effective tuning values.** Neither
-  `hobby deploy` nor `hobby queue ls` shows `max_batch_size`,
-  `max_batch_timeout`, `max_retries` or `retry_delay`, and the spec claims the
-  deploy does. Given that `max_batch_timeout` turned out to be the dominant
-  term in delivery latency, it is the value users will most want to see.
+- **Queue throughput is one batch per queue per tick (issue #159), and a
+  consumer wake starts only once a batch is ready (issue #163).** Both follow
+  from the tick being sequential, which is also why the delivery timeout is 30
+  seconds rather than Cloudflare's 15 minutes (issue #158, documented in the
+  guide). Making the tick concurrent per queue is the design change that would
+  lift all three, and it is deliberately not made piecemeal.
 - **Retries, dead letters and lease expiry have never met Docker.** They are
   covered against a fake clock in `packages/queue/test/` and no real handler
   has ever thrown, and no real container has ever died mid-batch.
@@ -155,3 +139,47 @@ queue rm` printed "deleted" and left the resource in `destroying` forever:
 the name stayed taken, bare `project` targets turned ambiguous, `hobby
 branch` refused the project and `hobby eject` still exported the queue. It
 now ends with `store.deleteResource`, as every other kind's destroy does.
+
+## Amendment, 2026-10-30: the QA queues lane fixes (issues #156 to #158, #164 to #170)
+
+- **Retention sweeps every queue.** `retentionTargets`
+  (`packages/cli/src/daemon/queues.ts`) lists every queue in a managed project
+  that `drainableQueues` leaves out, and `tickOnce` (`packages/queue/src/tick.ts`)
+  sweeps them after the drainable pass. Dead letter queues and producer-only
+  queues no longer keep messages forever (#167). A file that does not exist yet
+  is left alone rather than created.
+- **The manifest replaces the stored tuning on every deploy.**
+  `syncWorkerQueueBindings` writes all five consumer keys from the manifest,
+  null included, so a key deleted from `wrangler.toml` falls back to the
+  broker's default (#166). `QueueConfig`'s comment was right all along.
+- **Retry delay counts from the delivery result.** `tickOneQueue` reads the
+  clock again after `wake` and `deliver` return and hands that to `applyResult`
+  (#157).
+- **Dead letters keep their identity.** `insertDeadLetter`
+  (`packages/queue/src/broker.ts`) writes the same id, the original
+  `enqueued_at` and the failed attempt count into two new nullable columns,
+  `dead_lettered_at` and `failed_attempts`, added by `openQueueDb` with ALTER
+  TABLE on an older file. `attempts` restarts at 0. Retention on a dead letter
+  counts from `dead_lettered_at` (#168). INSERT OR IGNORE keeps the
+  write-before-delete ordering safe to repeat.
+- **A dead letter queue cannot be deleted while named.** `findBindingWorker`
+  (`packages/cli/src/daemon/routes.ts`) also reads every consumer's
+  `dead_letter_queue`, from the manifest and from the stored `QueueConfig`
+  (#156).
+- **Every failed delivery is logged.** `deliverBatch` returns a `failure`
+  reason on `DeliveryResult`; the tick logs it, logs dead letters, and logs
+  retention sweeps (#158). The 30 second handler limit is now documented in the
+  guide; it is not raised, see the follow-up above.
+- **Producer errors carry the daemon's message.** The shim in
+  `packages/worker/src/runtime-image.ts` reads `error.message` and `error.hint`
+  from a non-2xx response (#164). An ejected worker's shim throws a plain
+  "has no broker" error.
+- **The enqueue route takes a 1 MB body**, and `readJsonBody` drains an
+  oversized body and answers 400 instead of destroying the socket (#165).
+- **Eject strips `queueEndpoint` and `queueToken`** from `HOBBY_WORKER_MANIFEST`
+  in the compose output, and a queue-only project ejects its backlog with a
+  compose file that is comments only (#169).
+- **`hobby queue peek` marks `leased` and `delayed` messages and dead letter
+  provenance; `hobby queue ls` shows retention and effective tuning; `hobby
+  queue set` echoes the value** (#170). `peek()` takes `nowMs` and returns
+  `PeekedMessage`.

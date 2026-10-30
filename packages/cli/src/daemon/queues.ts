@@ -17,6 +17,7 @@ import {
   type DeliveryResult,
   type DrainableQueue,
   type LeasedBatch,
+  type RetentionTarget,
 } from '@hobby.sh/queue'
 import type { ResourceState, WorkerConfig } from '@hobby.sh/core'
 import type { DaemonContext } from './context.js'
@@ -130,6 +131,38 @@ export function drainableQueues(ctx: DaemonContext): DrainableQueue[] {
   }
 
   return queues
+}
+
+// Every queue in a managed project that drainableQueues above leaves out:
+// no consumer bound, a consumer with no deployed code, or a consumer that is
+// not a worker. These still hold messages, and `hobby queue set --retention`
+// still applies to them, so the tick sweeps them for retention and nothing
+// else (issue #167). Dead letter queues are the common case: auto-created
+// with consumerResourceId null, they held their dead letters forever before
+// this existed. Released projects are skipped for the same reason
+// drainableQueues skips them: hobby stopped acting on them.
+//
+// Disjoint from drainableQueues by construction (the same exclusions,
+// inverted), so no queue is swept twice in one tick.
+export function retentionTargets(ctx: DaemonContext): RetentionTarget[] {
+  const drained = new Set(drainableQueues(ctx).map((queue) => queue.resourceId))
+  const targets: RetentionTarget[] = []
+  for (const resource of ctx.store.listResources()) {
+    if (resource.kind !== 'queue' || drained.has(resource.id)) {
+      continue
+    }
+    const project = ctx.store.getProject(resource.projectId)
+    if (project === null || project.releasedAt != null) {
+      continue
+    }
+    targets.push({
+      resourceId: resource.id,
+      queueName: resource.name,
+      dbPath: queueDbPath(ctx.paths, project.name, resource.name),
+      retentionSeconds: resource.config.retentionSeconds,
+    })
+  }
+  return targets
 }
 
 // The tick's stateOf: a plain store read, never a probe. The tick only ever
