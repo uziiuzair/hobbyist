@@ -13,7 +13,7 @@
 // kind of thing `hobby eject` exists to promise we do not do.
 
 import { builtinModules } from 'node:module'
-import { HobbyError, type BuildSpec, type ComputeRuntime } from '@hobby.sh/core'
+import { buildQueuedNote, HobbyError, withBuildLock, type BuildSpec, type ComputeRuntime } from '@hobby.sh/core'
 
 // Pinned, and not to `latest`. As of 2026-08-10 npm's `latest` tag for
 // miniflare is 5.20260801.1-alpha; running an alpha as a server would be a
@@ -513,16 +513,43 @@ controlServer.listen(${CONTAINER_CONTROL_PORT}, '0.0.0.0', () => {
 // A clean shutdown, so a sleep does not look like a crash to whatever the
 // worker was talking to, and so Durable Object storage is flushed rather
 // than recovered on the next wake.
-const shutdown = async () => {
+//
+// The listeners are REPLACED, not added (issue #95). Miniflare's bundle
+// registers a SIGTERM/SIGINT listener of its own at import time
+// (onSignalTerm in its dist: runs its temp-file cleanup callbacks, then
+// process.exit(128 + 15) synchronously). Node runs signal listeners in
+// registration order, so that one ran first and the process was gone
+// before this handler reached its first await: every sleep ended as
+// Exited (143) with mf.dispose() never called. Reproduced and fixed against
+// miniflare 4.20260730.0 in node:22-bookworm-slim under docker stop, see
+// docs/compute/CLAUDE.md. Nothing of theirs is lost by dropping it:
+// mf.dispose() removes Miniflare's own temp paths, and the container's
+// filesystem goes with the container.
+//
+// The deadline is under the daemon's docker stop timeout (worker.ts's
+// STOP_TIMEOUT_SEC, 10s), so a dispose that hangs still ends as an exit
+// this process chose and logged, not a SIGKILL from Docker.
+const SHUTDOWN_DEADLINE_MS = 8000
+const shutdown = async (signal) => {
+  console.log('hobby: ' + signal + ' received, shutting down')
+  const deadline = setTimeout(() => {
+    console.error('hobby: shutdown did not finish within ' + SHUTDOWN_DEADLINE_MS + 'ms, exiting anyway')
+    process.exit(1)
+  }, SHUTDOWN_DEADLINE_MS)
+  deadline.unref()
   try {
     controlServer.close()
     await mf.dispose()
-  } finally {
     process.exit(0)
+  } catch (err) {
+    console.error('hobby: shutdown failed: ' + (err instanceof Error ? err.stack : String(err)))
+    process.exit(1)
   }
 }
-process.on('SIGTERM', shutdown)
-process.on('SIGINT', shutdown)
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.removeAllListeners(signal)
+  process.on(signal, shutdown)
+}
 `
 
 export interface WorkerDockerfileOptions {
@@ -623,8 +650,6 @@ export interface BuildWorkerImageOptions {
   contextPath: string
   dockerfilePath: string
   tag: string
-  memory?: string
-  cpuShares?: number
 }
 
 // The Dockerfile is generated into a directory hobby owns, outside the
@@ -649,8 +674,17 @@ export async function buildWorkerImage(
     dockerfile: opts.dockerfilePath,
     tag: opts.tag,
     exclude: WORKER_CONTEXT_EXCLUDES,
-    ...(opts.memory === undefined ? {} : { memory: opts.memory }),
-    ...(opts.cpuShares === undefined ? {} : { cpuShares: opts.cpuShares }),
   }
-  return runtime.build(spec)
+  // Through the same global lock the app kind takes (core's withBuildLock,
+  // issue #83). This used to call runtime.build directly, so a worker deploy
+  // started during a 47s Next.js build ran alongside it on a box the spec
+  // promised would run one build at a time.
+  const build = runtime.build.bind(runtime)
+  let queued = ''
+  const logs = await withBuildLock(() => build(spec), {
+    onWait: (buildsAhead) => {
+      queued = buildQueuedNote(buildsAhead)
+    },
+  })
+  return `${queued}${logs}`
 }

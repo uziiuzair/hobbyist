@@ -111,3 +111,15 @@ A new postgres is also born asleep: `createPostgres` boots it once so initdb
 and `CREATE DATABASE` run, then stops it cleanly, so that the first real start
 is never a crash recovery. `hobby new` therefore prints a connection string
 for a database that is `sleeping`, and the first connection wakes it.
+
+## Amendment, 2026-10-30: `BuildSpec` has no resource caps (issue #150)
+
+`BuildSpec.memory` and `BuildSpec.cpuShares` (`packages/core/src/runtime.ts`)
+are removed, and `createDockerRuntime().build` (`packages/core/src/docker.ts`)
+no longer passes `--memory` or `--cpu-shares` to `docker build`. BuildKit
+accepts both flags and ignores them; the measurement, the legacy-builder
+comparison and the decision not to add a capped buildx builder are in
+`docs/compute/CLAUDE.md`'s amendment of the same date. "Resource limits per
+instance" in the scope above still holds for running containers
+(`ContainerSpec`), which `docker run` does enforce; it never held for
+builds.

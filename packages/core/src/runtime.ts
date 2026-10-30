@@ -60,11 +60,11 @@ export interface BuildSpec {
   dockerfile: string
   // What the resulting image is tagged, e.g. hobby/blog-web:1754870400.
   tag: string
-  // Resource caps. A build that is slow is a nuisance; a build that makes a
-  // sleeping database miss its wake budget is a broken promise, so a build
-  // always loses to anything else contending for the box.
-  memory?: string
-  cpuShares?: number
+  // There are deliberately no resource caps here. `memory` and `cpuShares`
+  // used to be passed as `docker build --memory` and `--cpu-shares`, which
+  // BuildKit accepts and ignores (issue #150: a RUN step inside a `--memory
+  // 128m` build saw `memory.max: max`). The one thing that keeps a build from
+  // starving the box is the global build lock (build-lock.ts).
   // `docker build --build-arg K=V`, one per entry (issue #146). Baked into
   // the image by whatever ARG reads them, so not a place for a secret.
   buildArgs?: Record<string, string>

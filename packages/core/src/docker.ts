@@ -329,10 +329,18 @@ export function createDockerRuntime(exec: ExecFn = defaultExec, spawnFn: SpawnFn
       return mergeTimestampedLogs(stdout, stderr)
     },
 
-    // `docker build`, with the caps that keep a build from starving the box
-    // it shares with running databases. Never a shell string: contextPath and
-    // dockerfile come from user input and reach argv directly, same reasoning
-    // as buildCreateArgs above.
+    // `docker build`. Never a shell string: contextPath and dockerfile come
+    // from user input and reach argv directly, same reasoning as
+    // buildCreateArgs above.
+    //
+    // No `--memory` or `--cpu-shares`. Both were passed here until issue
+    // #150 showed BuildKit accepts them and does nothing (`docker build
+    // --help` under buildx does not even list them; a RUN step that printed
+    // its cgroup limit under `--memory 128m` printed `max`). Only the legacy
+    // builder (DOCKER_BUILDKIT=0) honours them, and it is deprecated, warns
+    // on every build and cannot build a Dockerfile that uses BuildKit
+    // syntax, so the flags are gone rather than kept as a false promise.
+    // The global build lock (build-lock.ts) is the real protection.
     //
     // A non-zero exit is the user's Dockerfile far more often than it is
     // ours, so it becomes `build_failed` (422) rather than
@@ -344,12 +352,6 @@ export function createDockerRuntime(exec: ExecFn = defaultExec, spawnFn: SpawnFn
       // In the streamed case the Dockerfile is an entry in the tar, named
       // by its basename, and docker is told to read the context from stdin.
       const args = ['build', '-f', streamed ? basename(spec.dockerfile) : spec.dockerfile, '-t', spec.tag]
-      if (spec.memory !== undefined) {
-        args.push('--memory', spec.memory)
-      }
-      if (spec.cpuShares !== undefined) {
-        args.push('--cpu-shares', String(spec.cpuShares))
-      }
       for (const [key, value] of Object.entries(spec.buildArgs ?? {})) {
         args.push('--build-arg', `${key}=${value}`)
       }
