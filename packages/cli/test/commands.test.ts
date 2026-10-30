@@ -1462,7 +1462,9 @@ test('hobby sleep passes --force to the stop route and reports terminated sessio
   assert.equal(code, 0)
   assert.deepEqual(calls, [{ id: 'primary-id', opts: { force: true } }])
   assert.deepEqual(err, ['terminated 2 open sessions'])
-  assert.ok(out[0]?.startsWith('primary  postgres  sleeping'))
+  // The connect hint carries the project (found live: it printed
+  // `hobby connect primary`, which resolves a project called primary).
+  assert.equal(out[0], 'primary  postgres  sleeping  connect: hobby connect blog/primary')
 
   await cmdSleep(ctx, ['blog/primary'], {})
   assert.deepEqual(calls[1]?.opts, { force: false })

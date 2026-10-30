@@ -1153,7 +1153,7 @@ export async function cmdBranch(c: Ctx, positionals: string[], flags: Flags): Pr
   } else {
     c.io.out(`branched ${source} into ${result.project.name}: asleep until something connects, and not pinned`)
     for (const resource of result.resources) {
-      c.io.out(`  ${renderResourceLine(resource)}`)
+      c.io.out(`  ${renderResourceLine(resource, Date.now(), result.project.name)}`)
     }
     if (result.paused.length > 0 && result.pausedMs !== null) {
       c.io.out(`${source} was paused for ${result.pausedMs}ms while ${result.paused.join(', ')} was cloned`)
@@ -1246,7 +1246,7 @@ async function createResourceAndReport(
   if (json) {
     c.io.out(JSON.stringify({ resource }))
   } else {
-    c.io.out(renderResourceLine(resource))
+    c.io.out(renderResourceLine(resource, Date.now(), project))
   }
   return 0
 }
@@ -1363,7 +1363,7 @@ export async function cmdConnect(c: Ctx, positionals: string[], flags: Flags): P
 
 async function cmdSleepWake(c: Ctx, verb: 'sleep' | 'wake', positionals: string[], flags: Flags): Promise<number> {
   const target = targetOrLinked(c, positionals, `usage: hobby ${verb} <target>${verb === 'sleep' ? ' [--force]' : ''}`)
-  const { resource } = await resolveTarget(c.api, target, c.config.project)
+  const { project, resource } = await resolveTarget(c.api, target, c.config.project)
   // The API says start/stop because those are mechanical container
   // operations; the CLI says wake/sleep because that is the domain, per the
   // brief. This is the one place that translation happens.
@@ -1376,7 +1376,7 @@ async function cmdSleepWake(c: Ctx, verb: 'sleep' | 'wake', positionals: string[
     if (flags.json) {
       c.io.out(JSON.stringify(result))
     } else {
-      c.io.out(renderResourceLine(result.resource))
+      c.io.out(renderResourceLine(result.resource, Date.now(), project.name))
     }
     return 0
   }
@@ -1386,7 +1386,7 @@ async function cmdSleepWake(c: Ctx, verb: 'sleep' | 'wake', positionals: string[
     c.io.out(JSON.stringify(result))
     return 0
   }
-  c.io.out(renderResourceLine(result.resource))
+  c.io.out(renderResourceLine(result.resource, Date.now(), project.name))
   const ended = result.endedConnections ?? 0
   if (ended > 0) {
     c.io.err(`terminated ${ended} open ${ended === 1 ? 'session' : 'sessions'}`)
@@ -1599,7 +1599,7 @@ export async function cmdQueueCreate(c: Ctx, positionals: string[], flags: Flags
   if (flags.json) {
     c.io.out(JSON.stringify({ resource }))
   } else {
-    c.io.out(renderResourceLine(resource))
+    c.io.out(renderResourceLine(resource, Date.now(), project))
   }
   return 0
 }
@@ -2074,7 +2074,7 @@ export async function cmdSnapshotRestore(c: Ctx, positionals: string[], flags: F
     c.io.out(`restored snapshot ${id} into new project ${result.project.name}. ${project} itself no longer exists; the snapshot outlived it`)
   }
   for (const resource of result.resources) {
-    c.io.out(`  ${renderResourceLine(resource)}`)
+    c.io.out(`  ${renderResourceLine(resource, Date.now(), result.project.name)}`)
   }
   for (const failure of result.restartFailures) {
     c.io.err(`did not start on the restored data: ${failure}`)
