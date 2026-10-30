@@ -38,7 +38,9 @@ import { forgetRemote, listRemotes, saveRemote } from './remote.js'
 import { exitCodeForError } from './exit.js'
 import {
   branchCopyNote,
+  diskWarning,
   hostNetworkingWarning,
+  preflightBlockers,
   proxyBindNote,
   reflinkWarning,
   renderDuration,
@@ -279,11 +281,40 @@ export async function cmdInit(io: Io, paths: Paths, config: HobbyConfig, json: b
     io.err(hostNetworkingIssue)
   }
 
+  const lowDisk = diskWarning(report)
+  if (lowDisk !== null) {
+    io.err(lowDisk)
+  }
+
   io.err(proxyBindNote(config.proxyHost, config.proxyTls?.hostname ?? null))
 
   if (!report.runtimeAvailable) {
     io.err('the container runtime is not reachable; hobby refuses to continue until it is')
     return exitCodeForError('runtime_unavailable')
+  }
+
+  // A daemon already holds the machine-wide lock (issue #108): the ports
+  // above are its, so neither "already in use" nor "host is ready. run
+  // hobby daemon" is the right ending. Say which daemon, and stop.
+  if (report.daemon !== null && report.daemon.running && !report.daemon.self) {
+    io.err(
+      `a hobby daemon is already running (pid ${report.daemon.pid}), serving ${report.daemon.home}. ` +
+        'nothing to start; use it, or stop it first.'
+    )
+    return 0
+  }
+
+  // Never "ready" for a configuration `hobby daemon` will refuse (issue
+  // #108): a taken port, an address this machine does not have, a
+  // proxyHost that cannot be resolved. Exit 4, the conflict code, since
+  // what blocks it is something already occupying what the daemon needs.
+  const blockers = preflightBlockers(report)
+  if (blockers.length > 0) {
+    for (const reason of blockers) {
+      io.err(reason)
+    }
+    io.err('host is not ready: fix the above, then run `hobby init` again.')
+    return exitCodeForError('conflict')
   }
 
   if (!json) {
@@ -2300,6 +2331,15 @@ export async function cmdLogin(
 
   if (res.status === 401) {
     throw new HobbyError('unauthorized', 'invalid credentials', 'the password is the one set by `hobby studio passwd` on that box')
+  }
+  // The daemon's own words, never "invalid credentials": a 429 means the
+  // source address is inside a login backoff window, and the password may
+  // well be right (issue #117). The message carries the seconds to wait.
+  if (res.status === 429) {
+    const error = isRecord(res.body) && isRecord(res.body['error']) ? res.body['error'] : {}
+    const message = typeof error['message'] === 'string' ? error['message'] : 'too many attempts, try again later'
+    const hint = typeof error['hint'] === 'string' ? error['hint'] : undefined
+    throw new HobbyError('too_many_attempts', message, hint)
   }
   if (res.status >= 400) {
     throw new HobbyError('internal', `login failed with status ${res.status}`)

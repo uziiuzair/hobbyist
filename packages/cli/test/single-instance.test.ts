@@ -7,13 +7,13 @@
 // a worse failure than the collision the lock exists to prevent.
 
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { HobbyError } from '@hobby.sh/core'
-import { acquireDaemonLock, DAEMON_LOCK_PATH } from '../src/daemon/single-instance.js'
+import { acquireDaemonLock, DAEMON_LOCK_PATH, inspectDaemonLock } from '../src/daemon/single-instance.js'
 
 // Each test gets its own path. tmpdir() is fine here and wrong in the module
 // under test: these want isolation from each other, the daemon wants the same
@@ -111,4 +111,67 @@ test('release only removes a lock this process still owns', () => {
   assert.equal(existsSync(path), true)
   const record = JSON.parse(readFileSync(path, 'utf8')) as { home: string }
   assert.equal(record.home, '/successor')
+})
+
+// Issue #64: a stale lock this process cannot unlink (root's file in a
+// sticky /tmp, in the report) used to end in "another daemon reclaimed it
+// while this one was starting. Try again." Trying again never helped. The
+// unlink refusal is reproduced here with a read-only parent directory,
+// which gives the same EACCES/EPERM a sticky /tmp gives for another user's
+// file, without needing a second user. Skipped as root, who can unlink
+// anything and so can never see this error.
+test('a stale lock this process cannot remove names its owner and the removal, not "try again"', (t) => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    t.skip('root can always unlink the lock, so the refusal cannot be reproduced')
+    return
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-lock-dir-'))
+  const path = join(dir, 'hobby-daemon.lock')
+  writeFileSync(path, JSON.stringify({ pid: DEAD_PID, home: '/root/.hobby', startedAt: '2026-01-01T00:00:00.000Z' }))
+  chmodSync(dir, 0o555)
+  try {
+    assert.throws(
+      () => acquireDaemonLock('/home/someone/.hobby', path),
+      (err: unknown) => {
+        assert.ok(err instanceof HobbyError)
+        assert.equal(err.code, 'conflict')
+        assert.match(err.message, /owned by .*\(uid \d+\)/)
+        assert.match(err.message, /cannot remove it \((EPERM|EACCES)\)/)
+        assert.match(err.hint ?? '', /pid 4194303, serving \/root\/\.hobby/)
+        assert.match(err.hint ?? '', new RegExp(`sudo rm ${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+        assert.match(err.hint ?? '', /run the daemon as that user/)
+        assert.doesNotMatch(err.hint ?? '', /[Tt]ry again/)
+        return true
+      }
+    )
+  } finally {
+    chmodSync(dir, 0o755)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// Issue #108: `hobby init` reads the lock to say "a daemon is already
+// running" instead of "proxy port: already in use ... host is ready".
+test('inspectDaemonLock reports a live lock as running and its own as self, and a dead one as not running', () => {
+  const path = lockPath()
+  assert.equal(inspectDaemonLock(path), null, 'no file, no lock')
+
+  const lock = acquireDaemonLock('/home/someone/.hobby', path)
+  try {
+    const status = inspectDaemonLock(path)
+    assert.ok(status !== null)
+    assert.equal(status.pid, process.pid)
+    assert.equal(status.home, '/home/someone/.hobby')
+    assert.equal(status.running, true)
+    assert.equal(status.self, true)
+  } finally {
+    lock.release()
+  }
+
+  writeFileSync(path, JSON.stringify({ pid: DEAD_PID, home: '/gone', startedAt: '2026-01-01T00:00:00.000Z' }))
+  const stale = inspectDaemonLock(path)
+  assert.ok(stale !== null)
+  assert.equal(stale.running, false)
+  assert.equal(stale.self, false)
+  rmSync(path, { force: true })
 })

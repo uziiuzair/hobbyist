@@ -17,6 +17,7 @@ import { existsSync } from 'node:fs'
 import { chmod, rm } from 'node:fs/promises'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import net from 'node:net'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { assertSocketPathFits, HobbyError, type ProxyTlsConfig, type Resource } from '@hobby.sh/core'
 import { startAlarmMirror } from '@hobby.sh/do'
@@ -31,7 +32,7 @@ import { startQueueEndpoint } from './queue-endpoint.js'
 import { drainableQueues, queueDeliverFn, queueStateOf, retentionTargets } from './queues.js'
 import { handleRequest } from './routes.js'
 import { createStudioApp } from './studio/routes.js'
-import { parseTailscaleIp } from './tailnet.js'
+import { resolveProxyHosts } from './proxy-hosts.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -121,50 +122,9 @@ function queueTokenFor(ctx: DaemonContext): (token: string) => string | null {
 // own milestone table already marks the Linux gateway bind as owed, not
 // closed, and a daemon that silently only ever bound loopback on Linux would
 // look like it worked right up until the first real container tried to send.
-// ADR 0017: which addresses the Postgres proxy binds.
-//
-//   "all"      every interface. The pre-0.1 default, now opt in and spelled out
-//   "tailnet"  loopback plus this machine's Tailscale address
-//   anything   bound literally
-//
-// The default is loopback, because the proxy speaks no TLS: it answers an
-// SSLRequest with N, so anything reaching it across a network sends its
-// password in cleartext. Two boxes installed from hobby.sh/install were
-// measured reachable from the open internet before this existed
-// (docs/proxy/research/2026-08-22-the-proxy-binds-every-interface.md).
-export async function resolveProxyHosts(ctx: DaemonContext): Promise<string[]> {
-  const setting = ctx.config.proxyHost.trim()
-
-  if (setting === 'all') {
-    return ['0.0.0.0']
-  }
-
-  if (setting !== 'tailnet') {
-    return [setting]
-  }
-
-  let ip: string | null = null
-  try {
-    const { stdout } = await execFileAsync('tailscale', ['status', '--json'])
-    ip = parseTailscaleIp(stdout)
-  } catch {
-    ip = null
-  }
-
-  if (ip === null) {
-    // Loud and fatal rather than a quiet fallback. Falling back to loopback
-    // would look like it worked and leave the operator's other machines
-    // unable to connect with no reason given; falling back to every
-    // interface would silently do the thing this decision exists to stop.
-    throw new HobbyError(
-      'usage',
-      'proxyHost is "tailnet" but no tailscale address could be found',
-      'Start tailscaled, or set proxyHost to an address, to "all", or remove it to use loopback.'
-    )
-  }
-
-  return ['127.0.0.1', ip]
-}
+// resolveProxyHosts (ADR 0017) moved to proxy-hosts.ts (issue #108) so preflight can run
+// the same resolution startDaemon does. Re-exported for its existing callers.
+export { resolveProxyHosts }
 
 // ADR 0019. Refuses a half-configured proxyTls rather than starting without
 // TLS: an operator who set two of the three variables meant to have TLS, and
@@ -563,7 +523,11 @@ export async function startDaemon(
   // string, so the router side and the Caddy side of on-demand TLS cannot
   // disagree about the path.
   const caddy = ctx.config.caddyEnabled
-    ? (opts.caddy ?? createCaddyManager(ctx.runtime, { adminPort: ctx.config.caddyAdminPort }))
+    ? (opts.caddy ??
+      createCaddyManager(ctx.runtime, {
+        adminPort: ctx.config.caddyAdminPort,
+        caddyfilePath: join(ctx.paths.home, 'caddy', 'Caddyfile'),
+      }))
     : null
 
   if (caddy !== null) {

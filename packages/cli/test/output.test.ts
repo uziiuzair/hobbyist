@@ -15,7 +15,16 @@ import { test } from 'node:test'
 import { run, type Io } from '../src/cli/main.js'
 import { CLI_VERSION } from '../src/version.js'
 import { connectionEnv } from '../src/cli/commands.js'
-import { formatBytes, renderResourceLine, sleepPolicyTrailer } from '../src/cli/output.js'
+import {
+  diskWarning,
+  formatBytes,
+  preflightBlockers,
+  renderPreflight,
+  renderResourceLine,
+  sleepPolicyTrailer,
+  studioExposureNote,
+} from '../src/cli/output.js'
+import type { PreflightReport } from '../src/daemon/preflight.js'
 
 function makeIo(env: NodeJS.ProcessEnv): { io: Io; outLines: string[]; errLines: string[] } {
   const outLines: string[] = []
@@ -642,4 +651,110 @@ test('renderQueueMessageLine marks leased, delayed and dead lettered messages', 
   assert.equal(renderDuration(3600), '1h')
   assert.equal(renderDuration(90), '90s')
   assert.equal(renderDuration(0), '0s')
+})
+
+// --- hobby init's report (issue #108) -------------------------------------
+
+function sampleReport(overrides: Partial<PreflightReport> = {}): PreflightReport {
+  const free = (port: number, host = '127.0.0.1') => ({ port, host, bound: false, error: null })
+  return {
+    runtimeAvailable: true,
+    filesystem: { path: '/home/u/.hobby', reflinkSupported: true, freeBytes: 50 * 1024 * 1024 * 1024 },
+    proxyHost: { setting: '127.0.0.1', hosts: ['127.0.0.1'], error: null },
+    ports: { proxy: free(5432), api: free(7432), http: free(7433), queue: free(7434), caddy: null },
+    daemon: null,
+    studio: { listen: '127.0.0.1:7432', publicHost: null },
+    hostNetworking: null,
+    ...overrides,
+  }
+}
+
+test('renderPreflight lists every daemon port with its host, and says what studio exposes', () => {
+  const lines = renderPreflight(sampleReport())
+  assert.deepEqual(lines.slice(2, 6), [
+    'proxy port 5432 on 127.0.0.1: free',
+    'api (daemon API and studio) port 7432 on 127.0.0.1: free',
+    'http port 7433 on 127.0.0.1: free',
+    'queue port 7434 on 127.0.0.1: free',
+  ])
+  assert.equal(lines.some((line) => /studio port/.test(line)), false, 'studioPort is dead and no longer printed')
+  assert.match(lines[lines.length - 1] ?? '', /^studio: served on 127\.0\.0\.1:7432, loopback only\. nothing off this box reaches studio/)
+  assert.deepEqual(preflightBlockers(sampleReport()), [])
+})
+
+test('renderPreflight marks a taken port and an unbindable host, and preflightBlockers names both', () => {
+  const report = sampleReport({
+    proxyHost: { setting: '10.9.9.9', hosts: ['10.9.9.9'], error: null },
+    ports: {
+      proxy: { port: 5432, host: '10.9.9.9', bound: false, error: 'EADDRNOTAVAIL' },
+      api: { port: 7432, host: '127.0.0.1', bound: true, error: null },
+      http: { port: 7433, host: '127.0.0.1', bound: false, error: null },
+      queue: { port: 7434, host: '127.0.0.1', bound: false, error: null },
+      caddy: [
+        { port: 80, host: '127.0.0.1', bound: true, error: null },
+        { port: 443, host: '127.0.0.1', bound: false, error: null },
+      ],
+    },
+  })
+  const lines = renderPreflight(report)
+  assert.ok(lines.includes('proxy port 5432 on 10.9.9.9: cannot bind (EADDRNOTAVAIL)'))
+  assert.ok(lines.includes('api (daemon API and studio) port 7432 on 127.0.0.1: already in use'))
+  assert.ok(lines.includes('caddy port 80 on 127.0.0.1: already in use'))
+  assert.ok(lines.includes('caddy port 443 on 127.0.0.1: free'))
+
+  const blockers = preflightBlockers(report)
+  assert.equal(blockers.length, 3)
+  assert.match(blockers[0] ?? '', /proxy port 5432 cannot be bound on 10\.9\.9\.9 \(EADDRNOTAVAIL\); hobby daemon would fail the same way/)
+  assert.match(blockers[1] ?? '', /api port 7432 on 127\.0\.0\.1 is already in use/)
+  assert.match(blockers[2] ?? '', /caddy port 80 on 127\.0\.0\.1 is already in use/)
+})
+
+test('a proxyHost the daemon cannot resolve is a blocker in the daemon\'s own words', () => {
+  const report = sampleReport({
+    proxyHost: { setting: 'tailnet', hosts: null, error: 'proxyHost is "tailnet" but no tailscale address could be found' },
+  })
+  assert.ok(renderPreflight(report).includes('proxy host "tailnet": proxyHost is "tailnet" but no tailscale address could be found'))
+  const blockers = preflightBlockers(report)
+  assert.equal(blockers.length, 1)
+  assert.match(blockers[0] ?? '', /proxyHost "tailnet" cannot be used: .*no tailscale address/)
+  assert.match(blockers[0] ?? '', /hobby daemon will refuse to start/)
+})
+
+test('a running daemon is named in the report, and its own ports are never blockers', () => {
+  const other = sampleReport({
+    daemon: { pid: 4242, home: '/srv/hobby', startedAt: '2026-10-30T08:00:00.000Z', running: true, self: false },
+    ports: { ...sampleReport().ports, proxy: { port: 5432, host: '127.0.0.1', bound: true, error: null } },
+  })
+  assert.ok(
+    renderPreflight(other).includes(
+      'daemon: already running (pid 4242), serving /srv/hobby since 2026-10-30T08:00:00.000Z; the ports above are its'
+    )
+  )
+  // Not self: still a blocker from preflightBlockers' point of view; cmdInit
+  // reports the daemon and stops before ever asking for blockers.
+  assert.equal(preflightBlockers(other).length, 1)
+
+  const self = sampleReport({ ...other, daemon: { ...other.daemon!, self: true } })
+  assert.deepEqual(preflightBlockers(self), [])
+  assert.equal(renderPreflight(self).some((line) => line.startsWith('daemon:')), false)
+})
+
+test('studioExposureNote has one sentence per configuration', () => {
+  const published = sampleReport({
+    ports: { ...sampleReport().ports, caddy: [] },
+    studio: { listen: '127.0.0.1:7432', publicHost: 'studio.example.com' },
+  })
+  assert.match(studioExposureNote(published), /published by caddy at https:\/\/studio\.example\.com\. That is reachable from the internet, behind the operator password/)
+
+  const caddyNoHost = sampleReport({ ports: { ...sampleReport().ports, caddy: [] } })
+  assert.match(studioExposureNote(caddyNoHost), /caddy is on but no HOBBY_CADDY_STUDIO_HOST is set, so nothing off this box reaches studio/)
+
+  assert.match(studioExposureNote(sampleReport()), /use an ssh tunnel or tailscale serve, or enable caddy with a hostname/)
+})
+
+test('diskWarning speaks up under a gigabyte and stays quiet above it', () => {
+  assert.equal(diskWarning(sampleReport()), null)
+  const low = sampleReport({ filesystem: { path: '/mnt/small', reflinkSupported: false, freeBytes: 330 * 1024 * 1024 } })
+  assert.match(diskWarning(low) ?? '', /only 330\.0 MB free under \/mnt\/small/)
+  assert.match(diskWarning(low) ?? '', /no space left on device/)
 })

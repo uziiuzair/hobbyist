@@ -21,6 +21,7 @@ import { ActivityTracker } from '@hobby.sh/proxy'
 import { createDefaultKindRegistry, type DaemonContext } from '../src/daemon/context.js'
 import {
   deleteSnapshot,
+  explainSnapshotFailure,
   findSnapshot,
   listSnapshots,
   projectSnapshotsDir,
@@ -380,4 +381,49 @@ test('deleteSnapshot removes the directory', async () => {
   await deleteSnapshot(ctx, taken.snapshotId)
 
   assert.equal(await findSnapshot(ctx, taken.snapshotId), null)
+})
+
+// --- a full disk (issue #139) ----------------------------------------------
+
+// Exactly the error node's copyFile raises when the destination filesystem
+// fills: code ENOSPC, the source in `path` and the destination in `dest`.
+function enospc(path: string, dest: string): NodeJS.ErrnoException & { dest: string } {
+  const err = new Error(`ENOSPC: no space left on device, copyfile '${path}' -> '${dest}'`) as NodeJS.ErrnoException & {
+    dest: string
+  }
+  err.code = 'ENOSPC'
+  err.errno = -28
+  err.syscall = 'copyfile'
+  err.path = path
+  err.dest = dest
+  return err
+}
+
+test('ENOSPC during a snapshot becomes disk_full naming the destination, not internal error', () => {
+  const partial = '/home/u/.hobby/snapshots/blog/20261016-aaaaaa.partial'
+  const explained = explainSnapshotFailure(enospc('/home/u/.hobby/projects/blog/primary/pgdata/base/1', `${partial}/data/primary/pgdata/base/1`), partial)
+
+  assert.ok(explained instanceof HobbyError)
+  assert.equal(explained.code, 'disk_full')
+  assert.equal(explained.httpStatus, 507)
+  assert.equal(explained.message, `no space left on device while writing ${partial}/data/primary/pgdata/base/1`)
+  assert.match(explained.hint ?? '', /free space there, delete a snapshot you no longer need/)
+  assert.match(explained.hint ?? '', /nothing was kept: the partial snapshot was removed/)
+})
+
+test('EDQUOT and a darwin cp that ran out of space are disk_full too; anything else passes through untouched', () => {
+  const partial = '/x/.partial'
+  const quota = Object.assign(new Error('EDQUOT: disk quota exceeded, write'), { code: 'EDQUOT' })
+  assert.equal((explainSnapshotFailure(quota, partial) as HobbyError).code, 'disk_full')
+  assert.match((explainSnapshotFailure(quota, partial) as HobbyError).message, new RegExp(`while writing ${partial}$`))
+
+  // execFile's rejection carries cp's own words on stderr and an exit code,
+  // never an errno.
+  const cp = Object.assign(new Error('Command failed: cp -Rc src dst'), { code: 1, stderr: 'cp: dst/a: No space left on device\n' })
+  assert.equal((explainSnapshotFailure(cp, partial) as HobbyError).code, 'disk_full')
+
+  const other = new HobbyError('conflict', 'something else')
+  assert.equal(explainSnapshotFailure(other, partial), other)
+  const plain = new Error('boom')
+  assert.equal(explainSnapshotFailure(plain, partial), plain)
 })

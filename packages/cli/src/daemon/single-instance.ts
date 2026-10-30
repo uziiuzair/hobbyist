@@ -22,7 +22,8 @@
 // directory being locked against cannot see the second daemon, which is the
 // entire failure being prevented.
 
-import { openSync, closeSync, readFileSync, unlinkSync, writeSync } from 'node:fs'
+import { openSync, closeSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs'
+import { userInfo } from 'node:os'
 import { HobbyError } from '@hobby.sh/core'
 
 // Literally /tmp, not os.tmpdir(). os.tmpdir() reads $TMPDIR, and on macOS
@@ -47,6 +48,82 @@ interface LockRecord {
 export interface DaemonLock {
   path: string
   release(): void
+}
+
+// What the lock file says about the daemon it belongs to, for callers that
+// only want to look (`hobby init`'s preflight, issue #108) rather than take
+// it. `running` is the same liveness test acquireDaemonLock applies; `self`
+// is true when the lock is this very process's, which is what a preflight
+// served by a running daemon sees.
+export interface DaemonLockStatus {
+  path: string
+  pid: number
+  home: string
+  startedAt: string
+  running: boolean
+  self: boolean
+}
+
+export function inspectDaemonLock(path: string = DAEMON_LOCK_PATH): DaemonLockStatus | null {
+  const record = readLock(path)
+  if (record === null) {
+    return null
+  }
+  return {
+    path,
+    pid: record.pid,
+    home: record.home,
+    startedAt: record.startedAt,
+    running: isAlive(record.pid),
+    self: record.pid === process.pid,
+  }
+}
+
+// Who owns a file, as "<name> (uid N)" when the name is known and "uid N"
+// otherwise. Node has no getpwuid; the only name it can resolve for free is
+// the current user's, and uid 0 is root everywhere, which between them cover
+// the one case this is for (issue #64: a root-owned lock from a systemd unit
+// blocking a daemon started by a user).
+function describeOwner(uid: number): string {
+  if (uid === 0) return 'root (uid 0)'
+  try {
+    const me = userInfo()
+    if (me.uid === uid) return `${me.username} (uid ${uid})`
+  } catch {
+    // fall through to the bare uid
+  }
+  return `uid ${uid}`
+}
+
+function describeSelf(): string {
+  try {
+    const me = userInfo()
+    return `${me.username} (uid ${me.uid})`
+  } catch {
+    return typeof process.getuid === 'function' ? `uid ${process.getuid()}` : 'this user'
+  }
+}
+
+// A stale lock this process is not allowed to remove (issue #64). On Linux
+// /tmp is sticky, so a file root left behind cannot be unlinked by anyone
+// else no matter how dead the pid in it is; "try again" was the one hint
+// guaranteed never to help. Says who owns it and the two things that do.
+function foreignStaleLock(path: string, existing: LockRecord | null, err: NodeJS.ErrnoException): HobbyError {
+  let owner = 'another user'
+  try {
+    owner = describeOwner(statSync(path).uid)
+  } catch {
+    // unreadable stat: keep the generic wording
+  }
+  const left =
+    existing === null
+      ? 'It is not a readable lock record, and'
+      : `It was left by a daemon (pid ${existing.pid}, serving ${existing.home}, started ${existing.startedAt}) that is no longer running, and`
+  return new HobbyError(
+    'conflict',
+    `the daemon lock at ${path} is owned by ${owner}, and this daemon runs as ${describeSelf()}, which cannot remove it (${err.code ?? 'EPERM'})`,
+    `${left} it blocks every daemon not started by ${owner}. Either remove it as that user (sudo rm ${path}) or run the daemon as that user.`
+  )
 }
 
 function readLock(path: string): LockRecord | null {
@@ -113,8 +190,13 @@ export function acquireDaemonLock(home: string, path: string = DAEMON_LOCK_PATH)
       // resolves to exactly one winner.
       try {
         unlinkSync(path)
-      } catch {
-        // Someone else reclaimed it first; the next attempt will see theirs.
+      } catch (unlinkErr) {
+        const code = (unlinkErr as NodeJS.ErrnoException).code
+        if (code === 'EPERM' || code === 'EACCES') {
+          throw foreignStaleLock(path, existing, unlinkErr as NodeJS.ErrnoException)
+        }
+        // ENOENT: someone else reclaimed it first; the next attempt will
+        // see theirs.
       }
       continue
     }
