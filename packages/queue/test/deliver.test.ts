@@ -110,7 +110,11 @@ test('a consumer that never responds is aborted, and returns an exception result
   const result = await deliverBatch(port, BATCH, 'jobs', 50)
   const elapsedMs = Date.now() - started
 
-  assert.deepEqual(result, { outcome: 'exception', retryBatch: { retry: false }, retryMessages: [] })
+  assert.equal(result.outcome, 'exception')
+  assert.deepEqual(result.retryBatch, { retry: false })
+  assert.deepEqual(result.retryMessages, [])
+  // Issue #158: the reason travels with the result so the tick can log it.
+  assert.match(result.failure ?? '', /did not answer within 50ms/)
   // Bounded by the injected timeout, not by the test's own runner timeout:
   // proves the abort fired on schedule rather than the request eventually
   // failing for some unrelated reason.

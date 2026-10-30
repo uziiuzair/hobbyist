@@ -254,6 +254,14 @@ export interface QueueMessage {
   attempts: number
   contentType: string
   body: unknown
+  // ready: waiting for the next batch; leased: out with the consumer;
+  // delayed: not visible until visibleAtMs (a delayed send or a retry).
+  state: 'ready' | 'leased' | 'delayed'
+  visibleAtMs: number
+  // Set only on a dead letter: when it landed in this queue, and how many
+  // deliveries failed in the source queue first.
+  deadLetteredAtMs: number | null
+  failedAttempts: number | null
 }
 export interface QueuePeekResponse {
   messages: QueueMessage[]

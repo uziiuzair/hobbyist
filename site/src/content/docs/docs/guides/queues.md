@@ -36,8 +36,16 @@ hobby queue rm blog/jobs
 ```
 
 `peek` reads the oldest messages **without leasing them**, so looking at a queue
-does not change what your consumer will receive. `purge` and `rm` both confirm
-before destroying anything, and both take `--yes`.
+does not change what your consumer will receive. A message that is out with the
+consumer is marked `leased`, and one that is not yet visible (a delayed send, or
+a retry waiting out its delay) is marked `delayed` with the time until it
+becomes visible. `purge` and `rm` both confirm before destroying anything, and
+both take `--yes`.
+
+`hobby queue ls` shows each queue's retention and, under a queue with a
+consumer, the tuning in force: batch size and timeout, retries and retry delay.
+A key your `wrangler.toml` does not set shows the default. `hobby queue set
+--retention` echoes the value it applied.
 
 ## Binding a consumer
 
@@ -50,7 +58,38 @@ queue = "jobs"
 ```
 
 Deploy the worker and the binding takes effect. `hobby queue ls` shows the
-consumer, or says there is none.
+consumer, or says there is none. Each deploy replaces the stored tuning with
+what the manifest says, so deleting `retry_delay` or `dead_letter_queue` from
+`wrangler.toml` and redeploying puts the default back.
+
+## Handler time limit
+
+A `queue()` handler has **30 seconds** to answer a batch. The daemon's delivery
+hop (`DELIVERY_TIMEOUT_MS` in `packages/queue/src/deliver.ts`) gives up after
+that, counts the attempt as failed, and the batch is retried after
+`retry_delay`, or dead lettered once `max_retries` is exhausted. The handler
+inside the container is not interrupted, so a handler that finishes at 40
+seconds has done its work and will then see the same batch again. Cloudflare
+allows 15 minutes; the limit here is tighter because one daemon drains every
+queue on the box in turn, and one hung consumer must not stall the others.
+
+Every failed delivery writes a line to the daemon log naming the queue and the
+reason (a timeout, a refused connection, a handler that threw), and so does
+every dead letter and every retention sweep. `hobby logs` on the daemon is
+where to look when a message is not arriving.
+
+## Retries and dead letters
+
+`retry_delay` is counted from the moment the delivery result came back, not from
+when the batch was handed out, so a slow handler or a cold start does not eat
+into it. A message that exhausts `max_retries` moves to the `dead_letter_queue`
+named in the consumer config, keeping **the same id**, its original enqueue time
+and the number of attempts that failed; `hobby queue peek` on the dead letter
+queue shows all three. Its retention clock restarts when it lands there, so a
+message that spent most of its life failing is not swept the moment it arrives.
+A dead letter queue cannot be deleted while a consumer still names it as
+`dead_letter_queue`; remove that line and redeploy first. Without a dead letter
+queue, an exhausted message is dropped, as on Cloudflare.
 
 ## The Linux producer gap
 
@@ -83,9 +122,8 @@ platform the bug was about, so this stays marked rough until someone does.
 Consuming has worked on both platforms throughout, and so has
 `hobby queue send` from the CLI.
 
-## Retention has a gap too
+## Retention
 
-`sweepRetention` runs from the per-queue tick, and that tick only covers queues
-with a drainable consumer. A queue with no consumer bound, which includes every
-dead letter queue, never gets swept, so messages accumulate there regardless of
-the retention you set.
+Every queue is swept on its retention, whether or not anything consumes it:
+dead letter queues and producer-only queues included. The default is four days,
+settable from 60 seconds to 14 days with `hobby queue set --retention`.

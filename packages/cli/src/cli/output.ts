@@ -14,6 +14,7 @@
 // in the brief required it, and inventing a `new Date(x)` coercion here
 // would be more type-widening than the requirement is worth.
 
+import { DEFAULT_CONSUMER_OPTIONS } from '@hobby.sh/queue'
 import type { PreflightReport } from '../daemon/preflight.js'
 import { formatRetryDelay } from '../daemon/wake-backoff.js'
 import type { WireResource, WireSnapshotManifest } from '../daemon/wire.js'
@@ -137,15 +138,57 @@ export function renderQueueLine(entry: QueueListEntry): string {
   }
   const oldest = entry.oldestMessageAgeSeconds === null ? 'empty' : `oldest ${entry.oldestMessageAgeSeconds}s ago`
   const dlq = entry.resource.config.deadLetterQueue === null ? 'no dlq' : `dlq ${entry.resource.config.deadLetterQueue}`
-  return `${entry.resource.name}  depth ${entry.depth}  ${oldest}  consumer ${renderQueueConsumer(entry.consumer)}  ${dlq}`
+  const retention = `retention ${renderDuration(entry.resource.config.retentionSeconds)}`
+  return `${entry.resource.name}  depth ${entry.depth}  ${oldest}  consumer ${renderQueueConsumer(entry.consumer)}  ${dlq}  ${retention}`
+}
+
+// The consumer tuning in force for a queue, or null when nothing consumes
+// it (issue #170). Null keys on the row mean "the broker's default", resolved
+// here exactly as packages/cli/src/daemon/queues.ts's drainableQueues
+// resolves them for delivery, so what this prints is what the tick uses.
+// Rendered on its own indented line under renderQueueLine, so `hobby queue
+// ls` stays readable for a queue that has no consumer at all.
+export function renderQueueTuningLine(entry: QueueListEntry): string | null {
+  if (entry.resource.kind !== 'queue' || entry.consumer === null) {
+    return null
+  }
+  const cfg = entry.resource.config
+  const batchSize = cfg.maxBatchSize ?? DEFAULT_CONSUMER_OPTIONS.maxBatchSize
+  const batchTimeout = cfg.maxBatchTimeoutSeconds ?? DEFAULT_CONSUMER_OPTIONS.maxBatchTimeoutSeconds
+  const retries = cfg.maxRetries ?? DEFAULT_CONSUMER_OPTIONS.maxRetries
+  const retryDelay = cfg.retryDelaySeconds ?? DEFAULT_CONSUMER_OPTIONS.retryDelaySeconds
+  return `batch ${batchSize} msgs or ${renderDuration(batchTimeout)}  retries ${retries}  retry delay ${renderDuration(retryDelay)}`
+}
+
+// Whole seconds as the largest unit that divides them: 60 -> 1m, 3600 -> 1h,
+// 345600 -> 4d, 90 -> 90s. Exact, never rounded, so a value the user set is
+// echoed back as something that re-parses to the same number of seconds.
+export function renderDuration(seconds: number): string {
+  if (seconds % 86400 === 0 && seconds !== 0) return `${seconds / 86400}d`
+  if (seconds % 3600 === 0 && seconds !== 0) return `${seconds / 3600}h`
+  if (seconds % 60 === 0 && seconds !== 0) return `${seconds / 60}m`
+  return `${seconds}s`
 }
 
 // One line per message for `hobby queue peek`. The body is already decoded
 // JSON (routes.ts's peek route runs decodeBody before this ever sees it), so
 // this is a plain JSON.stringify, the same rendering --json would show for
-// the same field.
-export function renderQueueMessageLine(message: QueueMessage): string {
-  return `${message.id}  attempts ${message.attempts}  ${JSON.stringify(message.body)}`
+// the same field. A message that is not simply waiting says so (issue #170):
+// `leased` is out with the consumer right now, `delayed` says when it becomes
+// visible, and a dead letter says how many deliveries failed before it landed
+// here (issue #168).
+export function renderQueueMessageLine(message: QueueMessage, now: number = Date.now()): string {
+  const notes: string[] = []
+  if (message.state === 'leased') {
+    notes.push('leased')
+  } else if (message.state === 'delayed') {
+    notes.push(`delayed, visible in ${renderDuration(Math.max(0, Math.ceil((message.visibleAtMs - now) / 1000)))}`)
+  }
+  if (message.failedAttempts !== null && message.failedAttempts !== undefined) {
+    notes.push(`dead letter after ${message.failedAttempts} failed ${message.failedAttempts === 1 ? 'attempt' : 'attempts'}`)
+  }
+  const trailer = notes.length === 0 ? '' : `  ${notes.join(', ')}`
+  return `${message.id}  attempts ${message.attempts}${trailer}  ${JSON.stringify(message.body)}`
 }
 
 // The reflink warning is deliberately not part of this function's output.

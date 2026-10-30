@@ -818,7 +818,10 @@ test("the compose comment documents the wrapper convention, and no wrapper is do
 // it produces has to be true.
 // ---------------------------------------------------------------------------
 
-test('a project holding only a queue refuses to eject, but says a queue exists rather than claiming the project is empty', async () => {
+// Issue #169: a project holding only a queue still hands over its backlog.
+// There is no service to render, so the file is the queue notice and a
+// comment saying why, never a bare `services:` key docker cannot parse.
+test('a project holding only a queue ejects its backlog, with a compose file that explains there is nothing to run', async () => {
   const ctx = buildContext()
   const project = ctx.store.createProject({ name: 'queue-only', sleepAfterSeconds: 300 })
   const queueConfig: QueueConfig = {
@@ -834,14 +837,49 @@ test('a project holding only a queue refuses to eject, but says a queue exists r
     deadLetterQueue: null,
   }
   ctx.store.createResource({ projectId: project.id, kind: 'queue', name: 'jobs', config: queueConfig })
+  seedQueueMessages(ctx, 'queue-only', 'jobs', ['one', 'two'])
 
   await withServer(ctx, async (baseUrl) => {
     const res = await fetch(`${baseUrl}/v1/projects/queue-only/eject`, { method: 'POST' })
-    assert.equal(res.status, 400)
-    const body = (await res.json()) as { error: { code: string; message: string } }
-    assert.equal(body.error.code, 'usage')
-    assert.doesNotMatch(body.error.message, /has no resources yet/)
-    assert.match(body.error.message, /jobs/)
-    assert.match(body.error.message, /queue/i)
+    assert.equal(res.status, 200)
+    const body = (await res.json()) as { compose: string; dataDirs: string[]; queues?: EjectQueueBacklog[] }
+    const jobs = body.queues?.find((q) => q.name === 'jobs')
+    assert.equal(jobs?.count, 2, 'the backlog is handed over')
+    assert.match(body.compose, /queues\/jobs\.jsonl \(2 messages\)/)
+    assert.match(body.compose, /no database, app or deployed worker/)
+    assert.doesNotMatch(body.compose, /^services:/m, 'no bare services key, which docker compose refuses to parse')
+    assert.deepEqual(body.dataDirs, [])
+  })
+})
+
+// Issue #169: the compose output must not keep an "ejected" worker wired to
+// hobby's broker. Before this, HOBBY_WORKER_MANIFEST carried the daemon's
+// enqueue URL and a live bearer token for it.
+test('an ejected producer worker has its queue endpoint and token stripped, with the binding names kept', async () => {
+  const ctx = buildContext()
+  seed(ctx)
+  const project = ctx.store.getProjectByName('blog')
+  assert.ok(project !== null)
+  const worker = ctx.store.listResources(project.id).find((r) => r.kind === 'worker')
+  assert.ok(worker !== undefined && worker.kind === 'worker' && worker.config.manifest !== null)
+  ctx.store.updateResourceConfig(worker.id, {
+    ...worker.config,
+    manifest: { ...worker.config.manifest, queues: { producers: [{ binding: 'JOBS', queue: 'jobs' }], consumers: [] } },
+  })
+
+  await withServer(ctx, async (baseUrl) => {
+    const { compose } = await eject(baseUrl)
+    const line = compose.split('\n').find((l) => l.includes('HOBBY_WORKER_MANIFEST'))
+    assert.ok(line !== undefined)
+    // The manifest is a JSON string inside a YAML double-quoted scalar.
+    const manifest = JSON.parse(JSON.parse(line.slice(line.indexOf(':') + 1).trim())) as {
+      queueEndpoint: unknown
+      queueToken: unknown
+      queueBindings: unknown[]
+    }
+    assert.equal(manifest.queueEndpoint, null)
+    assert.equal(manifest.queueToken, null)
+    assert.deepEqual(manifest.queueBindings, [{ binding: 'JOBS', queue: 'jobs' }], 'env.JOBS still exists, and the shim says why it cannot send')
+    assert.equal(compose.includes('test-queue-token'), false, 'the live token never appears in the file')
   })
 })

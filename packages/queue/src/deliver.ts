@@ -15,17 +15,27 @@
 //
 // Never throws. A network failure, a non-2xx status, a body that does not
 // parse as a QueueResponse, or a request that never gets a response at all
-// (see DELIVERY_TIMEOUT_MS below) all become the same EXCEPTION_RESULT, which
+// (see DELIVERY_TIMEOUT_MS below) all become an exception result, which
 // broker.ts's applyResult already treats as "retry everything": a dead,
 // unreachable, or hung consumer must produce a retry, not a crashed tick.
 
 import type { DeliveryResult, LeasedBatch } from './broker.js'
 import { LEASE_MS } from './broker.js'
 
-const EXCEPTION_RESULT: DeliveryResult = {
-  outcome: 'exception',
-  retryBatch: { retry: false },
-  retryMessages: [],
+// One exception result per failure path, each naming why, so the tick can
+// log it (issue #158): a redelivery with nothing in the daemon log saying
+// why the first delivery failed is indistinguishable from a handler bug.
+function exceptionResult(failure: string): DeliveryResult {
+  return {
+    outcome: 'exception',
+    retryBatch: { retry: false },
+    retryMessages: [],
+    failure,
+  }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 // Bounds how long a single delivery attempt is allowed to hang. Without this,
@@ -175,22 +185,27 @@ export async function deliverBatch(
       // leaves pending forever.
       signal: AbortSignal.timeout(timeoutMs),
     })
-  } catch {
+  } catch (err) {
     // Connection refused, timed out, or the container is simply not there.
-    return EXCEPTION_RESULT
+    if (err instanceof Error && err.name === 'TimeoutError') {
+      return exceptionResult(
+        `the consumer did not answer within ${timeoutMs}ms (the delivery timeout), so the batch will be redelivered`
+      )
+    }
+    return exceptionResult(`could not reach the consumer's control port: ${errorMessage(err)}`)
   }
 
   if (!res.ok) {
-    return EXCEPTION_RESULT
+    return exceptionResult(`the consumer answered HTTP ${res.status}`)
   }
 
   let parsedBody: unknown
   try {
     parsedBody = await res.json()
   } catch {
-    return EXCEPTION_RESULT
+    return exceptionResult('the consumer answered with a body that is not JSON')
   }
 
   const result = parseDeliveryResult(parsedBody)
-  return result ?? EXCEPTION_RESULT
+  return result ?? exceptionResult('the consumer answered with a body that is not a QueueResponse')
 }

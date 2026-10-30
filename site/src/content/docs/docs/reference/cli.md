@@ -272,7 +272,10 @@ Tails the resource's logs.
 
 ### `hobby queue ls [project]`
 
-Every queue, with depth and its bound consumer, or a note that it has none.
+Every queue, with depth, oldest message age, its bound consumer (or a note that
+it has none), dead letter queue and retention. Under a queue with a consumer, a
+second line shows the tuning in force: batch size and timeout, retries, retry
+delay.
 
 ### `hobby queue create <name> --project <p>`
 
@@ -282,7 +285,9 @@ A queue with no consumer bound yet. Bind one through a worker's own
 ### `hobby queue peek <target> [--limit n]`
 
 The oldest messages, **without leasing them**, so looking does not change what
-the consumer will receive.
+the consumer will receive. A message out with the consumer is marked `leased`,
+one not yet visible is marked `delayed` with the time until it is, and a dead
+letter says how many deliveries failed before it landed.
 
 ### `hobby queue send <target> <json>`
 
@@ -299,8 +304,9 @@ Destroys the queue, with confirmation.
 
 ### `hobby queue set <target> --retention <seconds>`
 
-Changes how long messages are kept. Note that
-[retention never sweeps a queue with no drainable consumer](/docs/guides/queues/#retention-has-a-gap-too).
+Changes how long messages are kept, from 60 seconds to 14 days, and echoes the
+value applied. Applies to every queue, including dead letter queues and queues
+with no consumer.
 
 ## Cron triggers
 
