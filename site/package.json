@@ -26,6 +26,6 @@
   },
   "private": true,
   "devDependencies": {
-    "puppeteer-core": "^25.8.0"
+    "puppeteer-core": "^25.16.0"
   }
 }
