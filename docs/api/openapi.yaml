@@ -41,11 +41,20 @@ info:
     cannot list or mint others.
 
     Every error is the one envelope: `{ "error": { "code", "message",
-    "hint"? } }`. Codes map to statuses as: project_not_found and
-    resource_not_found 404; name_taken and conflict 409; invalid_name and
-    usage 400; unauthorized 401; build_failed 422; runtime_unavailable 503;
-    wake_timeout 504; ambiguous_target, wake_failed, not_ready, unknown_kind
-    and internal 500.
+    "hint"? } }`. Codes map to statuses as: project_not_found,
+    resource_not_found and not_found 404; name_taken and conflict 409;
+    invalid_name and usage 400; unauthorized 401; too_many_attempts 429
+    (with a Retry-After header); build_failed 422; runtime_unavailable 503;
+    wake_timeout 504; disk_full 507; ambiguous_target, wake_failed,
+    not_ready, unknown_kind and internal 500. A method and path no route
+    matches is 404 not_found on every listener (`dispatch`, routes.ts), so
+    it is not repeated per operation below. too_many_attempts comes from
+    the login throttle (`LoginThrottle`, studio/auth.ts), which the
+    password routes and the bearer-token gate share: inside a source
+    address's backoff window the message is `too many attempts, retry in
+    Ns`. A bearer token is found by a short lookup key stored beside its
+    hash, so a bad token costs about what no header costs
+    (`verifyToken`, studio/tokens.ts).
 
     Request bodies are JSON, capped at 64KB. Secrets never cross this
     boundary in resource payloads: postgres `config.password` is omitted
@@ -405,6 +414,11 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "507":
+          description: "disk_full: the filesystem under HOBBY_HOME ran out of room while the snapshot was being written (ENOSPC or EDQUOT). The message names the path; the partial snapshot was removed (explainSnapshotFailure, snapshots.ts)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
     get:
       summary: "The project's snapshots, newest first. Answers for a project that has since been deleted: snapshots outlive it."
       parameters: [{ $ref: "#/components/parameters/projectName" }]
@@ -740,6 +754,13 @@ paths:
                 properties: { ok: { type: boolean, const: true } }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
+        "429":
+          description: "too_many_attempts: this address is inside its login backoff window. Retry-After carries the seconds; so does the message. The password was not checked."
+          headers:
+            Retry-After: { schema: { type: integer }, description: "Seconds until the next attempt is accepted" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
 
   /studio/logout:
     post:
@@ -780,6 +801,13 @@ paths:
                   name: { type: string }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
+        "429":
+          description: "too_many_attempts: same throttle and same shape as /studio/login. hobby login prints the daemon's message rather than 'invalid credentials'."
+          headers:
+            Retry-After: { schema: { type: integer } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
 
   /studio/session:
     get:
@@ -834,7 +862,7 @@ components:
           properties:
             code:
               type: string
-              enum: [project_not_found, resource_not_found, name_taken, invalid_name, ambiguous_target, runtime_unavailable, wake_failed, wake_timeout, not_ready, conflict, usage, unauthorized, unknown_kind, build_failed, internal]
+              enum: [project_not_found, resource_not_found, name_taken, invalid_name, ambiguous_target, runtime_unavailable, wake_failed, wake_timeout, not_ready, conflict, usage, unauthorized, unknown_kind, build_failed, too_many_attempts, not_found, disk_full, internal]
             message: { type: string }
             hint: { type: string }
 
@@ -1067,12 +1095,58 @@ components:
             path: { type: string }
             reflinkSupported: { type: boolean, description: "false means branching degrades to a real copy (ext4)" }
             freeBytes: { type: integer }
+        proxyHost:
+          type: object
+          description: "How proxyHost resolved, exactly as startDaemon resolves it (resolveProxyHosts, proxy-hosts.ts). hosts is null and error carries the daemon's refusal when it cannot (tailnet with no tailscaled)."
+          properties:
+            setting: { type: string }
+            hosts: { type: array, items: { type: string }, nullable: true }
+            error: { type: string, nullable: true }
         ports:
           type: object
+          description: "Every port the daemon binds, probed on the host it binds it on (issue #108). studioPort is not here: nothing listens on it."
           properties:
-            proxy:
-              type: object
-              properties: { port: { type: integer }, bound: { type: boolean } }
-            studio:
-              type: object
-              properties: { port: { type: integer }, bound: { type: boolean } }
+            proxy: { $ref: "#/components/schemas/PortCheck" }
+            api: { $ref: "#/components/schemas/PortCheck", description: "The daemon API, which also serves Studio" }
+            http: { $ref: "#/components/schemas/PortCheck" }
+            queue: { $ref: "#/components/schemas/PortCheck" }
+            caddy:
+              type: array
+              nullable: true
+              description: "80 and 443, probed by connecting rather than binding. null when caddy is off"
+              items: { $ref: "#/components/schemas/PortCheck" }
+        daemon:
+          type: object
+          nullable: true
+          description: "The machine-wide daemon lock (/tmp/hobby-daemon.lock). null when no lock file exists. self is true when the lock is the answering daemon's own, so its bound ports are expected."
+          properties:
+            pid: { type: integer }
+            home: { type: string }
+            startedAt: { type: string }
+            running: { type: boolean }
+            self: { type: boolean }
+        studio:
+          type: object
+          description: "What Studio exposes (ADR 0008). listen is where the daemon serves it; publicHost is the hostname Caddy publishes it on, or null when nothing off the box reaches it."
+          properties:
+            listen: { type: string, example: "127.0.0.1:7432" }
+            publicHost: { type: string, nullable: true }
+        hostNetworking:
+          type: object
+          nullable: true
+          description: "Whether a host-network container can reach this box's loopback. Only probed when caddy is on; null otherwise."
+          properties:
+            supported: { type: boolean }
+
+    PortCheck:
+      type: object
+      description: "One port the daemon (or Caddy on its behalf) will bind, and what the probe found (checkPortBindable / checkPortListening, preflight.ts)."
+      required: [port, host, bound, error]
+      properties:
+        port: { type: integer }
+        host: { type: string, description: "The address the daemon will bind it on, which is the address it was probed on" }
+        bound: { type: boolean, description: "Something else is already listening there" }
+        error:
+          type: string
+          nullable: true
+          description: "The errno when the probe could neither bind nor learn the port was taken (EADDRNOTAVAIL for an address this machine does not have, ENOTFOUND for a hostname that does not resolve). The daemon's own bind would fail the same way. null when the port is simply free or simply bound."

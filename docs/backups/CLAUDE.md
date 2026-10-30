@@ -228,3 +228,25 @@ answers for a deleted one), so restoring the snapshot of a deleted project is
 an ordinary path. `cmdSnapshotRestore` (`packages/cli/src/cli/commands.ts`)
 now asks `GET /v1/projects/:name` and says "`<project>` itself no longer
 exists; the snapshot outlived it" in that case. `--json` output is unchanged.
+
+## Amendment, 2026-10-30: a full disk is named (issue #139)
+
+`hobby snapshot` on a filesystem that ran out of room printed `internal
+error` and exit 1; the `ENOSPC: no space left on device, copyfile ...` was
+only in the daemon log, because `takeSnapshot` and `takeOnlineSnapshot`
+(`packages/cli/src/daemon/snapshots.ts`) rethrew the raw fs error and
+`toHobbyError` (`routes.ts`) turns anything that is not a `HobbyError` into
+`internal`. Both catch blocks now pass the error through
+`explainSnapshotFailure`, which maps a full disk to a new `ErrorCode`,
+`disk_full` (507 Insufficient Storage, exit 1), with `no space left on
+device while writing <path>` as the message (the copy destination when the
+error carries one, otherwise the partial snapshot directory) and a hint
+naming the filesystem, `hobby snapshot rm`, moving `HOBBY_HOME`, and that
+the partial snapshot was removed. `isDiskFullError`
+(`packages/core/src/errors.ts`) recognises ENOSPC and EDQUOT as errno codes
+and `No space left on device` in a child process's stderr or an existing
+`HobbyError`'s hint, which covers `cp -Rc` on darwin and pg_basebackup's
+tar. Every other error passes through untouched. How much space was needed
+is not reported: the copy stops at the first write that fails, and nothing
+measures the source first. `hobby init` now warns under 1 GiB free (issue
+#108), which is where the QA run's 330 MB would have been caught.

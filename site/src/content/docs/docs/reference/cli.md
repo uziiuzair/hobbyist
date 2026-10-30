@@ -55,6 +55,33 @@ Prepares the host. Creates `~/.hobby`, checks that Docker is reachable, and
 inspects the filesystem for reflink support and the host networking Caddy would
 need. Warns rather than failing on either.
 
+It then checks what `hobby daemon` is about to do, and says `host is ready`
+only when the daemon would start (`runPreflight`,
+`packages/cli/src/daemon/preflight.ts`; `preflightBlockers`,
+`packages/cli/src/cli/output.ts`):
+
+- Every port the daemon binds, on the address it binds it on: `proxyPort` on
+  the resolved `proxyHost`, and `apiPort` (the daemon API, which also serves
+  Studio), `httpPort` and `queuePort` on loopback. With Caddy enabled, 80 and
+  443 as well. Each line reads `free`, `already in use`, or `cannot bind
+  (EADDRNOTAVAIL)` for an address this machine does not have. `studioPort` is
+  no longer checked; nothing listens on it.
+- `proxyHost`, resolved exactly as the daemon resolves it: `tailnet` with no
+  tailscaled, or a hostname that does not resolve, is reported with the
+  daemon's own refusal.
+- Whether a daemon already holds the machine-wide lock
+  (`/tmp/hobby-daemon.lock`). If one does, init names its pid and
+  `HOBBY_HOME` and ends with `nothing to start`, since the ports it found
+  in use are that daemon's.
+- What Studio exposes: `served on 127.0.0.1:<apiPort>, loopback only` and
+  how to reach it off the box, or `published by caddy at https://<host>`
+  when `caddyStudioHost` is set.
+- Free space. Under a gigabyte, a note that a snapshot or a build is likely
+  to hit `no space left on device`.
+
+A taken port or an unusable `proxyHost` prints `host is not ready` and exits
+`4`; the lines above it say which. Nothing is bound or started.
+
 It refuses a `HOBBY_HOME` so deep that the daemon's socket path
 (`$HOBBY_HOME/hobby.sock`) would exceed 103 bytes, the most a unix socket path
 can hold on macOS, and says what the length is and to use a shorter
@@ -398,6 +425,12 @@ It refuses to send a token to a plain `http://` origin unless it is loopback. A
 token can create and destroy every database on the box, and that is not a thing
 to send in cleartext.
 
+A wrong password is `invalid credentials`, exit 1. Failures are throttled per
+address with a doubling backoff, and inside that window the daemon answers
+`429` rather than `401`, so the CLI prints the daemon's own `too many attempts,
+retry in Ns` (code `too_many_attempts`, also exit 1) instead of calling a
+password wrong that may well be right.
+
 ### `hobby logout [url]`
 
 Forgets a remote on this machine. The token stays valid on the box until you
@@ -586,10 +619,10 @@ exit code.
 | Code | Means | Daemon error codes that produce it |
 |---|---|---|
 | `0` | Success | |
-| `1` | The daemon tried and the operation did not succeed | `wake_failed`, `wake_timeout`, `not_ready`, `runtime_unavailable`, `unauthorized`, `unknown_kind`, `internal` |
+| `1` | The daemon tried and the operation did not succeed | `wake_failed`, `wake_timeout`, `not_ready`, `runtime_unavailable`, `unauthorized`, `too_many_attempts`, `disk_full`, `unknown_kind`, `internal` |
 | `2` | Usage: something you typed, or wrote in a Dockerfile or wrangler manifest, has to change | `usage`, `invalid_name`, `ambiguous_target`, `build_failed`, plus an unknown flag or a missing argument caught before any request is made |
-| `3` | Not found | `project_not_found`, `resource_not_found` |
-| `4` | Conflict: the name or state is already taken | `name_taken`, `conflict` |
+| `3` | Not found | `project_not_found`, `resource_not_found`, `not_found` |
+| `4` | Conflict: the name or state is already taken | `name_taken`, `conflict`, and `hobby init` when a port the daemon needs is taken or `proxyHost` cannot be bound |
 | `5` | The daemon could not be reached at all | none: this is a client-side condition, the socket refused or does not exist |
 
 A daemon that cannot be reached says so and suggests `hobby init` then

@@ -33,7 +33,13 @@ bearer token from `hobby login` (which calls `POST /studio/token`) or from
 `hobby token create` on the box. A request that fails gets
 `401 { "error": { "code": "unauthorized", "message": "authentication required" } }`,
 which is what `curl http://127.0.0.1:7432/v1/projects` returns on a fresh
-install. Only `/studio/login`, `/studio/logout`, `/studio/session`,
+install. Failed bearer tokens count against the same per-address backoff as
+failed logins, so a run of bad tokens from one address gets `429
+too_many_attempts` with a `Retry-After` header rather than more 401s; a
+valid token or password clears the window. A token is matched by a short
+lookup key stored beside its hash, so a bad token costs the daemon about
+what a request with no header costs, not one argon2 verify per issued
+token (`verifyToken`, `packages/cli/src/daemon/studio/tokens.ts`). Only `/studio/login`, `/studio/logout`, `/studio/session`,
 `/studio/token` and `/v1/health` answer unauthenticated there
 (`UNAUTHENTICATED_PATHS`).
 [ADR 0008](/docs/decisions/0008-studio-is-network-exposed/),
@@ -50,7 +56,7 @@ be called with a token, only with the password.
 |---|---|
 | `GET /v1/health` | Liveness. The one `/v1` route open without a credential |
 | `GET /v1/version` | `{ version }`, the daemon's build. Behind the gate on purpose, unlike health |
-| `GET /v1/preflight` | What `hobby init` reports: Docker, filesystem, host networking |
+| `GET /v1/preflight` | What `hobby init` reports: Docker, filesystem, every port the daemon binds (`ports.proxy`, `api`, `http`, `queue`, and `caddy` for 80/443 when Caddy is on), how `proxyHost` resolved, the daemon lock, what Studio exposes, host networking |
 | `GET` `POST /v1/projects` | List, create. Create accepts `{ name, sleepAfterSeconds? }`; absent, the box-wide default is copied in |
 | `GET` `DELETE /v1/projects/{name}` | Detail with resources, destroy |
 | `POST /v1/projects/{name}/resources` | Create a resource. Body `{ kind, name, ... }`, kind-specific; `queue` needs only a name |
@@ -99,14 +105,26 @@ One envelope, always:
 
 | Code | Status |
 |---|---|
-| `project_not_found`, `resource_not_found` | 404 |
+| `project_not_found`, `resource_not_found`, `not_found` | 404 |
 | `name_taken`, `conflict` | 409 |
 | `invalid_name`, `usage` | 400 |
 | `unauthorized` | 401 |
+| `too_many_attempts` | 429, with a `Retry-After` header |
 | `build_failed` | 422 |
 | `runtime_unavailable` | 503 |
 | `wake_timeout` | 504 |
+| `disk_full` | 507 |
 | `ambiguous_target`, `wake_failed`, `not_ready`, `unknown_kind`, `internal` | 500 |
+
+Three of those are narrow on purpose. `not_found` is a route that does not
+exist (`unknown route: GET /studio/logout`), as opposed to a thing that does
+not exist; a malformed request to a real route is still `usage`.
+`too_many_attempts` is a login or bearer-token attempt from an address inside
+its backoff window (`LoginThrottle`, `packages/cli/src/daemon/studio/auth.ts`):
+the message carries the wait (`too many attempts, retry in 4s`) and the
+password may well have been right, which is why it is not `unauthorized`.
+`disk_full` is ENOSPC or EDQUOT under `HOBBY_HOME` while a snapshot was being
+written; the message names the path.
 
 ## Secrets never cross this boundary
 

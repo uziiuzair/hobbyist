@@ -215,3 +215,90 @@ without psql prints the connection string, then install hints for Homebrew's
 `libpq` and Debian's `postgresql-client`, and exits 1 as before. The third
 bullet of #114 (a manual sleep clearing a wake refusal) is in PR #213's
 `stopResourceRoute`, not here.
+
+## Amendment, 2026-10-30: daemon and API bugs (issues #108, #117, #118, #64, #132)
+
+**`hobby init` checks what `hobby daemon` will do (issue #108).**
+`runPreflight` (`packages/cli/src/daemon/preflight.ts`) used to probe
+`proxyPort` and `studioPort` on loopback and nothing else, so it said `host
+is ready` for `HOBBY_PROXY_HOST=bogus`, for a taken `apiPort`, and with a
+daemon already running; `studioPort` is a port nothing listens on. It now
+reports `ports.proxy`, `ports.api`, `ports.http`, `ports.queue` and, with
+Caddy on, `ports.caddy` (80 and 443), each a `PortCheck { port, host, bound,
+error }`: `bound` is EADDRINUSE, `error` is the errno when the probe could
+neither bind nor learn it was taken (EADDRNOTAVAIL, ENOTFOUND), which is
+what the daemon's own bind would get. The proxy is probed on the address
+`resolveProxyHosts` resolves (moved from `server.ts` to `proxy-hosts.ts` so
+preflight can call it without a cycle), and the resolution itself is
+reported as `proxyHost { setting, hosts, error }`, so `tailnet` with no
+tailscaled carries the daemon's own refusal. 80 and 443 are probed by
+connecting, not binding, since a non-root process cannot bind them to find
+out. `daemon` is the machine-wide lock (`inspectDaemonLock`,
+`single-instance.ts`): pid, home, `running`, and `self` when the lock is the
+answering daemon's own, which is what Studio's call to `/v1/preflight`
+sees. `studio { listen, publicHost }` is what ADR 0008 asked init to state.
+`ports.studio` is gone from the report. `renderPreflight`,
+`preflightBlockers`, `studioExposureNote` and `diskWarning`
+(`packages/cli/src/cli/output.ts`) turn that into lines; `cmdInit` says `a
+hobby daemon is already running (pid N)` and stops when the lock is live,
+prints `host is not ready` and exits 4 when a port is taken or unbindable,
+and only otherwise says `host is ready`. Low free space (under 1 GiB) is a
+note on stderr, not a blocker.
+
+**Status codes (issue #117).** Two new `ErrorCode`s in
+`packages/core/src/errors.ts`: `too_many_attempts` (429) and `not_found`
+(404). `LoginThrottle.check` (`packages/cli/src/daemon/studio/auth.ts`)
+throws `ThrottledError`, a `HobbyError('too_many_attempts')` whose message
+is `too many attempts, retry in Ns` and which carries `retryAfterSeconds`;
+the studio router and the auth gate (`studio/routes.ts`) send it with a
+`Retry-After` header. `cmdLogin` (`packages/cli/src/cli/commands.ts`) prints
+the daemon's message on a 429 instead of `invalid credentials`. `dispatch`
+(`routes.ts`) throws `not_found` for an unknown route, both for a path
+outside `/v1` and for an unmapped one inside it; `usage` is kept for a
+malformed request to a route that exists. A missing file under `/assets/`
+is 404 rather than the SPA fallback (`serveStudioStatic`,
+`studio/static.ts`). Exit codes: `not_found` is exit 3, `too_many_attempts`
+exit 1; no seventh exit code, since neither is a new kind of outcome for a
+script. The one thing the issue lists that did not change: `HEAD /` still
+answers through the auth gate like any other method, since static serving
+is GET-only on purpose.
+
+**Bearer tokens (issue #118).** `ApiTokenRecord` gained `lookup`, the first
+8 hex characters of SHA-256 of the plaintext, written by `issueToken`
+(`packages/cli/src/daemon/studio/tokens.ts`). `verifyToken` computes the
+same key for the presented token and runs argon2 only against the record
+with that key, so a bogus token costs a hash and a file read (measured under
+20 ms for ten attempts against three issued tokens in `auth.test.ts`, versus
+about 55 ms per request before). Records written before the field existed
+are verified the old way and re-keyed on their first success, so an upgrade
+locks nobody out. `isAuthenticated` (`studio/routes.ts`) counts a bearer
+failure against the same per-address `LoginThrottle` as a wrong password
+and clears it on success; inside the window it answers 429 exactly as the
+login route does. The lookup key is not a secret and is never logged;
+neither is any token byte.
+
+**A lock another user owns (issue #64).** `acquireDaemonLock`
+(`single-instance.ts`) used to swallow every `unlinkSync` failure on a stale
+lock and end with `another daemon reclaimed it while this one was starting.
+Try again.`, which on Linux's sticky `/tmp` can never come true for a file
+root left behind. EPERM and EACCES on the unlink now throw `conflict` with
+the owner (`root (uid 0)`, or the uid), the user this daemon runs as, the
+dead daemon's pid and home from the record, and the two things that work:
+`sudo rm /tmp/hobby-daemon.lock` or running the daemon as that user.
+ENOENT (someone else reclaimed it first) still retries. Pinned with a
+read-only parent directory in `single-instance.test.ts`, skipped as root.
+
+**`HOBBY_CADDY_ADMIN_PORT` is honoured (issue #132).** `caddyAdminPort` was
+read into config and used only as the port the daemon polled; the container
+started from the image's default Caddyfile with the admin API on 2019, and
+`buildConfig` (`packages/cli/src/daemon/caddy.ts`) pushed configs with no
+`admin` block, so any other value waited 1500 ms and failed. `ensureRunning`
+now writes `$HOBBY_HOME/caddy/Caddyfile` holding `{ admin
+127.0.0.1:<port> }` (`renderBootstrapCaddyfile`) on every start and
+bind-mounts it over `/etc/caddy/Caddyfile`; every pushed config carries
+`admin.listen` with the same address, since a config without it would move
+the listener back to Caddy's default. `startDaemon` (`server.ts`) passes the
+path. A `hobby-caddy` container created before this has no bind and keeps
+2019; the unreachable-admin error now names the configured port and says to
+`docker rm -f hobby-caddy` once. The fixed `:80, :443` listen and the fixed
+container name the issue also mentions are unchanged.
