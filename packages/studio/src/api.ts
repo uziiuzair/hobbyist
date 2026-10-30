@@ -60,6 +60,20 @@ function looksLikeErrorEnvelope(value: unknown): value is ErrorEnvelope {
   );
 }
 
+const LOGIN_PATHS = new Set(["/studio/login", "/studio/token"]);
+const unauthorizedHandlers = new Set<() => void>();
+
+// Registers a listener for a 401 on any authenticated route. Returns the
+// unsubscribe, so a provider can register in an effect and drop the handler
+// on unmount. Only the auth provider is expected to call this; views keep
+// reading ApiError off their own calls as before.
+export function onUnauthorized(handler: () => void): () => void {
+  unauthorizedHandlers.add(handler);
+  return () => {
+    unauthorizedHandlers.delete(handler);
+  };
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
@@ -85,6 +99,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const body: unknown = text.length > 0 ? safeJsonParse(text) : undefined;
 
   if (!res.ok) {
+    // A 401 from inside the app means the session is gone: the daemon
+    // restarted (sessions are in memory, packages/cli/src/daemon/studio/
+    // session.ts) or the idle expiry passed. Every view used to render it
+    // as a bare "authentication required" box with no way back short of a
+    // reload (issue #124); now the one place that sees every response tells
+    // the auth provider, which returns to the login page. The login and
+    // token routes are excluded: a wrong password is also a 401, and it
+    // belongs to the form that sent it, not to the session.
+    if (res.status === 401 && !LOGIN_PATHS.has(path)) {
+      for (const handler of unauthorizedHandlers) handler();
+    }
     if (looksLikeErrorEnvelope(body)) {
       throw new ApiError(
         body.error.code,
@@ -117,8 +142,12 @@ function jsonBody(body: unknown): RequestInit {
 
 // --- Session (Task 10 contract, see the report for the assumption this rests on) ---
 
-export function login(username: string, password: string): Promise<void> {
-  return request("/studio/login", jsonBody({ username, password }));
+// Password only. There is one operator credential and no user table (ADR
+// 0008), and the daemon's login handler reads `password` alone
+// (packages/cli/src/daemon/studio/routes.ts, loginHandler). The form used
+// to collect a username the server never read (issue #123).
+export function login(password: string): Promise<void> {
+  return request("/studio/login", jsonBody({ password }));
 }
 
 export function logout(): Promise<void> {
