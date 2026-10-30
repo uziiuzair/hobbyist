@@ -229,6 +229,21 @@ an ordinary path. `cmdSnapshotRestore` (`packages/cli/src/cli/commands.ts`)
 now asks `GET /v1/projects/:name` and says "`<project>` itself no longer
 exists; the snapshot outlived it" in that case. `--json` output is unchanged.
 
+## Amendment, 2026-10-30: a pause closes connections, and the CLI says so (issue #177)
+
+`quiesce` (`packages/cli/src/daemon/snapshots.ts`) waits on the activity
+guard and then stops the container, so an idle session on a paused postgres
+is ended with "terminating connection due to administrator command" while a
+running query is respected. That is unchanged here and still the documented
+cost of a quiesced snapshot; what changed is that `hobby snapshot` and
+`hobby branch` (`cmdSnapshot`, `cmdBranch` in `packages/cli/src/cli/commands.ts`)
+now say which resources were paused and that their open connections were
+closed, and `hobby snapshot` points at `--online`, which copies a running
+postgres without pausing it. Keeping idle connections open across a pause
+would need the quiesce to hold the sockets rather than stop the container,
+which is the design question `docs/branching/CLAUDE.md` raises and this
+amendment does not settle.
+
 ## Amendment, 2026-10-30: a full disk is named (issue #139)
 
 `hobby snapshot` on a filesystem that ran out of room printed `internal

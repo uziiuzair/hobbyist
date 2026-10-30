@@ -1322,7 +1322,7 @@ async function startResourceRoute(ctx: DaemonContext, id: string): Promise<Route
 function busyDescription(resource: Resource): string {
   switch (resource.kind) {
     case 'postgres':
-      return 'a query or transaction is running, or a client is connected directly to it'
+      return 'a query or transaction is running, or a client session is open (through the proxy or directly)'
     case 'worker':
       return 'a queue batch is in flight or a Durable Object alarm is due within 30s'
     default:

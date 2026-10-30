@@ -89,6 +89,15 @@ function writeOperatorCredential(paths: Paths, hash: string): void {
   chmodSync(path, 0o600)
 }
 
+// The floor on the operator password's length, in characters (issue #127).
+// One constant, read by setOperatorPassword below and by the CLI's
+// `hobby studio passwd` (packages/cli/src/cli/commands.ts, cmdStudioPasswd),
+// so the two can never disagree about what is too short. Twelve is the
+// length at which a lower-case passphrase stops being cheap to brute force
+// against the argon2id hash above, and the whole point of ADR 0008 is that
+// this one credential is the largest security surface in the project.
+export const MIN_PASSWORD_LENGTH = 12
+
 // The single function that can create or change the operator credential
 // (ADR 0008: "can only be created or changed by running `hobby studio
 // passwd` on the box"). Nothing reachable over the network calls this; see
@@ -98,6 +107,13 @@ function writeOperatorCredential(paths: Paths, hash: string): void {
 export async function setOperatorPassword(paths: Paths, plain: string): Promise<void> {
   if (plain.length === 0) {
     throw new HobbyError('usage', 'password must not be empty')
+  }
+  if (plain.length < MIN_PASSWORD_LENGTH) {
+    throw new HobbyError(
+      'usage',
+      `password must be at least ${MIN_PASSWORD_LENGTH} characters (got ${plain.length})`,
+      'this credential gates a network-exposed control plane (ADR 0008); a passphrase of a few words is fine'
+    )
   }
   const hash = await hashPassword(plain)
   writeOperatorCredential(paths, hash)

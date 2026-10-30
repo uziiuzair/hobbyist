@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import * as api from "../api.js";
 import { useResource } from "../lib/useResource.js";
 import { useWakeAwareRun } from "../lib/useWaking.js";
+import { describeError } from "../lib/errors.js";
 import { WakingBanner } from "../components/WakingBanner.js";
 import { Workbench } from "../components/Workbench.js";
 import { State } from "../components/State.js";
@@ -60,11 +61,7 @@ export function Schema({
     )
       .then(setTables)
       .catch((err: unknown) =>
-        setError(
-          err instanceof api.ApiError
-            ? err.message
-            : "Could not read the schema",
-        ),
+        setError(describeError(err, "Could not read the schema")),
       );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resource?.id]);

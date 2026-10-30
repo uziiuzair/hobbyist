@@ -82,6 +82,11 @@ export interface PortCheck {
   error: string | null
 }
 
+// Linux's f_type for tmpfs (TMPFS_MAGIC in linux/magic.h). macOS reports a
+// different type space, so this only ever matches on Linux, which is also
+// where a HOBBY_HOME can land on tmpfs.
+const TMPFS_MAGIC = 0x01021994
+
 export interface PreflightReport {
   runtimeAvailable: boolean
   filesystem: {
@@ -92,6 +97,10 @@ export interface PreflightReport {
     path: string
     reflinkSupported: boolean
     freeBytes: number
+    // statfs says the home is on tmpfs, so every data directory is in RAM
+    // and gone at the next reboot (issue #138). False when the type cannot
+    // be read.
+    tmpfs: boolean
   }
   // How proxyHost resolved, the way startDaemon resolves it
   // (proxy-hosts.ts's resolveProxyHosts). `hosts` is null and `error` is
@@ -418,6 +427,7 @@ export async function runPreflight(ctx: DaemonContext, opts: PreflightOptions = 
       path: probeDir,
       reflinkSupported,
       freeBytes: fsStats.bavail * fsStats.bsize,
+      tmpfs: fsStats.type === TMPFS_MAGIC,
     },
     proxyHost,
     ports: { proxy, api, http, queue, caddy },

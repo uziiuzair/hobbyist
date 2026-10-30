@@ -48,6 +48,10 @@ test('ensureCreated issues docker create with the exact expected argv when absen
     if (args[0] === 'inspect') {
       throw notFoundError('Error: No such object: hobby-blog-primary')
     }
+    if (args[0] === 'image') {
+      // `docker image inspect`: the image is already on the box (issue #138).
+      return { stdout: '[{}]\n', stderr: '' }
+    }
     if (args[0] === 'create') {
       return { stdout: 'hobby-blog-primary\n', stderr: '' }
     }
@@ -58,8 +62,8 @@ test('ensureCreated issues docker create with the exact expected argv when absen
   const id = await runtime.ensureCreated(sampleSpec())
 
   assert.equal(id, 'hobby-blog-primary')
-  assert.equal(calls.length, 2)
-  assert.deepEqual(calls[1], {
+  assert.equal(calls.length, 3, 'container inspect, image inspect, create')
+  assert.deepEqual(calls[2], {
     cmd: 'docker',
     args: [
       'create',
@@ -108,9 +112,49 @@ test('ensureCreated publishes every port on loopback unless the spec names an ad
     ],
   })
 
-  const createArgs = calls[1]?.args ?? []
+  const createArgs = calls.find((call) => call.args[0] === 'create')?.args ?? []
   const published = createArgs.filter((_arg, index) => createArgs[index - 1] === '-p')
   assert.deepEqual(published, ['127.0.0.1:15432:5432', '0.0.0.0:8080:80'])
+})
+
+// Issue #138: a missing image is pulled explicitly before `docker create`,
+// so the first `hobby new` on a fresh box logs what it is waiting on, and a
+// failed pull is a bounded error rather than the whole pull log.
+test('ensureCreated pulls a missing image before creating, and a failed pull is a bounded error', async () => {
+  const calls: RecordedCall[] = []
+  let pullFails = false
+  const exec: ExecFn = async (cmd, args) => {
+    calls.push({ cmd, args })
+    if (args[0] === 'inspect') throw notFoundError('Error: No such object: hobby-blog-primary')
+    if (args[0] === 'image') throw notFoundError('Error: No such image: postgres:18-alpine')
+    if (args[0] === 'pull') {
+      if (pullFails) {
+        const err = new Error('pull failed') as Error & { stderr?: string }
+        err.stderr = 'line one\nline two\nline three\nError response from daemon: Get "https://registry-1.docker.io/v2/": dial tcp: lookup registry-1.docker.io: no such host\n'
+        throw err
+      }
+      return { stdout: '', stderr: '' }
+    }
+    return { stdout: 'hobby-blog-primary\n', stderr: '' }
+  }
+
+  const runtime = createDockerRuntime(exec)
+  await runtime.ensureCreated(sampleSpec())
+  assert.deepEqual(
+    calls.map((call) => call.args.slice(0, 2).join(' ')),
+    ['inspect hobby-blog-primary', 'image inspect', 'pull --quiet', 'create --name']
+  )
+
+  pullFails = true
+  calls.length = 0
+  await assert.rejects(runtime.ensureCreated({ ...sampleSpec(), name: 'hobby-blog-other' }), (err: unknown) => {
+    const e = err as { code?: string; message?: string; hint?: string }
+    assert.equal(e.code, 'runtime_unavailable')
+    assert.match(e.message ?? '', /could not pull postgres:18-alpine/)
+    assert.match(e.hint ?? '', /no such host/)
+    assert.doesNotMatch(e.hint ?? '', /line one/, 'only the tail of the pull output')
+    return true
+  })
 })
 
 test('the fake runtime records the same loopback default the real adapter emits', async () => {

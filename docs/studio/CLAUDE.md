@@ -76,6 +76,66 @@ already committed when the route answered 400. `shapeQueryResult`
 is what the text was written to see; the earlier statements run exactly as
 they would in psql.
 
+## Amendment, 2026-10-30: the QA lane's Studio bugs (issues #120 to #127)
+
+Seven fixes from the 2026-10-16 QA pass, in one change. Each is grounded in
+the file named.
+
+- **Wake failures and SQL errors are told apart by the daemon's error code
+  (#120).** `useWakeAwareRun` (`packages/studio/src/lib/useWaking.ts`) used
+  to set `phase: 'error'` for any rejection, so a typo in the SQL editor
+  rendered the "did not come up" banner. `isWakeFailure`
+  (`packages/studio/src/lib/errors.ts`) is true only for `wake_failed` and
+  `wake_timeout`, the two codes `getOrCreateWake` raises
+  (`packages/pg/src/postgres.ts`, `packages/cli/src/daemon/context.ts`); a
+  statement Postgres rejected arrives as `usage` from `toQueryError`
+  (`packages/pg/src/query.ts`) with the SQLSTATE in `hint`. The branch is on
+  the code, never on the HTTP status. `describeError` in the same module
+  renders message plus hint, so the Sql, Tables and Schema views now show
+  `syntax error at or near "selec" (SQLSTATE 42601)`.
+- **The hardcoded "Recommended" security alerts are gone (#121).**
+  `packages/studio/src/components/reusable/alert.tsx` is deleted and the
+  section in `packages/studio/src/views/Projects.tsx` with it. Nothing
+  replaces it: the home page shows the project list and the `MachineStrip`,
+  both read from the API.
+- **A project can be created from anywhere on the home page (#122).** A "New
+  project" button sits beside the search in `Projects.tsx`; the empty-state
+  button is wired; the no-match state says "No projects match". The create
+  sequence is `createProjectWithDefaults`
+  (`packages/studio/src/lib/createProject.ts`): `POST /v1/projects`, then a
+  postgres named `primary` (`DEFAULT_POSTGRES_NAME`, mirroring
+  `packages/core/src/names.ts`), and `DELETE /v1/projects/:name` if the
+  postgres fails, the same sequence and rollback as `cmdNew`
+  (`packages/cli/src/cli/commands.ts`). A "Start empty" checkbox is
+  `hobby new --empty`; `--pin` is deliberately not offered in the form.
+- **The login form asks for the password alone (#123).** `Login.tsx` has no
+  username field and `api.login(password)` sends `{ password }`, which is
+  all `loginHandler` (`packages/cli/src/daemon/studio/routes.ts`) reads.
+  Enter submits whenever the password is non-empty.
+- **A lost session returns to the login page (#124).** `request` in
+  `packages/studio/src/api.ts` calls every `onUnauthorized` handler on a 401
+  from any route except `/studio/login` and `/studio/token`; `AuthProvider`
+  (`packages/studio/src/providers/auth-provider.tsx`) registers one that
+  sets `SESSION_LOST_NOTICE`, drops the session and navigates to `/`, and
+  `Login` shows the note.
+- **Durations render exactly (#126).** `formatDuration` and
+  `formatDurationShort` (`packages/studio/src/lib/format.ts`) replace the
+  `Math.round(seconds / 60)` in `Project.tsx`: 30 is "30 seconds" / "30s",
+  90 is "1 minute 30 seconds" / "1m 30s", 3600 is "1 hour" / "1h".
+  `formatSince` and the queue age in `Queues.tsx` stay coarse on purpose;
+  they describe elapsed time, not a setting.
+- **The operator password has a floor of 12 characters (#127).**
+  `MIN_PASSWORD_LENGTH` (`packages/cli/src/daemon/studio/auth.ts`) is the
+  one constant; `setOperatorPassword` refuses anything shorter with a
+  `usage` error, and `cmdStudioPasswd` (`packages/cli/src/cli/commands.ts`)
+  checks it before the confirm prompt so a too-short password is not typed
+  twice. Tests in `packages/cli/test/studio-passwd.test.ts` cover both
+  sides.
+
+Tests for the Studio side are `packages/studio/test/errors.test.ts`,
+`format.test.ts`, `createProject.test.ts` and the login and 401 cases in
+`api.test.ts`.
+
 ## Amendment, 2026-10-30: column type names (issue #116)
 
 `select current_user, x::bytea, pg_sleep(0)` showed `oid:19`, `oid:17` and

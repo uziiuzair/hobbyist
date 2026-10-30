@@ -216,6 +216,44 @@ without psql prints the connection string, then install hints for Homebrew's
 bullet of #114 (a manual sleep clearing a wake refusal) is in PR #213's
 `stopResourceRoute`, not here.
 
+## Amendment, 2026-10-30: install, update and remote rough edges (issues #112, #113, #135, #136, #138)
+
+- **`hobby token` and `hobby studio` know about the remote (#112).** `run`
+  (`packages/cli/src/cli/main.ts`) reads `activeRemote` before dispatching
+  them. `token` refuses with a `usage` error naming the remote, because
+  tokens live in files on the box that holds them (`readTokens`, `issueToken`,
+  `revokeToken` in `packages/cli/src/daemon/studio/tokens.ts`); `studio`
+  prints and opens the remote's URL, since the daemon serving the API serves
+  Studio on the same origin (`cmdStudio`, `remoteUrl`).
+- **Login order and messages (#113).** `cmdLogin` builds the anonymous remote
+  client, which is what refuses plain http off loopback, before it prompts
+  for the password. A TLS handshake against a daemon speaking plain http is
+  reported as "does not speak https" with the `http://` form to try. A 401
+  from a remote on any verb is reported as that box rejecting this machine's
+  token, with `hobby login <url>` as the way back (`run`'s catch). `hobby
+  connect` against a remote notes when the address it was handed is loopback
+  on that box.
+- **`hobby update` finds the checkout it runs from (#136).**
+  `runningCheckout` resolves four directories up from the compiled module and
+  is used when `HOBBY_SRC_DIR` is unset, before falling back to
+  `$HOBBY_HOME/src`. `--check` exits `EXIT_UPDATE_AVAILABLE` (6) when a newer
+  tag exists. The before/after pair is `git describe --tags --always` on both
+  sides. The rebuild runs `install.sh` with `HOBBY_INSTALL_QUIET=1`, which
+  skips the first-install welcome text.
+- **The web installer handles a tag ref (#135).** `scripts/web-install.sh`
+  fetches tags and resets to `refs/tags/<ref>` when the ref names one, and
+  clones with `advice.detachedHead=false`.
+- **First-run papercuts (#138).** `ensureCreated` (`packages/core/src/docker.ts`)
+  pulls a missing image explicitly with a log line and a bounded error;
+  `install.sh` checks for curl and mentions psql and the systemd unit;
+  `hobby init` warns when `HOBBY_HOME` is on tmpfs (`PreflightReport.filesystem.tmpfs`,
+  `tmpfsWarning`) and the reflink note names XFS `reflink=1`; `hobby eject`
+  says where it writes the queue backlogs before writing them; a missing
+  daemon socket reads "no daemon is listening at <path>" instead of the
+  runtime's URL wording. The install guide gained a section on running the
+  daemon under systemd and an uninstall list that covers containers,
+  networks, images and the lock file.
+
 ## Amendment, 2026-10-30: daemon and API bugs (issues #108, #117, #118, #64, #132)
 
 **`hobby init` checks what `hobby daemon` will do (issue #108).**
