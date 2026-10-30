@@ -2201,6 +2201,172 @@ test('GET /v1/projects/:name/crons lists schedules of deployed workers only, wit
 })
 
 // ---------------------------------------------------------------------------
+// Queue fixes, 2026-10-30: issues #156, #165, #166, #170.
+// ---------------------------------------------------------------------------
+
+// Issue #156: a dead letter queue a consumer still routes to cannot be
+// deleted, whether the relationship is read from the consumer's deployed
+// manifest or from the stored QueueConfig of the queue it consumes. Before
+// this, `hobby queue rm` removed it and the next dead letter silently
+// recreated the file.
+test('DELETE /v1/resources/:id refuses to delete a queue that is still some consumer\'s dead letter queue', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const worker = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'cons',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({
+        queues: { producers: [], consumers: [consumerEntry('work', { deadLetterQueue: 'work-dlq' })] },
+      }),
+    }),
+  }) as WorkerResource
+  await syncWorkerQueueBindings(ctx, project, worker)
+  const dlq = ctx.store.getResourceByName(project.id, 'work-dlq')
+  assert.ok(dlq !== null && dlq.kind === 'queue')
+
+  await withServer(ctx, async (baseUrl) => {
+    const refused = await call(baseUrl, 'DELETE', `/v1/resources/${dlq.id}`)
+    assert.equal(refused.status, 400)
+    const body = refused.body as { error: { code: string; message: string; hint?: string } }
+    assert.match(body.error.message, /dead letter queue/)
+    assert.match(body.error.message, /cons/, 'the refusal names the consumer')
+    assert.match(body.error.hint ?? '', /dead_letter_queue/)
+    assert.equal((await call(baseUrl, 'GET', `/v1/resources/${dlq.id}`)).status, 200, 'nothing was torn down')
+
+    // The stored relationship alone, with the manifest no longer naming it,
+    // still protects it: the broker routes by the stored config.
+    ctx.store.updateResourceConfig(worker.id, {
+      ...worker.config,
+      manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [consumerEntry('work')] } }),
+    })
+    const stillRefused = await call(baseUrl, 'DELETE', `/v1/resources/${dlq.id}`)
+    assert.equal(stillRefused.status, 400)
+
+    // Once the source queue stops routing to it, the delete goes through.
+    const work = ctx.store.getResourceByName(project.id, 'work')
+    assert.ok(work !== null && work.kind === 'queue')
+    ctx.store.updateResourceConfig(work.id, { ...work.config, deadLetterQueue: null })
+    assert.equal((await call(baseUrl, 'DELETE', `/v1/resources/${dlq.id}`)).status, 200)
+  })
+})
+
+// Issue #166: the manifest replaces the stored tuning on every deploy, so a
+// key deleted from wrangler.toml falls back to the broker's default rather
+// than staying in force forever.
+test('syncWorkerQueueBindings clears a tuning key and a dead letter queue the redeployed manifest no longer sets', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const first = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'api',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({
+        queues: {
+          producers: [],
+          consumers: [consumerEntry('jobs', { retryDelaySeconds: 2, maxRetries: 7, deadLetterQueue: 'jobs-dlq' })],
+        },
+      }),
+    }),
+  }) as WorkerResource
+  await syncWorkerQueueBindings(ctx, project, first)
+
+  let queue = ctx.store.getResourceByName(project.id, 'jobs')
+  assert.ok(queue !== null && queue.kind === 'queue')
+  assert.equal(queue.config.retryDelaySeconds, 2)
+  assert.equal(queue.config.deadLetterQueue, 'jobs-dlq')
+
+  // Redeploy with retry_delay and dead_letter_queue deleted, max_retries kept.
+  const redeployed = ctx.store.getResource(first.id) as WorkerResource
+  ctx.store.updateResourceConfig(first.id, {
+    ...redeployed.config,
+    manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [consumerEntry('jobs', { maxRetries: 7 })] } }),
+  })
+  await syncWorkerQueueBindings(ctx, project, ctx.store.getResource(first.id) as WorkerResource)
+
+  queue = ctx.store.getResourceByName(project.id, 'jobs')
+  assert.ok(queue !== null && queue.kind === 'queue')
+  assert.equal(queue.config.retryDelaySeconds, null, 'removed from the manifest, so back to the default')
+  assert.equal(queue.config.deadLetterQueue, null, 'removed from the manifest, so no longer routed')
+  assert.equal(queue.config.maxRetries, 7, 'still set, still in force')
+  assert.equal(queue.config.consumerResourceId, first.id)
+  ctx.store.close()
+})
+
+// Issue #165: the enqueue route accepts a body larger than the daemon's
+// general 64 KB request limit, so the documented 128000 byte message limit
+// is reachable from the CLI, and an oversized message gets the broker's own
+// refusal naming the limit instead of a reset socket.
+test('POST /v1/resources/:id/queue/messages accepts a 100 KB message and refuses a 130 KB one with the real limit', async () => {
+  const ctx = buildContext()
+  ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+
+  await withServer(ctx, async (baseUrl) => {
+    const created = await call(baseUrl, 'POST', '/v1/projects/blog/resources', { kind: 'queue', name: 'jobs' })
+    const queueId = (created.body as { resource: QueueResourceBody }).resource.id
+
+    const ok = await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/messages`, { body: { x: 'a'.repeat(100_000) } })
+    assert.equal(ok.status, 201)
+
+    const tooBig = await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/messages`, {
+      body: { x: 'a'.repeat(130_000) },
+    })
+    assert.equal(tooBig.status, 400)
+    const body = tooBig.body as { error: { code: string; message: string } }
+    assert.equal(body.error.code, 'usage')
+    assert.match(body.error.message, /128000/, 'the message limit, not the request limit, is what the user reads')
+  })
+})
+
+// A body over the general limit on an ordinary route is still refused, but
+// with a 400 that reaches the client rather than a destroyed socket.
+test('an oversized body on an ordinary route gets a 400 naming the limit, not a reset connection', async () => {
+  const ctx = buildContext()
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', '/v1/projects', { name: 'x'.repeat(70_000) })
+    assert.equal(res.status, 400)
+    const body = res.body as { error: { message: string; hint?: string } }
+    assert.match(body.error.message, /too large/)
+    assert.match(body.error.hint ?? '', /65536/)
+  })
+})
+
+// Issue #170: peek reports each message's state and when it becomes visible,
+// so a leased or delayed message is not shown as if it were simply waiting.
+test('GET /v1/resources/:id/queue/messages reports ready, delayed and leased states', async () => {
+  const ctx = buildContext()
+  ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+
+  await withServer(ctx, async (baseUrl) => {
+    const created = await call(baseUrl, 'POST', '/v1/projects/blog/resources', { kind: 'queue', name: 'jobs' })
+    const queueId = (created.body as { resource: QueueResourceBody }).resource.id
+    await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/messages`, { body: 'now' })
+    await call(baseUrl, 'POST', `/v1/resources/${queueId}/queue/messages`, { body: 'later', delaySeconds: 600 })
+
+    const db = openQueueDb(queueDbPath(ctx.paths, 'blog', 'jobs'))
+    try {
+      // Lease the one ready message, as the tick would.
+      const batch = leaseBatch(db, { ...DEFAULT_CONSUMER_OPTIONS, maxBatchSize: 1 }, Date.now())
+      assert.equal(batch?.messages.length, 1)
+    } finally {
+      db.close()
+    }
+
+    const peeked = await call(baseUrl, 'GET', `/v1/resources/${queueId}/queue/messages`)
+    const messages = (peeked.body as { messages: Array<{ body: unknown; state: string; visibleAtMs: number; deadLetteredAtMs: unknown }> }).messages
+    assert.equal(messages.length, 2)
+    assert.equal(messages[0]?.body, 'now')
+    assert.equal(messages[0]?.state, 'leased')
+    assert.equal(messages[1]?.body, 'later')
+    assert.equal(messages[1]?.state, 'delayed')
+    assert.ok((messages[1]?.visibleAtMs ?? 0) > Date.now() + 500_000)
+    assert.equal(messages[0]?.deadLetteredAtMs, null)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Wake path fixes, 2026-10-30: issues #57, #73, #162.
 // ---------------------------------------------------------------------------
 

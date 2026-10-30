@@ -534,3 +534,25 @@ test('`hobby version` reports the daemon version from /v1/version when one answe
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+// Issue #170 and #168: `hobby queue peek` says what a message is doing and,
+// for a dead letter, how many deliveries failed before it landed.
+test('renderQueueMessageLine marks leased, delayed and dead lettered messages', async () => {
+  const { renderDuration, renderQueueMessageLine } = await import('../src/cli/output.js')
+  const now = 1_700_000_000_000
+  const base = { id: 'ID', timestampMs: now - 5000, contentType: 'json', body: { a: 1 }, visibleAtMs: now - 5000, deadLetteredAtMs: null, failedAttempts: null }
+  assert.equal(renderQueueMessageLine({ ...base, attempts: 0, state: 'ready' }, now), 'ID  attempts 0  {"a":1}')
+  assert.equal(renderQueueMessageLine({ ...base, attempts: 1, state: 'leased' }, now), 'ID  attempts 1  leased  {"a":1}')
+  assert.equal(
+    renderQueueMessageLine({ ...base, attempts: 1, state: 'delayed', visibleAtMs: now + 90_000 }, now),
+    'ID  attempts 1  delayed, visible in 90s  {"a":1}'
+  )
+  assert.equal(
+    renderQueueMessageLine({ ...base, attempts: 0, state: 'ready', deadLetteredAtMs: now - 1000, failedAttempts: 3 }, now),
+    'ID  attempts 0  dead letter after 3 failed attempts  {"a":1}'
+  )
+  assert.equal(renderDuration(345600), '4d')
+  assert.equal(renderDuration(3600), '1h')
+  assert.equal(renderDuration(90), '90s')
+  assert.equal(renderDuration(0), '0s')
+})

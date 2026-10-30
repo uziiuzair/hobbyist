@@ -46,6 +46,8 @@ import {
   queueDbPath,
   type ContentType,
   type LeasedMessage,
+  type PeekedMessage,
+  type PeekedState,
 } from '@hobby.sh/queue'
 import {
   buildRunnerManifest,
@@ -80,6 +82,18 @@ interface RouteResult {
 }
 
 const MAX_BODY_BYTES = 64 * 1024
+// The enqueue route's own limit (issue #165): a single message may be
+// MAX_MESSAGE_BYTES (128000) of body, and codec.ts's encoding plus the JSON
+// envelope around it add to that, so the default 64 KB request limit made
+// the documented message limit unreachable from the CLI and MCP. Generous
+// rather than exact, because enqueue() itself is what refuses an oversized
+// message with a message naming the real limit; this only has to let that
+// request reach it.
+const ENQUEUE_BODY_BYTES = 1024 * 1024
+// Past this, an oversized request is cut off rather than drained: draining
+// exists so a client gets the 400 instead of a reset socket, not so the
+// daemon reads an unbounded stream to be polite.
+const DRAIN_CEILING_BYTES = 8 * 1024 * 1024
 const DEFAULT_LOG_TAIL = 200
 
 function errorMessage(err: unknown): string {
@@ -90,11 +104,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
-function readJsonBody(req: IncomingMessage): Promise<unknown> {
+// An oversized body is drained and then refused at 'end' rather than
+// destroyed mid-stream (issue #165): destroying the socket before the 4xx is
+// written left the CLI reporting "cannot reach the hobby daemon: socket hang
+// up" for a 70 KB `hobby queue send`, which is the wrong diagnosis for a
+// request the daemon received perfectly well. The chunks past the limit are
+// dropped, not buffered, so draining costs nothing but time, and
+// DRAIN_CEILING_BYTES still cuts off a client that keeps going.
+function readJsonBody(req: IncomingMessage, limit: number = MAX_BODY_BYTES): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let size = 0
     let settled = false
+    let tooLarge = false
 
     const fail = (err: Error): void => {
       if (settled) return
@@ -104,9 +126,13 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
 
     req.on('data', (chunk: Buffer) => {
       size += chunk.length
-      if (size > MAX_BODY_BYTES) {
-        fail(new HobbyError('usage', 'request body too large', `limit is ${MAX_BODY_BYTES} bytes`))
-        req.destroy()
+      if (tooLarge || size > limit) {
+        tooLarge = true
+        chunks.length = 0
+        if (size > DRAIN_CEILING_BYTES) {
+          fail(new HobbyError('usage', `request body too large: more than ${DRAIN_CEILING_BYTES} bytes`, `the limit is ${limit} bytes`))
+          req.destroy()
+        }
         return
       }
       chunks.push(chunk)
@@ -114,6 +140,10 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
 
     req.on('end', () => {
       if (settled) return
+      if (tooLarge) {
+        fail(new HobbyError('usage', `request body too large: ${size} bytes`, `the limit is ${limit} bytes`))
+        return
+      }
       if (chunks.length === 0) {
         settled = true
         resolve({})
@@ -892,21 +922,19 @@ export async function syncWorkerQueueBindings(ctx: DaemonContext, project: Proje
     if (queue === undefined) {
       continue
     }
-    const config: QueueConfig = { ...queue.config, consumerResourceId: worker.id }
-    if (consumerEntry.maxBatchSize !== null) {
-      config.maxBatchSize = consumerEntry.maxBatchSize
-    }
-    if (consumerEntry.maxBatchTimeoutSeconds !== null) {
-      config.maxBatchTimeoutSeconds = consumerEntry.maxBatchTimeoutSeconds
-    }
-    if (consumerEntry.maxRetries !== null) {
-      config.maxRetries = consumerEntry.maxRetries
-    }
-    if (consumerEntry.retryDelaySeconds !== null) {
-      config.retryDelaySeconds = consumerEntry.retryDelaySeconds
-    }
-    if (consumerEntry.deadLetterQueue !== null) {
-      config.deadLetterQueue = consumerEntry.deadLetterQueue
+    // The manifest REPLACES the stored tuning, key by key, null included
+    // (issue #166): a key deleted from wrangler.toml must fall back to the
+    // broker's default on the next deploy, exactly as QueueConfig's own
+    // comment promises. Copying only non-null values, as this once did, left
+    // a removed `retry_delay` or `dead_letter_queue` in force forever.
+    const config: QueueConfig = {
+      ...queue.config,
+      consumerResourceId: worker.id,
+      maxBatchSize: consumerEntry.maxBatchSize,
+      maxBatchTimeoutSeconds: consumerEntry.maxBatchTimeoutSeconds,
+      maxRetries: consumerEntry.maxRetries,
+      retryDelaySeconds: consumerEntry.retryDelaySeconds,
+      deadLetterQueue: consumerEntry.deadLetterQueue,
     }
     ctx.store.updateResourceConfig(queue.id, config)
     byName.set(queue.name, { ...queue, config })
@@ -1026,29 +1054,52 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
 // makes the wedge ("everything sleeps, everything wakes on demand") one
 // mechanism rather than three.
 // Every worker in the queue's own project whose DEPLOYED manifest names this
-// queue, either as a consumer or as a producer, plus the stored consumer
-// relationship itself. Two sources rather than one: consumerResourceId is
-// the join drainableQueues (daemon/queues.ts) already trusts for delivery,
-// but nothing before this route has ever required it to be set, so a worker
-// whose manifest declares a binding is checked too, independently, so a
-// producer that would start throwing `env.X.send()` errors the moment this
-// queue vanished is caught even when consumerResourceId was never wired up.
-// Returns the first binder found; there is exactly one refusal message to
-// write regardless of how many exist.
-function findBindingWorker(ctx: DaemonContext, queue: QueueResource): WorkerResource | null {
+// queue, as a consumer, as a producer, or as the dead letter queue of a
+// queue it consumes, plus the stored consumer relationship itself. Two
+// sources rather than one: consumerResourceId is the join drainableQueues
+// (daemon/queues.ts) already trusts for delivery, but nothing before this
+// route has ever required it to be set, so a worker whose manifest declares
+// a binding is checked too, independently, so a producer that would start
+// throwing `env.X.send()` errors the moment this queue vanished is caught
+// even when consumerResourceId was never wired up. The dead letter check
+// (issue #156) reads both the manifest and the stored QueueConfig of every
+// other queue in the project, because deleting a dead letter queue a
+// consumer still routes to silently recreates it on the next dead letter.
+// Returns the first binder found with how it binds; there is exactly one
+// refusal message to write regardless of how many exist.
+function findBindingWorker(
+  ctx: DaemonContext,
+  queue: QueueResource
+): { worker: WorkerResource; role: 'binding' | 'dead letter' } | null {
   if (queue.config.consumerResourceId !== null) {
     const consumer = ctx.store.getResource(queue.config.consumerResourceId)
     if (consumer !== null && consumer.kind === 'worker') {
-      return consumer
+      return { worker: consumer, role: 'binding' }
     }
   }
-  for (const candidate of ctx.store.listResources(queue.projectId)) {
+  const siblings = ctx.store.listResources(queue.projectId)
+  for (const candidate of siblings) {
     if (candidate.kind !== 'worker' || candidate.config.manifest === null) {
       continue
     }
     const { producers, consumers } = candidate.config.manifest.queues
     if (producers.some((p) => p.queue === queue.name) || consumers.some((c) => c.queue === queue.name)) {
-      return candidate
+      return { worker: candidate, role: 'binding' }
+    }
+    if (consumers.some((c) => c.deadLetterQueue === queue.name)) {
+      return { worker: candidate, role: 'dead letter' }
+    }
+  }
+  for (const candidate of siblings) {
+    if (candidate.kind !== 'queue' || candidate.config.deadLetterQueue !== queue.name) {
+      continue
+    }
+    if (candidate.config.consumerResourceId === null) {
+      continue
+    }
+    const consumer = ctx.store.getResource(candidate.config.consumerResourceId)
+    if (consumer !== null && consumer.kind === 'worker') {
+      return { worker: consumer, role: 'dead letter' }
     }
   }
   return null
@@ -1081,8 +1132,12 @@ async function destroyResourceRoute(ctx: DaemonContext, id: string): Promise<Rou
     if (binder !== null) {
       throw new HobbyError(
         'usage',
-        `queue ${resource.name} is still bound to worker ${binder.name}, refusing to delete it`,
-        `remove the queue binding from ${binder.name}'s wrangler config and redeploy, or delete ${binder.name} first`
+        binder.role === 'dead letter'
+          ? `queue ${resource.name} is still the dead letter queue of a queue worker ${binder.worker.name} consumes, refusing to delete it`
+          : `queue ${resource.name} is still bound to worker ${binder.worker.name}, refusing to delete it`,
+        binder.role === 'dead letter'
+          ? `remove dead_letter_queue = "${resource.name}" from ${binder.worker.name}'s wrangler config and redeploy, or delete ${binder.worker.name} first`
+          : `remove the queue binding from ${binder.worker.name}'s wrangler config and redeploy, or delete ${binder.worker.name} first`
       )
     }
   }
@@ -1549,6 +1604,16 @@ function renderCompose(
         DB: `postgres://${user}:${password}@${database.name}:5432/${db.database}`,
       }
     }
+    // An ejected worker has no queue (ADR 0013, and the notice
+    // renderQueueEjectNotice prepends to this file): the broker is hobby's,
+    // and it does not come along. Stripping the endpoint and the token here
+    // (issue #169) is what makes that true rather than aspirational. Before
+    // this, the compose file carried a live bearer token and the daemon's
+    // enqueue URL, so an "ejected" worker kept producing into hobby's broker.
+    // The binding names stay, so the runner still mounts env.X and the shim
+    // answers send() with an error that says why (runtime-image.ts).
+    manifest.queueEndpoint = null
+    manifest.queueToken = null
     lines.push(`      HOBBY_WORKER_MANIFEST: ${JSON.stringify(JSON.stringify(manifest))}`)
     lines.push('    ports:')
     lines.push(`      - "${DEFAULT_PORT_BIND}:${cfg.hostPort}:${cfg.containerPort}"`)
@@ -1934,35 +1999,16 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
   // less than what renderCompose already knows: this is either "come back
   // once something has deployed" or "there is genuinely nothing here yet,"
   // never "hobby lost your data."
-  if (postgresResources.length + deployedApps.length + deployedWorkers.length === 0) {
-    // Accepted, tracked gap, not closed by this fix round: a project holding
-    // ONLY a queue (no postgres, app or worker at all) still refuses here
-    // rather than emitting a `services:` key with nothing under it, which is
-    // not valid compose (the comment above this block). Nothing is lost by
-    // that refusal: nothing is released, hobby keeps managing the project,
-    // and `hobby queue peek` still reads every message right up until this
-    // project also has something a compose file can be built around.
-    //
-    // What this fix round DOES close: the message must not claim the
-    // project "has no resources yet" when a queue resource plainly exists.
-    // 'queue' moved into EJECTABLE above, so a project holding only queues
-    // now has an empty skippedReasons (queues are no longer reported as
-    // unhandled), which is exactly the condition that used to fall through
-    // to the generic "no resources" message. Named explicitly instead.
-    const queueOnlyMessage =
-      queueResources.length === 0
-        ? `${name} has no resources yet, so there is nothing to eject`
-        : `${name} has ${queueResources.length === 1 ? 'a queue' : `${queueResources.length} queues`} ` +
-          `(${queueResources.map((r) => r.name).join(', ')}) but no database, app or worker yet, so there is no ` +
-          'compose file to build around them'
+  const nothingToRender = postgresResources.length + deployedApps.length + deployedWorkers.length === 0
+  if (nothingToRender && queueResources.length === 0) {
     throw new HobbyError(
       'usage',
-      skippedReasons.length > 0 ? `${name} has nothing to eject yet: ${skippedReasons.join('; ')}` : queueOnlyMessage,
+      skippedReasons.length > 0
+        ? `${name} has nothing to eject yet: ${skippedReasons.join('; ')}`
+        : `${name} has no resources yet, so there is nothing to eject`,
       skippedReasons.length > 0
         ? 'deploy at least one app or worker, or wait for a resource to finish creating, then eject again'
-        : queueResources.length === 0
-          ? 'create a resource first (hobby pg create, or deploy an app or worker), then eject again'
-          : 'deploy a database, app or worker first (your queued messages are safe: `hobby queue peek` reads them any time), then eject again'
+        : 'create a resource first (hobby pg create, or deploy an app or worker), then eject again'
     )
   }
 
@@ -1978,13 +2024,32 @@ async function ejectRoute(ctx: DaemonContext, name: string, release: boolean): P
     return { name: resource.name, jsonl: renderBacklogJsonl(messages), count: messages.length }
   })
 
+  // A project holding only queues (issue #169) still ejects: its backlog is
+  // user data, and "you can always leave" cannot wait for a database to
+  // exist. There is no container to render, and `services:` with nothing
+  // under it is not valid compose (verified: `docker compose config` fails
+  // with "services must be a mapping"), so the file is the queue notice and
+  // a comment saying why there is nothing else, never a bare `services:`.
+  const queueOnlyCompose = (): string =>
+    renderQueueEjectNotice(queueBacklogs) +
+    [
+      `# ${name} holds no database, app or deployed worker, so there is no service`,
+      '# to run here: the queue backlogs above are the whole handover.',
+      ...skippedReasons.map((reason) => `# skipped: ${reason}`),
+      '',
+    ].join('\n')
+
   const body = {
     // The queue notice is prepended, never appended, so it is the first
     // thing visible when the file is opened. Only rendered when this
     // project actually holds a queue: a project with none gets the exact
     // compose file it always did, with no disclaimer about a capability it
     // never touched.
-    compose: queueBacklogs.length === 0 ? rendered.compose : renderQueueEjectNotice(queueBacklogs) + rendered.compose,
+    compose: nothingToRender
+      ? queueOnlyCompose()
+      : queueBacklogs.length === 0
+        ? rendered.compose
+        : renderQueueEjectNotice(queueBacklogs) + rendered.compose,
     // ADR 0009: without this, an ejected app comes up on a loopback port with
     // nothing routing a hostname to it, which is a running container rather
     // than a working site.
@@ -2333,6 +2398,13 @@ interface QueueMessageWire {
   attempts: number
   contentType: ContentType
   body: unknown
+  // What the message is doing right now and when it becomes visible (issue
+  // #170), plus the dead letter provenance insertDeadLetter records (issue
+  // #168). Both nulls for a message that was sent normally.
+  state: PeekedState
+  visibleAtMs: number
+  deadLetteredAtMs: number | null
+  failedAttempts: number | null
 }
 
 // Decodes a codec-encoded body back into the value the sender actually gave
@@ -2352,13 +2424,17 @@ function decodeMessageBody(message: LeasedMessage): unknown {
   }
 }
 
-function toWireMessage(message: LeasedMessage): QueueMessageWire {
+function toWireMessage(message: PeekedMessage): QueueMessageWire {
   return {
     id: message.id,
     timestampMs: message.timestampMs,
     attempts: message.attempts,
     contentType: message.contentType,
     body: decodeMessageBody(message),
+    state: message.state,
+    visibleAtMs: message.visibleAtMs,
+    deadLetteredAtMs: message.deadLetteredAtMs,
+    failedAttempts: message.failedAttempts,
   }
 }
 
@@ -2374,7 +2450,7 @@ async function peekQueueRoute(ctx: DaemonContext, id: string, url: URL): Promise
   const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.floor(parsedLimit) : DEFAULT_PEEK_LIMIT
 
   const path = queueDbPath(ctx.paths, project.name, resource.name)
-  const messages = withQueueDbReadOnly<LeasedMessage[]>(path, [], (db) => peek(db, limit))
+  const messages = withQueueDbReadOnly<PeekedMessage[]>(path, [], (db) => peek(db, limit, Date.now()))
   return { status: 200, body: { messages: messages.map(toWireMessage) } }
 }
 
@@ -2387,7 +2463,7 @@ async function enqueueRoute(ctx: DaemonContext, req: IncomingMessage, id: string
   const resource = expectQueue(getResourceOrThrow(ctx, id), 'sending a message')
   const project = getOwningProjectOrThrow(ctx, resource)
 
-  const parsed = await readJsonBody(req)
+  const parsed = await readJsonBody(req, ENQUEUE_BODY_BYTES)
   const fields = isRecord(parsed) ? parsed : {}
   if (!('body' in fields)) {
     throw new HobbyError(

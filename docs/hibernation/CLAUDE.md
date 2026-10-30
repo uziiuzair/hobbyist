@@ -1,6 +1,11 @@
 # `docs/hibernation/` idle detection and sleep
 
-**Status:** PROPOSED. Nothing built.
+**Status:** BUILT, and in daily use. `startHibernator`
+(`packages/cli/src/daemon/hibernator.ts`) sleeps idle resources on a
+per-project threshold; `hobby pin` and `hobby unpin [--sleep-after N]` set it
+over `POST /v1/projects/:name/sleep-policy`. See the 2026-10-30 amendment at
+the end for what the threshold means and where it comes from. The body below
+is the original scope guard, kept as written.
 
 The sleep half of the pair the proxy completes. Watches instances, notices when
 nothing has been connected for a while, and stops them.
@@ -58,6 +63,49 @@ watcher that is itself a meaningful load has defeated its own purpose.
   weekend, but killing connections is rude and surprising.
 - What is the default idle threshold, and is it the same for a database someone
   is actively developing against as for one serving a deployed app?
+
+## Amendment, 2026-10-30: what is built, and what the threshold means (issue #72)
+
+**Built.** `startHibernator` (`packages/cli/src/daemon/hibernator.ts`) ticks
+over every `running` resource, reads idle time from the proxy's
+`ActivityTracker` (`packages/cli/src/daemon/context.ts`), asks the resource's
+kind handler for its pre-sleep guard (`ResourceKindHandler.guard`: the
+postgres guard is one `pg_stat_activity` query, the worker guard refuses when
+a Durable Object alarm is about to fire, the queue consumer guard refuses
+mid-batch), and stops what passes. A queue resource is exempt by kind: it
+holds no process. `packages/cli/test/hibernator.test.ts` covers the schedule
+against a fake clock. The open questions above about evicting a long-idle
+proxied connection and about a development-versus-production default are
+still open.
+
+**The threshold is per project, and it is copied, not referenced.** The
+hibernator reads `project.sleepAfterSeconds` and nothing else
+(`hibernator.ts`, the `sleepAfterSeconds === null` and `idleSeconds <
+sleepAfterSeconds` checks). The box-wide `sleepAfterSeconds` from
+`HOBBY_SLEEP_AFTER_SECONDS` or `hobby.json` is written into the project row
+once, by `createProjectRoute` (`packages/cli/src/daemon/routes.ts`), when the
+request names no threshold of its own. So:
+
+- Changing the box-wide value and restarting the daemon changes nothing for
+  projects that already exist. The QA pg and ops lanes created a project under
+  `HOBBY_SLEEP_AFTER_SECONDS=20`, restarted at 600, and watched it sleep at
+  about 25 seconds with `hobby ls --json` still reporting 20.
+- `hobby unpin <project> --sleep-after N` (`setSleepPolicyRoute`, the same
+  file) is how an existing project's threshold changes; `hobby pin` writes
+  `null`, which is the hibernator's word for never.
+- `HOBBY_SLEEP_AFTER_SECONDS=null` means projects created from then on are
+  born pinned. Any other non-number is refused by `envInteger`
+  (`packages/core/src/config.ts`) rather than becoming `NaN`, which issue #71
+  found had silently turned hibernation off.
+
+This is a documentation note, not a behaviour change. Reading the box-wide
+value live would be a different design (a project with no threshold of its
+own inheriting the box's), and nobody has asked for it; if someone does, it
+is a small change in `hibernator.ts` and a migration question for the
+`projects` table, and it should get its own issue rather than slipping in
+here. The configuration reference
+(`site/src/content/docs/docs/reference/configuration.md`) now says all of
+this where the setting is documented.
 
 ## Amendment, 2026-10-30: direct sessions, manual sleep, and a log line per sleep (issues #70, #73, #160, #162)
 

@@ -200,32 +200,32 @@ reachable** means the code exists and no user-facing surface calls it.
 | `app` | works, rough edges | Cold start measured 2026-08-10 |
 | `worker` | works, rough edges | Durable Object state verified across a sleep against real Docker |
 | Durable Object alarms | works, rough edges | Can be up to one mirror tick (10s) late, plus a cold start |
-| `queue` | **known broken on Linux** | The consumer half works. `env.MY_QUEUE.send()` from inside a container fails DNS on Linux, see below |
+| `queue` | works, rough edges | Consuming and producing both work on macOS. The Linux producer fix (`--add-host`) is in the code and has not been re-run on a Linux box yet, see below |
 | Studio | alpha | Network exposed by design (ADR 0008). Run it behind Tailscale or a tunnel, not on the open internet |
-| MCP | works, postgres only | 14 tools. Creating an `app` or `worker` from MCP is not wired yet |
+| MCP | works, postgres and queues | 18 tools. Creating an `app` or `worker` from MCP is not wired yet |
 | `hobby eject` | **reliable** | Verified end to end against real Docker 2026-08-08 |
 | Caddy and TLS | works, off by default | `caddyEnabled` defaults to `false`. Certificates are not persisted across container replacement |
-| Snapshots | **not reachable** | `takeSnapshot` is implemented and tested but has no CLI verb and no HTTP route |
-| Copy-on-write branching | not built | Phase 1.5 |
-| Remote deploy | not built | The CLI talks to a unix socket, so it must run on the daemon's own box |
+| Snapshots | works, rough edges | `hobby snapshot`, `snapshot ls`, `snapshot restore` (into a copy or `--in-place`) and `snapshot rm`. Local to the box; no schedule, retention or offsite copy yet |
+| Copy-on-write branching | works, rough edges | `hobby branch` for projects holding only Postgres. Instant on a reflink filesystem, a real copy on ext4 |
+| Remote CLI | works, rough edges | `hobby login <url>` and every command runs against that box (ADR 0018). MCP stays on the local socket by decision |
 | Object storage | not built | Phase 3 |
 
 ### Known gaps, in detail
 
-**The queue producer path does not work on Linux.** Not untested,
-unimplemented. `packages/worker/src/worker.ts` hands every producer container
-`http://host.docker.internal:<port>/enqueue`, which macOS resolves and Linux
-does not unless the container was created with
-`--add-host=host.docker.internal:host-gateway`. Nothing passes that flag. The
-daemon's own half is correct. The two halves live in different packages and
-never meet. Consuming works on both. See
-[`docs/queues/CLAUDE.md`](docs/queues/CLAUDE.md).
+**The Linux queue producer fix has not been re-run on Linux.** A producer
+container used to be handed `http://host.docker.internal:<port>/enqueue` with
+nothing mapping that name on Linux. `packages/worker/src/worker.ts` now passes
+`extraHosts` and `buildCreateArgs` (`packages/core/src/docker.ts`) emits
+`--add-host=host.docker.internal:host-gateway`; the daemon also binds a new
+project's bridge gateway as it appears (`queueEndpoint.addHost`). The producer
+path, retries and dead letters ran against real Docker on macOS on 2026-10-19.
+Nobody has re-run them on a Linux box since the fix, which is the platform the
+bug was about. See [`docs/queues/CLAUDE.md`](docs/queues/CLAUDE.md).
 
-**Snapshots are built but you cannot take one.** `takeSnapshot`, `restore`,
-`listSnapshots` and a manifest format all exist in
-`packages/cli/src/daemon/snapshots.ts` with tests, and every caller today is a
-test. There is no `hobby snapshot` verb and no route. Until that changes, back
-up with `pg_dump` and treat the snapshot code as unreleased.
+**Snapshots are local.** `hobby snapshot` writes to the same disk as the data,
+nothing takes one on a schedule, and nothing copies one off the box. Losing the
+disk loses the snapshots with it. `pg_dump` to somewhere else is still the
+offsite story. See [`docs/backups/CLAUDE.md`](docs/backups/CLAUDE.md).
 
 **Caddy's certificate store is not persisted.** The container is created with
 no volume, so replacing it re-issues certificates. That matters against Let's
@@ -362,7 +362,7 @@ That last row is the one that matters right now.
   explained
 - [CLI reference](https://hobbyist.sh/docs/reference/cli/) and the
   [daemon HTTP API](https://hobbyist.sh/docs/reference/api/)
-- [Decisions](https://hobbyist.sh/docs/decisions/), fifteen ADRs. The record of
+- [Decisions](https://hobbyist.sh/docs/decisions/), eighteen ADRs. The record of
   what this project chose **not** to build is the more useful half
 
 ## Contributing
@@ -372,9 +372,10 @@ is likely to be accepted, what needs an ADR before any code, and the two
 working agreements that will get a patch sent back (no em-dashes, and ground
 claims in code).
 
-The most useful contributions right now, in order: the Linux queue producer
-fix, a CLI verb for snapshots, and a cold start measurement on hardware nobody
-has tried (Hetzner, a Pi, anything not DigitalOcean).
+The most useful contributions right now, in order: re-running the queue
+producer path on a real Linux box, snapshots on a schedule (the design is in
+`docs/backups/specs/`), and a cold start measurement on hardware nobody has
+tried (Hetzner, a Pi, anything not DigitalOcean).
 `scripts/measure-cold-start.sh` runs it and prints the hardware with the
 numbers.
 

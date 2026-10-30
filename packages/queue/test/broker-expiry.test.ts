@@ -1,16 +1,22 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { after, test } from 'node:test'
+import { openDatabase } from '@hobby.sh/core'
 import {
   DEFAULT_CONSUMER_OPTIONS,
   DEFAULT_RETENTION_SECONDS,
   depth,
   enqueue,
   expireLeases,
+  insertDeadLetter,
   leaseBatch,
   peek,
   purge,
   sweepRetention,
 } from '../src/broker.js'
+import { openQueueDb } from '../src/schema.js'
 import { NOW, cleanupQueues, json, tempQueue } from './fixtures.js'
 
 after(cleanupQueues)
@@ -154,4 +160,64 @@ test('peek returns messages in insertion order by comparing the decoded bodies',
   assert.equal(firstBody.order, 'first')
   assert.equal(secondBody.order, 'second')
   assert.equal(thirdBody.order, 'third')
+})
+
+// Issue #170: peek says what each message is doing, so a leased or delayed
+// message is not mistaken for one that is simply waiting.
+test('peek marks a leased message, a delayed message and a ready one', () => {
+  const db = tempQueue()
+  enqueue(db, [json({ a: 1 })], NOW)
+  enqueue(db, [{ ...json({ b: 2 }), delaySeconds: 30 }], NOW)
+  enqueue(db, [json({ c: 3 })], NOW)
+  // Leases the first ready message only (the delayed one is not ready).
+  leaseBatch(db, { ...OPTS, maxBatchSize: 1 }, NOW, 60000)
+
+  const rows = peek(db, 10, NOW + 1000)
+  assert.equal(rows.length, 3)
+  assert.equal(rows[0]?.state, 'leased')
+  assert.equal(rows[1]?.state, 'delayed')
+  assert.equal(rows[1]?.visibleAtMs, NOW + 30_000)
+  assert.equal(rows[2]?.state, 'ready')
+  // A lease that has run out reads as ready: it will be the moment
+  // expireLeases runs.
+  assert.equal(peek(db, 1, NOW + 60_001)[0]?.state, 'ready')
+  // Not a dead letter, so no provenance.
+  assert.equal(rows[0]?.deadLetteredAtMs, null)
+  assert.equal(rows[0]?.failedAttempts, null)
+})
+
+// Issue #168: writing the same dead letter twice (a crash between the dead
+// letter write and the source delete) is a no-op, never a constraint error.
+test('insertDeadLetter keeps the id and is idempotent on a repeat', () => {
+  const db = tempQueue()
+  const message = { id: 'FIXEDID00000000000000000000', body: '"x"', contentType: 'json' as const, timestampMs: NOW, attempts: 3 }
+  insertDeadLetter(db, message, NOW + 5000)
+  insertDeadLetter(db, message, NOW + 6000)
+  assert.equal(depth(db), 1)
+  const [row] = peek(db, 1, NOW + 7000)
+  assert.equal(row?.id, message.id)
+  assert.equal(row?.failedAttempts, 3)
+  assert.equal(row?.attempts, 0)
+  assert.equal(row?.deadLetteredAtMs, NOW + 5000, 'the first landing wins')
+  assert.equal(row?.timestampMs, NOW)
+})
+
+test('a queue file written before the dead letter columns existed is migrated on open', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'hobby-queue-old-')), 'q.sqlite')
+  const old = openDatabase(path)
+  old.exec(`CREATE TABLE messages (
+    id TEXT PRIMARY KEY, body TEXT NOT NULL, content_type TEXT NOT NULL, bytes INTEGER NOT NULL,
+    enqueued_at INTEGER NOT NULL, visible_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+    lease_id TEXT, lease_expires_at INTEGER)`)
+  old.prepare(
+    'INSERT INTO messages (id, body, content_type, bytes, enqueued_at, visible_at, attempts) VALUES (?, ?, ?, ?, ?, ?, 0)'
+  ).run('OLDID0000000000000000000000', '"x"', 'json', 3, NOW, NOW)
+  old.close()
+
+  const db = openQueueDb(path)
+  const [row] = peek(db, 1, NOW)
+  assert.equal(row?.id, 'OLDID0000000000000000000000')
+  assert.equal(row?.deadLetteredAtMs, null)
+  assert.equal(sweepRetention(db, 60, NOW + 61_000), 1, 'retention still works on a migrated file')
+  db.close()
 })

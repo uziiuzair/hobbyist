@@ -219,6 +219,14 @@ export interface DeliveryResult {
   outcome: 'ok' | 'exception'
   retryBatch: { retry: boolean; delaySeconds?: number }
   retryMessages: Array<{ msgId: string; delaySeconds?: number }>
+  // Why an `exception` outcome happened, when the delivery hop itself knows
+  // (deliver.ts: a timeout, a refused connection, a non-2xx status, an
+  // unparseable response). Never read by applyResult; the tick logs it so
+  // a failed delivery leaves a line in the daemon log naming the queue and
+  // the reason (issue #158). A handler that threw inside the container
+  // answers outcome 'exception' with no failure here, since the container
+  // already logged the throw itself.
+  failure?: string
 }
 
 export interface ApplyOutcome {
@@ -400,32 +408,101 @@ export function expireLeases(
 
 // Returns the count so the tick can log it. A queue that silently drops what
 // it holds is a queue that lies about its depth.
+//
+// A dead letter's clock starts when it landed here (dead_lettered_at, set by
+// insertDeadLetter), not when it was first enqueued into the source queue,
+// otherwise a message that spent most of its retention window failing would
+// be swept moments after arriving, before anyone could peek at it.
 export function sweepRetention(db: SqliteDatabase, retentionSeconds: number, nowMs: number): number {
   const cutoff = nowMs - retentionSeconds * 1000
   const doomed = db
-    .prepare('SELECT count(*) AS n FROM messages WHERE enqueued_at <= ?')
+    .prepare('SELECT count(*) AS n FROM messages WHERE coalesce(dead_lettered_at, enqueued_at) <= ?')
     .get(cutoff) as { n: number }
   if (doomed.n === 0) return 0
-  db.prepare('DELETE FROM messages WHERE enqueued_at <= ?').run(cutoff)
+  db.prepare('DELETE FROM messages WHERE coalesce(dead_lettered_at, enqueued_at) <= ?').run(cutoff)
   return doomed.n
 }
 
-export function peek(db: SqliteDatabase, limit: number): LeasedMessage[] {
+// What a message is doing right now, as `hobby queue peek` shows it (issue
+// #170): `ready` is waiting for the next batch, `leased` is out with the
+// consumer on an unexpired lease, `delayed` is not yet visible (a send with
+// delaySeconds, or a retry with a delay). A lease that has expired but not
+// yet been swept by expireLeases reads as `ready`, which is what it will be
+// the moment the next tick runs.
+export type PeekedState = 'ready' | 'leased' | 'delayed'
+
+export interface PeekedMessage extends LeasedMessage {
+  state: PeekedState
+  // When a delayed message becomes visible; equals the enqueue (or retry)
+  // time for a ready one.
+  visibleAtMs: number
+  // Both null unless this message is a dead letter (insertDeadLetter).
+  deadLetteredAtMs: number | null
+  failedAttempts: number | null
+}
+
+interface PeekRow extends LeasedRow {
+  visible_at: number
+  lease_id: string | null
+  lease_expires_at: number | null
+  dead_lettered_at: number | null
+  failed_attempts: number | null
+}
+
+export function peek(db: SqliteDatabase, limit: number, nowMs: number = Date.now()): PeekedMessage[] {
   const rows = db
     .prepare(
-      `SELECT id, body, content_type, enqueued_at AS timestamp, attempts
+      `SELECT id, body, content_type, enqueued_at AS timestamp, attempts,
+              visible_at, lease_id, lease_expires_at, dead_lettered_at, failed_attempts
          FROM messages
         ORDER BY id
         LIMIT ?`
     )
-    .all(limit) as LeasedRow[]
-  return rows.map((row) => ({
-    id: row.id,
-    body: row.body,
-    contentType: row.content_type as ContentType,
-    timestampMs: row.timestamp,
-    attempts: row.attempts,
-  }))
+    .all(limit) as PeekRow[]
+  return rows.map((row) => {
+    const leased = row.lease_id !== null && row.lease_expires_at !== null && row.lease_expires_at > nowMs
+    const state: PeekedState = leased ? 'leased' : row.visible_at > nowMs ? 'delayed' : 'ready'
+    return {
+      id: row.id,
+      body: row.body,
+      contentType: row.content_type as ContentType,
+      timestampMs: row.timestamp,
+      attempts: row.attempts,
+      state,
+      visibleAtMs: row.visible_at,
+      deadLetteredAtMs: row.dead_lettered_at,
+      failedAttempts: row.failed_attempts,
+    }
+  })
+}
+
+// Writes a message that exhausted its retries into a dead letter queue's
+// database, keeping its identity (issue #168): the same id, the original
+// enqueue time, and how many deliveries failed, so a failure can be traced
+// from the dead letter queue back to the source queue's logs. `attempts`
+// restarts at 0 so a consumer bound to the dead letter queue gets a fresh
+// retry budget, and the message is visible immediately.
+//
+// INSERT OR IGNORE, because the id is the primary key and the tick calls
+// this BEFORE the source row is deleted (tick.ts's routeDeadLetter explains
+// the ordering): a crash between the two leaves the source row in place, it
+// is dead lettered again on the next tick, and the second write must be a
+// no-op rather than a constraint error that would wedge the source queue.
+export function insertDeadLetter(db: SqliteDatabase, message: LeasedMessage, nowMs: number): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO messages
+       (id, body, content_type, bytes, enqueued_at, visible_at, attempts, dead_lettered_at, failed_attempts)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
+  ).run(
+    message.id,
+    message.body,
+    message.contentType,
+    bodyBytes(message.body),
+    message.timestampMs,
+    nowMs,
+    nowMs,
+    message.attempts
+  )
 }
 
 export function purge(db: SqliteDatabase): number {

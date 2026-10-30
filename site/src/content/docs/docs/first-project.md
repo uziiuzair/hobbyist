@@ -64,17 +64,28 @@ hobby ls
 
 ```
 blog
-  primary  postgres  running  port 15000
+  primary  postgres  running  port 15432
 ```
 
-The port on that line is the resource's own host port, allocated from the
-15000 to 19999 range for a direct connection to the container. It is not the
-port you normally dial: that is the proxy on 5432, which is what makes wake
-work.
+It says `running` because `hobby connect` just woke it. Had you run `hobby ls`
+straight after `hobby new`, it would have said `sleeping`: a new database is
+booted once so it is initialised and then stopped cleanly, on purpose, so that
+its first real start is not a crash recovery (`createPostgres`,
+`packages/pg/src/postgres.ts`). Asleep is the resting state of everything here.
 
-Leave it alone for five minutes and look again. The state becomes `sleeping` and
-the container is gone. That default lives in `sleepAfterSeconds` and is
-configurable; see [configuration](/docs/reference/configuration/).
+The port on that line is the resource's own host port, allocated from the
+15432 to 25432 range postgres uses (apps and workers have ranges of their own)
+for a direct connection to the container. It is not the port you normally dial:
+that is the proxy on 5432, which is what makes wake work.
+
+Leave it alone for five minutes and look again. The state becomes `sleeping`.
+The container is stopped, not removed (`docker stop`, through
+`ComputeRuntime.stop` in `packages/core/src/docker.ts`), so its data directory,
+network and name are all still there and the next wake is a `docker start`.
+That default lives in `sleepAfterSeconds` and is configurable; see
+[configuration](/docs/reference/configuration/). Note that the value is copied
+into a project when it is created, so changing it later only affects new
+projects; `hobby unpin blog --sleep-after 900` changes this one.
 
 You can also do it now, rather than waiting:
 
@@ -93,7 +104,15 @@ There is no `hobby wake` in that sequence, and that is the entire point. The
 proxy accepted your connection, noticed the resource was asleep, asked the
 daemon to start it, waited for Postgres to actually accept queries, and only
 then completed the handshake. Your client saw one slightly slow connection and
-never saw an error.
+no error.
+
+The one exception is a wake that fails, say because Docker is down or the
+container will not boot. Then the proxy answers the connection with an error
+rather than hanging, and the daemon refuses further automatic wakes for a
+growing interval (30 seconds, doubling, capped at 15 minutes) so a broken
+database does not crash-loop. `hobby ls` shows the refusal and when the next
+try is; `hobby wake blog` retries at once. See
+[the CLI reference](/docs/reference/cli/#hobby-ls).
 
 `hobby wake blog` exists for when you want it warm before something else needs
 it, not because anything requires you to call it.

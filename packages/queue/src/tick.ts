@@ -16,10 +16,11 @@
 // process it does not observe.
 
 import { createStopSignal, type ResourceState } from '@hobby.sh/core'
+import { existsSync } from 'node:fs'
 import {
   applyResult,
-  enqueue,
   expireLeases,
+  insertDeadLetter,
   isBatchReady,
   leaseBatch,
   sweepRetention,
@@ -50,10 +51,26 @@ export interface DrainableQueue {
   retentionSeconds: number
 }
 
+// A queue the tick only sweeps for retention: no consumer to wake or deliver
+// to (a producer-only queue, a dead letter queue, a consumer with no code
+// yet). Built by packages/cli/src/daemon/queues.ts's retentionTargets.
+// Before this existed, sweepRetention ran only from tickOneQueue, so a queue
+// nobody consumed, which includes every dead letter queue, kept its messages
+// forever regardless of the retention set on it (issue #167).
+export interface RetentionTarget {
+  resourceId: string
+  queueName: string
+  dbPath: string
+  retentionSeconds: number
+}
+
 export interface QueueTickOptions {
   // Called fresh each tick rather than captured once, so a queue created or
   // destroyed while the daemon runs is picked up without restarting the tick.
   queues: () => DrainableQueue[]
+  // Queues to sweep for retention only, in addition to the drainable ones.
+  // Optional so the tick's existing callers and tests are unchanged.
+  retention?: () => RetentionTarget[]
   // Asked for, never performed here. Resolving means the consumer is running;
   // rejecting is logged and left for the next tick, exactly as the alarm
   // mirror's own wake.
@@ -99,13 +116,13 @@ function defaultSleepFor(ms: number): Promise<void> {
 // the loss window this function exists to close. See broker.ts's own comment
 // on the same callback for the same reasoning stated from the source side.
 //
-// Uses the broker's own public enqueue(), not a raw INSERT, so a dead
-// lettered message gets a fresh id and a fresh retention clock starting from
-// the moment it lands in the dead letter queue. Restarting the clock is
-// deliberate: inheriting the original enqueued_at would let a message that
-// had already been sitting for most of its retention window get swept on the
-// very next tick, disappearing from the dead letter queue before anyone had a
-// chance to `hobby queue peek` it.
+// Uses the broker's insertDeadLetter, which keeps the message's id, original
+// enqueue time and failed attempt count (issue #168) while starting the dead
+// letter queue's own retention clock from the moment it lands there
+// (dead_lettered_at, see schema.ts): inheriting the original enqueued_at for
+// retention would let a message that had already been sitting for most of
+// its retention window get swept on the very next tick, disappearing from
+// the dead letter queue before anyone had a chance to `hobby queue peek` it.
 function routeDeadLetter(deadLetterDbPath: string | null, message: LeasedMessage, nowMs: number): void {
   if (deadLetterDbPath === null) {
     // Matches Cloudflare: a consumer with no configured dead_letter_queue
@@ -115,7 +132,31 @@ function routeDeadLetter(deadLetterDbPath: string | null, message: LeasedMessage
   }
   const db = openQueueDb(deadLetterDbPath)
   try {
-    enqueue(db, [{ body: message.body, contentType: message.contentType }], nowMs)
+    insertDeadLetter(db, message, nowMs)
+  } finally {
+    db.close()
+  }
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`
+}
+
+// Retention only: a queue with nothing to deliver to still ages out its
+// backlog on schedule. Never creates the file: a queue that was never
+// started or sent to has nothing to sweep, and creating an empty database
+// here would make "does the file exist" (guard.ts, kind.ts's probe) mean
+// less than it does today.
+function sweepOnly(target: RetentionTarget, nowMs: number): void {
+  if (!existsSync(target.dbPath)) {
+    return
+  }
+  const db = openQueueDb(target.dbPath)
+  try {
+    const swept = sweepRetention(db, target.retentionSeconds, nowMs)
+    if (swept > 0) {
+      console.error(`queue tick: retention swept ${plural(swept, 'message')} from queue ${target.queueName}`)
+    }
   } finally {
     db.close()
   }
@@ -127,7 +168,12 @@ function routeDeadLetter(deadLetterDbPath: string | null, message: LeasedMessage
 // batch costs one isBatchReady read and nothing else.
 async function tickOneQueue(
   queue: DrainableQueue,
-  opts: { wake: QueueTickOptions['wake']; deliver: QueueTickOptions['deliver']; stateOf: QueueTickOptions['stateOf'] },
+  opts: {
+    wake: QueueTickOptions['wake']
+    deliver: QueueTickOptions['deliver']
+    stateOf: QueueTickOptions['stateOf']
+    now: () => number
+  },
   nowMs: number
 ): Promise<void> {
   const db = openQueueDb(queue.dbPath)
@@ -142,7 +188,10 @@ async function tickOneQueue(
     // constraint from this task's brief and from the design doc's own "The
     // tick" section. A queue with a consumer that never wakes must still age
     // out its backlog on schedule.
-    sweepRetention(db, queue.retentionSeconds, nowMs)
+    const swept = sweepRetention(db, queue.retentionSeconds, nowMs)
+    if (swept > 0) {
+      console.error(`queue tick: retention swept ${plural(swept, 'message')} from queue ${queue.queueName}`)
+    }
 
     // Step 3: is a batch ready at all.
     if (!isBatchReady(db, queue.options, nowMs)) {
@@ -188,7 +237,7 @@ async function tickOneQueue(
       result = await opts.deliver(queue.consumerResourceId, batch, queue.queueName)
     } catch (err) {
       console.error(
-        `queue tick: delivery threw for queue ${queue.resourceId}, leaving ${batch.messages.length} message(s) leased: ${errorMessage(err)}`
+        `queue tick: delivery threw for queue ${queue.queueName}, leaving ${plural(batch.messages.length, 'message')} leased: ${errorMessage(err)}`
       )
       return
     }
@@ -196,9 +245,29 @@ async function tickOneQueue(
     // Step 7: apply the result and route dead letters, in that order:
     // applyResult calls onDeadLetter itself, before it deletes the row, so
     // the routing already happened by the time this line returns.
-    applyResult(db, batch.leaseId, result, queue.options, nowMs, (message) =>
-      routeDeadLetter(queue.deadLetterDbPath, message, nowMs)
+    //
+    // The clock is read again here rather than reusing nowMs (issue #157):
+    // the wake in step 4 and the delivery in step 6 both took real time, and
+    // a retry delay counted from the START of the tick would have most of
+    // itself eaten by a slow handler or a cold start. Cloudflare counts
+    // retry_delay from when the batch result came back, so this does too.
+    const appliedAtMs = opts.now()
+    if (result.outcome === 'exception') {
+      console.error(
+        `queue tick: delivery to queue ${queue.queueName} failed` +
+          (result.failure === undefined ? ' (the handler threw)' : `: ${result.failure}`) +
+          `; ${plural(batch.messages.length, 'message')} will be retried or dead lettered`
+      )
+    }
+    const outcome = applyResult(db, batch.leaseId, result, queue.options, appliedAtMs, (message) =>
+      routeDeadLetter(queue.deadLetterDbPath, message, appliedAtMs)
     )
+    if (outcome.deadLettered.length > 0) {
+      console.error(
+        `queue tick: ${plural(outcome.deadLettered.length, 'message')} from queue ${queue.queueName} exhausted ` +
+          `${queue.options.maxRetries} retries: ${queue.options.deadLetterQueue === null ? 'dropped, no dead letter queue is configured' : `moved to ${queue.options.deadLetterQueue}`}`
+      )
+    }
   } finally {
     db.close()
   }
@@ -223,15 +292,30 @@ async function tickOneQueue(
 // not starve a fast one of tick cadence) this task did not set out to make.
 export async function tickOnce(
   queues: DrainableQueue[],
-  opts: Omit<QueueTickOptions, 'queues' | 'intervalMs'>
+  opts: Omit<QueueTickOptions, 'queues' | 'intervalMs' | 'retention'>,
+  retention: RetentionTarget[] = []
 ): Promise<void> {
   const now = opts.now ?? Date.now
   const nowMs = now()
   for (const queue of queues) {
     try {
-      await tickOneQueue(queue, { wake: opts.wake, deliver: opts.deliver, stateOf: opts.stateOf }, nowMs)
+      await tickOneQueue(queue, { wake: opts.wake, deliver: opts.deliver, stateOf: opts.stateOf, now }, nowMs)
     } catch (err) {
-      console.error(`queue tick: tick failed for queue ${queue.resourceId}: ${errorMessage(err)}`)
+      console.error(`queue tick: tick failed for queue ${queue.queueName}: ${errorMessage(err)}`)
+    }
+  }
+  // Retention for everything the loop above did not already sweep. A queue
+  // that is drainable AND listed here would be swept twice in one tick,
+  // harmlessly, but the join (daemon/queues.ts) keeps the two lists disjoint.
+  const drained = new Set(queues.map((queue) => queue.resourceId))
+  for (const target of retention) {
+    if (drained.has(target.resourceId)) {
+      continue
+    }
+    try {
+      sweepOnly(target, nowMs)
+    } catch (err) {
+      console.error(`queue tick: retention sweep failed for queue ${target.queueName}: ${errorMessage(err)}`)
     }
   }
 }
@@ -265,12 +349,16 @@ export function startQueueTick(opts: QueueTickOptions): { stop(): Promise<void> 
       }
       // Caught inside the tracked promise, not around the await, so stop()'s
       // await of currentTick never rejects either.
-      currentTick = tickOnce(opts.queues(), {
-        wake: opts.wake,
-        deliver: opts.deliver,
-        stateOf: opts.stateOf,
-        now,
-      }).catch((err: unknown) => {
+      currentTick = tickOnce(
+        opts.queues(),
+        {
+          wake: opts.wake,
+          deliver: opts.deliver,
+          stateOf: opts.stateOf,
+          now,
+        },
+        opts.retention?.() ?? []
+      ).catch((err: unknown) => {
         console.error(`queue tick: tick failed: ${errorMessage(err)}`)
       })
       await currentTick

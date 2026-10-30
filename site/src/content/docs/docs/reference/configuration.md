@@ -11,10 +11,17 @@ sidebar:
 
 Config values come from, in decreasing priority:
 
-1. Command-line flags.
-2. `HOBBY_*` environment variables.
-3. A `hobby.json` found by walking up from the current directory.
-4. Defaults.
+1. `HOBBY_*` environment variables (`readEnvConfig`,
+   `packages/core/src/config.ts`).
+2. A `hobby.json` found by walking up from the current directory
+   (`findConfigFile`, the same file).
+3. Defaults (`DEFAULT_CONFIG`, the same file).
+
+There are no command-line flags for configuration. `resolveConfig` accepts a
+`flags` argument, and the one caller, `packages/cli/src/cli/main.ts`, passes
+`{ env, cwd }` and nothing else. The flags that do exist on verbs
+(`--sleep-after`, `--port`, `--pin`) change one project or one resource, never
+the daemon's config.
 
 Paths are separate and simpler: they always come from `$HOBBY_HOME`, or
 `~/.hobby` if that is unset.
@@ -22,7 +29,7 @@ Paths are separate and simpler: they always come from `$HOBBY_HOME`, or
 :::caution[`~/.hobby/hobby.json` is not read]
 `resolvePaths` constructs a `configPath` at `$HOBBY_HOME/hobby.json`
 (`packages/core/src/config.ts:47`) and **nothing reads it**. Config comes only
-from the cwd walk in step 3 above.
+from the cwd walk in step 2 above.
 
 Two consequences worth knowing. Settings written to `~/.hobby/hobby.json` do
 nothing and report no error, including `sleepAfterSeconds`. And because the walk
@@ -37,22 +44,44 @@ Start the daemon from the directory holding your `hobby.json`.
 
 | Key | Env | Default | What |
 |---|---|---|---|
-| `image` | | `postgres:18-alpine` | The Postgres image |
+| `image` | `HOBBY_IMAGE` | `postgres:18-alpine` | The Postgres image |
 | `proxyPort` | `HOBBY_PROXY_PORT` | `5432` | Where the wire-protocol proxy listens |
 | `proxyHost` | `HOBBY_PROXY_HOST` | `127.0.0.1` | Which addresses it binds. An address, `"tailnet"`, or `"all"`. See below |
 | `proxyTls` | `HOBBY_PROXY_TLS_CERT`, `HOBBY_PROXY_TLS_KEY`, `HOBBY_PROXY_TLS_HOSTNAME` | `null` | TLS for the proxy: `{ certFile, keyFile, hostname }`. See below |
 | `project` | | `null` | Which project this directory belongs to. Written by `hobby link` |
 | `studioPort` | `HOBBY_STUDIO_PORT` | `8443` | **Nothing listens on this.** Studio is served by the daemon on `apiPort`. The value is only used by a preflight port check |
-| `apiPort` | | `7432` | The daemon API, loopback only |
-| `httpPort` | | `7433` | The HTTP wake router |
-| `queuePort` | | `7434` | The queue endpoint |
-| `domain` | | `localhost` | The base domain apps and workers get hostnames under |
-| `sleepAfterSeconds` | | `300` | Idle time before a resource sleeps |
-| `wakeTimeoutMs` | | `30000` | How long a wake may take before it is a failure |
-| `readinessPollMs` | | `25` | How often readiness is polled during a wake |
-| `caddyEnabled` | | `false` | Whether the Caddy front door runs at all |
-| `caddyAdminPort` | | `2019` | Caddy's admin API, loopback only |
-| `caddyStudioHost` | | `null` | The public hostname for Studio. `null` publishes no Studio route |
+| `apiPort` | `HOBBY_API_PORT` | `7432` | The daemon API, loopback only. Gated by the operator session or an API token; see [the API reference](/docs/reference/api/#listeners-and-what-authenticates) |
+| `httpPort` | `HOBBY_HTTP_PORT` | `7433` | The HTTP wake router |
+| `queuePort` | `HOBBY_QUEUE_PORT` | `7434` | The queue endpoint |
+| `domain` | `HOBBY_DOMAIN` | `localhost` | The base domain apps and workers get hostnames under |
+| `sleepAfterSeconds` | `HOBBY_SLEEP_AFTER_SECONDS` | `300` | The idle threshold a **new** project is given. See below: it is copied at creation, not read live |
+| `wakeTimeoutMs` | `HOBBY_WAKE_TIMEOUT_MS` | `30000` | How long a wake may take before it is a failure |
+| `readinessPollMs` | `HOBBY_READINESS_POLL_MS` | `25` | How often readiness is polled during a wake |
+| `caddyEnabled` | `HOBBY_CADDY_ENABLED` | `false` | Whether the Caddy front door runs at all. Only `1` or `true` turns it on; anything else is false |
+| `caddyAdminPort` | `HOBBY_CADDY_ADMIN_PORT` | `2019` | Caddy's admin API, loopback only |
+| `caddyStudioHost` | `HOBBY_CADDY_STUDIO_HOST` | `null` | The public hostname for Studio. `null` publishes no Studio route |
+
+Every numeric variable is validated by name (`envInteger`): a value that is
+not a whole number in range stops the daemon with a message naming the
+variable, rather than becoming `NaN` somewhere downstream.
+
+### `sleepAfterSeconds` is a default for new projects
+
+The hibernator reads each project's own threshold and nothing else
+(`project?.sleepAfterSeconds`, `packages/cli/src/daemon/hibernator.ts`). The
+box-wide value is copied into the project row once, when the project is
+created (`createProjectRoute`, `packages/cli/src/daemon/routes.ts`, which
+falls back to `ctx.config.sleepAfterSeconds` when the request names no
+threshold). Three consequences:
+
+- Changing `HOBBY_SLEEP_AFTER_SECONDS` or `hobby.json` and restarting the
+  daemon changes nothing for projects that already exist. They keep the value
+  they were born with, and `hobby ls --json` shows it.
+- To change an existing project, use `hobby unpin <project> --sleep-after <seconds>`,
+  which writes the project's own threshold over `POST /v1/projects/{name}/sleep-policy`.
+  `hobby pin` sets it to `null`, which means never.
+- `HOBBY_SLEEP_AFTER_SECONDS=null` is accepted and means every project created
+  from then on is born pinned. Any other non-number is refused.
 
 A minimal `hobby.json`:
 
@@ -155,10 +184,22 @@ subdirectory.
 
 ## Port allocation
 
-Resources that need a directly reachable host port are allocated one from
-**15000 to 19999**. That is the port `hobby ls` prints. It is not the port you
-normally dial: for Postgres that is the proxy on 5432, which is what makes wake
-work.
+Resources that need a directly reachable host port are allocated one from a
+range per kind, so a port number tells you what owns it:
+
+| Kind | Range | Where |
+|---|---|---|
+| `postgres` | 15432 to 25432 | `PORT_RANGE_FROM` and `PORT_RANGE_TO`, `packages/pg/src/postgres.ts` |
+| `app` | 25433 to 35432 | `APP_PORT_RANGE`, `packages/app/src/app.ts` |
+| `worker` | 35433 to 45432 | `WORKER_PORT_RANGE`, `packages/worker/src/worker.ts`. Each worker takes two: its HTTP port and a control port |
+
+That is the port `hobby ls` prints. It is not the port you normally dial: for
+Postgres that is the proxy on 5432, which is what makes wake work, and an app
+or worker is reached by hostname through the HTTP router on `httpPort`. Every
+container port is published on loopback, so none of these ranges needs a
+firewall rule; a candidate port is bound and released before it is handed out
+(`allocateHostPort`, `packages/core/src/ports.ts`), so another process holding
+one is skipped rather than collided with.
 
 ## Installer variables
 
