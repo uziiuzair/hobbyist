@@ -30,7 +30,7 @@ import {
 } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
 import { DEFAULT_CONSUMER_OPTIONS, leaseBatch, openQueueDb, queueDbPath } from '@hobby.sh/queue'
-import { createDefaultKindRegistry } from '../src/daemon/context.js'
+import { createDefaultKindRegistry, getOrCreateWake, isWakeRefused } from '../src/daemon/context.js'
 import { createApp, createProxyDeps, reconcile, type DaemonContext } from '../src/index.js'
 import { syncWorkerQueueBindings } from '../src/daemon/routes.js'
 import { CLI_VERSION } from '../src/version.js'
@@ -2363,5 +2363,172 @@ test('GET /v1/resources/:id/queue/messages reports ready, delayed and leased sta
     assert.equal(messages[1]?.state, 'delayed')
     assert.ok((messages[1]?.visibleAtMs ?? 0) > Date.now() + 500_000)
     assert.equal(messages[0]?.deadLetteredAtMs, null)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Wake path fixes, 2026-10-30: issues #57, #73, #162.
+// ---------------------------------------------------------------------------
+
+// Issue #162 and #73: `hobby sleep` consults the same guards the hibernator
+// does, and open proxied sessions count. Without --force the stop is refused
+// with a reason; with it, the response says what was interrupted.
+test('POST /v1/resources/:id/stop refuses a worker with a queue batch in flight unless forced', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const worker = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'worker',
+    name: 'cons',
+    config: sampleDeployedWorkerConfig({
+      manifest: sampleWorkerManifest({ queues: { producers: [], consumers: [consumerEntry('work')] } }),
+    }),
+  }) as WorkerResource
+  await syncWorkerQueueBindings(ctx, project, worker)
+  await ctx.runtime.ensureCreated({ name: worker.config.containerName, image: 'x', env: {}, ports: [], binds: [] })
+  await ctx.runtime.start(worker.config.containerName)
+  ctx.store.setResourceState(worker.id, 'running')
+
+  // A batch out with the consumer, exactly as the tick leaves it.
+  const db = openQueueDb(queueDbPath(ctx.paths, 'blog', 'work'))
+  try {
+    const { enqueue, encodeBody } = await import('@hobby.sh/queue')
+    enqueue(db, [{ body: encodeBody({ n: 1 }), contentType: 'json' }], Date.now())
+    assert.ok(leaseBatch(db, DEFAULT_CONSUMER_OPTIONS, Date.now()) !== null)
+  } finally {
+    db.close()
+  }
+
+  await withServer(ctx, async (baseUrl) => {
+    const refused = await call(baseUrl, 'POST', `/v1/resources/${worker.id}/stop`)
+    assert.equal(refused.status, 409)
+    const body = refused.body as { error: { code: string; message: string; hint?: string } }
+    assert.equal(body.error.code, 'conflict')
+    assert.match(body.error.message, /blog\/cons is in use: a queue batch is in flight/)
+    assert.match(body.error.hint ?? '', /hobby sleep blog\/cons --force/)
+    assert.equal(ctx.store.getResource(worker.id)?.state, 'running', 'nothing was stopped')
+
+    const forced = await call(baseUrl, 'POST', `/v1/resources/${worker.id}/stop`, { force: true })
+    assert.equal(forced.status, 200)
+    const forcedBody = forced.body as { resource: { state: string }; wasBusy: boolean; endedConnections: number }
+    assert.equal(forcedBody.resource.state, 'sleeping')
+    assert.equal(forcedBody.wasBusy, true)
+    assert.equal(forcedBody.endedConnections, 0)
+  })
+})
+
+test('POST /v1/resources/:id/stop refuses a database with an open proxied session unless forced, and counts what it ended', async () => {
+  const ctx = buildContext()
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig(),
+  })
+  ctx.store.setResourceState(resource.id, 'running')
+  const session = ctx.activity.open(resource.id)
+
+  await withServer(ctx, async (baseUrl) => {
+    const refused = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/stop`)
+    assert.equal(refused.status, 409)
+    assert.match((refused.body as { error: { message: string } }).error.message, /1 open session through the proxy would be terminated/)
+
+    const forced = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/stop`, { force: true })
+    assert.equal(forced.status, 200)
+    const body = forced.body as { resource: { state: string }; endedConnections: number; wasBusy: boolean }
+    assert.equal(body.resource.state, 'sleeping')
+    assert.equal(body.endedConnections, 1)
+    // The postgres guard cannot reach a fake container, and an unreachable
+    // guard never blocks a manual sleep (the person asking can see it).
+    assert.equal(body.wasBusy, false)
+
+    // Idle and unused: no force needed.
+    ctx.activity.close(session)
+    ctx.store.setResourceState(resource.id, 'running')
+    const plain = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/stop`)
+    assert.equal(plain.status, 200)
+    assert.equal((plain.body as { endedConnections: number }).endedConnections, 0)
+  })
+})
+
+// Issue #57: a successful deploy clears the wake refusal a failed wake left,
+// the same way an explicit `hobby wake` does, so the first request after a
+// fixed redeploy is served rather than refused until the backoff runs out.
+test('POST /v1/resources/:id/deploy clears a wake refusal once the new code has proven it serves', async () => {
+  const base = createFakeRuntime()
+  let startBroken = true
+  const runtime: ComputeRuntime = {
+    ...base,
+    async start(name: string): Promise<void> {
+      if (startBroken) throw new Error('exec format error')
+      await base.start(name)
+    },
+  }
+  const ctx = buildContext(runtime)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+
+  // Something real for the app's TCP readiness probe to reach: the fake
+  // runtime starts no process, so the port the app config publishes is
+  // served by this test instead.
+  const listener = createServer((_req, res) => res.end('ok'))
+  await new Promise<void>((resolve) => listener.listen(0, '127.0.0.1', () => resolve()))
+  const hostPort = (listener.address() as AddressInfo).port
+  const app = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'app',
+    name: 'web',
+    config: sampleUndeployedAppConfig({ image: 'hobby/blog-web:1', hostPort, containerPort: 3000 }),
+  })
+  await runtime.ensureCreated({ name: app.config.containerName, image: 'hobby/blog-web:1', env: {}, ports: [], binds: [] })
+  ctx.store.setResourceState(app.id, 'sleeping')
+
+  // A failed automatic wake leaves a refusal behind.
+  await assert.rejects(getOrCreateWake(ctx)(app.id))
+  assert.equal(isWakeRefused(ctx, app.id), true)
+
+  const source = mkdtempSync(join(tmpdir(), 'hobby-deploy-clears-'))
+  writeFileSync(join(source, 'Dockerfile'), 'FROM scratch\n')
+  startBroken = false
+  try {
+    await withServer(ctx, async (baseUrl) => {
+      const res = await call(baseUrl, 'POST', `/v1/resources/${app.id}/deploy`, { source: { path: source } })
+      assert.equal(res.status, 200, JSON.stringify(res.body))
+      assert.equal((res.body as { resource: { state: string } }).resource.state, 'sleeping')
+      assert.equal(isWakeRefused(ctx, app.id), false, 'the deploy cleared the refusal')
+    })
+  } finally {
+    await new Promise<void>((resolve) => listener.close(() => resolve()))
+  }
+})
+
+// Issue #114: a manual `hobby sleep` clears the refusal a failed wake left,
+// so `hobby ls` stops saying "wake refused" about a resource the user has
+// just handled by hand.
+test('POST /v1/resources/:id/stop clears a wake refusal', async () => {
+  const base = createFakeRuntime()
+  const runtime: ComputeRuntime = {
+    ...base,
+    async start(): Promise<void> {
+      throw new Error('exec format error')
+    },
+  }
+  const ctx = buildContext(runtime)
+  const project = ctx.store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+  const resource = ctx.store.createResource({
+    projectId: project.id,
+    kind: 'postgres',
+    name: 'primary',
+    config: samplePostgresConfig(),
+  })
+  await runtime.ensureCreated({ name: resource.config.containerName, image: 'postgres:18-alpine', env: {}, ports: [], binds: [] })
+  ctx.store.setResourceState(resource.id, 'sleeping')
+  await assert.rejects(getOrCreateWake(ctx)(resource.id))
+  assert.equal(isWakeRefused(ctx, resource.id), true)
+
+  await withServer(ctx, async (baseUrl) => {
+    const res = await call(baseUrl, 'POST', `/v1/resources/${resource.id}/stop`)
+    assert.equal(res.status, 200)
+    assert.equal(isWakeRefused(ctx, resource.id), false)
   })
 })

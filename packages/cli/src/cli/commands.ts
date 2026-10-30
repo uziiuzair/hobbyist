@@ -1216,17 +1216,37 @@ export async function cmdConnect(c: Ctx, positionals: string[], flags: Flags): P
 }
 
 async function cmdSleepWake(c: Ctx, verb: 'sleep' | 'wake', positionals: string[], flags: Flags): Promise<number> {
-  const target = targetOrLinked(c, positionals, `usage: hobby ${verb} <target>`)
+  const target = targetOrLinked(c, positionals, `usage: hobby ${verb} <target>${verb === 'sleep' ? ' [--force]' : ''}`)
   const { resource } = await resolveTarget(c.api, target, c.config.project)
   // The API says start/stop because those are mechanical container
   // operations; the CLI says wake/sleep because that is the domain, per the
   // brief. This is the one place that translation happens.
-  const result = verb === 'sleep' ? await c.api.stopResource(resource.id) : await c.api.startResource(resource.id)
+  //
+  // `hobby sleep` without --force is refused by the daemon while the
+  // resource is mid-work or has sessions open (issue #162); the refusal
+  // names --force. With it, what was interrupted is reported on stderr.
+  if (verb === 'wake') {
+    const result = await c.api.startResource(resource.id)
+    if (flags.json) {
+      c.io.out(JSON.stringify(result))
+    } else {
+      c.io.out(renderResourceLine(result.resource))
+    }
+    return 0
+  }
 
+  const result = await c.api.stopResource(resource.id, { force: flags.force === true })
   if (flags.json) {
     c.io.out(JSON.stringify(result))
-  } else {
-    c.io.out(renderResourceLine(result.resource))
+    return 0
+  }
+  c.io.out(renderResourceLine(result.resource))
+  const ended = result.endedConnections ?? 0
+  if (ended > 0) {
+    c.io.err(`terminated ${ended} open ${ended === 1 ? 'session' : 'sessions'}`)
+  }
+  if (result.wasBusy === true) {
+    c.io.err('it was mid-work when stopped; interrupted work is retried where the kind supports it (queue batches are redelivered)')
   }
   return 0
 }

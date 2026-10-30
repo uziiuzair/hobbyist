@@ -201,6 +201,13 @@ export function queueDeliverFn(
     if (resource === null || resource.kind !== 'worker') {
       return UNREACHABLE_CONSUMER_RESULT
     }
-    return deliverBatch(resource.config.controlPort, batch, queueName)
+    const result = await deliverBatch(resource.config.controlPort, batch, queueName)
+    // A delivered batch is activity (issue #160). Without this the consumer
+    // looked idle between batches, because nothing but an HTTP request ever
+    // reset its idle clock, and a worker fed one message every 12 seconds
+    // slept and paid a cold start between every pair of them. Touched after
+    // the result comes back, so the clock starts when the handler finished.
+    ctx.activity.touch(consumerResourceId)
+    return result
   }
 }

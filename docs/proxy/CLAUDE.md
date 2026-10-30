@@ -364,3 +364,27 @@ include it.
 
 The compose file `hobby eject` emits still points apps at the database
 service by name, since there is no proxy in an ejected stack.
+
+## Amendment, 2026-10-30: a crash on boot fails fast, a deploy clears the refusal, errors name the resource (issues #55, #57, #58)
+
+- **A container that exits before it listens is reported after one poll
+  (#55).** `waitListening` (`packages/app/src/readiness.ts`, and the worker's
+  own copy in `packages/worker/src/worker.ts`) and `waitReady`
+  (`packages/pg/src/readiness.ts`) take a `status` callback, `runtime.inspect`
+  in production, consulted after every failed probe; `exists && !running`
+  ends the wait with the exit code. The kinds turn that into `wake_failed`
+  (not `wake_timeout`: the loopback hint is for a process that is alive)
+  with the container's last 20 log lines in the hint. A crash that used to
+  cost 30 seconds on deploy and 30 more on the first request now costs one
+  poll interval. A wake that genuinely hangs still waits `wakeTimeoutMs`
+  (30 s by default, `HOBBY_WAKE_TIMEOUT_MS`), which is issue #56's remaining
+  half; the default was deliberately not lowered, since a large app or a
+  postgres in crash recovery can legitimately take longer than the 3 second
+  cold start target.
+- **A successful deploy clears the wake refusal (#57).** `deployResourceRoute`
+  calls `clearWakeRefusal` after `deployApp` or `deployWorker` returns, as
+  `startResourceRoute` already did for `hobby wake`.
+- **Errors name `project/name` (#58).** `ProxyTarget.label` is filled by
+  `createProxyDeps` and used by every refusal and wake error the Postgres
+  proxy sends; `startPostgres` names `postgres project/name` rather than the
+  resource UUID. App and worker errors already named the container.

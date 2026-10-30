@@ -483,3 +483,93 @@ test('startPostgres stops the container it started when readiness never arrives,
     store.close()
   }
 })
+
+// Issue #55 and #58: a postgres container that exits on boot is reported
+// after one poll, with its exit code and log tail, and the error names
+// project/resource rather than the resource UUID.
+test('startPostgres reports a container that exited on boot at once, naming project/resource', async () => {
+  const store = openStore(':memory:')
+  try {
+    const project = store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+    const resource = store.createResource({
+      projectId: project.id,
+      kind: 'postgres',
+      name: 'primary',
+      config: { ...sampleConfig(), containerName: 'hobby-blog-primary' },
+    })
+    const runtime = createFakeRuntime()
+    runtime.logs = async (): Promise<string> => 'FATAL:  data directory "/var/lib/postgresql/18/docker" has invalid permissions\n'
+    const paths = resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-pg-test-${randomUUID()}`) })
+    await runtime.ensureCreated({ name: 'hobby-blog-primary', image: 'postgres:18-alpine', env: {}, ports: [], binds: [] })
+
+    let probes = 0
+    await assert.rejects(
+      () =>
+        startPostgres(
+          {
+            store,
+            runtime,
+            paths,
+            config: { ...testHobbyConfig(), wakeTimeoutMs: 10_000, readinessPollMs: 5 },
+            probeFactory: () => async () => {
+              probes++
+              runtime._state.set('hobby-blog-primary', { exists: true, running: false, exitCode: 1 })
+              return false
+            },
+          },
+          expectKind(resource, 'postgres')
+        ),
+      (err: unknown) => {
+        assert.ok(err instanceof HobbyError)
+        assert.equal(err.code, 'wake_failed')
+        assert.match(err.message, /^postgres blog\/primary exited with code 1/)
+        assert.doesNotMatch(err.message, new RegExp(resource.id))
+        assert.match(err.hint ?? '', /invalid permissions/)
+        return true
+      }
+    )
+    assert.equal(probes, 1, 'one poll, not a timeout')
+    assert.equal(store.getResource(resource.id)?.state, 'failed')
+  } finally {
+    store.close()
+  }
+})
+
+test('a postgres readiness timeout names project/resource, not the resource id', async () => {
+  const store = openStore(':memory:')
+  try {
+    const project = store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+    const resource = store.createResource({
+      projectId: project.id,
+      kind: 'postgres',
+      name: 'primary',
+      config: { ...sampleConfig(), containerName: 'hobby-blog-primary' },
+    })
+    const runtime = createFakeRuntime()
+    const paths = resolvePaths({ HOBBY_HOME: join(tmpdir(), `hobby-pg-test-${randomUUID()}`) })
+    await runtime.ensureCreated({ name: 'hobby-blog-primary', image: 'postgres:18-alpine', env: {}, ports: [], binds: [] })
+    await assert.rejects(
+      () =>
+        startPostgres(
+          {
+            store,
+            runtime,
+            paths,
+            config: { ...testHobbyConfig(), wakeTimeoutMs: 10, readinessPollMs: 5 },
+            probeFactory: () => async () => false,
+            isHostPortFree: async () => true,
+          },
+          expectKind(resource, 'postgres')
+        ),
+      (err: unknown) => {
+        assert.ok(err instanceof HobbyError)
+        assert.equal(err.code, 'wake_timeout')
+        assert.match(err.message, /^postgres blog\/primary did not become ready within 10ms/)
+        assert.match(err.hint ?? '', /HOBBY_WAKE_TIMEOUT_MS/)
+        return true
+      }
+    )
+  } finally {
+    store.close()
+  }
+})

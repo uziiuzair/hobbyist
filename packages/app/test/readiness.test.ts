@@ -65,3 +65,46 @@ test('tcpProbe answers false for a port nothing listens on', async () => {
   await server.close()
   assert.equal(await tcpProbe({ host: '127.0.0.1', port, timeoutMs: 500 })(), false)
 })
+
+// Issue #55: the loop ends the moment the container is seen to have exited.
+test('waitListening returns exited, not a timeout, once the status says the container stopped', async () => {
+  const { waitListening } = await import('../src/readiness.js')
+  let clock = 0
+  let statusCalls = 0
+  const result = await waitListening({
+    probe: async () => false,
+    pollMs: 10,
+    timeoutMs: 60_000,
+    status: async () => {
+      statusCalls++
+      return statusCalls < 3 ? { exists: true, running: true, exitCode: null } : { exists: true, running: false, exitCode: 137 }
+    },
+    now: () => clock,
+    sleepFor: async (ms) => {
+      clock += ms
+    },
+  })
+  assert.equal(result.ready, false)
+  assert.deepEqual(result.exited, { exitCode: 137 })
+  assert.equal(result.attempts, 3)
+  assert.equal(clock, 20, 'two polls, then the exit was seen')
+})
+
+test('waitListening keeps polling when the status check itself fails', async () => {
+  const { waitListening } = await import('../src/readiness.js')
+  let clock = 0
+  const result = await waitListening({
+    probe: async () => clock >= 30,
+    pollMs: 10,
+    timeoutMs: 60_000,
+    status: async () => {
+      throw new Error('docker inspect failed')
+    },
+    now: () => clock,
+    sleepFor: async (ms) => {
+      clock += ms
+    },
+  })
+  assert.equal(result.ready, true)
+  assert.equal(result.exited, undefined)
+})

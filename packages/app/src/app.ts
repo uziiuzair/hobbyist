@@ -26,7 +26,7 @@ import {
   allocateHostPort,
 } from '@hobby.sh/core'
 import { buildAppImage, buildTag, type AppSource } from './build.js'
-import { tcpProbe, waitListening } from './readiness.js'
+import { logTail, tcpProbe, waitListening, type WaitReadyResult } from './readiness.js'
 
 export interface AppDeps {
   store: Store
@@ -155,6 +155,29 @@ function notListening(config: AppConfig, waitedMs: number): HobbyError {
     `${config.containerName} did not start listening on port ${config.containerPort} within ${waitedMs}ms`,
     'the process inside the container must listen on $PORT and on 0.0.0.0, not on 127.0.0.1: a loopback bind inside a container is unreachable from outside it. `hobby logs` shows what it printed.'
   )
+}
+
+// A container that exited before it ever listened (issue #55). Reported as
+// wake_failed, not wake_timeout: the process said no, and the loopback hint
+// above would send the user to the wrong place. The last lines it printed
+// ride along in the hint, because `hobby logs` is exactly what they would
+// run next.
+async function exitedOnBoot(deps: AppDeps, config: AppConfig, result: WaitReadyResult): Promise<HobbyError> {
+  const code = result.exited?.exitCode
+  const tail = await logTail(deps.runtime.logs.bind(deps.runtime), config.containerName)
+  return new HobbyError(
+    'wake_failed',
+    `${config.containerName} exited${code === null || code === undefined ? '' : ` with code ${code}`} after ${result.waitedMs}ms, before it started listening on port ${config.containerPort}`,
+    tail.length === 0
+      ? 'the process inside the container crashed on boot and printed nothing. `hobby logs` shows anything it prints on the next attempt.'
+      : `the process inside the container crashed on boot. the last lines it printed:\n${tail}`
+  )
+}
+
+// The one failure translation for every readiness wait in this file: exited
+// first, since a crash is also "not ready", then the plain timeout.
+async function notReady(deps: AppDeps, config: AppConfig, result: WaitReadyResult): Promise<HobbyError> {
+  return result.exited !== undefined ? exitedOnBoot(deps, config, result) : notListening(config, result.waitedMs)
 }
 
 // ensureCreated is a no-op for a container that already exists, which is
@@ -304,10 +327,11 @@ export async function createAppResource(deps: AppDeps, opts: CreateAppOptions): 
       probe,
       pollMs: deps.config.readinessPollMs,
       timeoutMs: deps.config.wakeTimeoutMs,
+      status: () => deps.runtime.inspect(containerName),
     })
     if (!result.ready) {
       deps.store.setResourceState(resource.id, 'failed')
-      throw notListening(config, result.waitedMs)
+      throw await notReady(deps, config, result)
     }
 
     // Proven to serve, then put straight back to sleep. Sleeping is the
@@ -317,7 +341,7 @@ export async function createAppResource(deps: AppDeps, opts: CreateAppOptions): 
     await deps.runtime.stop(containerName, { timeoutSec: STOP_TIMEOUT_SEC })
     deps.store.setResourceState(resource.id, 'sleeping')
   } catch (err) {
-    if (!(err instanceof HobbyError && err.code === 'wake_timeout')) {
+    if (!(err instanceof HobbyError && (err.code === 'wake_timeout' || err.code === 'wake_failed'))) {
       deps.store.setResourceState(resource.id, 'failed')
     }
     throw err
@@ -354,6 +378,7 @@ export async function startApp(deps: AppDeps, resource: AppResource): Promise<vo
     probe,
     pollMs: deps.config.readinessPollMs,
     timeoutMs: deps.config.wakeTimeoutMs,
+    status: () => deps.runtime.inspect(resource.config.containerName),
   })
   if (!result.ready) {
     // Same as startPostgres's stopAfterFailedStart (#59): a container left
@@ -361,7 +386,7 @@ export async function startApp(deps: AppDeps, resource: AppResource): Promise<vo
     // times out again. Best effort, the readiness error is the one to keep.
     await deps.runtime.stop(resource.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC }).catch(() => undefined)
     deps.store.setResourceState(resource.id, 'failed')
-    throw notListening(resource.config, result.waitedMs)
+    throw await notReady(deps, resource.config, result)
   }
 
   deps.store.setResourceState(resource.id, 'running')
@@ -515,9 +540,10 @@ export async function deployApp(
       probe,
       pollMs: deps.config.readinessPollMs,
       timeoutMs: deps.config.wakeTimeoutMs,
+      status: () => deps.runtime.inspect(config.containerName),
     })
     if (!result.ready) {
-      throw notListening(config, result.waitedMs)
+      throw await notReady(deps, config, result)
     }
 
     await deps.runtime.stop(config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })

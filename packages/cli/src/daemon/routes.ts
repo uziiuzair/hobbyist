@@ -16,6 +16,8 @@ import { join } from 'node:path'
 import {
   DEFAULT_PORT_BIND,
   HobbyError,
+  guardFor,
+  type ActivityGuardResult,
   openDatabaseReadOnly,
   validateName,
   type AppResource,
@@ -974,6 +976,12 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
       ...(source === null ? {} : { source: appSourceFrom(source, resource.config.source) }),
       ...(env === undefined ? {} : { env }),
     })
+    // A deploy that proved the new code serves is as good as `hobby wake`
+    // for the refusal's purposes (issue #57): whatever the last wake failed
+    // on has been replaced. Without this, the first request after a fixed
+    // redeploy was still answered with "its last wake failed" until the
+    // backoff ran out on its own.
+    clearWakeRefusal(ctx, resource.id)
     return {
       status: 200,
       body: {
@@ -1020,6 +1028,9 @@ async function deployResourceRoute(ctx: DaemonContext, req: IncomingMessage, id:
     // check just above means syncWorkerQueueBindings's own defense-in-depth
     // copy of it can never actually fire here.
     await syncWorkerQueueBindings(ctx, project, result.resource)
+    // Same as the app branch (issue #57): a deploy that proved the new code
+    // serves clears a refusal left by an earlier failed wake.
+    clearWakeRefusal(ctx, resource.id)
     return {
       status: 200,
       body: {
@@ -1205,11 +1216,74 @@ async function startResourceRoute(ctx: DaemonContext, id: string): Promise<Route
   return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
 }
 
-async function stopResourceRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
+// What a manual sleep would interrupt, in words a user can act on. The kind
+// guards answer only active/idle/unreachable (ActivityGuardResult), so the
+// description is per kind rather than per cause.
+function busyDescription(resource: Resource): string {
+  switch (resource.kind) {
+    case 'postgres':
+      return 'a query or transaction is running, or a client is connected directly to it'
+    case 'worker':
+      return 'a queue batch is in flight or a Durable Object alarm is due within 30s'
+    default:
+      return 'it is busy'
+  }
+}
+
+// Body: { "force"?: boolean }. Without force, the same guards the hibernator
+// consults before an automatic sleep are consulted here (issue #162), and
+// open proxied sessions count too (issue #73): `hobby sleep` used to stop a
+// worker mid-batch, or a database with a psql session open, silently and
+// at once. A guard that cannot answer ('unreachable') does not block a
+// manual sleep, unlike an automatic one: the person asking can see the
+// resource and is the one who decides.
+async function stopResourceRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
   const resource = getResourceOrThrow(ctx, id)
   refuseUndeployed(ctx, resource)
+  const body = await readJsonBody(req)
+  const force = isRecord(body) && body['force'] === true
+  const label = `${getOwningProjectOrThrow(ctx, resource).name}/${resource.name}`
+
+  const connections = ctx.activity.count(resource.id)
+  let guardResult: ActivityGuardResult = 'idle'
+  if (resource.state === 'running') {
+    try {
+      guardResult = await guardFor(ctx.kinds, ctx, resource)
+    } catch {
+      guardResult = 'unreachable'
+    }
+  }
+  if (!force && (guardResult === 'active' || connections > 0)) {
+    const reasons: string[] = []
+    if (guardResult === 'active') {
+      reasons.push(busyDescription(resource))
+    }
+    if (connections > 0) {
+      reasons.push(`${connections} open ${connections === 1 ? 'session' : 'sessions'} through the proxy would be terminated`)
+    }
+    throw new HobbyError(
+      'conflict',
+      `${label} is in use: ${reasons.join('; ')}`,
+      `wait for it to go idle, or run \`hobby sleep ${label} --force\` to stop it anyway`
+    )
+  }
+
   await ctx.kinds.get(resource.kind).stop(ctx, resource)
-  return { status: 200, body: { resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)) } }
+  // A manual sleep is someone looking at the resource, the same signal an
+  // explicit `hobby wake` is (issue #114): the refusal a failed wake left
+  // should not outlive it, or `hobby ls` keeps saying "wake refused" about a
+  // resource the user just handled.
+  clearWakeRefusal(ctx, resource.id)
+  console.error(`sleep: ${label} (${resource.kind}) stopped by request${force ? ' (--force)' : ''}`)
+  return {
+    status: 200,
+    body: {
+      resource: await toWireResource(ctx, getResourceOrThrow(ctx, id)),
+      // What the stop interrupted, for the CLI to report (issue #73).
+      endedConnections: connections,
+      wasBusy: guardResult === 'active',
+    },
+  }
 }
 
 // Always rendered as though the client will reach it through the proxy
@@ -2584,7 +2658,7 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       const id = decodeURIComponent(segments[2] as string)
       const action = segments[3]
       if (method === 'POST' && action === 'start') return startResourceRoute(ctx, id)
-      if (method === 'POST' && action === 'stop') return stopResourceRoute(ctx, id)
+      if (method === 'POST' && action === 'stop') return stopResourceRoute(ctx, req, id)
       if (method === 'GET' && action === 'connection') return connectionRoute(ctx, id)
       if (method === 'GET' && action === 'logs') return logsRoute(ctx, id, url)
       if (method === 'POST' && action === 'query') return queryRoute(ctx, req, id)

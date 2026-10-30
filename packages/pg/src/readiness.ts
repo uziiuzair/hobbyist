@@ -6,7 +6,7 @@
 // resolves, Postgres is genuinely ready to take queries.
 
 import { Client, DatabaseError } from 'pg'
-import type { PostgresConfig } from '@hobby.sh/core'
+import type { ContainerStatus, PostgresConfig } from '@hobby.sh/core'
 
 // What one probe learned. `true` and `false` are the two answers this probe
 // always gave: Postgres accepted a session, or nothing usable answered yet
@@ -90,6 +90,7 @@ export function pgProbe(config: PostgresConfig): () => Promise<ProbeOutcome> {
       user: config.superuser,
       password: config.password,
       database: config.database,
+      application_name: 'hobby',
       connectionTimeoutMillis: PROBE_CONNECTION_TIMEOUT_MS,
     })
     try {
@@ -122,6 +123,11 @@ export interface WaitReadyResult {
   // broken (see ProbeOutcome). Absent on success and on a plain timeout, so
   // a caller can tell "gave up waiting" from "was told no".
   broken?: string
+  // Set when the container stopped running before the probe ever passed
+  // (issue #55): a postgres that exits on boot (a bad data directory, a
+  // config it refuses) is reported after one poll, not after the whole
+  // timeout.
+  exited?: { exitCode: number | null }
 }
 
 // probe, sleepFor and now are all injectable so the poll loop itself is
@@ -133,6 +139,8 @@ export async function waitReady(opts: {
   pollMs: number
   timeoutMs: number
   probe?: () => Promise<ProbeOutcome>
+  // Consulted after each failed probe; omitted by tests of the loop itself.
+  status?: () => Promise<ContainerStatus>
   sleepFor?: (ms: number) => Promise<void>
   now?: () => number
 }): Promise<WaitReadyResult> {
@@ -155,6 +163,12 @@ export async function waitReady(opts: {
     // poll is still more useful to the caller than "timed out".
     if (outcome !== false) {
       return { ready: false, attempts, waitedMs, broken: outcome.broken }
+    }
+    if (opts.status !== undefined) {
+      const status = await opts.status().catch(() => null)
+      if (status !== null && status.exists && !status.running) {
+        return { ready: false, attempts, waitedMs, exited: { exitCode: status.exitCode } }
+      }
     }
     if (waitedMs >= opts.timeoutMs) {
       return { ready: false, attempts, waitedMs }

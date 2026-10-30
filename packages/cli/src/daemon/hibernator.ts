@@ -238,14 +238,18 @@ async function tick(
       continue
     }
 
+    // One line per sleep, naming the resource the way `hobby ls` does and
+    // saying why (issue #73): the daemon used to sleep things in silence.
+    const label = `${project?.name ?? resource.projectId}/${resource.name}`
     try {
       // Dispatched by kind. Before the registry, this named stopPostgres
       // directly, which meant hibernation could only ever sleep a database:
       // the wedge says everything sleeps, and this line is where that stops
       // being true if a kind is added without a handler.
       await ctx.kinds.get(freshResource.kind).stop(ctx, freshResource)
+      console.error(`hibernator: ${label} (${resource.kind}) slept after ${idleSeconds}s idle (threshold ${sleepAfterSeconds}s)`)
     } catch (err) {
-      console.error(`hibernator: failed to sleep resource ${resource.id}: ${errorMessage(err)}`)
+      console.error(`hibernator: failed to sleep ${label}: ${errorMessage(err)}`)
     }
   }
 }

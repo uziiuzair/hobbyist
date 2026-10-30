@@ -27,6 +27,10 @@ import {
 
 export interface ProxyTarget {
   resourceId: string
+  // What error messages call this resource (issue #58): `project/name`, the
+  // same spelling the refusal path and `hobby ls` use. Optional so a
+  // resolver that only knows the id still works; messages fall back to it.
+  label?: string
   host: string
   port: number
   state: string
@@ -577,6 +581,10 @@ type HoldResult =
 // using it, and a hibernator tick that saw zero connections could otherwise
 // stop the very backend being waited on. It is handed to the splice on
 // 'serving' and closed here on every other way out, exactly once.
+function targetLabel(target: ProxyTarget): string {
+  return target.label ?? target.resourceId
+}
+
 async function holdUntilServing(
   client: net.Socket,
   target: ProxyTarget,
@@ -601,7 +609,7 @@ async function holdUntilServing(
     } catch (err) {
       return release({
         kind: 'refused',
-        message: `could not connect to ${target.resourceId}: ${errorMessage(err)}`,
+        message: `could not connect to ${targetLabel(target)}: ${errorMessage(err)}`,
         dialFailed: true,
       })
     }
@@ -636,7 +644,7 @@ async function holdUntilServing(
     }
     if (answer.kind === 'timeout') {
       const said = lastRefusal === null ? '' : ` (it last said: ${lastRefusal})`
-      return release({ kind: 'refused', message: `${target.resourceId} accepted the connection but did not answer${said}` })
+      return release({ kind: 'refused', message: `${targetLabel(target)} accepted the connection but did not answer${said}` })
     }
 
     // A close or reset before the first backend message (awaitBackendAnswer
@@ -651,7 +659,7 @@ async function holdUntilServing(
     if (remainingMs(deadline) < READY_RETRY_INTERVAL_MS) {
       return release({
         kind: 'refused',
-        message: `${target.resourceId} was still not accepting connections after ${budgetMs}ms: ${lastRefusal}`,
+        message: `${targetLabel(target)} was still not accepting connections after ${budgetMs}ms: ${lastRefusal}`,
       })
     }
     await sleep(READY_RETRY_INTERVAL_MS)
@@ -775,7 +783,7 @@ async function handleStartup(
     try {
       await raceTimeout(deps.wake(target.resourceId), wakeTimeoutMs, () => new Error(`wake timed out after ${wakeTimeoutMs}ms`))
     } catch (err) {
-      sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, `could not wake ${target.resourceId}: ${errorMessage(err)}`)
+      sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, `could not wake ${targetLabel(target)}: ${errorMessage(err)}`)
       return
     }
     woken = true
@@ -794,7 +802,7 @@ async function handleStartup(
       return
     }
     if (target.state !== 'running') {
-      sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, `${target.resourceId} did not become ready after wake`)
+      sendErrorAndClose(socket, 'FATAL', CANNOT_CONNECT_NOW, `${targetLabel(target)} did not become ready after wake`)
       return
     }
   }

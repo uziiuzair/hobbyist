@@ -274,6 +274,8 @@ test('resolve: a project with exactly one resource returns its host, port, state
 
   assert.deepEqual(target, {
     resourceId: resource.id,
+    // What errors call it (issue #58), the same spelling as `hobby ls`.
+    label: 'blog/primary',
     host: '127.0.0.1',
     port: 25558,
     state: 'running',
