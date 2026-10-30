@@ -36,10 +36,12 @@ import {
   buildRunnerManifest,
   createWorkerResource,
   deployWorker,
+  destroyWorker,
   probeWorker,
   startWorker,
   stopWorker,
   uniqueKeyFor,
+  workerTag,
   type WorkerDeps,
 } from '../src/worker.js'
 
@@ -1399,4 +1401,62 @@ test('the generated Dockerfile proves miniflare loads before the image is tagged
   const check = dockerfile.indexOf(`RUN node -e "require('miniflare')"`)
   assert.ok(install !== -1 && check > install, 'the load check follows the install')
   assert.ok(check < dockerfile.indexOf('COPY --from=build'), 'and precedes the bundle copy, so a code change does not re-run it')
+})
+
+// Issue #80: same as the app kind. A first deploy whose readiness probe
+// fails must not leave its container behind, since a `failed` row is
+// outside everything that would ever stop it.
+test('a worker create that fails readiness removes the container it started', async () => {
+  const deps = buildDeps({ workerProbeFactory: () => async () => false })
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+
+  await assert.rejects(() =>
+    createWorkerResource(deps, { project, name: 'api', sourcePath: workerSource(), databaseResourceId: null })
+  )
+
+  const row = deps.store.listResources(project.id)[0]
+  assert.ok(row !== undefined && row.kind === 'worker')
+  assert.equal(row.state, 'failed')
+  assert.equal((await runtime.inspect(row.config.containerName)).exists, false, 'no container is left behind')
+})
+
+// Issue #84: every tag the worker ever built goes with it, and a deploy
+// keeps only the newest three.
+test('destroy removes every tag under the worker repository, and deploy prunes to the newest three', async () => {
+  let at = 1_754_870_400_000
+  const deps = buildDeps({ now: () => at })
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const source = workerSource()
+
+  let worker = (await createWorkerResource(deps, { project, name: 'api', sourcePath: source, databaseResourceId: null })).resource
+  for (let i = 0; i < 4; i++) {
+    at += 1000
+    worker = (await deployWorker(deps, worker)).resource
+  }
+  const tags = [...runtime._images].filter((tag) => tag.startsWith('hobby/blog-api-worker:')).sort()
+  assert.deepEqual(tags, [
+    workerTag('blog', 'api', at - 2000),
+    workerTag('blog', 'api', at - 1000),
+    workerTag('blog', 'api', at),
+  ])
+
+  await destroyWorker(deps, worker)
+  assert.deepEqual([...runtime._images].filter((tag) => tag.startsWith('hobby/blog-api-worker:')), [])
+})
+
+// Issue #81: a redeploy can rebind the database, and keeps it when the
+// field is absent.
+test('deployWorker applies databaseResourceId and keeps it when absent', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const created = (await createWorkerResource(deps, { project, name: 'api', sourcePath: workerSource(), databaseResourceId: null })).resource
+
+  const bound = await deployWorker(deps, created, { databaseResourceId: 'db-1' as never })
+  assert.equal(bound.resource.config.databaseResourceId, 'db-1')
+  const kept = await deployWorker(deps, bound.resource, {})
+  assert.equal(kept.resource.config.databaseResourceId, 'db-1')
+  const unbound = await deployWorker(deps, kept.resource, { databaseResourceId: null })
+  assert.equal(unbound.resource.config.databaseResourceId, null)
 })
