@@ -21,6 +21,10 @@ export const EXIT_USAGE = 2
 export const EXIT_NOT_FOUND = 3
 export const EXIT_CONFLICT = 4
 export const EXIT_DAEMON_UNREACHABLE = 5
+// `hobby update --check` only: a newer release exists. Not an error, but
+// distinct from 0 so a script can tell "update available" from "current"
+// without parsing the output (issue #136).
+export const EXIT_UPDATE_AVAILABLE = 6
 
 const EXIT_CODE_BY_ERROR: Record<ErrorCode, number> = {
   // The two "no such thing" codes. Both are, by name, exactly what exit 3

@@ -98,7 +98,15 @@ export function createClient(socketPath: string): DaemonClient {
         // apart for the user, both mean "there is no daemon to talk to
         // right now."
         req.on('error', (err) => {
-          reject(new DaemonUnreachableError(`cannot reach the hobby daemon at ${socketPath}: ${errorMessage(err)}`))
+          // Both mean "nothing is listening"; the runtime's own wording for
+          // them (bun: "Was there a typo in the url or port?") is about URLs
+          // and misleads for a unix socket (issue #138).
+          const code = (err as NodeJS.ErrnoException).code
+          const message =
+            code === 'ENOENT' || code === 'ECONNREFUSED'
+              ? `no daemon is listening at ${socketPath}`
+              : `cannot reach the hobby daemon at ${socketPath}: ${errorMessage(err)}`
+          reject(new DaemonUnreachableError(message))
         })
 
         if (payload !== undefined) {

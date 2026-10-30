@@ -473,9 +473,15 @@ hobby update           # update to the newest tag
 hobby update --check   # print the newest tag and change nothing
 ```
 
+The checkout it updates is `HOBBY_SRC_DIR` when set, otherwise the checkout
+the `hobby` launcher runs from (a hand install's clone, or the web installer's
+`~/.hobby/src`). `--check` exits `6` when a newer release exists and `0` when
+you are current, so a script can test it without parsing.
+
 Accepts `--json`: `--check` and "already on" both print
 `{ current, latest, updateAvailable }` (`current` is null on a checkout that
-is not on a tag), and an update prints `{ updated: true, from, to }`.
+is not on a tag), and an update prints `{ updated: true, from, to }`, both as
+tags, or a short commit for a checkout that was not on one.
 
 It refuses if the checkout has *tracked* modifications rather than discarding
 them. Untracked files do not block it, which matters because `bun install`
@@ -591,6 +597,7 @@ exit code.
 | `3` | Not found | `project_not_found`, `resource_not_found` |
 | `4` | Conflict: the name or state is already taken | `name_taken`, `conflict` |
 | `5` | The daemon could not be reached at all | none: this is a client-side condition, the socket refused or does not exist |
+| `6` | `hobby update --check` found a newer release. Not a failure: `0` from the same command means you are current | none |
 
 A daemon that cannot be reached says so and suggests `hobby init` then
 `hobby daemon`, rather than failing with a bare status. Two verbs return `1`

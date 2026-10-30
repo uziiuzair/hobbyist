@@ -23,14 +23,16 @@ also mirrored at `https://hobbyist.sh/install`.
 | Docker | Required, not optional. Every resource is a container |
 | Bun 1.1+ | Installed for you under `~/.bun` if missing. Needs no root |
 | git | Needed to fetch the checkout |
+| curl | Needed to fetch Bun's installer. The install script checks for it (`install.sh`) |
 | unzip | Needed by Bun's installer. **Absent from a fresh Ubuntu cloud image**, and the usual reason an install fails on a cheap VPS |
+| psql | Optional. `hobby connect` opens it when it is on PATH and prints the connection string when it is not (`cmdConnect`, `packages/cli/src/cli/commands.ts`). Debian or Ubuntu: `postgresql-client`; macOS: `brew install libpq` |
 | Memory | About 640MB of RAM and swap together, to build. See below |
 | Filesystem | Anything works. XFS with reflinks, ZFS or APFS additionally get cheap copies. [Details](/docs/reference/filesystems/) |
 
 On a fresh Debian or Ubuntu box, the prerequisites first:
 
 ```sh
-sudo apt-get update && sudo apt-get install -y git unzip
+sudo apt-get update && sudo apt-get install -y git curl unzip
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker "$USER"    # then log out and back in
 ```
@@ -111,12 +113,40 @@ HOBBY_SRC_DIR=~/code/hobbyist bash <(curl -fsSL https://hobby.sh/install)
 The installer itself reads `HOBBY_BIN_DIR` if you want the launcher somewhere
 specific.
 
+## Keeping the daemon running
+
+`hobby daemon &` dies with the shell that started it, so on a box reached over
+ssh the daemon stops when the connection drops. For a box meant to stay up,
+run it as a service. The repository ships a systemd unit at
+`scripts/hobby.service` (it waits for Docker, restarts on failure and gives the
+daemon 90 seconds to stop cleanly):
+
+```sh
+sudo cp ~/.hobby/src/scripts/hobby.service /etc/systemd/system/hobby.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now hobby
+journalctl -u hobby -f          # the daemon logs every sleep, wake and failed wake
+```
+
+The unit runs as root because the Docker socket is root-owned on most
+installs; to run as another user, add them to the `docker` group and change
+`User=` in the unit. There is no launchd plist for macOS yet: a Mac that
+should keep serving runs `hobby daemon` in a terminal or a `tmux` session.
+
 ## Upgrading
 
-Run the same one-liner again. An existing checkout is fetched and reset to the
-latest commit rather than re-cloned, which is why nothing you edit by hand
-under `~/.hobby/src` survives an upgrade. It refuses outright if the directory
-is a checkout of something other than this project.
+Run the same one-liner again, or `hobby update`. An existing checkout is
+fetched and reset to the requested ref (a branch or a tag) rather than
+re-cloned, which is why nothing you edit by hand under `~/.hobby/src` survives
+an upgrade. It refuses outright if the directory is a checkout of something
+other than this project.
+
+The running daemon keeps the old code until it is restarted. After an upgrade:
+
+```sh
+sudo systemctl restart hobby    # under systemd
+# or: stop the `hobby daemon` you started by hand and start it again
+```
 
 ## Uninstalling
 
@@ -125,12 +155,21 @@ you can see.
 
 ```sh
 hobby eject <project> --release   # for each project you want to keep
+hobby rm <project> --yes          # for each project you do not: removes its containers, network and images
+# stop the daemon (systemctl stop hobby, or end `hobby daemon`)
+docker ps -a --filter name=hobby- -q | xargs -r docker rm -f     # anything hobby rm did not reach
+docker network ls --filter name=hobby- -q | xargs -r docker network rm
+docker images 'hobby/*' -q | xargs -r docker rmi
+rm -f /tmp/hobby-daemon.lock
 rm -rf ~/.hobby                   # state, config, and every data directory
 sudo rm /usr/local/bin/hobby      # or ~/.local/bin/hobby
+sudo rm /etc/systemd/system/hobby.service && sudo systemctl daemon-reload   # if you installed the unit
 ```
 
 Eject first. `~/.hobby/projects/` holds the data directories, and removing it
-removes your databases.
+removes your databases. The containers (`hobby-<project>-<resource>`), the
+per-project networks (`hobby-<project>`) and the built images (`hobby/*`) are
+Docker's, not files under `~/.hobby`, which is why they need their own lines.
 
 ## Then
 

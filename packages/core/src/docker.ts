@@ -144,6 +144,27 @@ function isInUse(stderr: string | undefined): boolean {
   return stderr !== undefined && /has active endpoints/i.test(stderr)
 }
 
+async function ensureImage(exec: ExecFn, image: string): Promise<void> {
+  try {
+    await exec('docker', ['image', 'inspect', image])
+    return
+  } catch {
+    // Not present locally: fall through to the pull.
+  }
+  console.error(`docker: pulling ${image} (first use on this box; this can take a minute)`)
+  try {
+    await exec('docker', ['pull', '--quiet', image])
+  } catch (err) {
+    const e = errorOf(err)
+    const lines = (e.stderr ?? e.message ?? String(err)).trim().split('\n')
+    throw new HobbyError(
+      'runtime_unavailable',
+      `could not pull ${image}`,
+      `${lines.slice(-3).join('\n')}\nis this box online, and does docker have access to the registry?`
+    )
+  }
+}
+
 function toRuntimeUnavailable(action: string, err: unknown): HobbyError {
   const e = errorOf(err)
   return new HobbyError('runtime_unavailable', `${action} failed`, e.stderr ?? e.message ?? String(err))
@@ -271,6 +292,12 @@ export function createDockerRuntime(exec: ExecFn = defaultExec, spawnFn: SpawnFn
       if (status.exists) {
         return spec.name
       }
+      // `docker create` pulls a missing image silently, which on a fresh box
+      // is 47 seconds of nothing for the first `hobby new` (issue #138).
+      // Pulled explicitly instead, with a log line before and a bounded
+      // error after: a failed pull used to arrive as the whole pull log in
+      // the hint.
+      await ensureImage(exec, spec.image)
       await run(buildCreateArgs(spec))
       return spec.name
     },
