@@ -139,6 +139,18 @@ export function serveStudioStatic(
     return true
   }
 
+  // A missing file under assets/ is a missing file, not a page: Vite names
+  // every bundle output `assets/<name>-<hash>.<ext>`, so a request there
+  // that matches nothing is a stale cached HTML page asking for a bundle
+  // this build no longer ships. Answering it with index.html as 200 (issue
+  // #117) made the browser try to run an HTML document as a script. 404
+  // tells it, and anyone reading the network tab, the truth.
+  if (segments[0] === 'assets') {
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
+    res.end('not found')
+    return true
+  }
+
   if (sendIndex(res, distRoot)) {
     return true
   }

@@ -24,7 +24,7 @@ import { HobbyError } from '@hobby.sh/core'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { DaemonContext } from '../context.js'
 import { issueToken, readBearerToken, verifyToken } from './tokens.js'
-import { DUMMY_CREDENTIAL_HASH, LoginThrottle, readOperatorCredential, verifyPassword } from './auth.js'
+import { DUMMY_CREDENTIAL_HASH, LoginThrottle, ThrottledError, readOperatorCredential, verifyPassword } from './auth.js'
 import { readSessionCookie, serializeClearCookie, serializeSessionCookie, SessionStore } from './session.js'
 import { resolveStudioDistDir, serveStudioStatic } from './static.js'
 
@@ -100,9 +100,19 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
   })
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
+// A throttled failure carries how long to wait (auth.ts's ThrottledError),
+// and HTTP has a header for exactly that, so a 429 from here always has
+// Retry-After beside the same figure in the body (issue #117).
+function retryAfterHeader(err: unknown): Record<string, string> {
+  if (err instanceof ThrottledError) {
+    return { 'retry-after': String(err.retryAfterSeconds) }
+  }
+  return {}
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown, extraHeaders: Record<string, string> = {}): void {
   const payload = JSON.stringify(body)
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...extraHeaders })
   res.end(payload)
 }
 
@@ -136,7 +146,7 @@ export function createRouter(): DispatchableRouter {
         sendJson(res, result.status, result.body)
       } catch (err) {
         const hobbyErr = toHobbyError(err)
-        sendJson(res, hobbyErr.httpStatus, hobbyErr.toWire())
+        sendJson(res, hobbyErr.httpStatus, hobbyErr.toWire(), retryAfterHeader(hobbyErr))
       }
       return true
     },
@@ -325,8 +335,15 @@ const UNAUTHENTICATED_PATHS = new Set(['studio/login', 'studio/logout', 'studio/
 // wrong and a single place to read when asking what is protected.
 //
 // The cookie is tried first because it is the cheap, in-memory path: a token
-// costs an argon2 verify per stored token, and a browser making many requests
-// should not pay that on every one.
+// costs one argon2 verify (tokens.ts's verifyToken, issue #118), and a
+// browser making many requests should not pay that on every one.
+//
+// Bearer failures count against the same per-source throttle as a wrong
+// password (issue #118): a well-formed, wrong `hob_` token used to cost the
+// daemon an argon2 verify per stored token with nothing limiting the rate.
+// Inside a backoff window this throws auth.ts's ThrottledError (429), which
+// the gate in handle() below renders exactly as the login route would; a
+// valid token clears the window the way a correct password does.
 export async function isAuthenticated(ctx: DaemonContext, req: IncomingMessage): Promise<boolean> {
   const cookie = readSessionCookie(req)
   if (cookie !== null && stateFor(ctx).sessions.verify(cookie)) {
@@ -337,7 +354,16 @@ export async function isAuthenticated(ctx: DaemonContext, req: IncomingMessage):
   if (bearer === null) {
     return false
   }
-  return verifyToken(ctx.paths, bearer)
+
+  const state = stateFor(ctx)
+  const key = remoteKey(req)
+  state.throttle.check(key)
+  if (!(await verifyToken(ctx.paths, bearer))) {
+    state.throttle.fail(key)
+    return false
+  }
+  state.throttle.succeed(key)
+  return true
 }
 
 // Reduces a request to exactly the identity ../routes.ts's `dispatch` routes
@@ -521,7 +547,19 @@ async function handle(
     return
   }
 
-  if (!(await isAuthenticated(ctx, req))) {
+  let authenticated: boolean
+  try {
+    authenticated = await isAuthenticated(ctx, req)
+  } catch (err) {
+    // Only ever a ThrottledError in practice (isAuthenticated throws
+    // nothing else), rendered through the same path a throttled login
+    // takes so the two are indistinguishable: 429, Retry-After, and the
+    // wait in the message.
+    const hobbyErr = toHobbyError(err)
+    sendJson(res, hobbyErr.httpStatus, hobbyErr.toWire(), retryAfterHeader(hobbyErr))
+    return
+  }
+  if (!authenticated) {
     sendJson(res, 401, { error: { code: 'unauthorized', message: 'authentication required' } })
     return
   }

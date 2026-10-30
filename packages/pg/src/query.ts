@@ -35,30 +35,92 @@ export interface QueryResultShape {
   command: string
 }
 
-// Only the handful of built-in type OIDs a database inspector actually
-// needs a human label for (see packages/studio/src/views/Sql.tsx's column
-// header, and schema.ts's own column rendering). Not an exhaustive OID
-// table: an OID this map does not recognize renders as its own numeric
-// string, which is an honest "unlabeled" rather than a guess, and never
-// blocks the query result itself.
+// The built-in type OIDs node-postgres itself knows (pg-types' builtins
+// table, the same set the driver's own parsers are keyed on), labelled with
+// Postgres's own type names as `format_type` prints them: `name`, `bytea`
+// and `void` were the three a real query surfaced as `oid:N` in Studio's
+// column headers (issue #116). Not an exhaustive OID table, and not a
+// catalog lookup: a user-defined type, an enum or an array type renders as
+// `oid:N`, which is an honest "unlabeled" rather than a guess, and never
+// blocks the query result itself. The common array types are included
+// because `select array_agg(...)` is an ordinary thing to type.
 const OID_NAMES: Record<number, string> = {
   16: 'boolean',
+  17: 'bytea',
+  18: '"char"',
+  19: 'name',
   20: 'bigint',
   21: 'smallint',
   23: 'integer',
+  24: 'regproc',
   25: 'text',
+  26: 'oid',
+  27: 'tid',
+  28: 'xid',
+  29: 'cid',
   114: 'json',
+  142: 'xml',
+  194: 'pg_node_tree',
+  602: 'path',
+  604: 'polygon',
+  650: 'cidr',
   700: 'real',
   701: 'double precision',
+  718: 'circle',
+  774: 'macaddr8',
+  790: 'money',
+  829: 'macaddr',
+  869: 'inet',
+  1033: 'aclitem',
   1042: 'char',
   1043: 'varchar',
   1082: 'date',
   1083: 'time',
   1114: 'timestamp',
   1184: 'timestamptz',
+  1186: 'interval',
+  1266: 'timetz',
+  1560: 'bit',
+  1562: 'varbit',
   1700: 'numeric',
+  1790: 'refcursor',
+  2202: 'regprocedure',
+  2203: 'regoper',
+  2204: 'regoperator',
+  2205: 'regclass',
+  2206: 'regtype',
+  2278: 'void',
   2950: 'uuid',
+  2970: 'txid_snapshot',
+  3220: 'pg_lsn',
+  3361: 'pg_ndistinct',
+  3402: 'pg_dependencies',
+  3614: 'tsvector',
+  3615: 'tsquery',
+  3642: 'gtsvector',
+  3734: 'regconfig',
+  3769: 'regdictionary',
   3802: 'jsonb',
+  4089: 'regnamespace',
+  4096: 'regrole',
+  // Array types, by their element's OID, for the handful anyone aggregates
+  // into interactively.
+  1000: 'boolean[]',
+  1001: 'bytea[]',
+  1005: 'smallint[]',
+  1007: 'integer[]',
+  1009: 'text[]',
+  1015: 'varchar[]',
+  1016: 'bigint[]',
+  1021: 'real[]',
+  1022: 'double precision[]',
+  1115: 'timestamp[]',
+  1182: 'date[]',
+  1185: 'timestamptz[]',
+  1231: 'numeric[]',
+  2951: 'uuid[]',
+  199: 'json[]',
+  3807: 'jsonb[]',
 }
 
 function dataTypeName(oid: number): string {

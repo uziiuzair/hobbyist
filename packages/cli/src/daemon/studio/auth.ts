@@ -105,6 +105,19 @@ export async function setOperatorPassword(paths: Paths, plain: string): Promise<
 
 // --- login throttling --------------------------------------------------
 
+// A HobbyError with the one extra fact a 429 needs: how long to wait, so
+// the response can carry a Retry-After header (routes.ts's sendJson reads
+// it). Everything else about it is an ordinary HobbyError('too_many_attempts').
+export class ThrottledError extends HobbyError {
+  constructor(readonly retryAfterSeconds: number) {
+    super(
+      'too_many_attempts',
+      `too many attempts, retry in ${retryAfterSeconds}s`,
+      'each failed login or bearer token from this address doubles the wait; a successful one clears it'
+    )
+  }
+}
+
 interface ThrottleState {
   failures: number
   blockedUntil: number
@@ -131,17 +144,33 @@ const MAX_TRACKED_KEYS = 10_000
 // attacker simply by succeeding on a different address": succeed(key) only
 // ever deletes state.get(key), never anything else in the map, so a fresh
 // address starting clean has no effect on any other address's state.
+//
+// Shared by the password routes (login, token) and the bearer-token gate
+// (studio/routes.ts's isAuthenticated, issue #118): a bogus bearer token
+// counts as a failed attempt from its source address exactly as a wrong
+// password does, so neither path can be used to make the daemon do argon2
+// work without limit.
 export class LoginThrottle {
   private readonly state = new Map<string, ThrottleState>()
 
-  check(key: string, now: number = Date.now()): void {
+  // Seconds left in the key's backoff window, or 0 when it may try now.
+  retryAfterSeconds(key: string, now: number = Date.now()): number {
     const entry = this.state.get(key)
-    if (entry !== undefined && now < entry.blockedUntil) {
-      throw new HobbyError(
-        'unauthorized',
-        'too many attempts, try again later',
-        `retry in ${Math.ceil((entry.blockedUntil - now) / 1000)}s`
-      )
+    if (entry === undefined || now >= entry.blockedUntil) {
+      return 0
+    }
+    return Math.ceil((entry.blockedUntil - now) / 1000)
+  }
+
+  // `too_many_attempts` (429), never `unauthorized` (issue #117): the CLI
+  // mapped every 401 to "invalid credentials", so a throttled user with the
+  // right password was told it was wrong. The wait is in the message, where
+  // every client prints it, and on the error as a number so the HTTP layer
+  // can send Retry-After.
+  check(key: string, now: number = Date.now()): void {
+    const seconds = this.retryAfterSeconds(key, now)
+    if (seconds > 0) {
+      throw new ThrottledError(seconds)
     }
   }
 

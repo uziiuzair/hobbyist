@@ -15,7 +15,7 @@ import { test } from 'node:test'
 import { createFakeRuntime, openStore, resolvePaths, type HobbyConfig, type Store } from '@hobby.sh/core'
 import { ActivityTracker } from '@hobby.sh/proxy'
 import { createDefaultKindRegistry } from '../src/daemon/context.js'
-import { issueToken, readTokens, revokeToken } from '../src/daemon/studio/tokens.js'
+import { issueToken, readTokens, revokeToken, tokenLookupKey, verifyToken } from '../src/daemon/studio/tokens.js'
 import {
   createApp,
   createStudioApp,
@@ -662,19 +662,23 @@ test('repeated failed logins from the same source eventually get throttled', asy
   await setOperatorPassword(ctx.paths, 'correct horse battery staple')
 
   await withStudioServer(ctx, async (baseUrl) => {
-    let lastStatus = 0
+    let throttled: JsonResponse | null = null
     for (let i = 0; i < 6; i += 1) {
       const res = await call(baseUrl, 'POST', '/studio/login', { body: { password: 'wrong' } })
-      lastStatus = res.status
-      if (res.status === 401) {
-        const body = res.body as { error: { hint?: string } }
-        if (body.error.hint !== undefined && /retry in/.test(body.error.hint)) {
-          // Throttled: reached the point exponential backoff kicks in.
-          break
-        }
+      if (res.status === 429) {
+        // Throttled: reached the point exponential backoff kicks in.
+        throttled = res
+        break
       }
+      assert.equal(res.status, 401, 'a wrong password outside the window is still 401')
     }
-    assert.equal(lastStatus, 401)
+    // Issue #117: 429 with the wait in the message and a Retry-After header,
+    // never 401, so a client cannot mistake "wait" for "wrong password".
+    assert.ok(throttled !== null, 'repeated failures must eventually be throttled')
+    const body = throttled.body as { error: { code: string; message: string } }
+    assert.equal(body.error.code, 'too_many_attempts')
+    assert.match(body.error.message, /too many attempts, retry in \d+s/)
+    assert.match(throttled.headers.get('retry-after') ?? '', /^\d+$/)
   })
 })
 
@@ -712,12 +716,11 @@ test('a client rotating its own X-Forwarded-For value still gets throttled', asy
         body: { password: 'wrong' },
         headers: { 'x-forwarded-for': `10.0.0.${i}, 203.0.113.9` },
       })
-      assert.equal(res.status, 401)
-      const body = res.body as { error: { hint?: string } }
-      if (body.error.hint !== undefined && /retry in/.test(body.error.hint)) {
+      if (res.status === 429) {
         throttled = true
         break
       }
+      assert.equal(res.status, 401)
     }
     assert.equal(throttled, true, 'rotating the client-supplied hop must not reset the backoff')
   })
@@ -730,6 +733,105 @@ test('readOperatorCredential returns null, not a throw, before the file exists',
   const ctx = buildContext()
   assert.equal(readOperatorCredential(ctx.paths), null)
   ctx.store.close()
+})
+
+// --- bearer tokens: lookup key and throttle (issue #118) -----------------
+
+test('a minted token stores a lookup key derived from the plaintext, and verifies through it', async () => {
+  const ctx = buildContext()
+  const plain = await issueToken(ctx.paths, 'laptop')
+  const [stored] = readTokens(ctx.paths)
+
+  assert.equal(stored?.lookup, tokenLookupKey(plain))
+  assert.equal(stored?.lookup?.length, 8)
+  assert.equal(await verifyToken(ctx.paths, plain), true)
+  // Same lookup prefix cannot be forged into a match: a different token
+  // never verifies, and a token with no stored counterpart is refused.
+  assert.equal(await verifyToken(ctx.paths, 'hob_' + 'A'.repeat(43)), false)
+  ctx.store.close()
+})
+
+test('a bogus bearer token is refused without an argon2 verify against every stored token', async () => {
+  const ctx = buildContext()
+  for (const name of ['one', 'two', 'three']) {
+    await issueToken(ctx.paths, name)
+  }
+  // argon2 with the project's parameters costs tens of milliseconds per
+  // verify on any machine; three of them is a figure this would be well
+  // over, and one SHA-256 plus a file read is a figure it is well under.
+  // Timed loosely rather than counted, because verifyToken has no seam for
+  // counting and adding one for a test would be the tail wagging the dog.
+  const started = Date.now()
+  for (let i = 0; i < 10; i += 1) {
+    assert.equal(await verifyToken(ctx.paths, `hob_${'x'.repeat(42)}${i}`), false)
+  }
+  const perRequestMs = (Date.now() - started) / 10
+  assert.ok(perRequestMs < 20, `a bogus token cost ${perRequestMs}ms per request, which means argon2 ran`)
+  ctx.store.close()
+})
+
+test('a token record written before lookup keys existed still verifies, and is re-keyed on first use', async () => {
+  const ctx = buildContext()
+  const plain = 'hob_' + 'legacy'.repeat(7) + 'x'
+  // Exactly what the old writeTokens produced: no lookup field at all.
+  const legacy = { name: 'old-laptop', hash: await hashPassword(plain), createdAt: '2026-01-01T00:00:00.000Z', tail: plain.slice(-6) }
+  const file = join(ctx.paths.home, 'api-tokens.json')
+  const { writeFileSync } = await import('node:fs')
+  writeFileSync(file, `${JSON.stringify([legacy], null, 2)}\n`, { mode: 0o600 })
+
+  assert.equal(await verifyToken(ctx.paths, plain), true, 'an upgrade must not lock the laptop out')
+  const [rekeyed] = readTokens(ctx.paths)
+  assert.equal(rekeyed?.lookup, tokenLookupKey(plain), 'the first successful verify writes the lookup key')
+  assert.equal(rekeyed?.hash, legacy.hash, 'the hash is untouched')
+  assert.equal(await verifyToken(ctx.paths, plain), true)
+  assert.equal(await verifyToken(ctx.paths, 'hob_' + 'wrong'.repeat(8) + 'xyz'), false)
+  ctx.store.close()
+})
+
+test('repeated bogus bearer tokens from one source are throttled like failed logins, with a 429', async () => {
+  const ctx = buildContext()
+  await setOperatorPassword(ctx.paths, 'correct horse battery staple')
+
+  await withStudioServer(ctx, async (baseUrl) => {
+    let throttled: JsonResponse | null = null
+    for (let i = 0; i < 6; i += 1) {
+      const res = await call(baseUrl, 'GET', '/v1/projects', {
+        headers: { authorization: `Bearer hob_${'b'.repeat(42)}${i}` },
+      })
+      if (res.status === 429) {
+        throttled = res
+        break
+      }
+      assert.equal(res.status, 401)
+    }
+    assert.ok(throttled !== null, 'bearer failures must count against the throttle')
+    assert.equal((throttled.body as { error: { code: string } }).error.code, 'too_many_attempts')
+    assert.match(throttled.headers.get('retry-after') ?? '', /^\d+$/)
+
+    // The window is per source address: a different address is unaffected,
+    // and a session cookie never consults the throttle at all.
+    const other = await call(baseUrl, 'GET', '/v1/projects', {
+      headers: { authorization: `Bearer hob_${'c'.repeat(43)}`, 'x-forwarded-for': '198.51.100.7' },
+    })
+    assert.equal(other.status, 401)
+  })
+})
+
+test('a valid bearer token clears its source\'s backoff window', async () => {
+  const ctx = buildContext()
+  const plain = await issueToken(ctx.paths, 'laptop')
+
+  await withStudioServer(ctx, async (baseUrl) => {
+    // One failure opens a 1s window; the right token must still be
+    // accepted once the window has passed and must leave no window behind.
+    const denied = await call(baseUrl, 'GET', '/v1/projects', { headers: { authorization: `Bearer hob_${'d'.repeat(43)}` } })
+    assert.equal(denied.status, 401)
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    const allowed = await call(baseUrl, 'GET', '/v1/projects', { headers: { authorization: `Bearer ${plain}` } })
+    assert.equal(allowed.status, 200)
+    const again = await call(baseUrl, 'GET', '/v1/projects', { headers: { authorization: `Bearer ${plain}` } })
+    assert.equal(again.status, 200)
+  })
 })
 
 void readFileSync

@@ -2646,8 +2646,10 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
   const url = new URL(req.url ?? '/', 'http://localhost')
   const segments = url.pathname.split('/').filter((segment) => segment.length > 0)
 
+  // `not_found` (404), not `usage` (400): a route that does not exist is
+  // not a malformed request to one that does (issue #117).
   if (segments[0] !== 'v1') {
-    throw new HobbyError('usage', `unknown route: ${method} ${url.pathname}`)
+    throw new HobbyError('not_found', `unknown route: ${method} ${url.pathname}`)
   }
 
   if (method === 'GET' && segments.length === 2 && segments[1] === 'health') {
@@ -2797,7 +2799,7 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
     }
   }
 
-  throw new HobbyError('usage', `unknown route: ${method} ${url.pathname}`, 'see docs/cli/specs for the route list')
+  throw new HobbyError('not_found', `unknown route: ${method} ${url.pathname}`, 'see docs/api/openapi.yaml for the route list')
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {

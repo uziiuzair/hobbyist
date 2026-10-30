@@ -119,3 +119,29 @@ test('shapeQueryResult answers an empty shape for an empty text, which the simpl
   const shaped = shapeQueryResult([])
   assert.deepEqual(shaped, { columns: [], rows: [], rowCount: 0, command: '' })
 })
+
+// Issue #116: `select current_user, x::bytea, pg_sleep(0)` showed
+// `oid:19`, `oid:17` and `oid:2278` in Studio's column headers. The common
+// built-in types carry Postgres's own names; a type the table does not
+// know still renders as its OID rather than a guess.
+test('shapeQueryResult labels the built-in types node-postgres knows by their Postgres names', () => {
+  const shaped = shapeQueryResult({
+    fields: [
+      { name: 'current_user', dataTypeID: 19 },
+      { name: 'x', dataTypeID: 17 },
+      { name: 'pg_sleep', dataTypeID: 2278 },
+      { name: 'when', dataTypeID: 1184 },
+      { name: 'span', dataTypeID: 1186 },
+      { name: 'addr', dataTypeID: 869 },
+      { name: 'tags', dataTypeID: 1009 },
+      { name: 'custom', dataTypeID: 99999 },
+    ],
+    rows: [],
+    rowCount: 0,
+    command: 'SELECT',
+  })
+  assert.deepEqual(
+    shaped.columns.map((c) => c.dataType),
+    ['name', 'bytea', 'void', 'timestamptz', 'interval', 'inet', 'text[]', 'oid:99999']
+  )
+})

@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { HobbyError, type ErrorCode } from '../src/index.js'
+import { HobbyError, isDiskFullError, type ErrorCode } from '../src/index.js'
 
 const EXPECTED_STATUS: Record<ErrorCode, number> = {
   project_not_found: 404,
@@ -19,6 +19,9 @@ const EXPECTED_STATUS: Record<ErrorCode, number> = {
   unauthorized: 401,
   unknown_kind: 500,
   build_failed: 422,
+  too_many_attempts: 429,
+  not_found: 404,
+  disk_full: 507,
   internal: 500,
 }
 
@@ -41,4 +44,17 @@ test('HobbyError.toWire omits hint when none is given', () => {
   assert.deepEqual(error.toWire(), {
     error: { code: 'internal', message: 'oops' },
   })
+})
+
+// Issue #139: the two errno codes for "no room", and the same condition
+// reported by a child process on stderr, all read as a full disk.
+test('isDiskFullError recognises ENOSPC, EDQUOT and cp\'s own words, and nothing else', () => {
+  assert.equal(isDiskFullError(Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' })), true)
+  assert.equal(isDiskFullError(Object.assign(new Error('EDQUOT: disk quota exceeded'), { code: 'EDQUOT' })), true)
+  assert.equal(isDiskFullError(Object.assign(new Error('Command failed: cp'), { code: 1, stderr: 'cp: x: No space left on device' })), true)
+  assert.equal(isDiskFullError(new HobbyError('internal', 'online backup failed', 'tar: write error: No space left on device')), true)
+  assert.equal(isDiskFullError(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })), false)
+  assert.equal(isDiskFullError(new Error('boom')), false)
+  assert.equal(isDiskFullError(null), false)
+  assert.equal(isDiskFullError('ENOSPC'), false)
 })

@@ -13,7 +13,7 @@
 // lost laptop costs one `hobby token rm` rather than a password rotation across
 // every machine.
 
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { HobbyError, type Paths } from '@hobby.sh/core'
@@ -34,6 +34,20 @@ export interface ApiTokenRecord {
   // something a human can match against the value their laptop is holding
   // without the stored file containing anything usable.
   readonly tail: string
+  // The first LOOKUP_CHARS hex characters of SHA-256(plaintext) (issue
+  // #118). Not a secret and not a credential: 32 bits of a one-way hash of
+  // a 256-bit random token narrows a brute force by nothing that matters,
+  // and it lets verifyToken find the one record a presented token could
+  // match before paying for argon2, instead of paying once per stored
+  // token. Absent on records written before this field existed; those are
+  // verified the old way and re-keyed on their first successful use.
+  readonly lookup?: string
+}
+
+const LOOKUP_CHARS = 8
+
+export function tokenLookupKey(plain: string): string {
+  return createHash('sha256').update(plain, 'utf8').digest('hex').slice(0, LOOKUP_CHARS)
 }
 
 function tokensPath(paths: Paths): string {
@@ -80,6 +94,7 @@ export async function issueToken(paths: Paths, name: string): Promise<string> {
     hash: await hashPassword(plain),
     createdAt: new Date().toISOString(),
     tail: plain.slice(-6),
+    lookup: tokenLookupKey(plain),
   }
   writeTokens(paths, [...readTokens(paths), record])
   return plain
@@ -95,21 +110,54 @@ export function revokeToken(paths: Paths, name: string): boolean {
   return true
 }
 
-// Every stored token is checked, and the loop does not stop at the first match.
-// argon2.verify is already constant time for a given hash, but returning early
-// would leak which position matched through timing, and the cost of finishing
-// the loop is bounded by how many tokens one operator makes.
+// At most one argon2 verify per request for a token minted with a lookup
+// key (issue #118): the candidate is the record whose stored lookup equals
+// the presented token's, and a token matching no record costs a SHA-256 and
+// a file read, about what a request with no header costs. A wrong token
+// that happens to share a lookup key with a real one costs one verify, the
+// same as the right token does, so timing does not say which.
+//
+// Records without a lookup key were written before the field existed and
+// are verified the old way, every one of them, so an upgrade never locks a
+// laptop out. The first successful verify writes the key onto the record,
+// so the slow path runs once per legacy token rather than forever.
 export async function verifyToken(paths: Paths, presented: string): Promise<boolean> {
   if (!presented.startsWith(TOKEN_PREFIX)) {
     return false
   }
-  let matched = false
-  for (const record of readTokens(paths)) {
-    if (await verifyPassword(presented, record.hash)) {
-      matched = true
+  const tokens = readTokens(paths)
+  const lookup = tokenLookupKey(presented)
+
+  for (const record of tokens) {
+    if (record.lookup === lookup && (await verifyPassword(presented, record.hash))) {
+      return true
     }
   }
-  return matched
+
+  let matchedLegacy: ApiTokenRecord | null = null
+  for (const record of tokens) {
+    if (record.lookup === undefined && (await verifyPassword(presented, record.hash))) {
+      matchedLegacy = record
+    }
+  }
+  if (matchedLegacy === null) {
+    return false
+  }
+  rekeyLegacyToken(paths, matchedLegacy, lookup)
+  return true
+}
+
+// Best effort: the verify already succeeded, and a token file that cannot be
+// rewritten right now (read-only home, a concurrent `hobby token rm`) is
+// not a reason to refuse a request that presented the right credential.
+function rekeyLegacyToken(paths: Paths, matched: ApiTokenRecord, lookup: string): void {
+  try {
+    const current = readTokens(paths)
+    const updated = current.map((t) => (t.name === matched.name && t.hash === matched.hash ? { ...t, lookup } : t))
+    writeTokens(paths, updated)
+  } catch {
+    // The next successful verify tries again.
+  }
 }
 
 // Reads a bearer token from the Authorization header. Returns null rather than

@@ -82,6 +82,13 @@ const EXPECTED_EXIT_CODE: Record<ErrorCode, number> = {
   wake_timeout: 1,
   not_ready: 1,
   unauthorized: 1,
+  // Issue #117: a throttled login is "the operation did not happen", not a
+  // usage error and not a missing thing; a route that does not exist is a
+  // missing thing.
+  too_many_attempts: 1,
+  not_found: 3,
+  // Issue #139: a full disk is the daemon trying and failing.
+  disk_full: 1,
   internal: 1,
 }
 
