@@ -1,6 +1,6 @@
 ---
 title: MCP tools
-description: Fifteen tools over the daemon API, so an agent drives the same control surface the CLI does.
+description: Eighteen tools over the daemon API, so an agent drives the same control surface the CLI does.
 sidebar:
   order: 4
 ---
@@ -22,6 +22,9 @@ drifting: there is no second path for them to drift along.
 | `hobby_sleep` | `hobby sleep` |
 | `hobby_wake` | `hobby wake` |
 | `hobby_logs` | `hobby logs` |
+| `hobby_env_set` | `hobby env set` |
+| `hobby_env_ls` | `hobby env ls` |
+| `hobby_env_unset` | `hobby env unset` |
 | `hobby_rm` | `hobby rm` |
 | `hobby_queue_list` | `hobby queue ls` |
 | `hobby_queue_create` | `hobby queue create` |
@@ -50,8 +53,15 @@ same gap rather than a separate decision.
 
 ## A note on where it runs
 
-The MCP server talks to the daemon over the unix socket, so today it has to run
-on the daemon's own box. Reaching a daemon from a laptop is
-[not built](/docs/status/#not-built) and needs its own decision record first,
-because it turns a socket with filesystem permissions into a network service
-with an authentication story.
+The MCP server talks to the daemon over the unix socket (`createApi(paths.socketPath)`,
+`packages/mcp/src/server.ts`), so it runs on the daemon's own box. That is a
+decision, not a gap: filesystem permissions on the socket are its whole
+authentication story, and there is no token for an agent to hold or leak
+(`docs/mcp/CLAUDE.md`, "Transport is already decided").
+
+The CLI half of reaching a box from a laptop is built:
+[`hobby login`](/docs/reference/cli/#hobby-login-url) exchanges the operator
+password for an API token and every CLI command then runs against that box
+([ADR 0018](/docs/decisions/0018-the-cli-talks-to-a-remote-daemon/)). MCP
+does not use that path. To drive a remote box from an agent, run the MCP
+server on the box itself, over SSH or a Tailscale node.

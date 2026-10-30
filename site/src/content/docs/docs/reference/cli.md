@@ -9,7 +9,9 @@ sidebar:
 
 Every verb below appears in `printHelp` (`packages/cli/src/cli/main.ts`). A
 script in `site/scripts/check-cli-reference.mjs` runs in CI and fails if this
-page lists a verb the binary does not have, or omits one it does.
+page lists a verb the binary does not have, omits one it does, leaves out a
+flag a verb's `parseArgs` spec accepts, or leaves an exit code defined in
+`packages/cli/src/cli/exit.ts` out of the table at the bottom.
 
 Three conventions apply throughout:
 
@@ -56,12 +58,23 @@ Takes no flags.
 
 ## Projects and resources
 
-### `hobby new <name> [--empty]`
+### `hobby new <name> [--empty] [--pin]`
 
-Creates a project, puts a `postgres` resource named `primary` in it, waits for
-that database to accept queries, and prints a connection string.
+Creates a project, puts a `postgres` resource named `primary` in it, boots that
+database once so it is initialised, and prints a connection string. The new
+database is then left `sleeping`, deliberately: a clean stop is what keeps its
+first real start out of crash recovery (`createPostgres`,
+`packages/pg/src/postgres.ts`). The first connection wakes it.
 
 `--empty` creates the project with nothing in it.
+
+`--pin` creates the project pinned, so it never auto-sleeps, the same state
+`hobby pin` puts an existing project in. Without it the project takes the
+box-wide `sleepAfterSeconds` at the moment it is created; see
+[configuration](/docs/reference/configuration/#settings) for what that means
+when the default later changes.
+
+Accepts `--json`.
 
 ### `hobby ls`
 
@@ -78,10 +91,15 @@ shows why the start failed.
 
 ```
 blog
-  primary  postgres  running  port 15000
+  primary  postgres  running  port 15432
   site     app       sleeping  site.blog.example.com
   api      app       failed  api.blog.example.com  (wake refused, retry in 3m 12s: docker start failed)
 ```
+
+The port is the resource's own host port, allocated from a range that tells
+you the kind: 15432 to 25432 for postgres, 25433 to 35432 for apps, 35433 to
+45432 for workers. See
+[port allocation](/docs/reference/configuration/#port-allocation).
 
 With `--json`, the same thing is the resource's `wakeRefusal` field:
 `{ failures, retryAt, lastError }`, or `null`.
@@ -140,6 +158,7 @@ Both present is an error rather than a guess.
 | `--project <p>` | Which project it belongs to |
 | `--name <n>` | The resource name |
 | `--port <n>` | The port your process listens on inside the container. Apps only |
+| `--database <r>` | A sibling `postgres` resource in the same project to bind. The app or worker gets `DATABASE_URL` pointing at it through the wake proxy, so its first query wakes the database |
 | `--env-file <f>` | Variables from a dotenv file, replacing the resource's current set |
 | `--env K=V` | One variable, repeatable. Wins over the same key in `--env-file` |
 | `--dockerfile <f>` | The Dockerfile, relative to `[path]`, when it is not `<path>/Dockerfile`. Apps only |
@@ -495,11 +514,22 @@ Manages a released project again.
 
 ## Exit codes
 
-| Code | Means |
-|---|---|
-| `0` | Success |
-| `2` | Usage error: an unknown flag, a missing argument |
-| non-zero | The operation failed, or the daemon could not be reached |
+Six codes a script can branch on. The mapping from the daemon's error codes to
+these lives in one table, `EXIT_CODE_BY_ERROR` in `packages/cli/src/cli/exit.ts`,
+which TypeScript refuses to compile if the daemon grows an error code with no
+exit code.
+
+| Code | Means | Daemon error codes that produce it |
+|---|---|---|
+| `0` | Success | |
+| `1` | The daemon tried and the operation did not succeed | `wake_failed`, `wake_timeout`, `not_ready`, `runtime_unavailable`, `unauthorized`, `unknown_kind`, `internal` |
+| `2` | Usage: something you typed, or wrote in a Dockerfile or wrangler manifest, has to change | `usage`, `invalid_name`, `ambiguous_target`, `build_failed`, plus an unknown flag or a missing argument caught before any request is made |
+| `3` | Not found | `project_not_found`, `resource_not_found` |
+| `4` | Conflict: the name or state is already taken | `name_taken`, `conflict` |
+| `5` | The daemon could not be reached at all | none: this is a client-side condition, the socket refused or does not exist |
 
 A daemon that cannot be reached says so and suggests `hobby init` then
-`hobby daemon`, rather than failing with a bare status.
+`hobby daemon`, rather than failing with a bare status. Two verbs return `1`
+for a reason of their own rather than through that table: `hobby snapshot
+restore` when something that was running did not come back on the restored
+data, and a confirmation prompt that did not match.

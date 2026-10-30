@@ -34,6 +34,7 @@ hobby deploy ./my-app --project blog --name site --port 8080
 | `--project <p>` | Which project it belongs to |
 | `--name <n>` | The resource name |
 | `--port <n>` | The port your process listens on inside the container |
+| `--database <r>` | A sibling Postgres resource to bind. The app gets `DATABASE_URL`, see below |
 | `--env-file <f>` | Variables from a dotenv file, see below |
 | `--env K=V` | One variable, repeatable, see below |
 | `--kind app\|worker` | Only needed when the directory is ambiguous |
@@ -114,6 +115,11 @@ rebuilds with the same file and the same arguments. A `--build-arg` is inlined
 into the image by whatever `ARG` reads it, which is what `NEXT_PUBLIC_*` values
 need and what a secret must never be: use [environment variables](#environment-variables-and-secrets)
 for anything the running process reads.
+
+The build runs on the box, in Docker, with whatever memory the box has. A
+Next.js monorepo that copies the whole repository into the image does not fit
+a 1GB VPS; [Next.js on Hobby](/docs/guides/nextjs/) has the shape that does,
+and the way to build elsewhere when it still does not.
 
 ## Create now, deploy later
 

@@ -140,6 +140,40 @@ the name stayed taken, bare `project` targets turned ambiguous, `hobby
 branch` refused the project and `hobby eject` still exported the queue. It
 now ends with `store.deleteResource`, as every other kind's destroy does.
 
+## Amendment, 2026-10-30: three follow-ups above are stale (issue #171)
+
+The follow-ups list is left as written; three of its entries no longer
+describe the code.
+
+**The producer path is fixed in code, and owes a Linux re-run.** Both halves
+landed: `containerSpec` (`packages/worker/src/worker.ts`) sets
+`extraHosts: [{ name: 'host.docker.internal', address: 'host-gateway' }]` for
+any worker that produces to a queue or is bound to a database, and
+`buildCreateArgs` (`packages/core/src/docker.ts`) emits it as `--add-host`;
+`ContainerSpec` (`packages/core/src/runtime.ts`) has the field. The second
+half, recorded in `research/2026-08-22-the-producer-path-on-real-linux.md`,
+is also closed: the queue endpoint's listener set is no longer a startup
+snapshot, `queueEndpoint.addHost` (`packages/cli/src/daemon/queue-endpoint.ts`)
+binds a new project's bridge gateway when `packages/cli/src/daemon/server.ts`
+creates the network. The QA queues lane ran `send()` from inside a container
+against real Docker on macOS on 2026-10-19. **Nobody has re-run it on a real
+Linux box since the fix**, and Linux is the platform the bug was about, so the
+site keeps it under "unmeasured" rather than "works".
+
+**The readiness probe no longer writes a stack trace.** `defaultProbeFactory`
+(`worker.ts`) now probes the control port with `GET /`, and `CONTROL_SOURCE`
+(`packages/worker/src/runtime-image.ts`) answers any non-POST with 405 before
+it reads a body, so `await request.json()` is never reached by the probe. The
+QA lane's `hobby logs` for two workers showed only the two `hobby: ...
+listening` lines per start.
+
+**Retries, dead letters and lease expiry have met Docker.** The same lane
+drove a consumer that threw, watched the message retry and land in the dead
+letter queue, and let a lease expire with the container stopped mid-batch,
+all against real Docker on macOS. They remain covered by the fake-clock tests
+in `packages/queue/test/`; the point of this note is that the "never met
+Docker" wording above is out of date.
+
 ## Amendment, 2026-10-30: the QA queues lane fixes (issues #156 to #158, #164 to #170)
 
 - **Retention sweeps every queue.** `retentionTargets`

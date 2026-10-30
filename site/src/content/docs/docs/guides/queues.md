@@ -1,11 +1,11 @@
 ---
 title: Queues
-description: Durable messages that survive a sleep, and wake their consumer when they arrive. Includes the one thing here that is openly broken on Linux.
+description: Durable messages that survive a sleep, and wake their consumer when they arrive.
 sidebar:
   order: 5
 ---
 
-<p class="state state--failed">consuming works. producing is broken on Linux</p>
+<p class="state state--starting">works, rough edges</p>
 
 A `queue` holds messages in a sqlite file the daemon owns, outside any runtime.
 It is the first thing in this project where **stored state, rather than an
@@ -93,31 +93,34 @@ queue, an exhausted message is dropped, as on Cloudflare.
 
 ## The Linux producer gap
 
-<p class="state state--failed">known broken</p>
+<p class="state state--starting">fixed in code, not yet re-run on a Linux box</p>
 
-**`env.MY_QUEUE.send()` from inside a container fails on Linux.** Unimplemented,
-not untested.
+This page used to record that `env.MY_QUEUE.send()` from inside a container
+failed on Linux, for two reasons that lived in different packages: the
+container was handed `http://host.docker.internal:<port>/enqueue` and nothing
+mapped that name on Linux, and the daemon's listener only bound the bridge
+gateways that existed when it started, so every project created afterwards
+missed it.
 
-`packages/worker/src/worker.ts` hands every producer container
-`http://host.docker.internal:<port>/enqueue`. macOS resolves that name. Linux
-does not, unless the container was created with
-`--add-host=host.docker.internal:host-gateway`, and nothing passes that flag:
-`buildCreateArgs` (`packages/core/src/docker.ts`) never emits `--add-host`, and
-`ContainerSpec` (`packages/core/src/runtime.ts`) has no field for one.
+Both halves are now in the code:
 
-The daemon's own half is correct. It binds the project bridge gateway on Linux.
-The two halves live in different packages and never meet.
+- A producer container, or one bound to a database, is created with
+  `extraHosts: [{ name: host.docker.internal, address: host-gateway }]`
+  (`packages/worker/src/worker.ts`, `containerSpec`), and `buildCreateArgs`
+  (`packages/core/src/docker.ts`) emits it as `--add-host`. On macOS that
+  restates the address Docker already provides.
+- The queue endpoint grows a listener for a new project's bridge gateway when
+  the project's network is created (`queueEndpoint.addHost`,
+  `packages/cli/src/daemon/queue-endpoint.ts`, called from
+  `packages/cli/src/daemon/server.ts`), instead of taking a snapshot of the
+  addresses at startup.
 
-**Consuming works on both platforms.** Sending from the CLI
-(`hobby queue send`) works on both platforms. It is specifically producing from
-inside a container on Linux that fails, which is the five dollar VPS this
-project is aimed at.
-
-Found by reading the code during a whole-branch review, after every end-to-end
-run had passed on macOS. The fix is to add extra hosts to `ContainerSpec` and
-emit the flag, or to resolve the gateway address into the URL at container
-start, and it is
-[one of the most useful contributions available](/docs/contributing/).
+What has been observed: the producer path, retries, dead letters and lease
+expiry all ran against real Docker on macOS on 2026-10-19. **No one has yet
+re-run the producer path on a real Linux box since the fix**, which is the
+platform the bug was about, so this stays marked rough until someone does.
+Consuming has worked on both platforms throughout, and so has
+`hobby queue send` from the CLI.
 
 ## Retention
 

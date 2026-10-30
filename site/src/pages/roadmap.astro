@@ -18,10 +18,10 @@ const phases = [
       'The core. A project holding a Postgres database, the command line tool, the dashboard, tools for AI agents, and the command that hands you your data back.',
     items: [
       { state: 'done', what: 'Postgres databases that switch off and on by themselves', note: 'Measured at 170ms to start, and the part used daily' },
-      { state: 'done', what: 'The hobby command line tool', note: 'Sixteen commands' },
+      { state: 'done', what: 'The hobby command line tool', note: 'Thirty verbs, checked against the reference page in CI' },
       { state: 'done', what: 'Taking your data out', note: 'Verified end to end against real Docker' },
       { state: 'partial', what: 'The dashboard', note: 'Browsing, SQL and schema all work. It cannot create a website or function yet' },
-      { state: 'partial', what: 'Tools for AI agents', note: 'Fourteen of them. Databases only so far' },
+      { state: 'partial', what: 'Tools for AI agents', note: 'Eighteen of them. Databases and queues; an agent cannot deploy code yet' },
     ],
   },
   {
@@ -36,7 +36,7 @@ const phases = [
       { state: 'done', what: 'Stored state that survives being switched off', note: 'Including timers that fire while the thing is stopped, which is the hard part' },
       { state: 'done', what: 'HTTPS and custom domains', note: 'Off by default. Certificates are not saved between restarts yet' },
       { state: 'done', what: 'Private access over Tailscale', note: 'How the author actually runs it' },
-      { state: 'partial', what: 'Job queues', note: 'Reading jobs works. Sending one from inside a container is broken on Linux' },
+      { state: 'partial', what: 'Job queues', note: 'Reading and sending both work. The Linux sending fix is in the code and still owes a re-run on a Linux box' },
     ],
   },
   {
@@ -44,23 +44,25 @@ const phases = [
     title: 'Backups, because losing data is the one unacceptable failure',
     state: 'partial',
     summary:
-      'Deliberately outside the phase order. Five kinds of thing now hold data nobody would accept losing, and the backup command is the piece still missing.',
+      'Deliberately outside the phase order. Five kinds of thing now hold data nobody would accept losing. You can snapshot and restore a project by hand; the schedule is the piece still missing.',
     items: [
-      { state: 'done', what: 'pg_dump works, and always will', note: 'This is the backup story today' },
+      { state: 'done', what: 'pg_dump works, and always will', note: 'Still the way to get a copy off the box' },
       { state: 'done', what: 'Taking a whole project out as files', note: 'Runs anywhere with Docker' },
-      { state: 'partial', what: 'Project snapshots', note: 'Written and tested inside the daemon, and connected to no command you can type. Genuinely unusable until that changes' },
+      { state: 'done', what: 'Project snapshots, by hand', note: 'hobby snapshot takes one, hobby snapshot restore brings it back into a copy or in place. Kept on the same disk' },
+      { state: 'planned', what: 'Snapshots on a schedule, kept for a while, copied elsewhere', note: 'Nothing takes one for you yet, nothing prunes them, nothing sends them offsite' },
       { state: 'planned', what: 'Point in time recovery', note: 'Cut on purpose rather than postponed. It needs write-ahead log archiving and a restore path that deserves its own testing discipline' },
     ],
   },
   {
     id: 'Phase 1.5',
     title: 'Copying a project instantly',
-    state: 'planned',
+    state: 'partial',
     summary:
       'Clone a whole project, data and all, in about the time it takes to press enter, so you can try something against real data without risking it. Numbered 1.5 because it was scoped before Phase 2 and built after.',
     items: [
       { state: 'done', what: 'The file copying underneath it', note: 'Already written, because snapshots needed the same thing' },
-      { state: 'planned', what: 'Branching a project', note: 'Nearly free on XFS, ZFS or a Mac. A real copy on ext4, which is what many cheap servers use' },
+      { state: 'done', what: 'Branching a project that holds databases', note: 'hobby branch. Nearly free on XFS, ZFS or a Mac. A real copy on ext4, which is what many cheap servers use, and it says so' },
+      { state: 'planned', what: 'Branching a project that also holds websites, functions or queues', note: 'Refused today. Their state is tied to the original and copying it is not designed yet' },
     ],
   },
   {
@@ -83,12 +85,12 @@ const nearTerm = [
     why: 'The database path is measured on a five dollar box now: 30 wakes, p50 710ms, none over a second. The app and worker figures are still laptop-only, and no provider other than DigitalOcean has been tried.',
   },
   {
-    what: 'Fix sending jobs to a queue on Linux',
-    why: 'A networking flag that never got passed. The problem is fully understood and written down.',
+    what: 'Re-run sending jobs to a queue on a Linux box',
+    why: 'The networking fix is in the code and has run on a Mac. The bug was about Linux, so until it is re-run there it is a fix in theory.',
   },
   {
-    what: 'A command for taking backups',
-    why: 'The hard part is already written and tested. It needs a command and an API route so a person can actually reach it.',
+    what: 'Backups that happen without being asked',
+    why: 'Taking one by hand works. A daily schedule, pruning old ones and refusing to fill the disk are designed and not built.',
   },
   {
     what: 'Let the dashboard create websites and functions',
