@@ -3,7 +3,7 @@
  *
  * @author Uzair Hayat <business@uziiuzair.com>
  *
- * Last updated: Aug 16, 2026
+ * Last updated: Oct 30, 2026
  */
 
 import { useMemo, useState } from "react";
@@ -11,6 +11,11 @@ import type { FormEvent } from "react";
 import * as api from "../api.js";
 import { navigate } from "../lib/router.js";
 import { formatSince, readStats } from "../lib/format.js";
+import { describeError } from "../lib/errors.js";
+import {
+  createProjectWithDefaults,
+  DEFAULT_POSTGRES_NAME,
+} from "../lib/createProject.js";
 import { State, summarise } from "../components/State.js";
 import { MachineStrip } from "../components/MachineStrip.js";
 import { Modal } from "../components/Modal.js";
@@ -21,8 +26,6 @@ import {
   AlertTriangleIcon,
   CodeSquareIcon,
 } from "../components/reusable/icons.js";
-import { Alert } from "../components/reusable/alert.js";
-import { Pill } from "../components/reusable/pill.js";
 import { Button } from "../components/reusable/button.js";
 
 interface Props {
@@ -33,6 +36,12 @@ interface Props {
 
 type Filter = "all" | "awake" | "sleeping";
 
+// The home page shows what the API returns and nothing it does not: the
+// project list, the machine strip (awake count, databases, free disk, all
+// read from the daemon), and a way to add a project. A "Recommended" block
+// of hardcoded security findings used to sit below the list (issue #121);
+// it read as a real alert about a real domain, and nothing backed it, so it
+// is gone rather than replaced with something else invented.
 export function Projects({ rows, freeBytes, onChanged }: Props) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
@@ -76,36 +85,58 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
             freeBytes={freeBytes}
           />
 
-          <Search
-            placeholder="Search projects"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            aria-label="Search projects"
-          />
+          {/* The create control lives beside the search, always, so a second
+              project is one click away whether the list has one project in
+              it or fifty (issue #122: it used to exist only in the empty
+              state, and the no-match state's copy of it did nothing). */}
+          <div className="flex items-center gap-3">
+            <Search
+              placeholder="Search projects"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label="Search projects"
+            />
+            <Button
+              type="button"
+              variant="primary"
+              className="shrink-0"
+              onClick={() => setCreating(true)}
+            >
+              New project
+            </Button>
+          </div>
         </section>
 
         <section className="grid grid-cols-3 gap-x-4 gap-y-0">
           {rows.length === 0 ? (
             <div className="flex items-center flex-col col-span-3 gap-3">
               <p>You currently do not have any projects</p>
-              <Button onClick={() => setCreating(true)}>
+              <Button type="button" onClick={() => setCreating(true)}>
                 Create a Project
               </Button>
             </div>
           ) : visible.length === 0 ? (
             <div className="flex items-center flex-col col-span-3 gap-3">
-              <p>You currently do not have any projects</p>
-              <Button>Create a Project</Button>
+              <p>
+                No projects match
+                {query.trim().length > 0 ? ` "${query.trim()}"` : ""}
+              </p>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  setQuery("");
+                  setFilter("all");
+                }}
+              >
+                Clear search
+              </Button>
             </div>
           ) : (
             <>
-              {visible.map((row, i) => {
+              {visible.map((row) => {
                 const stats = row.resources.map((r) => readStats(r));
                 const summary = summarise(row.resources.map((r) => r.state));
-                const bytes = stats.reduce(
-                  (sum, s) => sum + (s.sizeBytes ?? 0),
-                  0,
-                );
                 const lastActive = stats
                   .map((s) => s.lastActiveAt ?? null)
                   .filter((v): v is string => v !== null)
@@ -113,9 +144,11 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
                   .pop();
 
                 return (
-                  <div className="border-b border-line py-0.5">
+                  <div
+                    key={row.project.id}
+                    className="border-b border-line py-0.5"
+                  >
                     <a
-                      key={row.project.id}
                       href={`#/projects/${encodeURIComponent(row.project.name)}`}
                       className="flex items-center justify-between text-ink py-3.5 px-4 transition-all duration-300 hover:bg-surface-2 rounded-md"
                     >
@@ -147,20 +180,6 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
             </>
           )}
         </section>
-
-        <section>
-          <div className="flex items-center gap-4">
-            <h2>Recommended</h2>
-
-            <Pill>3</Pill>
-          </div>
-
-          <div className="flex flex-col gap-2">
-            <Alert className="z-10" />
-            <Alert className="-translate-y-full z-9 scale-99" />
-            <Alert className="translate-y-[-200%] z-8 scale-98" />
-          </div>
-        </section>
       </div>
 
       {creating && (
@@ -177,6 +196,11 @@ export function Projects({ rows, freeBytes, onChanged }: Props) {
   );
 }
 
+// The same two shapes `hobby new` offers (packages/cli/src/cli/commands.ts,
+// cmdNew): a project with a postgres named primary in it, or, with the box
+// ticked, a project and nothing else (`hobby new --empty`). The sequence and
+// the rollback live in lib/createProject.ts so they can be tested without a
+// DOM and stay the CLI's sequence.
 function NewProjectModal({
   onClose,
   onCreated,
@@ -185,6 +209,7 @@ function NewProjectModal({
   onCreated: (name: string) => void;
 }) {
   const [name, setName] = useState("");
+  const [empty, setEmpty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -194,12 +219,14 @@ function NewProjectModal({
     if (trimmed.length === 0 || busy) return;
     setBusy(true);
     setError(null);
-    api
-      .createProject(trimmed)
-      .then(() => api.createResource(trimmed, "primary"))
+    createProjectWithDefaults(api, trimmed, { empty })
       .then(() => onCreated(trimmed))
       .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(
+          err instanceof Error
+            ? describeError(err, err.message)
+            : String(err),
+        );
         setBusy(false);
       });
   }
@@ -207,7 +234,11 @@ function NewProjectModal({
   return (
     <Modal
       title="New project"
-      description="A project holds your databases. This one starts with a Postgres named primary."
+      description={
+        empty
+          ? "A project holds your databases. This one starts with nothing in it; add a database or deploy into it afterwards."
+          : `A project holds your databases. This one starts with a Postgres named ${DEFAULT_POSTGRES_NAME}.`
+      }
       onClose={busy ? () => undefined : onClose}
       footer={
         <>
@@ -250,6 +281,17 @@ function NewProjectModal({
             Lowercase letters, numbers and dashes. This becomes the database
             name in your connection string.
           </p>
+        </div>
+        <div className="field">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={empty}
+              disabled={busy}
+              onChange={(e) => setEmpty(e.target.checked)}
+            />
+            Start empty, with no database
+          </label>
         </div>
         {error !== null && (
           <div className="notice notice-danger" style={{ marginTop: 12 }}>
