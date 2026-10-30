@@ -93,9 +93,11 @@ you cannot dump is a bug.
 pg_dump "$(hobby connect blog --json | jq -r .connectionString)" > blog.sql
 ```
 
-Do not read the presence of snapshot code in the repository as a backup story:
-`takeSnapshot` is implemented and tested and reachable from no command.
-[Status](/docs/status/#not-reachable).
+For a copy of the whole project on the same box, including a worker's state
+and a queue's backlog, `hobby snapshot <project>` takes one and
+`hobby snapshot restore` brings it back, into a new project or in place. A
+snapshot lives on the same disk as the data, so it is not an offsite backup;
+`pg_dump` to somewhere else still is. [Snapshots](/docs/guides/snapshots/).
 
 ## Leaving
 

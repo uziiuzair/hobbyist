@@ -148,7 +148,8 @@ state has no online copy mechanism. Nothing is quiesced:
   end, so a long backup of a busy database can fail if checkpoints recycle
   the segment it started from; it fails loudly and keeps nothing. A cluster
   with a user-defined tablespace is refused by pg_basebackup in this shape;
-  hobby creates none. Not yet run against real Docker.
+  hobby creates none. Run against real Docker on 2026-10-19; see the
+  amendment of 2026-10-30 at the end.
 
 Two refusals the routes add (`refusePausingPinned` and `refuseReleased`,
 `packages/cli/src/daemon/routes.ts`):
@@ -198,3 +199,32 @@ MCP tool, a Studio screen, and offsite copies.
 - **Retention defaults.** Seven daily snapshots, plus a free-space floor the
   snapshotter refuses to cross. Nearly free on a reflink filesystem, linear on
   ext4, which is why the floor exists. Spec, "Schedule, retention, free space"
+
+## Amendment, 2026-10-30: `--online` has met Docker, `stateAtSnapshot`, and a restore message (issue #181)
+
+**`--online` has run against real Docker.** The QA backups lane on 2026-10-19
+(Apple Silicon Mac, OrbStack, APFS) took quiesced and online snapshots, listed
+them, restored into a new project and in place, and deleted one. The "Not yet
+run against real Docker" at the end of the online section above is no longer
+true; it is left in the text as the record and corrected here. The Linux
+ownership question in Known gaps is unchanged: nothing has run as an ordinary
+user on Linux.
+
+**What `stateAtSnapshot` records.** For a quiesced snapshot, `takeSnapshot`
+builds the manifest after `quiesce` has run and reads `resource.state` then,
+so a database that was running when the command was typed is recorded as
+`sleeping`. That is deliberate: the field tells a restore what state the
+copied data was in, and a quiesced copy is always of a stopped resource. It is
+not a record of what was running before the snapshot, and `hobby snapshot ls
+--json` should be read that way. An online snapshot records the state at the
+moment of each resource's copy (`before` in `takeOnlineSnapshot`), which can
+be `running`, since nothing is stopped; the `method` field says which copy
+mechanism was used. The snapshots guide on the site now says this.
+
+**The restore message.** `hobby snapshot restore <project> <id>` into a new
+project ended with "`<project>` is untouched", which is wrong when the project
+has been deleted: snapshots outlive their project by design (`listSnapshotsRoute`
+answers for a deleted one), so restoring the snapshot of a deleted project is
+an ordinary path. `cmdSnapshotRestore` (`packages/cli/src/cli/commands.ts`)
+now asks `GET /v1/projects/:name` and says "`<project>` itself no longer
+exists; the snapshot outlived it" in that case. `--json` output is unchanged.

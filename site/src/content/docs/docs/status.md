@@ -8,7 +8,9 @@ description: What works, what is rough, what is openly broken, and what is built
 This is v0-alpha. The purpose of this page is that you can decide correctly
 whether to run it, and know which half is safe.
 
-Last reviewed 2026-08-21, against `main`.
+Last reviewed 2026-10-30, against `main`, after the QA lanes of 2026-10-16 to
+2026-10-19 (Apple M5 Pro with Docker 29.4 via OrbStack, and an Ubuntu 24.04
+container with its own dockerd on the same host).
 
 ## The vocabulary
 
@@ -29,33 +31,24 @@ Last reviewed 2026-08-21, against `main`.
 | `app` | works, rough edges | Any Dockerfile, built and served. Cold start p50 121ms, p95 133ms |
 | `worker` | works, rough edges | workerd via Miniflare. Durable Object state verified to survive a sleep against real Docker |
 | Durable Object alarms | works, rough edges | An alarm armed 60s out fired 61s after the container was stopped, verified 2026-08-11. Can be up to one mirror tick (10s) late, plus a cold start |
-| `queue`, consuming | works, rough edges | A message arriving wakes a sleeping consumer. This is the first thing here where stored state, not a connection, starts a container |
+| `queue` | works, rough edges | Consuming, producing from a container, retries, dead letters and lease expiry all ran against real Docker on macOS, 2026-10-19. The Linux producer fix still owes a Linux re-run, see [Unmeasured](#unmeasured) |
 | Studio | alpha | Browsing, SQL and schema work. Network exposed by design |
-| MCP | works, postgres only | Fifteen tools over the daemon API |
+| MCP | works, postgres and queues | Eighteen tools over the daemon API (`packages/mcp/src/server.ts`). No deploy tool |
 | Caddy and TLS | works, off by default | `caddyEnabled` defaults to `false`. Measured on Linux and OrbStack |
-| `hobby branch` | new, not yet run against Docker | A new project from a clone of a project's data. Postgres-only projects. Tested against a fake engine only; see [Unmeasured](#unmeasured) |
+| `hobby branch` | works, rough edges | A new project from a clone of a project's data. Postgres-only projects. Ran against real Docker on ext4 in an Ubuntu 24.04 container, 2026-10-16, with the full-copy warning. Clone times on a reflink filesystem are unmeasured |
+| `hobby snapshot` | works, rough edges | Take, list, restore into a copy or in place, delete. `--online` for Postgres-only projects. Ran against real Docker on APFS, 2026-10-19. Local to the box; see [Snapshots](/docs/guides/snapshots/) |
+| Remote CLI | works, rough edges | `hobby login <url>` and every command runs against that box with an API token. [ADR 0018](/docs/decisions/0018-the-cli-talks-to-a-remote-daemon/) |
+| The proxy binds loopback | reliable | Default since [ADR 0017](/docs/decisions/0017-the-proxy-binds-loopback-by-default/); `proxyHost` opens it, and `proxyTls` makes `"all"` safe ([ADR 0019](/docs/decisions/0019-the-proxy-terminates-tls/)). `ss` on a fresh install shows `127.0.0.1:5432` |
 
 ## Known broken
-
-### The queue producer path does not work on Linux
-
-Unimplemented, not untested. `packages/worker/src/worker.ts` hands every
-producer container `http://host.docker.internal:<port>/enqueue`. macOS resolves
-that name; Linux does not, unless the container was created with
-`--add-host=host.docker.internal:host-gateway`, and nothing passes that flag.
-The daemon's own half is correct: it binds the project bridge gateway on Linux.
-The two halves live in different packages and never meet, so
-`env.MY_QUEUE.send()` fails DNS on exactly the five dollar VPS this project is
-aimed at.
-
-Consuming works on both platforms. Found by reading the code during a
-whole-branch review, after every end-to-end run had passed on macOS.
-[The write-up](https://github.com/uziiuzair/hobbyist/blob/main/docs/queues/CLAUDE.md).
 
 ### Retention never sweeps a queue with no drainable consumer
 
 Which includes every dead letter queue. Messages accumulate there and the
-retention setting does not remove them.
+retention setting does not remove them. `sweepRetention` has exactly one
+caller, `tickOneQueue` (`packages/queue/src/tick.ts`), and `drainableQueues`
+(`packages/cli/src/daemon/queues.ts`) excludes any queue whose consumer is
+null, undeployed or released.
 
 ### Caddy's certificate store is not persisted
 
@@ -68,62 +61,46 @@ recreating the container casually until this is fixed.
 Cheap copies need a reflink-capable filesystem: XFS with reflinks, ZFS, or APFS.
 ext4 has none, and ext4 is the default image on a lot of the cheap VPS providers
 this is aimed at. There the copy is a real copy, which is correct but slow and
-costs full disk space. `hobby init` detects it and warns rather than failing.
+costs full disk space. `hobby init` detects it and warns rather than failing,
+and so does `hobby branch`.
 [Filesystem requirements](/docs/reference/filesystems/).
 
-### An app cannot wake its own database
+### An app cannot wake its own database by container name
 
-An app reaches its sibling database by container name on the project's docker
-network. Docker resolves running containers only, so a woken app pointed at a
-sleeping database gets `EAI_AGAIN` and stays broken. Worse, it cannot wake it:
-the connection never reaches the wake-on-connect proxy, so nothing triggers.
-
-The two sleep on independent timers, so this is the ordinary case for a web app
-and its database, not an edge case. Measured 2026-08-22 while benchmarking a
-Next.js app bound to Postgres.
+An app that reaches its sibling database by container name on the project's
+docker network gets `EAI_AGAIN` while the database sleeps, because Docker
+resolves running containers only. The fix that exists is `--database`: a bound
+database is handed to the app as `DATABASE_URL` built against
+`host.docker.internal` and the proxy port (`HOST_FROM_CONTAINER`,
+`packages/app/src/app.ts`; `hyperdriveUrl` in `packages/worker/src/worker.ts`
+does the same for a worker), so the app's first query wakes it. An app that builds its own
+connection string against the container name still has the problem.
+Measured 2026-08-22.
 [The finding, with three options](https://github.com/uziiuzair/hobbyist/blob/main/docs/compute/research/2026-08-22-real-app-cold-start-and-the-sibling-wake-gap.md).
 
-### The Postgres proxy binds every interface
+### A real Next.js monorepo does not build on a 1GB box
 
-The proxy listens on all interfaces and there is no setting to change it:
-`packages/proxy/src/proxy.ts:611` defaults to `0.0.0.0` and the daemon never
-passes a host. On a cloud VM with a public address and no firewall, that puts
-Postgres on the internet, and the proxy answers an `SSLRequest` with `N`, so
-there is no TLS and credentials cross in cleartext.
-
-Measured on two DigitalOcean droplets on 2026-08-22, both reachable from the
-open internet on 5432. Until this is fixed, firewall the port or keep the box
-off a public network.
-[The finding](https://github.com/uziiuzair/hobbyist/blob/main/docs/proxy/research/2026-08-22-the-proxy-binds-every-interface.md).
-
-### The queue producer break has a second half
-
-Previously recorded as one bug, the container not resolving
-`host.docker.internal`. Measured on Linux, the daemon is not listening on the
-project's bridge gateway either, because that address set is a snapshot taken at
-daemon startup and every project created afterwards misses it. Both halves have
-to be fixed for a producer to work.
-[The finding](https://github.com/uziiuzair/hobbyist/blob/main/docs/queues/research/2026-08-22-the-producer-path-on-real-linux.md).
+A Next.js image that copies the whole repository came out at 2 to 3GB and
+needed a 6GB Node heap to build, which is not a thing a 1 vCPU, 1GB VPS can
+do. Found deploying a production monorepo in October 2026. The workaround is
+to build elsewhere and have the box pull the image; see
+[Next.js on Hobby](/docs/guides/nextjs/).
 
 ## Not reachable
 
-### Snapshots
-
-`takeSnapshot`, `restore`, `listSnapshots`, a manifest format and a quiesce and
-resume cycle all exist in `packages/cli/src/daemon/snapshots.ts`, with tests.
-Every caller today is a test. There is no `hobby snapshot` verb and no HTTP
-route, so **you cannot take one**.
-
-Until that changes, back up with `pg_dump`, and do not read the presence of
-snapshot code as a backup story.
+Nothing at the moment. Snapshots were the last entry here and are now
+`hobby snapshot`.
 
 ## Not built
 
 | Thing | Notes |
 |---|---|
-| Remote deploy, laptop to VPS | The CLI talks to a unix socket, so today it must run on the daemon's own box. Needs its own decision record first |
-| Creating an `app` or `worker` from Studio or MCP | Both hardcode `kind: 'postgres'`. The daemon side that makes it possible has landed (ADR 0014) |
-| Studio API tokens | Not designed beyond the label |
+| Creating an `app` or `worker` from Studio or MCP | Both hardcode `kind: 'postgres'` (`packages/mcp/src/tools.ts`, `hobby_new`). The daemon side that makes it possible has landed ([ADR 0014](/docs/decisions/0014-resource-records-exist-before-code/)) |
+| MCP over the network | By decision, not omission: the MCP server stays on the unix socket (`docs/mcp/CLAUDE.md`). The CLI reaches a remote box; an agent runs on the box |
+| Scheduled snapshots, retention, offsite copies | `hobby snapshot` is manual. The schedule, the free-space floor and the weekly restore verification are designed in `docs/backups/specs/` and not built |
+| Branching a project that holds apps, workers or queues | Refused. Their state is keyed to resource identity |
+| `hobby do` verbs | The 2026-08-10 Durable Objects spec sketches `hobby do ls`, `inspect` and `rm`. None exists; Durable Object storage is reached only through the worker that owns it |
+| Shipping a prebuilt image to `hobby deploy` | There is no `--image` flag. The off-box build path in [Next.js on Hobby](/docs/guides/nextjs/) works through a one-line Dockerfile instead |
 | Object storage, volumes for compute | Phase 3 |
 | Point in time recovery | Cut deliberately rather than deferred. [ADR 0016](/docs/decisions/0016-project-snapshots-and-no-pitr/) |
 
@@ -135,18 +112,28 @@ droplets, 512MB with swap and 1GB without, 60 wakes total: p50 691ms, p95
 ceiling. More memory improved the median and not the tail.
 [The write-up and its caveats](https://github.com/uziiuzair/hobbyist/blob/main/docs/proxy/research/2026-08-22-cold-start-on-a-five-dollar-vps.md).
 
+**The queue producer path on a real Linux box, after the fix.** The two halves
+of the Linux producer bug are both in the code now: `packages/worker/src/worker.ts`
+passes `extraHosts` and `packages/core/src/docker.ts` emits `--add-host`, and
+the daemon binds a new project's bridge gateway as it appears
+(`queueEndpoint.addHost`, called from `packages/cli/src/daemon/server.ts`).
+Everything ran on macOS. The bug was about Linux, and nobody has re-run the
+producer path there since.
+[The write-up of the second half](https://github.com/uziiuzair/hobbyist/blob/main/docs/queues/research/2026-08-22-the-producer-path-on-real-linux.md).
+
 **App and worker wake on cheap hardware.** Only the database path has been
 measured there. The published app and worker figures are still from a laptop.
 
 **Other providers.** One box, one provider, one region, one afternoon. Hetzner,
 Vultr and a Raspberry Pi are all still unmeasured.
 
-**`hobby branch` against real Docker, and its clone times.** The branch flow
-is covered by fake-engine tests, and nobody has yet run it against a real
-Postgres. Clone times on a reflink filesystem and on ext4 are unmeasured, and on
-Linux the daemon's own user may not be able to read a data directory the
-Postgres container owns, which would make every branch fail there until the
-copy moves into a container. Details in `docs/branching/CLAUDE.md`.
+**Clone times.** `hobby branch` has run against real Docker on ext4 (a full
+copy of a tiny database, 0.9s end to end, which is not a benchmark). Nobody
+has timed a clone on a reflink filesystem with a dataset worth timing, so the
+"instant" claim rests on the filesystem's documentation rather than on this
+project's numbers. On Linux, a daemon running as an ordinary user may also be
+unable to read a data directory the Postgres container owns; the one Linux
+run so far was as root in a container. Details in `docs/branching/CLAUDE.md`.
 
 **Caddy on Docker Desktop for macOS.** It needs host networking. Linux and
 OrbStack are both measured and fine. `hobby init` detects the absence and warns,
@@ -156,9 +143,21 @@ and nobody has confirmed the warning actually fires.
 
 Studio is exposed to the network by design
 ([ADR 0008](/docs/decisions/0008-studio-is-network-exposed/)), which makes its
-operator credential a real boundary rather than a formality. It is also the
-youngest surface here. Put it behind Tailscale or a Cloudflare Tunnel rather
-than on the open internet.
+operator credential a real boundary rather than a formality. The same gate now
+covers the loopback API port: every `/v1` route there needs the session cookie
+or an API token from `hobby token create` or `hobby login`
+([ADR 0018](/docs/decisions/0018-the-cli-talks-to-a-remote-daemon/)); only the
+unix socket is open to whoever can read it. It is also the youngest surface
+here. Put it behind Tailscale or a Cloudflare Tunnel rather than on the open
+internet.
+
+The Postgres proxy binds loopback by default. Two boxes installed from
+`hobby.sh/install` were measured with it on every interface and no TLS on
+2026-08-22, which is why the default changed
+([ADR 0017](/docs/decisions/0017-the-proxy-binds-loopback-by-default/)).
+Opening it with `proxyHost: "all"` without `proxyTls` puts your database on
+the internet in cleartext; see
+[configuration](/docs/reference/configuration/#reaching-a-database-from-another-machine).
 
 Hobbyist assumes every tenant is the same person. There is no isolation between
 projects beyond what Docker gives you, and hardening that is explicitly out of

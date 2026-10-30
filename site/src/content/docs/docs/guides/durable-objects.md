@@ -24,9 +24,15 @@ thing they are most often reached for.
 
 The schedule is held outside the runtime.
 
-1. Alarm deadlines are read out of each object's own sqlite file, which is
-   readable while the container is stopped. The deadline is `_cf_METADATA` key 1,
-   an int64 of nanoseconds since the epoch.
+1. Alarm deadlines are read out of the namespace's `metadata.sqlite`, the file
+   workerd's own alarm scheduler writes and reloads, which is readable while
+   the container is stopped. The table is `_cf_ALARM` (`ALARM_TABLE`,
+   `packages/do/src/alarms.ts`), one row per object with `actor_id`,
+   `actor_name` and `scheduled_time`, an int64 of nanoseconds since the epoch.
+   Each object's own sqlite file also records its alarm, as `_cf_METADATA`
+   key 1, and the two agree; the mirror reads `_cf_ALARM` because it is one
+   file per namespace rather than one per object, and because it is the copy
+   that decides what a restarted runtime fires.
 2. The daemon keeps a mirror of those deadlines and ticks over it.
 3. When a deadline arrives for a sleeping worker, the daemon wakes it, and the
    runtime fires the alarm normally on the way up.
@@ -57,5 +63,6 @@ not that.
 `uniqueKey` is `${resource.id}-${className}` and is never regenerated, so
 renaming or redeploying a worker cannot orphan its objects' storage.
 
-Each namespace directory also contains Miniflare's own `metadata.sqlite`. It is
-not an object and has no `_cf_METADATA` table.
+Each namespace directory also contains workerd's own `metadata.sqlite`. It is
+not an object: it holds the namespace's `_cf_ALARM` table, which is what the
+alarm mirror reads.

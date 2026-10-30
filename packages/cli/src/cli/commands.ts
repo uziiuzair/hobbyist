@@ -1734,6 +1734,20 @@ export async function cmdAdopt(c: Ctx, positionals: string[], flags: Flags): Pro
 // an error anyone should be able to make by pasting the wrong line from
 // `hobby snapshot ls`, and naming the project is also what gives the
 // in-place confirmation prompt something meaningful to ask for.
+// Whether the project a snapshot was taken of still exists. Only the
+// not-found answer is swallowed: any other failure is the daemon's to report.
+async function projectExists(c: Ctx, name: string): Promise<boolean> {
+  try {
+    await c.api.getProject(name)
+    return true
+  } catch (err) {
+    if (err instanceof HobbyError && err.code === 'project_not_found') {
+      return false
+    }
+    throw err
+  }
+}
+
 async function snapshotOfProject(c: Ctx, project: string, id: string): Promise<void> {
   const { snapshots } = await c.api.listSnapshots(project)
   if (!snapshots.some((snapshot) => snapshot.snapshotId === id)) {
@@ -1869,8 +1883,13 @@ export async function cmdSnapshotRestore(c: Ctx, positionals: string[], flags: F
 
   if (inPlace) {
     c.io.out(`restored ${project} in place from snapshot ${id}`)
-  } else {
+  } else if (await projectExists(c, project)) {
     c.io.out(`restored snapshot ${id} into new project ${result.project.name}. ${project} is untouched`)
+  } else {
+    // Snapshots outlive their project (listSnapshotsRoute answers for a
+    // deleted one), so this is an ordinary way to arrive here, and "is
+    // untouched" would describe a project that no longer exists (issue #181).
+    c.io.out(`restored snapshot ${id} into new project ${result.project.name}. ${project} itself no longer exists; the snapshot outlived it`)
   }
   for (const resource of result.resources) {
     c.io.out(`  ${renderResourceLine(resource)}`)
