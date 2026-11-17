@@ -51,3 +51,22 @@ Someone would have to be running Hobbyist at a scale where a single host is
 genuinely insufficient, and that scale would mean this had become a product with
 users and operators, which it explicitly is not. Revisiting this is effectively
 starting a different project.
+
+## Amendment, 2026-11-17: Neon's Postgres is patched, not unmodified
+
+This does not change the decision. It corrects a statement of fact in the
+context above, which said Neon kept Postgres itself unmodified.
+
+Neon builds every supported major version from its own repository,
+`neondatabase/postgres`, pulled into `neondatabase/neon` as git submodules
+under `vendor/postgres-v14` through `vendor/postgres-v17` (pinned in
+`vendor/revisions.json`; v17 is 17.5 at `1e01fce`). The commits on that line
+change Postgres internals, for example buffer allocation and SLRU segment
+handling, and add hooks Neon's storage needs. What Neon keeps unmodified is the
+wire protocol and the SQL surface clients see, not the server.
+
+The correction strengthens the decision rather than weakening it. Hobbyist's
+engine rule (`docs/engine/CLAUDE.md`) is that Postgres is unmodified, stock
+upstream binaries and no patches, so even the parts of Neon's storage design
+that might look reusable assume a server Hobbyist will not run. Checked against
+the repository on 2026-11-17.
