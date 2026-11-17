@@ -19,7 +19,8 @@
  *      registers.
  *   4. No connection string with a real-looking password: the skills tell
  *      agents never to print one, and must not show one either.
- *   5. The plugin manifests parse, and the MCP config starts `hobby mcp`.
+ *   5. The plugin manifests parse, the MCP configs start `hobby mcp`, and
+ *      the agent-plugins.org copies agree with the Claude Code ones.
  *
  * Exits 0 and prints a one-line summary, or lists every problem and exits 1.
  * Needs no build and no daemon.
@@ -189,6 +190,25 @@ if (mcp !== null) {
   if (server?.command !== 'hobby' || JSON.stringify(server?.args) !== '["mcp"]') {
     problems.push('plugin/.mcp.json: mcpServers.hobby must run `hobby mcp` (command "hobby", args ["mcp"])')
   }
+}
+
+// The agent-plugins.org copies (plugin.json and mcp.json at the plugin
+// root, the shape xataio/skills uses) must say the same thing as the Claude
+// Code manifests above, or one client gets a different plugin.
+const openPlugin = await readJson('plugin/plugin.json')
+if (openPlugin !== null && manifest !== null) {
+  for (const key of ['name', 'version', 'description', 'license']) {
+    if (openPlugin[key] !== manifest[key]) problems.push(`plugin/plugin.json ${key} differs from plugin/.claude-plugin/plugin.json`)
+  }
+  if (typeof openPlugin.$schema !== 'string') problems.push('plugin/plugin.json needs $schema')
+}
+const openMcp = await readJson('plugin/mcp.json')
+if (openMcp !== null) {
+  const server = openMcp.mcpServers?.hobby
+  if (server?.type !== 'stdio' || server?.command !== 'hobby' || JSON.stringify(server?.args) !== '["mcp"]') {
+    problems.push('plugin/mcp.json: mcpServers.hobby must be type "stdio" running `hobby mcp`')
+  }
+  if (typeof openMcp.$schema !== 'string') problems.push('plugin/mcp.json needs $schema')
 }
 
 // ---------------------------------------------------------------- verdict

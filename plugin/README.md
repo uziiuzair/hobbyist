@@ -21,5 +21,7 @@ https://hobbyist.sh/docs/guides/agent-plugin/
 - `.claude-plugin/plugin.json`: the Claude Code manifest. The repo root's
   `.claude-plugin/marketplace.json` lists this directory.
 - `.mcp.json`: starts `hobby mcp` over stdio.
+- `plugin.json` and `mcp.json`: the same plugin and server in the
+  agent-plugins.org format, for clients that read that instead.
 - `skills/<name>/SKILL.md`: one skill each. `site/scripts/check-plugin-skills.mjs`
   checks them against the CLI.
