@@ -44,6 +44,20 @@ export interface Project {
   // is why handing a project over records a state rather than deleting one.
   // `hobby adopt` clears it and takes the project back.
   releasedAt: Date | null
+  // The project this one was branched from (`hobby branch`), by id rather
+  // than by name, so a parent deleted and a new project later created under
+  // the same name is never mistaken for it. Null for every project that was
+  // not created as a branch, including branches made before this was
+  // recorded (the 2026-11-17 amendment in docs/branching/CLAUDE.md). It is
+  // what `hobby reset` resets to and what `hobby diff` compares against by
+  // default, and nothing else reads it: removing the parent never touches a
+  // branch, and the id simply stops resolving.
+  parentId: ProjectId | null
+  // When the expiry sweep (packages/cli/src/daemon/expiry.ts) may delete
+  // this project. Opt-in, and only ever set on a project with a parentId:
+  // the routes that write it refuse anything else, so `hobby new` projects
+  // can never expire. Null means never.
+  expiresAt: Date | null
 }
 
 // The fields every kind's config carries, so the many existing call sites

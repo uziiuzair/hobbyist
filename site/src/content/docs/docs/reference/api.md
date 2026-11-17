@@ -60,7 +60,10 @@ be called with a token, only with the password.
 | `GET` `POST /v1/projects` | List, create. Create accepts `{ name, sleepAfterSeconds? }`; absent, the box-wide default is copied in |
 | `GET` `DELETE /v1/projects/{name}` | Detail with resources, destroy |
 | `POST /v1/projects/{name}/resources` | Create a resource. Body `{ kind, name, ... }`, kind-specific; `queue` needs only a name |
-| `POST /v1/projects/{name}/branch` | A new project from a clone of this one's data. Body `{ name, allowPause? }`, 201 with `{ project, resources, clone, paused, pausedMs, resumeFailures }` |
+| `POST /v1/projects/{name}/branch` | A new project from a clone of this one's data. Body `{ name, allowPause?, expiresInSeconds? }`, 201 with `{ project, resources, clone, paused, pausedMs, resumeFailures }` |
+| `POST /v1/projects/{name}/reset` | Replace a branch's data with a fresh clone of its parent's. Destructive. Body `{ allowPause? }`, 200 with the parent's and the branch's pauses, `restartFailures` and `preResetDirs` |
+| `POST /v1/projects/{name}/expiry` | Body `{ expiresInSeconds }`: seconds from now, or `null` to clear. Branches only |
+| `POST /v1/projects/{name}/diff` | Schema diff against `{ against? }` or the parent, by `pg_dump --schema-only`. Wakes what it compares |
 | `GET /v1/projects/{name}/crons` | `{ crons: [{ worker, resourceId, cron, nextAt, lastAt, lastOutcome }] }`, read-only |
 | `GET /v1/projects/{name}/queues` | `{ queues: [{ resource, depth, oldestMessageAgeSeconds, consumer }] }` |
 | `GET` `POST /v1/projects/{name}/snapshots` | List, newest first (answers for a deleted project), and take one. Body `{ allowPause?, online? }` |

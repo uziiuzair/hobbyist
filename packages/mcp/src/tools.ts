@@ -12,7 +12,7 @@
 // invents a new route or a new capability.
 
 import { HobbyError, parseTarget } from '@hobby.sh/core'
-import { DaemonUnreachableError, resolveQueueTarget, resolveTarget, type Api } from '@hobby.sh/cli'
+import { DaemonUnreachableError, parseDuration, resolveQueueTarget, resolveTarget, type Api } from '@hobby.sh/cli'
 
 // The MCP SDK's CallToolResult shape, reproduced by hand rather than
 // imported, so this file has zero dependency on @modelcontextprotocol/sdk.
@@ -69,6 +69,24 @@ export interface BranchArgs {
   source: string
   name: string
   allowPause?: boolean
+  expires?: string
+}
+
+export interface ResetArgs {
+  branch: string
+  allowPause?: boolean
+  confirm: boolean
+}
+
+export interface ExpireArgs {
+  branch: string
+  // A duration such as "7d", or null to clear the expiry.
+  expires: string | null
+}
+
+export interface DiffArgs {
+  project: string
+  against?: string
 }
 
 export interface TargetArgs {
@@ -179,8 +197,57 @@ export async function newTool(api: Api, args: NewArgs): Promise<ToolResult> {
 // agent exactly as they do to a person. allowPause is passed through only
 // when the agent set it, never defaulted to true: pausing a project someone
 // pinned awake is not a choice this layer gets to make for them.
+//
+// `expires` is parsed with the CLI's own parseDuration (packages/cli/src/cli/
+// output.ts), so "7d" means the same thing to an agent as to `hobby branch
+// --expires 7d`, and is sent only when the agent set it.
 export async function branchTool(api: Api, args: BranchArgs): Promise<ToolResult> {
-  return run(async () => await api.branchProject(args.source, args.name, { allowPause: args.allowPause === true }))
+  return run(async () => {
+    const expiresInSeconds = args.expires === undefined ? undefined : durationOrThrow(args.expires)
+    return await api.branchProject(args.source, args.name, {
+      allowPause: args.allowPause === true,
+      ...(expiresInSeconds === undefined ? {} : { expiresInSeconds }),
+    })
+  })
+}
+
+function durationOrThrow(text: string): number {
+  const seconds = parseDuration(text)
+  if (seconds === null) {
+    throw new HobbyError('usage', `not a duration: ${text}`, 'use a whole number with a unit, for example "7d", "36h", "1d12h" or "90m"')
+  }
+  return seconds
+}
+
+// Mirrors `hobby reset <branch>`: the branch's data is replaced by a fresh
+// copy of its parent's, which destroys the branch's own changes. Gated on
+// confirm: true exactly as hobby_rm is, with no request made otherwise, and
+// allowPause passed through only when the agent set it.
+export async function resetTool(api: Api, args: ResetArgs): Promise<ToolResult> {
+  return run(async () => {
+    if (args.confirm !== true) {
+      throw new HobbyError(
+        'usage',
+        `hobby_reset refused: confirm must be true to reset "${args.branch}"`,
+        'this replaces the branch\'s data with a copy of its parent\'s, and everything written to the branch is lost; ' +
+          'call hobby_reset again with confirm: true only once that is actually intended'
+      )
+    }
+    return await api.resetBranch(args.branch, { allowPause: args.allowPause === true })
+  })
+}
+
+// Mirrors `hobby expire <branch> <duration>` and `hobby expire <branch>
+// --never` (expires: null).
+export async function expireTool(api: Api, args: ExpireArgs): Promise<ToolResult> {
+  return run(async () => await api.setExpiry(args.branch, args.expires === null ? null : durationOrThrow(args.expires)))
+}
+
+// Mirrors `hobby diff`: `project` is the side whose additions are `+`, and
+// `against` the other side, defaulting to project's parent. The same route,
+// so it wakes the same databases.
+export async function diffTool(api: Api, args: DiffArgs): Promise<ToolResult> {
+  return run(async () => await api.diffSchemas(args.project, args.against))
 }
 
 // Mirrors `hobby connect <target>`'s data path (not its psql exec: an

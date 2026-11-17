@@ -9,10 +9,10 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Api, BranchResponse, ConnectionResponse, DeletedResponse, LogsResponse, ProjectDetailResponse, ProjectsResponse, ResourceResponse, WireResource } from '@hobby.sh/cli'
 import type { Project } from '@hobby.sh/core'
-import { branchTool, connectionStringTool, envListTool, envSetTool, envUnsetTool, listTool, logsTool, newTool, rmTool, sleepTool, wakeTool, type ToolResult } from '../src/tools.js'
+import { branchTool, diffTool, expireTool, resetTool, connectionStringTool, envListTool, envSetTool, envUnsetTool, listTool, logsTool, newTool, rmTool, sleepTool, wakeTool, type ToolResult } from '../src/tools.js'
 
 function project(name: string, id = `${name}-id`): Project {
-  return { id, name, networkName: `hobby-${name}`, sleepAfterSeconds: 300, createdAt: new Date('2026-01-01'), releasedAt: null }
+  return { id, name, networkName: `hobby-${name}`, sleepAfterSeconds: 300, createdAt: new Date('2026-01-01'), releasedAt: null, parentId: null, expiresAt: null }
 }
 
 // The daemon's wire shape (WireResource, packages/cli/src/daemon/wire.ts):
@@ -62,6 +62,9 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     setSleepPolicy: notWired('setSleepPolicy'),
     getProject: notWired('getProject'),
     branchProject: notWired('branchProject'),
+    resetBranch: notWired('resetBranch'),
+    setExpiry: notWired('setExpiry'),
+    diffSchemas: notWired('diffSchemas'),
     deleteProject: notWired('deleteProject'),
     createResource: notWired('createResource'),
     deployResource: notWired('deployResource'),
@@ -344,4 +347,68 @@ test('hobby_env_set on a postgres is a usage error, with no env call made', asyn
   assert.equal(result.isError, true)
   assert.match(result.content[0]?.text ?? '', /only an app or a worker/)
   assert.deepEqual(calls, ['getProject("blog")'])
+})
+
+test('hobby_branch: expires is parsed like the CLI flag, and a bad one makes no request', async () => {
+  const { api, calls } = fakeApi({
+    branchProject: async (): Promise<BranchResponse> => ({
+      project: project('blog-exp'),
+      resources: [],
+      clone: 'reflink',
+      paused: [],
+      pausedMs: null,
+      resumeFailures: [],
+    }),
+  })
+  const ok = await branchTool(api, { source: 'blog', name: 'blog-exp', expires: '7d' })
+  assert.equal(ok.isError, undefined)
+  const bad = await branchTool(api, { source: 'blog', name: 'blog-exp', expires: 'next week' })
+  assert.equal(bad.isError, true)
+  assert.deepEqual(calls, ['branchProject("blog", "blog-exp", {"allowPause":false,"expiresInSeconds":604800})'])
+})
+
+test('hobby_reset without confirm: true refuses and makes no request', async () => {
+  const { api, calls } = fakeApi({})
+  const result = await resetTool(api, { branch: 'blog-exp', confirm: false })
+  assert.equal(result.isError, true)
+  assert.match(result.content[0]?.text ?? '', /confirm must be true/)
+  assert.deepEqual(calls, [])
+})
+
+test('hobby_reset with confirm: one POST /v1/projects/:name/reset, allowPause only when set', async () => {
+  const { api, calls } = fakeApi({
+    resetBranch: async () => ({
+      project: project('blog-exp'),
+      parent: 'blog',
+      resources: [],
+      clone: 'reflink',
+      parentPaused: [],
+      parentPausedMs: null,
+      parentResumeFailures: [],
+      paused: [],
+      pausedMs: null,
+      restartFailures: [],
+      preResetDirs: [],
+    }),
+  })
+  await resetTool(api, { branch: 'blog-exp', confirm: true })
+  await resetTool(api, { branch: 'blog-exp', confirm: true, allowPause: true })
+  assert.deepEqual(calls, ['resetBranch("blog-exp", {"allowPause":false})', 'resetBranch("blog-exp", {"allowPause":true})'])
+})
+
+test('hobby_expire sets a parsed duration or clears with null; hobby_diff passes project and against', async () => {
+  const { api, calls } = fakeApi({
+    setExpiry: async () => ({ project: project('blog-exp') }),
+    diffSchemas: async () => ({ old: { project: 'blog' }, new: { project: 'blog-exp' }, resources: [], woke: [], identical: true }),
+  })
+  await expireTool(api, { branch: 'blog-exp', expires: '36h' })
+  await expireTool(api, { branch: 'blog-exp', expires: null })
+  await diffTool(api, { project: 'blog-exp' })
+  await diffTool(api, { project: 'b', against: 'a' })
+  assert.deepEqual(calls, [
+    'setExpiry("blog-exp", 129600)',
+    'setExpiry("blog-exp", null)',
+    'diffSchemas("blog-exp", )',
+    'diffSchemas("b", "a")',
+  ])
 })

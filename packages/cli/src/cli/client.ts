@@ -238,6 +238,42 @@ export interface BranchResponse {
   pausedMs: number | null
   resumeFailures: string[]
 }
+// POST /v1/projects/:name/reset. packages/cli/src/daemon/reset.ts's
+// ResetResult, with the parent given by name.
+export interface ResetResponse {
+  project: Project
+  parent: string
+  resources: WireResource[]
+  clone: 'reflink' | 'copy'
+  parentPaused: string[]
+  parentPausedMs: number | null
+  parentResumeFailures: string[]
+  paused: string[]
+  pausedMs: number | null
+  restartFailures: string[]
+  preResetDirs: string[]
+}
+// POST /v1/projects/:name/diff. packages/cli/src/daemon/schema-diff.ts's
+// SchemaDiffResult.
+export interface SchemaDiffHunk {
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  lines: Array<{ op: ' ' | '-' | '+'; text: string }>
+}
+export interface SchemaDiffResponse {
+  old: { project: string }
+  new: { project: string }
+  resources: Array<{
+    name: string
+    status: 'same' | 'changed' | 'only-old' | 'only-new'
+    diff: string
+    hunks: SchemaDiffHunk[]
+  }>
+  woke: string[]
+  identical: boolean
+}
 export interface DeletedResponse {
   deleted: true
   // Set when the project was released: the directory hobby left untouched,
@@ -363,7 +399,18 @@ export interface Api {
   getProject(name: string): Promise<ProjectDetailResponse>
   // A new project whose postgres resources start from a clone of the
   // source's data. allowPause is the pinned-project guard's override.
-  branchProject(source: string, name: string, opts?: { allowPause?: boolean }): Promise<BranchResponse>
+  // expiresInSeconds is an opt-in expiry, counted on the daemon's clock.
+  branchProject(
+    source: string,
+    name: string,
+    opts?: { allowPause?: boolean; expiresInSeconds?: number }
+  ): Promise<BranchResponse>
+  // Replace a branch's data with a fresh clone of its parent's.
+  resetBranch(name: string, opts?: { allowPause?: boolean }): Promise<ResetResponse>
+  // Set a branch's expiry, seconds from now, or clear it with null.
+  setExpiry(name: string, expiresInSeconds: number | null): Promise<ProjectResponse>
+  // The schema of `name` compared against `against`, or its parent.
+  diffSchemas(name: string, against?: string): Promise<SchemaDiffResponse>
   deleteProject(name: string): Promise<DeletedResponse>
   createResource(
     project: string,
@@ -545,8 +592,17 @@ export function createApi(transport: string | DaemonClient): Api {
         client,
         'POST',
         `/v1/projects/${p(source)}/branch`,
-        opts?.allowPause === true ? { name, allowPause: true } : { name }
+        {
+          name,
+          ...(opts?.allowPause === true ? { allowPause: true } : {}),
+          ...(opts?.expiresInSeconds === undefined ? {} : { expiresInSeconds: opts.expiresInSeconds }),
+        }
       ),
+    resetBranch: (name, opts) =>
+      call(client, 'POST', `/v1/projects/${p(name)}/reset`, opts?.allowPause === true ? { allowPause: true } : {}),
+    setExpiry: (name, expiresInSeconds) => call(client, 'POST', `/v1/projects/${p(name)}/expiry`, { expiresInSeconds }),
+    diffSchemas: (name, against) =>
+      call(client, 'POST', `/v1/projects/${p(name)}/diff`, against === undefined ? {} : { against }),
     deleteProject: (name) => call(client, 'DELETE', `/v1/projects/${p(name)}`),
     createResource: (project, input) => call(client, 'POST', `/v1/projects/${p(project)}/resources`, input),
     deployResource: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/deploy`, input ?? {}),

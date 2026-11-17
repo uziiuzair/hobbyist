@@ -27,10 +27,11 @@ import { durableObjectNamespaces } from './alarms.js'
 import { cronState, postScheduled, scheduledWorkers, startCronScheduler } from './crons.js'
 import { createCaddyManager, type CaddyManager } from './caddy.js'
 import { createHttpProxyDeps, createProxyDeps, getOrCreateWake, type DaemonContext } from './context.js'
+import { startExpirySweeper } from './expiry.js'
 import { startHibernator } from './hibernator.js'
 import { startQueueEndpoint } from './queue-endpoint.js'
 import { drainableQueues, queueDeliverFn, queueStateOf, retentionTargets } from './queues.js'
-import { handleRequest } from './routes.js'
+import { deleteProject, handleRequest } from './routes.js'
 import { createStudioApp } from './studio/routes.js'
 import { resolveProxyHosts } from './proxy-hosts.js'
 
@@ -47,6 +48,9 @@ const SOCKET_MODE = 0o600
 // ActivityTracker reads for every resource that is not already a sleep
 // candidate, and only one real Postgres round trip for the ones that are).
 const HIBERNATION_TICK_MS = 10_000
+// Branch expiry is measured in hours and days, so a minute late is nothing,
+// and a sweep that only reads the store costs nothing either.
+const EXPIRY_SWEEP_MS = 60_000
 
 // How often the alarm mirror re-reads pending Durable Object deadlines.
 //
@@ -572,6 +576,10 @@ export async function startDaemon(
   // is one source of truth for both), never polls Postgres on a schedule.
   const hibernator = startHibernator(ctx, { intervalMs: HIBERNATION_TICK_MS })
 
+  // Deletes branches whose opt-in expiry has passed, skipping (and saying
+  // so) any that are pinned, awake or held. See expiry.ts.
+  const expirySweeper = startExpirySweeper(ctx, { intervalMs: EXPIRY_SWEEP_MS, remove: deleteProject })
+
   // The other half of the sleep pair, for the one kind whose work can arrive
   // with no request behind it. A stopped container has no timer, so nothing
   // inside a sleeping worker can fire an alarm set for 03:00. This reads the
@@ -712,6 +720,10 @@ export async function startDaemon(
       // resource and is running stopPostgres, this awaits that tick's
       // drain so it can never run concurrently with the loop below.
       await hibernator.stop()
+
+      // Drained here for the hibernator's reason: a sweep that is mid-way
+      // through deleting a branch must finish before shutdown stops things.
+      await expirySweeper.stop()
 
       // Drained before the proxy closes, for the mirror's own version of the
       // ordering constraint below: a tick that has already decided to wake a

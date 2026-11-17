@@ -299,6 +299,62 @@ export async function createPostgresFromClone(
   return expectKind(final, 'postgres')
 }
 
+// The third way a postgres resource meets a cloned data directory: not a new
+// resource around it (createPostgresFromClone above) but an existing one
+// whose data directory has just been replaced by a clone, which is what
+// `hobby reset` does to a branch (packages/cli/src/daemon/reset.ts). The
+// caller has already stopped the container and swapped the directory in at
+// resource.config.dataDir.
+//
+// The split is createPostgresFromClone's, for the same reasons:
+//
+//   - Kept from the resource: its container name, host port and data
+//     directory path. They are properties of the box and of this resource,
+//     and keeping them is the point of a reset: whatever was pointed at the
+//     branch is still pointed at it afterwards.
+//   - Taken from the source: the superuser, password and database name,
+//     because they live inside the cluster that was just cloned, and the
+//     image, because the clone was written by the source's major version.
+//     A branch's own values were the source's anyway when it was made; this
+//     only matters if the source's stored config has changed since.
+//
+// The container is removed and created again, stopped, rather than reused:
+// its spec carries the image and the bind, and recreating is what makes a
+// changed image take effect. Removing a stopped container loses nothing,
+// since the data lives in the bind mount.
+export async function rebindPostgresToClone(
+  deps: PgDeps,
+  opts: { project: Project; resource: PostgresResource; source: PostgresConfig }
+): Promise<PostgresResource> {
+  const config: PostgresConfig = {
+    ...opts.resource.config,
+    image: opts.source.image,
+    superuser: opts.source.superuser,
+    password: opts.source.password,
+    database: opts.source.database,
+  }
+  // Written first: the data directory already holds the source's cluster,
+  // so the old credentials are wrong from this moment whether or not the
+  // container work below succeeds.
+  deps.store.updateResourceConfig(opts.resource.id, config)
+  try {
+    await deps.runtime.remove(config.containerName)
+    await deps.runtime.ensureNetwork(opts.project.networkName)
+    await deps.runtime.ensureCreated(containerSpec(config, opts.project.networkName))
+  } catch (err) {
+    deps.store.setResourceState(opts.resource.id, 'failed')
+    throw err
+  }
+  deps.store.setResourceState(opts.resource.id, 'sleeping')
+  deps.activity?.reset(opts.resource.id)
+
+  const final = deps.store.getResource(opts.resource.id)
+  if (final === null) {
+    throw new HobbyError('internal', `resource ${opts.resource.id} vanished while its data was being replaced`)
+  }
+  return expectKind(final, 'postgres')
+}
+
 // A start that failed readiness used to leave its container running (issue
 // #59): the next wake's `docker start` was then a no-op on an already
 // running container, and every attempt after the first waited out the whole
