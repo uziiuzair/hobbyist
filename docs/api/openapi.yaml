@@ -222,6 +222,10 @@ paths:
                     kind: { const: postgres }
                     name: { type: string }
                     extensions: { type: array, items: { type: string }, description: "Extensions to declare and create on the first boot (CREATE EXTENSION IF NOT EXISTS ... CASCADE). One the image does not ship is a usage error and no resource is left behind. Stored as config.extensions" }
+                    settings:
+                      type: object
+                      additionalProperties: { type: string }
+                      description: "Server settings from the allowlist (GET /v1/resources/{id}/settings lists it), passed as postgres -c name=value from the first boot on. A name outside the allowlist or a value outside its range is a usage error and nothing is created. An extension that needs a preload library (pg_stat_statements) is refused unless shared_preload_libraries names it here. Stored as config.settings"
                 - type: object
                   required: [kind, name]
                   properties:
@@ -837,6 +841,50 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /v1/resources/{id}/settings:
+    get:
+      summary: "Declared server settings of a postgres resource, and the allowlist (getSettingsRoute). Never wakes anything: what Postgres runs with is the declaration, as command-line arguments, from its next start on. Other kinds answer usage."
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settings: { type: object, additionalProperties: { type: string } }
+                  needsPreload: { type: array, items: { $ref: "#/components/schemas/PreloadGap" } }
+                  available: { type: array, items: { $ref: "#/components/schemas/SettingInfo" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: "Change the declared settings (setSettingsRoute, applyPostgresSettings in packages/cli/src/daemon/pg-settings.ts). Settings are server arguments, never written to postgresql.conf or postgresql.auto.conf, so every change replaces the container. A sleeping database gets a new stopped container and is not woken (applied: next-start). An awake one is restarted (applied: restarted): a pinned project needs allowPause (409 otherwise), the activity guard must report idle (409 if it stays active or cannot answer), and wakes are held for the swap. A start that fails with the new settings restores the previous ones, starts it again, and answers usage with the failed start's log lines. A released project answers 409."
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                set: { type: object, additionalProperties: { type: [string, number, boolean] } }
+                unset: { type: array, items: { type: string } }
+                allowPause: { type: boolean }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resource: { $ref: "#/components/schemas/WireResource" }
+                  settings: { type: object, additionalProperties: { type: string } }
+                  applied: { enum: [unchanged, next-start, restarted] }
+                  pausedMs: { type: [integer, "null"], description: "Stop to ready, for a restart" }
+                  needsPreload: { type: array, items: { $ref: "#/components/schemas/PreloadGap" }, description: "Declared extensions whose library the new settings do not preload. Allowed, but reported" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
   /v1/resources/{id}/extensions:
     get:
       summary: "Declared and installed extensions of a postgres resource (getExtensionsRoute). Wakes a sleeping database, as the query route does, because only a running Postgres can say what it has installed; the daemon's connection carries application_name hobby and never counts as activity. Other kinds answer usage."
@@ -860,7 +908,7 @@ paths:
             schema:
               type: object
               properties:
-                add: { type: array, items: { type: string } }
+                add: { type: array, items: { type: string }, description: "An extension that needs a preload library not in the resource's shared_preload_libraries (pg_stat_statements) is refused before any wake, with the hobby pg config set that adds it as the hint" }
                 remove: { type: array, items: { type: string } }
       responses:
         "200":
@@ -1121,6 +1169,30 @@ components:
             messages: { type: array, items: { type: string } }
             expected: { type: array, items: { type: string } }
         warnings: { type: array, items: { type: string } }
+
+    PreloadGap:
+      type: object
+      properties:
+        extension: { type: string }
+        library: { type: string }
+        allowed: { type: boolean, description: "False when hobby will not preload the library at all (pg_cron)" }
+
+    SettingInfo:
+      type: object
+      description: "One allowlisted setting (settingCatalog, packages/pg/src/settings.ts)"
+      properties:
+        name: { type: string }
+        type: { enum: [integer, real, bool, enum, memory, duration, libraries] }
+        context: { enum: [postmaster, sighup, superuser, user], description: "pg_settings.context" }
+        restartRequired: { type: boolean, description: "What PostgreSQL requires (context postmaster). hobby replaces the container for every change regardless" }
+        default: { type: string }
+        summary: { type: string }
+        docs: { type: string, description: "PostgreSQL 18 docs link" }
+        min: { type: string }
+        max: { type: string }
+        values: { type: array, items: { type: string } }
+        library: { type: string, description: "The preload library this setting belongs to" }
+
     ExtensionReport:
       type: object
       properties:
@@ -1141,6 +1213,10 @@ components:
             - type: "null"
             - type: array
               items: { type: string }
+        needsPreload:
+          type: array
+          description: "Declared or installed extensions whose library is not in the resource's shared_preload_libraries: created, but every use errors"
+          items: { $ref: "#/components/schemas/PreloadGap" }
     ErrorEnvelope:
       type: object
       properties:
@@ -1302,6 +1378,7 @@ components:
                 superuser: { type: string }
                 database: { type: string }
                 extensions: { type: array, items: { type: string }, description: "Declared extensions. Absent when none were ever declared. What is installed is read live from GET /v1/resources/{id}/extensions" }
+                settings: { type: object, additionalProperties: { type: string }, description: "Declared server settings, passed as postgres -c name=value. Absent when none are declared" }
 
     WireAppResource:
       allOf:

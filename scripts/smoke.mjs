@@ -446,6 +446,30 @@ const scenarios = [
     return `snapshot ${id}, clone method ${out.snapshot.clone ?? 'unknown'}`
   }, { needs: ['postgres: create and query through the proxy'] }],
 
+  // Settings are server arguments, so the preload has to reach the
+  // container and the ejected compose file alike (docs/engine/CLAUDE.md and
+  // docs/portability/CLAUDE.md, amendments of 2026-11-17).
+  ['postgres: settings preload pg_stat_statements, and eject carries them', async () => {
+    const refused = await hobby(['pg', 'ext', 'add', DB_PROJECT, 'pg_stat_statements'], { timeoutMs: 60_000 })
+    if (refused.code === 0 || !refused.stderr.includes('shared_preload_libraries=pg_stat_statements')) {
+      throw failure('pg ext add pg_stat_statements before the preload should be refused with the setting to add', refused)
+    }
+    const start = Date.now()
+    const set = await hobbyJson(['pg', 'config', 'set', DB_PROJECT, 'shared_preload_libraries=pg_stat_statements'], {
+      timeoutMs: 120_000,
+    })
+    const applied = `${set.applied}${set.pausedMs != null ? ` (paused ${set.pausedMs}ms)` : ''} in ${since(start)}`
+    await hobbyOk(['pg', 'ext', 'add', DB_PROJECT, 'pg_stat_statements'], { timeoutMs: 120_000 })
+    const got = await psql(await connectionString(DB_PROJECT), 'select count(*) >= 0 from pg_stat_statements')
+    if (got !== 't') throw new Error(`pg_stat_statements did not answer: ${JSON.stringify(got)}`)
+    const ejected = await hobby(['eject', DB_PROJECT], { timeoutMs: 60_000 })
+    if (ejected.code !== 0) throw failure(`hobby eject ${DB_PROJECT}`, ejected)
+    if (!ejected.stdout.includes('"-c", "shared_preload_libraries=pg_stat_statements"')) {
+      throw new Error('the ejected compose file has no command: carrying shared_preload_libraries')
+    }
+    return `applied ${applied}; pg_stat_statements answers; eject command: carries it`
+  }, { needs: ['postgres: create and query through the proxy'] }],
+
   ['eject: emits a compose file docker compose accepts', async () => {
     const checked = []
     for (const [project, services] of [

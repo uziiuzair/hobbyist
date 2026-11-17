@@ -65,8 +65,8 @@ export function snapshotDir(paths: Paths, project: string, id: string): string {
   return join(projectSnapshotsDir(paths, project), id)
 }
 
-const DEFAULT_QUIESCE_ATTEMPTS = 5
-const DEFAULT_QUIESCE_WAIT_MS = 2000
+export const DEFAULT_QUIESCE_ATTEMPTS = 5
+export const DEFAULT_QUIESCE_WAIT_MS = 2000
 
 export interface QuiesceOptions {
   attempts?: number
@@ -97,7 +97,7 @@ function defaultSleepFor(ms: number): Promise<void> {
 // skipped resource inside a snapshot produces a backup that is missing a
 // database and does not say so, so an unreachable guard fails the whole
 // snapshot here instead of being quietly deferred.
-async function waitForIdle(
+export async function waitForIdle(
   resource: Resource,
   guard: (resource: Resource) => Promise<ActivityGuardResult>,
   attempts: number,

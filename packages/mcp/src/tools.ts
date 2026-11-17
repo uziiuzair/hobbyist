@@ -64,6 +64,19 @@ export interface ListArgs {
 export interface NewArgs {
   name: string
   extensions?: string[]
+  settings?: Record<string, string>
+}
+
+export interface PgConfigSetArgs {
+  target: string
+  settings: Record<string, string>
+  allowPause?: boolean
+}
+
+export interface PgConfigUnsetArgs {
+  target: string
+  names: string[]
+  allowPause?: boolean
 }
 
 export interface PgExtArgs {
@@ -202,6 +215,7 @@ export async function newTool(api: Api, args: NewArgs): Promise<ToolResult> {
       kind: 'postgres',
       name: 'primary',
       ...(args.extensions !== undefined && args.extensions.length > 0 ? { extensions: args.extensions } : {}),
+      ...(args.settings !== undefined && Object.keys(args.settings).length > 0 ? { settings: args.settings } : {}),
     })
     return {
       project,
@@ -375,10 +389,10 @@ export async function envListTool(api: Api, args: TargetArgs): Promise<ToolResul
 // GET/POST /v1/resources/:id/extensions. ls and add wake a sleeping
 // database (only a running Postgres can say what it has installed); rm
 // only undeclares and never drops anything.
-async function pgResourceId(api: Api, target: string): Promise<string> {
+async function pgResourceId(api: Api, target: string, what: string = 'extensions'): Promise<string> {
   const { resource } = await resolveTarget(api, target)
   if (resource.kind !== 'postgres') {
-    throw new HobbyError('usage', `${target} is a ${resource.kind}, and only a postgres resource has extensions`)
+    throw new HobbyError('usage', `${target} is a ${resource.kind}, and only a postgres resource has ${what}`)
   }
   return resource.id
 }
@@ -422,6 +436,34 @@ export async function allowRmTool(api: Api, args: AllowArgs): Promise<ToolResult
 
 export async function allowOffTool(api: Api, args: ProjectArgs): Promise<ToolResult> {
   return run(async () => await api.clearAllowlist(args.project))
+}
+
+// The settings tools mirror `hobby pg config ls|set|unset` over
+// GET/POST /v1/resources/:id/settings. ls never wakes anything. set and
+// unset restart an awake database (a pause; a pinned project needs
+// allowPause) and apply to a sleeping one on its next wake.
+export async function pgConfigListTool(api: Api, args: TargetArgs): Promise<ToolResult> {
+  return run(async () => await api.getSettings(await pgResourceId(api, args.target, 'settings')))
+}
+
+export async function pgConfigSetTool(api: Api, args: PgConfigSetArgs): Promise<ToolResult> {
+  return run(
+    async () =>
+      await api.setSettings(await pgResourceId(api, args.target, 'settings'), {
+        set: args.settings,
+        allowPause: args.allowPause === true,
+      })
+  )
+}
+
+export async function pgConfigUnsetTool(api: Api, args: PgConfigUnsetArgs): Promise<ToolResult> {
+  return run(
+    async () =>
+      await api.setSettings(await pgResourceId(api, args.target, 'settings'), {
+        unset: args.names,
+        allowPause: args.allowPause === true,
+      })
+  )
 }
 
 export async function rmTool(api: Api, args: RmArgs): Promise<ToolResult> {

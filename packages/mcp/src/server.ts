@@ -30,6 +30,9 @@ import {
   listTool,
   logsTool,
   newTool,
+  pgConfigListTool,
+  pgConfigSetTool,
+  pgConfigUnsetTool,
   pgExtAddTool,
   pgExtListTool,
   pgExtRmTool,
@@ -88,6 +91,13 @@ export function createServer(api: Api): McpServer {
           .array(z.string().min(1))
           .optional()
           .describe('extensions to declare and create on first boot, for example ["pg_trgm"]. mirrors --extension'),
+        settings: z
+          .record(z.string(), z.string())
+          .optional()
+          .describe(
+            'server settings from hobby\'s allowlist, for example {"shared_buffers": "256MB"}. mirrors --setting. ' +
+              'pg_stat_statements needs {"shared_preload_libraries": "pg_stat_statements"} here'
+          ),
       },
     },
     async (args) => newTool(api, args)
@@ -134,6 +144,52 @@ export function createServer(api: Api): McpServer {
       },
     },
     async (args) => pgExtRmTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_pg_config_ls',
+    {
+      description:
+        'list a postgres resource\'s declared server settings, every setting hobby allows (type, range, default, ' +
+        'whether Postgres needs a restart for it, docs link), and extensions whose preload library is missing. ' +
+        'mirrors `hobby pg config ls <target> --all`. never wakes anything.',
+      inputSchema: {
+        target: z.string().min(1).describe(TARGET_DESCRIPTION),
+      },
+    },
+    async (args) => pgConfigListTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_pg_config_set',
+    {
+      description:
+        'set server settings on a postgres resource, passed to Postgres as `postgres -c name=value`. mirrors ' +
+        '`hobby pg config set <target> name=value...`. a sleeping database is not woken: the settings apply on its ' +
+        'next wake. an awake one is restarted (a pause of a second or two); a pinned project needs allowPause. a ' +
+        'start that fails with the new settings is rolled back. settings outside the allowlist are refused.',
+      inputSchema: {
+        target: z.string().min(1).describe(TARGET_DESCRIPTION),
+        settings: z.record(z.string(), z.string()).describe('name to value, for example {"work_mem": "16MB"}'),
+        allowPause: z.boolean().optional().describe('accept restarting an awake database in a pinned project'),
+      },
+    },
+    async (args) => pgConfigSetTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_pg_config_unset',
+    {
+      description:
+        'remove declared server settings from a postgres resource, so Postgres uses its defaults for them. mirrors ' +
+        '`hobby pg config unset <target> <name>...`, applied the same way as hobby_pg_config_set.',
+      inputSchema: {
+        target: z.string().min(1).describe(TARGET_DESCRIPTION),
+        names: z.array(z.string().min(1)).min(1).describe('setting names to unset'),
+        allowPause: z.boolean().optional().describe('accept restarting an awake database in a pinned project'),
+      },
+    },
+    async (args) => pgConfigUnsetTool(api, args)
   )
 
   server.registerTool(

@@ -41,6 +41,11 @@ export interface ContainerSpec {
   // producer path never worked there
   // (docs/queues/research/2026-08-22-the-producer-path-on-real-linux.md).
   extraHosts?: Array<{ name: string; address: string }>
+  // The container's command, replacing the image's CMD (the entrypoint is
+  // kept). Absent means the image's own CMD. Postgres server settings ride
+  // here as `postgres -c name=value` (packages/pg/src/settings.ts), so they
+  // never touch a config file inside the data directory (ADR 0003).
+  command?: string[]
 }
 
 export interface ContainerStatus {

@@ -13,6 +13,7 @@ import { createFakeRuntime, HobbyError, openStore, resolvePaths, type HobbyConfi
 import {
   createPostgres,
   createPostgresFromClone,
+  rebindPostgresToClone,
   reportExtensions,
   validateExtensionNames,
   type ExtensionOps,
@@ -183,6 +184,113 @@ test('reportExtensions names declared extensions that are not installed, and pas
     declared: ['vector', 'pg_trgm'],
     installed: [{ name: 'pg_trgm', version: '1.6' }],
     missing: ['vector'],
+    needsPreload: [],
   })
-  assert.deepEqual(reportExtensions(['vector'], null), { declared: ['vector'], installed: null, missing: null })
+  assert.deepEqual(reportExtensions(['vector'], null), { declared: ['vector'], installed: null, missing: null, needsPreload: [] })
+})
+
+// Settings (settings.ts) on the same lifecycle paths: the first boot runs
+// with them, a clone and a reset carry them, and an extension that needs a
+// preload is refused at create unless the same create preloads it.
+
+test('createPostgres with settings creates its container with postgres -c arguments and stores them', async () => {
+  const { store, project, runtime, paths, isRunning } = setup()
+  try {
+    const extensions = fakeExtensions(['pg_stat_statements'], isRunning)
+    const resource = await createPostgres(
+      { store, runtime, paths, config: testHobbyConfig(), probeFactory: () => async () => true, extensions },
+      {
+        project,
+        name: 'primary',
+        extensions: ['pg_stat_statements'],
+        settings: { shared_preload_libraries: 'pg_stat_statements', work_mem: '16MB' },
+      }
+    )
+    assert.deepEqual(resource.config.settings, { shared_preload_libraries: 'pg_stat_statements', work_mem: '16MB' })
+    assert.deepEqual(runtime._specs.get(resource.config.containerName)?.command, [
+      'postgres',
+      '-c',
+      'shared_preload_libraries=pg_stat_statements',
+      '-c',
+      'work_mem=16MB',
+    ])
+    assert.deepEqual(extensions.applied, [['pg_stat_statements']])
+  } finally {
+    store.close()
+  }
+})
+
+test('createPostgres without settings creates the container with no command, as before', async () => {
+  const { store, project, runtime, paths } = setup()
+  try {
+    const resource = await createPostgres(
+      { store, runtime, paths, config: testHobbyConfig(), probeFactory: () => async () => true },
+      { project, name: 'primary' }
+    )
+    assert.equal(runtime._specs.get(resource.config.containerName)?.command, undefined)
+    assert.equal('settings' in resource.config, false)
+  } finally {
+    store.close()
+  }
+})
+
+test('createPostgres refuses pg_stat_statements without its preload, before anything is created', async () => {
+  const { store, project, runtime, paths, isRunning } = setup()
+  try {
+    const extensions = fakeExtensions(['pg_stat_statements'], isRunning)
+    await assert.rejects(
+      createPostgres(
+        { store, runtime, paths, config: testHobbyConfig(), probeFactory: () => async () => true, extensions },
+        { project, name: 'primary', extensions: ['pg_stat_statements'] }
+      ),
+      (err: unknown) =>
+        err instanceof HobbyError &&
+        err.code === 'usage' &&
+        /hobby pg config set blog\/primary shared_preload_libraries=pg_stat_statements/.test(err.hint ?? '')
+    )
+    assert.deepEqual(store.listResources(project.id), [])
+    assert.equal(runtime._specs.size, 0)
+    assert.deepEqual(extensions.applied, [])
+  } finally {
+    store.close()
+  }
+})
+
+test('createPostgresFromClone carries the source settings; rebindPostgresToClone takes the source settings', async () => {
+  const { store, project, runtime, paths } = setup()
+  try {
+    const source: PostgresConfig = {
+      image: 'postgres:18-alpine',
+      containerName: 'hobby-src-primary',
+      dataDir: '/x/pgdata',
+      hostPort: 15999,
+      superuser: 'postgres',
+      password: 'secret',
+      database: 'src',
+      settings: { shared_preload_libraries: 'pg_stat_statements' },
+    }
+    const deps = { store, runtime, paths, config: testHobbyConfig() }
+    const clone = await createPostgresFromClone(deps, { project, name: 'primary', source })
+    assert.deepEqual(clone.config.settings, { shared_preload_libraries: 'pg_stat_statements' })
+    assert.deepEqual(runtime._specs.get(clone.config.containerName)?.command, ['postgres', '-c', 'shared_preload_libraries=pg_stat_statements'])
+
+    // The branch tuned itself, then is reset to a parent that declares
+    // different settings: it takes the parent's, as it takes the image.
+    store.updateResourceConfig(clone.id, { ...clone.config, settings: { work_mem: '64MB' } })
+    const tuned = store.getResource(clone.id)
+    const reset = await rebindPostgresToClone(deps, {
+      project,
+      resource: tuned as typeof clone,
+      source: { ...source, settings: { jit: 'off' } },
+    })
+    assert.deepEqual(reset.config.settings, { jit: 'off' })
+    assert.deepEqual(runtime._specs.get(reset.config.containerName)?.command, ['postgres', '-c', 'jit=off'])
+
+    const { settings: _settings, ...noSettings } = source
+    const bare = await rebindPostgresToClone(deps, { project, resource: reset, source: noSettings })
+    assert.equal('settings' in bare.config, false)
+    assert.equal(runtime._specs.get(bare.config.containerName)?.command, undefined)
+  } finally {
+    store.close()
+  }
 })

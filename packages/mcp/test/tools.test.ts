@@ -21,6 +21,9 @@ import {
   listTool,
   logsTool,
   newTool,
+  pgConfigListTool,
+  pgConfigSetTool,
+  pgConfigUnsetTool,
   pgExtAddTool,
   pgExtListTool,
   pgExtRmTool,
@@ -78,6 +81,8 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     setEnv: notWired('setEnv'),
     getExtensions: notWired('getExtensions'),
     setExtensions: notWired('setExtensions'),
+    getSettings: notWired('getSettings'),
+    setSettings: notWired('setSettings'),
     listCrons: notWired('listCrons'),
     listProjects: notWired('listProjects'),
     createProject: notWired('createProject'),
@@ -516,4 +521,38 @@ test('hobby_import: resolves sourceEnv in this process and sends one POST /v1/im
   } finally {
     delete process.env['HOBBY_TEST_IMPORT_URL']
   }
+})
+
+test('hobby_pg_config_ls/set/unset: resolve the target then GET or POST /v1/resources/:id/settings', async () => {
+  const p = project('blog')
+  const r = resource('primary', p.id)
+  const listed = { settings: {}, needsPreload: [], available: [] }
+  const changed = { resource: r, settings: { jit: 'off' }, applied: 'next-start' as const, pausedMs: null, needsPreload: [] }
+  const { api, calls } = fakeApi({
+    getProject: async (): Promise<ProjectDetailResponse> => ({ project: p, resources: [r] }),
+    getSettings: async () => listed,
+    setSettings: async () => changed,
+  })
+  assert.deepEqual(resultText(await pgConfigListTool(api, { target: 'blog' })), listed)
+  await pgConfigSetTool(api, { target: 'blog', settings: { jit: 'off' } })
+  await pgConfigUnsetTool(api, { target: 'blog', names: ['jit'], allowPause: true })
+  assert.deepEqual(calls, [
+    'getProject("blog")',
+    `getSettings("${r.id}")`,
+    'getProject("blog")',
+    `setSettings("${r.id}", {"set":{"jit":"off"},"allowPause":false})`,
+    'getProject("blog")',
+    `setSettings("${r.id}", {"unset":["jit"],"allowPause":true})`,
+  ])
+})
+
+test('hobby_new passes declared settings on the resource create', async () => {
+  const p = project('blog')
+  const r = resource('primary', p.id)
+  const { api, calls } = fakeApi({
+    createProject: async () => ({ project: p }),
+    createResource: async () => ({ resource: r }),
+  })
+  await newTool(api, { name: 'blog', settings: { shared_buffers: '256MB' } })
+  assert.equal(calls[1], 'createResource("blog", {"kind":"postgres","name":"primary","settings":{"shared_buffers":"256MB"}})')
 })

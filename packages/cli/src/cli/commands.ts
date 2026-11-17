@@ -38,6 +38,8 @@ import {
   DaemonUnreachableError,
   type Api,
   type ExtensionsResponse,
+  type SetSettingsResponse,
+  type SettingsResponse,
   type IgnoredKey,
   type ProjectResponse,
   type RawResponse,
@@ -1089,7 +1091,7 @@ export async function cmdCron(c: Ctx, positionals: string[], flags: Flags): Prom
 export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const name = positionals[0]
   if (name === undefined) {
-    throw new UsageError('usage: hobby new <name> [--empty] [--pin] [--extension <ext>...]')
+    throw new UsageError('usage: hobby new <name> [--empty] [--pin] [--extension <ext>...] [--setting <name=value>...]')
   }
 
   // `--pin`: born pinned awake, for the project that must never cold-start
@@ -1139,6 +1141,7 @@ export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promi
       kind: 'postgres',
       name: DEFAULT_POSTGRES_NAME,
       ...extensionsFrom(flags),
+      ...settingsFrom(flags),
     }))
   } catch (err) {
     try {
@@ -1440,11 +1443,19 @@ async function createResourceAndReport(
   kind: CreatableKind,
   name: string,
   json: boolean,
-  extensions: string[] = []
+  extensions: string[] = [],
+  settings: Record<string, string> = {}
 ): Promise<number> {
   const { resource } = await c.api.createResource(
     project,
-    kind === 'postgres' && extensions.length > 0 ? { kind, name, extensions } : { kind, name }
+    kind === 'postgres'
+      ? {
+          kind,
+          name,
+          ...(extensions.length > 0 ? { extensions } : {}),
+          ...(Object.keys(settings).length > 0 ? { settings } : {}),
+        }
+      : { kind, name }
   )
   if (json) {
     c.io.out(JSON.stringify({ resource }))
@@ -1484,9 +1495,34 @@ function extensionsFrom(flags: Flags): { extensions?: string[] } {
   return list.length === 0 ? {} : { extensions: list }
 }
 
+// `--setting name=value`, repeatable, on `hobby new` and `hobby pg
+// create`: server settings declared at creation, so the first boot already
+// runs with them. The daemon validates against its allowlist; this only
+// splits on the first `=`.
+function settingsFrom(flags: Flags): { settings?: Record<string, string> } {
+  const raw = flags.setting
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : []
+  if (list.length === 0) return {}
+  return { settings: parseSettingPairs(list) }
+}
+
+function parseSettingPairs(pairs: string[]): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const pair of pairs) {
+    const eq = pair.indexOf('=')
+    if (eq <= 0) {
+      throw new UsageError(`expected name=value, got ${pair}`)
+    }
+    out[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim()
+  }
+  return out
+}
+
 const PG_USAGE =
-  'usage: hobby pg create --project <project> <name> [--extension <ext>...] | hobby pg ext [ls] <target> | ' +
-  'hobby pg ext add <target> <ext>... | hobby pg ext rm <target> <ext>...'
+  'usage: hobby pg create --project <project> <name> [--extension <ext>...] [--setting <name=value>...] | ' +
+  'hobby pg ext [ls] <target> | hobby pg ext add <target> <ext>... | hobby pg ext rm <target> <ext>... | ' +
+  'hobby pg config [ls] <target> [--all] | hobby pg config set <target> <name=value>... [--allow-pause] | ' +
+  'hobby pg config unset <target> <name>... [--allow-pause]'
 
 // `hobby pg create --project <p> <name>`: kept as the explicit form for
 // anyone who prefers spelling out the kind, an alias for cmdCreate above
@@ -1501,21 +1537,36 @@ export async function cmdPg(c: Ctx, positionals: string[], flags: Flags): Promis
   if (sub === 'ext') {
     return cmdPgExt(c, positionals.slice(1), flags)
   }
+  if (sub === 'config') {
+    return cmdPgConfig(c, positionals.slice(1), flags)
+  }
   if (sub !== 'create') {
     throw new UsageError(sub === undefined ? PG_USAGE : `unknown pg subcommand: ${sub}\n${PG_USAGE}`)
   }
   const name = positionals[1]
   const project = projectFrom(c, flags)
   if (project === undefined || name === undefined) {
-    throw new UsageError('usage: hobby pg create --project <project> <name> [--extension <ext>...]')
+    throw new UsageError('usage: hobby pg create --project <project> <name> [--extension <ext>...] [--setting <name=value>...]')
   }
-  return createResourceAndReport(c, project, 'postgres', name, flags.json === true, extensionsFrom(flags).extensions)
+  return createResourceAndReport(
+    c,
+    project,
+    'postgres',
+    name,
+    flags.json === true,
+    extensionsFrom(flags).extensions,
+    settingsFrom(flags).settings
+  )
 }
 
-async function resolvePgTarget(c: Ctx, target: string): Promise<{ project: Project; resource: WireResource }> {
+async function resolvePgTarget(
+  c: Ctx,
+  target: string,
+  what: string = 'extensions'
+): Promise<{ project: Project; resource: WireResource }> {
   const found = await resolveTarget(c.api, target, c.config.project)
   if (found.resource.kind !== 'postgres') {
-    throw new UsageError(`${target} is a ${found.resource.kind}, and only a postgres resource has extensions`)
+    throw new UsageError(`${target} is a ${found.resource.kind}, and only a postgres resource has ${what}`)
   }
   return found
 }
@@ -1535,6 +1586,120 @@ function printExtensions(c: Ctx, label: string, report: ExtensionsResponse['exte
   if (report.missing !== null && report.missing.length > 0) {
     c.io.out(`  declared but not installed: ${report.missing.join(', ')} (\`hobby pg ext add\` creates them again)`)
   }
+  printPreloadGaps(c, label.replace(/:$/, ''), report.needsPreload ?? [])
+}
+
+// Extensions that exist but answer every use with an error, because the
+// library they need is not preloaded.
+function printPreloadGaps(c: Ctx, target: string, gaps: SettingsResponse['needsPreload']): void {
+  for (const gap of gaps) {
+    c.io.out(
+      gap.allowed
+        ? `  ! ${gap.extension} needs ${gap.library} in shared_preload_libraries, which is not set: hobby pg config set ${target} shared_preload_libraries=${gap.library}`
+        : `  ! ${gap.extension} needs ${gap.library} preloaded, which hobby does not allow`
+    )
+  }
+}
+
+// `hobby pg config`: server settings, over GET/POST
+// /v1/resources/:id/settings. ls never wakes anything. set and unset
+// replace the container: a sleeping database picks the settings up on its
+// next wake, an awake one is restarted (a pause, so a pinned project needs
+// --allow-pause), and a start that fails with them is rolled back.
+async function cmdPgConfig(c: Ctx, args: string[], flags: Flags): Promise<number> {
+  const first = args[0]
+  const op = first === 'set' || first === 'unset' || first === 'ls' ? first : 'ls'
+  const rest = op === 'ls' && first !== 'ls' ? args : args.slice(1)
+
+  if (op === 'ls') {
+    if (rest.length > 1) {
+      throw new UsageError(PG_USAGE)
+    }
+    const target = targetOrLinked(c, rest, PG_USAGE)
+    const { project, resource } = await resolvePgTarget(c, target, 'settings')
+    const result = await c.api.getSettings(resource.id)
+    if (flags.json) {
+      c.io.out(JSON.stringify(result))
+      return 0
+    }
+    printSettings(c, `${project.name}/${resource.name}`, result, flags.all === true)
+    return 0
+  }
+
+  // `set <target> a=b...`, or in a linked directory `set a=b...`: a first
+  // argument with `=` in it is a setting, never a target. `unset` reads as
+  // `hobby pg ext rm` does.
+  const linked = c.config.project ?? null
+  const { target, items } =
+    op === 'set'
+      ? rest[0] !== undefined && !rest[0].includes('=')
+        ? { target: rest[0], items: rest.slice(1) }
+        : { target: linked ?? undefined, items: rest }
+      : rest.length >= 2 || linked === null
+        ? { target: rest[0], items: rest.slice(1) }
+        : { target: linked, items: rest }
+  if (target === undefined || items.length === 0) {
+    throw new UsageError(PG_USAGE)
+  }
+  const { project, resource } = await resolvePgTarget(c, target, 'settings')
+  const label = `${project.name}/${resource.name}`
+  const input =
+    op === 'set'
+      ? { set: parseSettingPairs(items), allowPause: flags['allow-pause'] === true }
+      : { unset: items, allowPause: flags['allow-pause'] === true }
+  const result = await c.api.setSettings(resource.id, input)
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+    return 0
+  }
+  printSettingsChange(c, label, result)
+  return 0
+}
+
+function printSettings(c: Ctx, label: string, result: SettingsResponse, all: boolean): void {
+  const declared = Object.entries(result.settings)
+  c.io.out(`${label}:`)
+  if (declared.length === 0) {
+    c.io.out('  (no settings declared; Postgres runs with its defaults)')
+  }
+  for (const [name, value] of declared) {
+    const info = result.available.find((s) => s.name === name)
+    c.io.out(`  ${name} = ${value}${info !== undefined ? `  (default ${info.default === '' ? 'none' : info.default})` : ''}`)
+  }
+  printPreloadGaps(c, label, result.needsPreload)
+  if (!all) {
+    c.io.out('`hobby pg config ls <target> --all` lists every setting hobby allows, with ranges and docs.')
+    return
+  }
+  c.io.out('allowed:')
+  for (const s of result.available) {
+    const range = s.values !== undefined ? s.values.join('|') : s.min !== undefined ? `${s.min}..${s.max}` : s.type
+    const restart = s.restartRequired ? ', restart' : ''
+    c.io.out(`  ${s.name}  ${range}  (default ${s.default === '' ? 'none' : s.default}${restart})  ${s.summary}`)
+  }
+}
+
+function printSettingsChange(c: Ctx, label: string, result: SetSettingsResponse): void {
+  const declared = Object.entries(result.settings)
+  c.io.out(`${label}:`)
+  for (const [name, value] of declared) {
+    c.io.out(`  ${name} = ${value}`)
+  }
+  if (declared.length === 0) {
+    c.io.out('  (no settings declared; Postgres runs with its defaults)')
+  }
+  switch (result.applied) {
+    case 'unchanged':
+      c.io.out('nothing changed.')
+      break
+    case 'next-start':
+      c.io.out('it is asleep: the settings apply when it next wakes. Nothing was woken.')
+      break
+    case 'restarted':
+      c.io.out(`restarted with the new settings (paused ${result.pausedMs ?? 0}ms).`)
+      break
+  }
+  printPreloadGaps(c, label, result.needsPreload)
 }
 
 async function cmdPgExt(c: Ctx, args: string[], flags: Flags): Promise<number> {

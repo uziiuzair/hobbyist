@@ -23,6 +23,7 @@
 import { Client } from 'pg'
 import { HobbyError, type PostgresConfig } from '@hobby.sh/core'
 import { HOBBY_APPLICATION_NAME } from './activity-guard.js'
+import { missingPreloads, type MissingPreload, type PostgresSettings } from './settings.js'
 
 const EXTENSIONS_CONNECTION_TIMEOUT_MS = 5000
 // CREATE EXTENSION for something large (postgis) runs a long install
@@ -169,16 +170,29 @@ export const realExtensionOps: ExtensionOps = {
 // restore of older data). Installed but undeclared is normal: plpgsql is
 // always there, CASCADE adds dependencies, and anyone can CREATE EXTENSION
 // from psql.
+//
+// `needsPreload` names every declared or installed extension whose library
+// is not in the resource's shared_preload_libraries (EXTENSION_PRELOADS,
+// settings.ts): created, but answering every use with an error. Computed
+// from the stored settings alone, so it costs nothing beyond what the
+// report already read.
 export interface ExtensionReport {
   declared: string[]
   installed: InstalledExtension[] | null
   missing: string[] | null
+  needsPreload: MissingPreload[]
 }
 
-export function reportExtensions(declared: string[], installed: InstalledExtension[] | null): ExtensionReport {
+export function reportExtensions(
+  declared: string[],
+  installed: InstalledExtension[] | null,
+  settings?: PostgresSettings
+): ExtensionReport {
+  const seen = [...declared, ...(installed ?? []).map((ext) => ext.name)]
+  const needsPreload = missingPreloads(seen, settings)
   if (installed === null) {
-    return { declared, installed: null, missing: null }
+    return { declared, installed: null, missing: null, needsPreload }
   }
   const names = new Set(installed.map((ext) => ext.name))
-  return { declared, installed, missing: declared.filter((name) => !names.has(name)) }
+  return { declared, installed, missing: declared.filter((name) => !names.has(name)), needsPreload }
 }

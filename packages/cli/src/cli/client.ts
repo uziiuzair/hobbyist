@@ -230,9 +230,51 @@ export interface ExtensionsResponse {
     declared: string[]
     installed: Array<{ name: string; version: string }> | null
     missing: string[] | null
+    // Declared or installed extensions whose library is not preloaded
+    // (packages/pg/src/settings.ts, EXTENSION_PRELOADS).
+    needsPreload?: PreloadGap[]
   }
   // POST only: names undeclared by this call. Never dropped from the database.
   removed?: string[]
+}
+
+export interface PreloadGap {
+  extension: string
+  library: string
+  allowed: boolean
+}
+
+// One allowlisted server setting, as GET /v1/resources/:id/settings
+// reports it (settingCatalog, packages/pg/src/settings.ts).
+export interface SettingInfo {
+  name: string
+  type: string
+  context: string
+  restartRequired: boolean
+  default: string
+  summary: string
+  docs: string
+  min?: string
+  max?: string
+  values?: string[]
+  library?: string
+}
+
+export interface SettingsResponse {
+  settings: Record<string, string>
+  needsPreload: PreloadGap[]
+  available: SettingInfo[]
+}
+
+export interface SetSettingsResponse {
+  resource: WireResource
+  settings: Record<string, string>
+  // unchanged: nothing differed. next-start: it was asleep; its container
+  // was replaced and the settings apply on its next wake. restarted: it
+  // was awake and was restarted with them.
+  applied: 'unchanged' | 'next-start' | 'restarted'
+  pausedMs: number | null
+  needsPreload: PreloadGap[]
 }
 
 export interface EnvResponse {
@@ -445,7 +487,7 @@ export interface Api {
   createResource(
     project: string,
     input:
-      | { kind: 'postgres'; name: string; extensions?: string[] }
+      | { kind: 'postgres'; name: string; extensions?: string[]; settings?: Record<string, string> }
       | {
           kind: 'app'
           name: string
@@ -493,6 +535,13 @@ export interface Api {
   // Declared and installed extensions of a postgres resource. Both wake it.
   getExtensions(id: string): Promise<ExtensionsResponse>
   setExtensions(id: string, input: { add?: string[]; remove?: string[] }): Promise<ExtensionsResponse>
+  // Declared server settings and the allowlist. Never wakes anything.
+  getSettings(id: string): Promise<SettingsResponse>
+  // Restarts the database if it is awake (a pause); a pinned one needs allowPause.
+  setSettings(
+    id: string,
+    input: { set?: Record<string, string>; unset?: string[]; allowPause?: boolean }
+  ): Promise<SetSettingsResponse>
   deleteResource(id: string): Promise<DeletedResponse>
   startResource(id: string): Promise<ResourceResponse>
   stopResource(id: string, opts?: { force?: boolean }): Promise<StopResponse>
@@ -650,6 +699,8 @@ export function createApi(transport: string | DaemonClient): Api {
     setEnv: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/env`, input),
     getExtensions: (id) => call(client, 'GET', `/v1/resources/${p(id)}/extensions`),
     setExtensions: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/extensions`, input),
+    getSettings: (id) => call(client, 'GET', `/v1/resources/${p(id)}/settings`),
+    setSettings: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/settings`, input),
     deleteResource: (id) => call(client, 'DELETE', `/v1/resources/${p(id)}`),
     startResource: (id) => call(client, 'POST', `/v1/resources/${p(id)}/start`),
     stopResource: (id, opts) => call(client, 'POST', `/v1/resources/${p(id)}/stop`, opts?.force === true ? { force: true } : {}),

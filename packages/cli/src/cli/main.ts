@@ -187,6 +187,7 @@ const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]>
   ['new', 'hobby new <name> --empty', 'a project with nothing in it'],
   ['new', 'hobby new <name> --pin', 'born pinned: never auto-sleeps'],
   ['new', 'hobby new <name> --extension <ext>', 'with an extension declared and created (repeatable)'],
+  ['new', 'hobby new <name> --setting <name=value>', 'with a server setting declared (repeatable)'],
   ['ls', 'hobby ls', 'everything, with sleep state'],
   ['branch', 'hobby branch <project> <name>', 'a new project from a copy of its data, unpinned'],
   ['branch', 'hobby branch ... --allow-pause', 'accept pausing a pinned, awake source'],
@@ -215,6 +216,9 @@ const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]>
   ['pg', 'hobby pg ext [ls] <target>', 'declared and installed extensions, with versions'],
   ['pg', 'hobby pg ext add <target> <ext>...', 'declare and CREATE EXTENSION IF NOT EXISTS'],
   ['pg', 'hobby pg ext rm <target> <ext>...', 'undeclare; never drops anything'],
+  ['pg', 'hobby pg config [ls] <target> [--all]', 'declared server settings; --all lists what is allowed'],
+  ['pg', 'hobby pg config set <target> <name=value>...', 'set; restarts it if awake, else applies on next wake'],
+  ['pg', 'hobby pg config unset <target> <name>... [--allow-pause]', 'back to the default, applied the same way'],
   ['connect', 'hobby connect <target>', 'open psql against it'],
   ['sleep', 'hobby sleep <target> [--force]', 'put it to sleep; --force ends open sessions and in-flight work'],
   ['wake', 'hobby wake <target>', 'wake it back up'],
@@ -487,7 +491,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
         return await cmdVersion(ctx, flags)
       }
       case 'new': {
-        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'empty', 'pin'], multi: ['extension'] })
+        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'empty', 'pin'], multi: ['extension', 'setting'] })
         return await cmdNew(ctx, positionals, flags)
       }
       case 'branch': {
@@ -518,7 +522,11 @@ export async function run(argv: string[], io: Io): Promise<number> {
         return await cmdCreate(ctx, positionals, flags)
       }
       case 'pg': {
-        const { positionals, flags } = parseArgs(rest, { bool: ['json'], value: ['project'], multi: ['extension'] })
+        const { positionals, flags } = parseArgs(rest, {
+          bool: ['json', 'all', 'allow-pause'],
+          value: ['project'],
+          multi: ['extension', 'setting'],
+        })
         return await cmdPg(ctx, positionals, flags)
       }
       case 'connect': {
