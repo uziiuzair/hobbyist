@@ -9,7 +9,23 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Api, BranchResponse, ConnectionResponse, DeletedResponse, LogsResponse, ProjectDetailResponse, ProjectsResponse, ResourceResponse, WireResource } from '@hobby.sh/cli'
 import type { Project } from '@hobby.sh/core'
-import { branchTool, connectionStringTool, envListTool, envSetTool, envUnsetTool, listTool, logsTool, newTool, rmTool, sleepTool, wakeTool, type ToolResult } from '../src/tools.js'
+import {
+  branchTool,
+  connectionStringTool,
+  envListTool,
+  envSetTool,
+  envUnsetTool,
+  listTool,
+  logsTool,
+  newTool,
+  pgExtAddTool,
+  pgExtListTool,
+  pgExtRmTool,
+  rmTool,
+  sleepTool,
+  wakeTool,
+  type ToolResult,
+} from '../src/tools.js'
 
 function project(name: string, id = `${name}-id`): Project {
   return { id, name, networkName: `hobby-${name}`, sleepAfterSeconds: 300, createdAt: new Date('2026-01-01'), releasedAt: null }
@@ -56,6 +72,8 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     health: notWired('health'),
     version: notWired('version'),
     setEnv: notWired('setEnv'),
+    getExtensions: notWired('getExtensions'),
+    setExtensions: notWired('setExtensions'),
     listCrons: notWired('listCrons'),
     listProjects: notWired('listProjects'),
     createProject: notWired('createProject'),
@@ -343,5 +361,53 @@ test('hobby_env_set on a postgres is a usage error, with no env call made', asyn
   const result = await envSetTool(api, { target: 'blog', set: { A: '1' } })
   assert.equal(result.isError, true)
   assert.match(result.content[0]?.text ?? '', /only an app or a worker/)
+  assert.deepEqual(calls, ['getProject("blog")'])
+})
+
+test('hobby_pg_ext_ls/add/rm: resolve the target then GET or POST /v1/resources/:id/extensions', async () => {
+  const p = project('blog')
+  const r = resource('primary', p.id)
+  const report = {
+    extensions: { declared: ['pg_trgm'], installed: [{ name: 'pg_trgm', version: '1.6' }, { name: 'plpgsql', version: '1.0' }], missing: [] },
+  }
+  const { api, calls } = fakeApi({
+    getProject: async (): Promise<ProjectDetailResponse> => ({ project: p, resources: [r] }),
+    getExtensions: async () => report,
+    setExtensions: async () => ({ ...report, removed: [] }),
+  })
+  assert.deepEqual(resultText(await pgExtListTool(api, { target: 'blog' })), report)
+  await pgExtAddTool(api, { target: 'blog', extensions: ['pg_trgm'] })
+  await pgExtRmTool(api, { target: 'blog', extensions: ['hstore'] })
+  assert.deepEqual(calls, [
+    'getProject("blog")',
+    `getExtensions("${r.id}")`,
+    'getProject("blog")',
+    `setExtensions("${r.id}", {"add":["pg_trgm"]})`,
+    'getProject("blog")',
+    `setExtensions("${r.id}", {"remove":["hstore"]})`,
+  ])
+})
+
+test('hobby_new passes declared extensions on the resource create, and omits the field when none are given', async () => {
+  const p = project('blog')
+  const r = resource('primary', p.id)
+  const { api, calls } = fakeApi({
+    createProject: async () => ({ project: p }),
+    createResource: async () => ({ resource: r }),
+  })
+  await newTool(api, { name: 'blog', extensions: ['vector'] })
+  await newTool(api, { name: 'blog' })
+  assert.equal(calls[1], 'createResource("blog", {"kind":"postgres","name":"primary","extensions":["vector"]})')
+  assert.equal(calls[3], 'createResource("blog", {"kind":"postgres","name":"primary"})')
+})
+
+test('hobby_pg_ext_add on an app is a usage error, with no extensions call made', async () => {
+  const p = project('blog')
+  const r = appResource('web', p.id, {})
+  const { api, calls } = fakeApi({
+    getProject: async (): Promise<ProjectDetailResponse> => ({ project: p, resources: [r] }),
+  })
+  const result = await pgExtAddTool(api, { target: 'blog', extensions: ['vector'] })
+  assert.equal(result.isError, true)
   assert.deepEqual(calls, ['getProject("blog")'])
 })

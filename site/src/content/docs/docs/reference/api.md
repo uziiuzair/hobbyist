@@ -77,6 +77,8 @@ be called with a token, only with the password.
 | `POST /v1/resources/{id}/query` | Run SQL. Body `{ sql, params? }` |
 | `POST /v1/resources/{id}/deploy` | Deploy code to an existing resource |
 | `POST /v1/resources/{id}/env` | Body `{ set?, unset?, replace? }`. Returns `{ resource, keys, stopped }`, names only |
+| `GET /v1/resources/{id}/extensions` | Postgres only. Wakes it. Returns `{ extensions: { declared, installed: [{ name, version }], missing } }` |
+| `POST /v1/resources/{id}/extensions` | Body `{ add?, remove? }`. `add` applies `CREATE EXTENSION IF NOT EXISTS ... CASCADE` before storing; `remove` undeclares and drops nothing |
 | `GET /v1/resources/{id}/queue/messages` | Peek without leasing. `?limit=` defaults to 10. `{ messages: [{ id, timestampMs, attempts, contentType, body }] }` |
 | `POST /v1/resources/{id}/queue/messages` | Enqueue. Body `{ body, delaySeconds? }`, 201 with `{ id }` |
 | `DELETE /v1/resources/{id}/queue/messages` | Purge. `{ purged }` |

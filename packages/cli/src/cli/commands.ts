@@ -33,7 +33,14 @@ import { startDaemon } from '../daemon/server.js'
 import { MIN_PASSWORD_LENGTH, hasOperatorCredential, setOperatorPassword } from '../daemon/studio/auth.js'
 import { issueToken, readTokens, revokeToken } from '../daemon/studio/tokens.js'
 import type { WireResource } from '../daemon/wire.js'
-import { createRemoteClient, DaemonUnreachableError, type Api, type IgnoredKey, type RawResponse } from './client.js'
+import {
+  createRemoteClient,
+  DaemonUnreachableError,
+  type Api,
+  type ExtensionsResponse,
+  type IgnoredKey,
+  type RawResponse,
+} from './client.js'
 import { CLI_VERSION } from '../version.js'
 import { activeRemote, forgetRemote, listRemotes, saveRemote } from './remote.js'
 import { EXIT_UPDATE_AVAILABLE, exitCodeForError } from './exit.js'
@@ -1077,7 +1084,7 @@ export async function cmdCron(c: Ctx, positionals: string[], flags: Flags): Prom
 export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const name = positionals[0]
   if (name === undefined) {
-    throw new UsageError('usage: hobby new <name> [--empty] [--pin]')
+    throw new UsageError('usage: hobby new <name> [--empty] [--pin] [--extension <ext>...]')
   }
 
   // `--pin`: born pinned awake, for the project that must never cold-start
@@ -1123,7 +1130,11 @@ export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promi
   // moments ago.
   let resource
   try {
-    ;({ resource } = await c.api.createResource(project.name, { kind: 'postgres', name: DEFAULT_POSTGRES_NAME }))
+    ;({ resource } = await c.api.createResource(project.name, {
+      kind: 'postgres',
+      name: DEFAULT_POSTGRES_NAME,
+      ...extensionsFrom(flags),
+    }))
   } catch (err) {
     try {
       await c.api.deleteProject(project.name)
@@ -1283,9 +1294,13 @@ async function createResourceAndReport(
   project: string,
   kind: CreatableKind,
   name: string,
-  json: boolean
+  json: boolean,
+  extensions: string[] = []
 ): Promise<number> {
-  const { resource } = await c.api.createResource(project, { kind, name })
+  const { resource } = await c.api.createResource(
+    project,
+    kind === 'postgres' && extensions.length > 0 ? { kind, name, extensions } : { kind, name }
+  )
   if (json) {
     c.io.out(JSON.stringify({ resource }))
   } else {
@@ -1315,20 +1330,110 @@ export async function cmdCreate(c: Ctx, positionals: string[], flags: Flags): Pr
   return createResourceAndReport(c, project, kind, name, flags.json === true)
 }
 
+// `--extension <name>`, repeatable, on `hobby new` and `hobby pg create`:
+// declared at creation and created on the database's first boot, so it costs
+// no extra wake. Absent sends no field.
+function extensionsFrom(flags: Flags): { extensions?: string[] } {
+  const raw = flags.extension
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : []
+  return list.length === 0 ? {} : { extensions: list }
+}
+
+const PG_USAGE =
+  'usage: hobby pg create --project <project> <name> [--extension <ext>...] | hobby pg ext [ls] <target> | ' +
+  'hobby pg ext add <target> <ext>... | hobby pg ext rm <target> <ext>...'
+
 // `hobby pg create --project <p> <name>`: kept as the explicit form for
 // anyone who prefers spelling out the kind, an alias for cmdCreate above
 // rather than a second implementation of the same route.
+//
+// `hobby pg ext`: declared extensions and what is installed, over
+// GET/POST /v1/resources/:id/extensions. Under the existing `pg` verb
+// because extensions are a postgres-only idea, the same reason `pg create`
+// lives here. `rm` undeclares and never drops (see setExtensionsRoute).
 export async function cmdPg(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const sub = positionals[0]
+  if (sub === 'ext') {
+    return cmdPgExt(c, positionals.slice(1), flags)
+  }
   if (sub !== 'create') {
-    throw new UsageError(`usage: hobby pg create --project <project> <name>${sub === undefined ? '' : ` (got: ${sub})`}`)
+    throw new UsageError(sub === undefined ? PG_USAGE : `unknown pg subcommand: ${sub}\n${PG_USAGE}`)
   }
   const name = positionals[1]
   const project = projectFrom(c, flags)
   if (project === undefined || name === undefined) {
-    throw new UsageError('usage: hobby pg create --project <project> <name>')
+    throw new UsageError('usage: hobby pg create --project <project> <name> [--extension <ext>...]')
   }
-  return createResourceAndReport(c, project, 'postgres', name, flags.json === true)
+  return createResourceAndReport(c, project, 'postgres', name, flags.json === true, extensionsFrom(flags).extensions)
+}
+
+async function resolvePgTarget(c: Ctx, target: string): Promise<{ project: Project; resource: WireResource }> {
+  const found = await resolveTarget(c.api, target, c.config.project)
+  if (found.resource.kind !== 'postgres') {
+    throw new UsageError(`${target} is a ${found.resource.kind}, and only a postgres resource has extensions`)
+  }
+  return found
+}
+
+function printExtensions(c: Ctx, label: string, report: ExtensionsResponse['extensions']): void {
+  c.io.out(label)
+  c.io.out(`  declared: ${report.declared.length === 0 ? '(none)' : report.declared.join(', ')}`)
+  if (report.installed === null) {
+    c.io.out('  installed: not read, it is asleep (`hobby pg ext ls` wakes it to read)')
+    return
+  }
+  c.io.out('  installed:')
+  for (const ext of report.installed) {
+    const mark = report.declared.includes(ext.name) ? '' : '  (not declared)'
+    c.io.out(`    ${ext.name} ${ext.version}${mark}`)
+  }
+  if (report.missing !== null && report.missing.length > 0) {
+    c.io.out(`  declared but not installed: ${report.missing.join(', ')} (\`hobby pg ext add\` creates them again)`)
+  }
+}
+
+async function cmdPgExt(c: Ctx, args: string[], flags: Flags): Promise<number> {
+  const first = args[0]
+  const op = first === 'add' || first === 'rm' || first === 'ls' ? first : 'ls'
+  const rest = op === 'ls' && first !== 'ls' ? args : args.slice(1)
+
+  if (op === 'ls') {
+    if (rest.length > 1) {
+      throw new UsageError(PG_USAGE)
+    }
+    const target = targetOrLinked(c, rest, PG_USAGE)
+    const { project, resource } = await resolvePgTarget(c, target)
+    const result = await c.api.getExtensions(resource.id)
+    if (flags.json) {
+      c.io.out(JSON.stringify(result))
+      return 0
+    }
+    printExtensions(c, `${project.name}/${resource.name}:`, result.extensions)
+    return 0
+  }
+
+  // `hobby pg ext add <target> <ext>...`, or in a linked directory with a
+  // single argument, `hobby pg ext add <ext>`: the same reading as
+  // `hobby env unset`.
+  const linked = c.config.project ?? null
+  const { target, names } =
+    rest.length >= 2 || linked === null
+      ? { target: rest[0], names: rest.slice(1) }
+      : { target: linked, names: rest }
+  if (target === undefined || names.length === 0) {
+    throw new UsageError(PG_USAGE)
+  }
+  const { project, resource } = await resolvePgTarget(c, target)
+  const result = await c.api.setExtensions(resource.id, op === 'add' ? { add: names } : { remove: names })
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+    return 0
+  }
+  printExtensions(c, `${project.name}/${resource.name}:`, result.extensions)
+  if (op === 'rm') {
+    c.io.out('undeclared only. Nothing was dropped; DROP EXTENSION from psql if you mean it.')
+  }
+  return 0
 }
 
 // Turns a postgres:// connection string into the libpq PG* environment

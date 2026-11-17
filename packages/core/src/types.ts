@@ -82,6 +82,13 @@ export interface PostgresConfig extends ResourceConfigBase {
   superuser: string
   password: string
   database: string
+  // Extensions this resource declares, applied with CREATE EXTENSION IF NOT
+  // EXISTS at creation and whenever the list changes (packages/pg/src/
+  // extensions.ts). Optional and absent on every row written before the
+  // field existed, which reads as an empty list. A declaration, not a
+  // record of what is installed: that lives in the data directory's own
+  // pg_extension and is read live.
+  extensions?: string[]
 }
 
 // A container the user brought, either built here from their Dockerfile or
