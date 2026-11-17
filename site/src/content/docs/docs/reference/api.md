@@ -57,6 +57,7 @@ be called with a token, only with the password.
 | `GET /v1/health` | Liveness. The one `/v1` route open without a credential |
 | `GET /v1/version` | `{ version }`, the daemon's build. Behind the gate on purpose, unlike health |
 | `GET /v1/preflight` | What `hobby init` reports: Docker, filesystem, every port the daemon binds (`ports.proxy`, `api`, `http`, `queue`, and `caddy` for 80/443 when Caddy is on), how `proxyHost` resolved, the daemon lock, what Studio exposes, host networking |
+| `POST /v1/import` | Copy an existing Postgres in with `pg_dump` and `pg_restore`. Body `{ project, source, resource?, schemas?, excludeSchemas?, strict? }`; `source` is the connection string, never echoed back. 200 with `{ import }`: tables, rows, bytes, duration, extensions, restore errors |
 | `GET` `POST /v1/projects` | List, create. Create accepts `{ name, sleepAfterSeconds? }`; absent, the box-wide default is copied in |
 | `GET` `DELETE /v1/projects/{name}` | Detail with resources, destroy |
 | `POST /v1/projects/{name}/resources` | Create a resource. Body `{ kind, name, ... }`, kind-specific; `queue` needs only a name |

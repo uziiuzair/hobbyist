@@ -123,3 +123,9 @@ fails when a skill names a verb, flag or MCP tool that does not exist, or
 breaks the skill frontmatter rules; `packages/mcp/test/plugin-skills.test.ts`
 runs it in `npm test`. Install steps are on the site at
 `/docs/guides/agent-plugin/`.
+
+**2026-11-17 amendment (import).** `hobby_import` mirrors `hobby import` and
+takes the source connection string by reference only, as `sourceEnv` or
+`sourceFile`, resolved in the MCP server process; there is no argument for the
+string itself. The reasoning is in `docs/portability/CLAUDE.md`'s 2026-11-17
+import amendment.

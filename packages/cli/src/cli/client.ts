@@ -14,6 +14,7 @@ import http from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { HobbyError, type ErrorCode, type Project } from '@hobby.sh/core'
 import type { WireResource, WireSnapshotManifest } from '../daemon/wire.js'
+import type { ImportReport } from '../daemon/import.js'
 
 // Thrown when the socket does not exist, or exists but nothing answers on
 // it (a stale file, or the daemon crashed). Deliberately not a HobbyError:
@@ -398,6 +399,16 @@ export interface SnapshotRestoreResponse {
   preRestoreDir: string | null
 }
 
+export interface ImportInput {
+  project: string
+  source: string
+  resource?: string
+  schemas?: string[]
+  excludeSchemas?: string[]
+  strict?: boolean
+}
+export type { ImportReport }
+
 export interface Api {
   health(): Promise<HealthResponse>
   version(): Promise<VersionResponse>
@@ -511,6 +522,10 @@ export interface Api {
     opts?: { as?: string; inPlace?: boolean; allowPause?: boolean }
   ): Promise<SnapshotRestoreResponse>
   deleteSnapshot(id: string): Promise<DeletedResponse>
+  // POST /v1/import. `source` is the connection string itself, resolved by
+  // the caller from stdin, a file or an environment variable
+  // (resolveImportSource, cli/import.ts); the daemon never echoes it.
+  importDatabase(input: ImportInput): Promise<{ import: ImportReport }>
 }
 
 // Accepts a transport rather than only a socket path (ADR 0018). Every verb
@@ -666,5 +681,6 @@ export function createApi(transport: string | DaemonClient): Api {
         ...(opts?.allowPause === true ? { allowPause: true } : {}),
       }),
     deleteSnapshot: (id) => call(client, 'DELETE', `/v1/snapshots/${p(id)}`),
+    importDatabase: (input) => call(client, 'POST', '/v1/import', input),
   }
 }

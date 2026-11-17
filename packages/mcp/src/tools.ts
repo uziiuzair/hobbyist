@@ -12,7 +12,7 @@
 // invents a new route or a new capability.
 
 import { HobbyError, parseTarget } from '@hobby.sh/core'
-import { DaemonUnreachableError, parseDuration, resolveQueueTarget, resolveTarget, type Api } from '@hobby.sh/cli'
+import { DaemonUnreachableError, parseDuration, resolveImportSource, resolveQueueTarget, resolveTarget, type Api } from '@hobby.sh/cli'
 
 // The MCP SDK's CallToolResult shape, reproduced by hand rather than
 // imported, so this file has zero dependency on @modelcontextprotocol/sdk.
@@ -147,6 +147,16 @@ export interface QueuePurgeArgs {
 export interface QueueRmArgs {
   target: string
   confirm: boolean
+}
+
+export interface ImportArgs {
+  project: string
+  resource?: string
+  sourceEnv?: string
+  sourceFile?: string
+  schemas?: string[]
+  excludeSchemas?: string[]
+  strict?: boolean
 }
 
 export interface QueueSetRetentionArgs {
@@ -535,5 +545,52 @@ export async function queueSetRetentionTool(api: Api, args: QueueSetRetentionArg
   return run(async () => {
     const { resource } = await resolveQueueTarget(api, args.target)
     return await api.setRetention(resource.id, args.retentionSeconds)
+  })
+}
+
+// Mirrors `hobby import <project> --from-env NAME` and `--from-file PATH`.
+// There is deliberately no argument that takes the connection string
+// itself, and no stdin form: anything a model passes as a tool argument is
+// in the conversation, the client's transcript on disk and the provider's
+// context, and a model asked to "import my Neon database" would otherwise
+// be invited to ask for the password and paste it in. Instead the person
+// puts the string where this server process can read it (an environment
+// variable in the MCP server's configuration, or a chmod 600 file) and the
+// model names the reference. This process resolves it with the CLI's own
+// resolveImportSource, so the two surfaces accept the same references and
+// say the same things when one is wrong, and sends it to the daemon over
+// the unix socket. The value never comes back: the daemon's report holds
+// the source's host and database name only, and every error from the
+// daemon is redacted (packages/cli/src/daemon/import.ts).
+//
+// The reference cannot widen what a model could already do: a variable or
+// file that is not a Postgres connection string is refused without its
+// content being quoted, and the import only reads from the source.
+export async function importTool(api: Api, args: ImportArgs): Promise<ToolResult> {
+  return run(async () => {
+    if ((args.sourceEnv === undefined) === (args.sourceFile === undefined)) {
+      throw new HobbyError(
+        'usage',
+        'hobby_import needs exactly one of sourceEnv or sourceFile',
+        'the connection string is never a tool argument: ask the person to set it in an environment variable of this MCP server, ' +
+          'or write it to a file only they can read (chmod 600), and pass the variable name or the path'
+      )
+    }
+    const source = await resolveImportSource(
+      {
+        ...(args.sourceEnv === undefined ? {} : { fromEnv: args.sourceEnv }),
+        ...(args.sourceFile === undefined ? {} : { fromFile: args.sourceFile }),
+      },
+      process.env,
+      null
+    )
+    return await api.importDatabase({
+      project: args.project,
+      source,
+      ...(args.resource === undefined ? {} : { resource: args.resource }),
+      ...(args.schemas !== undefined && args.schemas.length > 0 ? { schemas: args.schemas } : {}),
+      ...(args.excludeSchemas !== undefined && args.excludeSchemas.length > 0 ? { excludeSchemas: args.excludeSchemas } : {}),
+      ...(args.strict === true ? { strict: true } : {}),
+    })
   })
 }

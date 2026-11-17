@@ -76,6 +76,7 @@ import { diffSchemas } from './schema-diff.js'
 import { CLI_VERSION } from '../version.js'
 import { listCrons } from './crons.js'
 import { clearWakeRefusal, getOrCreateWake, waitForProjectAwakeable, wakeBoundDatabase, type DaemonContext } from './context.js'
+import { readImportRequest, runImport } from './import.js'
 import { runPreflight } from './preflight.js'
 import { treeOpsFor } from './tree-ops.js'
 import {
@@ -2884,6 +2885,15 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
   // reads it over the unix socket or an authenticated remote (ADR 0018).
   if (method === 'GET' && segments.length === 2 && segments[1] === 'version') {
     return { status: 200, body: { version: CLI_VERSION } }
+  }
+
+  // POST /v1/import: copy an existing Postgres into a hobby resource
+  // (import.ts). The body carries the source connection string, which is a
+  // credential: no route echoes a request body, and runImport redacts
+  // everything it surfaces.
+  if (method === 'POST' && segments.length === 2 && segments[1] === 'import') {
+    const request = readImportRequest(await readJsonBody(req))
+    return { status: 200, body: { import: await runImport(ctx, request, { deleteProject }) } }
   }
 
   if (method === 'GET' && segments.length === 2 && segments[1] === 'preflight') {

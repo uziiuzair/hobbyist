@@ -50,6 +50,7 @@ import {
   type Ctx,
   type Flags,
 } from './commands.js'
+import { cmdImport } from './import.js'
 import { EXIT_DAEMON_UNREACHABLE, EXIT_OPERATION_FAILED, EXIT_USAGE, exitCodeForError } from './exit.js'
 
 export interface ReadLineOptions {
@@ -228,6 +229,12 @@ const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]>
   ['eject', 'hobby eject <project>', 'emit docker-compose.yml plus data'],
   ['eject', 'hobby eject <project> --release', 'the same, and stop managing it'],
   ['adopt', 'hobby adopt <project>', 'manage a released project again'],
+  ['import', 'hobby import <project>', 'copy a Postgres in: connection string on stdin (prompted, hidden)'],
+  ['import', 'hobby import <project> --from-file <path>', 'the same, the connection string read from a file'],
+  ['import', 'hobby import <project> --from-env <NAME>', 'the same, from an environment variable, by name'],
+  ['import', 'hobby import ... --resource <name>', 'into that postgres resource, created if absent'],
+  ['import', 'hobby import ... --schema <s> [--exclude-schema <s>]', 'only these schemas (repeatable), e.g. public for Supabase'],
+  ['import', 'hobby import ... --strict', 'one transaction: all or nothing'],
   ['snapshot', 'hobby snapshot <project> [--allow-pause]', 'a local snapshot, everything quiesced'],
   ['snapshot', 'hobby snapshot <project> --online', 'postgres-only projects: no pause, pg_basebackup'],
   ['snapshot', 'hobby snapshot ls <project>', 'its snapshots, newest first'],
@@ -583,6 +590,14 @@ export async function run(argv: string[], io: Io): Promise<number> {
           value: ['project', 'limit', 'retention'],
         })
         return await cmdQueue(ctx, positionals, flags)
+      }
+      case 'import': {
+        const { positionals, flags } = parseArgs(rest, {
+          bool: ['json', 'strict'],
+          value: ['from-env', 'from-file', 'resource'],
+          multi: ['schema', 'exclude-schema'],
+        })
+        return await cmdImport(ctx, positionals, flags)
       }
       case 'snapshot': {
         // One parseArgs for every `hobby snapshot` shape, as `queue` does

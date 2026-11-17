@@ -71,6 +71,7 @@ There is nothing secret in it: access is whoever can open the daemon's socket.
 | `hobby_allow_rm` | `hobby allow rm` |
 | `hobby_allow_off` | `hobby allow off` |
 | `hobby_rm` | `hobby rm` |
+| `hobby_import` | `hobby import --from-env` / `--from-file`, as `sourceEnv` / `sourceFile` |
 | `hobby_queue_list` | `hobby queue ls` |
 | `hobby_queue_create` | `hobby queue create` |
 | `hobby_queue_peek` | `hobby queue peek` |
@@ -78,6 +79,16 @@ There is nothing secret in it: access is whoever can open the daemon's socket.
 | `hobby_queue_purge` | `hobby queue purge` |
 | `hobby_queue_rm` | `hobby queue rm` |
 | `hobby_queue_set_retention` | `hobby queue set --retention` |
+
+## The import tool never sees the password
+
+`hobby_import` takes the source connection string by reference only: the name
+of an environment variable set in the MCP server's own configuration
+(`sourceEnv`), or the path of a file on the box (`sourceFile`). The MCP server
+process reads it and passes it to the daemon; there is no argument that takes
+the string itself, so a model never has to ask for it and it never enters a
+transcript. The result holds the source's host and database name, never the
+string.
 
 ## Destructive tools require confirmation twice
 

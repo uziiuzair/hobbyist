@@ -26,6 +26,7 @@ import {
   envSetTool,
   envUnsetTool,
   expireTool,
+  importTool,
   listTool,
   logsTool,
   newTool,
@@ -486,6 +487,37 @@ export function createServer(api: Api): McpServer {
       },
     },
     async (args) => queueSetRetentionTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_import',
+    {
+      description:
+        'copy an existing Postgres database (Neon, Supabase, RDS, a local server) into a hobby project with pg_dump and ' +
+        'pg_restore. mirrors `hobby import <project> --from-env <NAME>` / `--from-file <path>`. the connection string is ' +
+        'NEVER an argument and you should never ask for it in the conversation: ask the person to put it in an environment ' +
+        'variable of this MCP server or in a file only they can read, then pass sourceEnv or sourceFile. the project (and ' +
+        'its postgres resource) is created when absent; an existing database must be empty, nothing is ever restored over ' +
+        'data. only import from a server you trust: the dump is restored as the target superuser. returns tables, rows, ' +
+        'bytes, duration, extensions and a summary of pg_restore errors.',
+      inputSchema: {
+        project: z.string().min(1).describe('the hobby project to import into; created when it does not exist'),
+        resource: z.string().min(1).optional().describe('a postgres resource in the project; created when absent'),
+        sourceEnv: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('NAME of an environment variable of this MCP server that holds the connection string (not the value)'),
+        sourceFile: z.string().min(1).optional().describe('path to a file on this machine holding the connection string'),
+        schemas: z
+          .array(z.string().min(1))
+          .optional()
+          .describe('only these schemas, as pg_dump --schema patterns. ["public"] for Supabase, whose auth and storage schemas need its own extensions'),
+        excludeSchemas: z.array(z.string().min(1)).optional().describe('pg_dump --exclude-schema patterns'),
+        strict: z.boolean().optional().describe('restore in one transaction: any error rolls everything back'),
+      },
+    },
+    async (args) => importTool(api, args)
   )
 
   return server
