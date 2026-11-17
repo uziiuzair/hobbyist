@@ -21,6 +21,7 @@ import {
   HobbyError,
   openStore,
   type ComputeRuntime,
+  type ElevatedTreeOps,
   type HobbyConfig,
   type KindRegistry,
   type Paths,
@@ -100,6 +101,11 @@ export interface DaemonContext {
   // test can play a Postgres that ships some extensions and not others.
   // Production leaves it unset and gets real CREATE EXTENSION.
   extensions?: ExtensionOps
+  // How a copy or removal the daemon was refused (EACCES or EPERM) is
+  // retried as root: tree-ops.ts. Production leaves it unset and gets
+  // createContainerTreeOps (packages/core/src/docker.ts), a throwaway root
+  // container; a test sets it to watch the fallback run without Docker.
+  elevatedTreeOps?: (images: string[]) => ElevatedTreeOps
 }
 
 // A convenience factory for the real, production wiring: opens the real

@@ -11,7 +11,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync } from 'node:fs'
-import { rm, rmdir } from 'node:fs/promises'
+import { rmdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   DEFAULT_PORT_BIND,
@@ -76,6 +76,7 @@ import { CLI_VERSION } from '../version.js'
 import { listCrons } from './crons.js'
 import { clearWakeRefusal, getOrCreateWake, waitForProjectAwakeable, wakeBoundDatabase, type DaemonContext } from './context.js'
 import { runPreflight } from './preflight.js'
+import { treeOpsFor } from './tree-ops.js'
 import {
   deleteSnapshot,
   findSnapshot,
@@ -418,10 +419,16 @@ async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<Rou
   // branching to that name fail with "destination already exists" (issue
   // #178). Only attempted once every kind succeeded: a failed teardown
   // leaves its data where it is for the manual cleanup the error names.
+  //
+  // A worker's state directory holds files its container wrote as root, so
+  // a non-root daemon on Linux is refused here; tree-ops.ts retries as root
+  // in a container. Its image candidates come from `resources`, listed
+  // before the kinds ran, because destroyWorker has removed the worker's own
+  // image by now and tree-ops.ts falls back to images that stay local.
   const projectDir = join(ctx.paths.projectsDir, project.name)
   if (failures.length === 0) {
     try {
-      await rm(projectDir, { recursive: true, force: true })
+      await treeOpsFor(ctx, resources).remove(projectDir)
     } catch (err) {
       failures.push(`remove ${projectDir}: ${errorMessage(err)}`)
     }

@@ -7,10 +7,9 @@
 // they restore it.
 
 import { randomUUID } from 'node:crypto'
-import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join, relative, sep } from 'node:path'
 import {
-  cloneTree,
   expectKind,
   guardFor,
   HobbyError,
@@ -33,6 +32,7 @@ import { createPostgresFromClone } from '@hobby.sh/pg'
 import { WORKER_PORT_RANGE } from '@hobby.sh/worker'
 import { basebackupPostgres, type UnpackOptions } from './basebackup.js'
 import { holdProjectAsleep, holdProjectExclusive, type DaemonContext } from './context.js'
+import { treeOpsFor } from './tree-ops.js'
 
 // Sortable, and lowercase because restore builds project names out of this and
 // validateName (packages/core/src/names.ts:10) allows only /^[a-z][a-z0-9-]/.
@@ -276,12 +276,16 @@ export async function takeSnapshot(
   // packages/cli/src/daemon/context.ts, has the pool-reconnect case that
   // makes this ordinary rather than rare). Outside the try: a refusal here
   // has stopped nothing and cloned nothing, so there is nothing to undo.
+  // Copies and removals go through tree-ops.ts: on Linux with a non-root
+  // daemon, a PGDATA (and a worker's state directory) belongs to a container
+  // user, and the native operation is refused.
+  const ops = treeOpsFor(ctx, ctx.store.listResources(project.id))
   const release = holdProjectAsleep(ctx, project.id, project.name)
   try {
     await quiesce(ctx, project, { ...opts.quiesce, onStopped: (resourceId) => stopped.push(resourceId) })
 
     await mkdir(partialDir, { recursive: true })
-    const result = await cloneTree(join(ctx.paths.projectsDir, project.name), join(partialDir, 'data'))
+    const result = await ops.clone(join(ctx.paths.projectsDir, project.name), join(partialDir, 'data'))
     const clone = result.mechanism
 
     const manifest: SnapshotManifest = {
@@ -306,7 +310,7 @@ export async function takeSnapshot(
 
     return manifest
   } catch (err: unknown) {
-    await rm(partialDir, { recursive: true, force: true })
+    await ops.remove(partialDir)
     throw explainSnapshotFailure(err, partialDir)
   } finally {
     // Safe to await unguarded only because resume (above) already catches
@@ -453,6 +457,10 @@ export async function takeOnlineSnapshot(
 
   // Outside the try, like takeSnapshot's hold: a refusal here has touched
   // nothing, so there is nothing to undo.
+  // Copies and removals go through tree-ops.ts: on Linux with a non-root
+  // daemon, a PGDATA (and a worker's state directory) belongs to a container
+  // user, and the native operation is refused.
+  const ops = treeOpsFor(ctx, ctx.store.listResources(project.id))
   const release = holdProjectExclusive(ctx, project.id, project.name)
   const handles: Array<ReturnType<DaemonContext['activity']['open']>> = []
   try {
@@ -502,7 +510,7 @@ export async function takeOnlineSnapshot(
         // matters to ADR 0016's free-space reasoning.
         clone = 'copy'
       } else {
-        const result = await cloneTree(
+        const result = await ops.clone(
           ctx.paths.resourceDir(project.name, resource.name),
           join(partialDir, 'data', resource.name)
         )
@@ -544,7 +552,7 @@ export async function takeOnlineSnapshot(
     await rename(partialDir, finalDir)
     return manifest
   } catch (err: unknown) {
-    await rm(partialDir, { recursive: true, force: true })
+    await ops.remove(partialDir)
     throw explainSnapshotFailure(err, partialDir)
   } finally {
     for (const handle of handles) {
@@ -651,7 +659,8 @@ export async function deleteSnapshot(ctx: DaemonContext, id: string): Promise<vo
   if (found === null) {
     throw new HobbyError('resource_not_found', `no snapshot ${id}`, 'run `hobby snapshot ls <project>`')
   }
-  await rm(found.dir, { recursive: true, force: true })
+  // A snapshot's data keeps its container owners (tree-ops.ts).
+  await treeOpsFor(ctx, found.manifest.resources).remove(found.dir)
 }
 
 export async function writeVerification(found: FoundSnapshot, verification: SnapshotVerification): Promise<void> {
@@ -857,6 +866,10 @@ async function restoreInPlace(ctx: DaemonContext, found: FoundSnapshot, opts: Re
   }
 
   const liveDir = join(ctx.paths.projectsDir, name)
+  // The copy and every removal below go through tree-ops.ts: on Linux with a non-root
+  // daemon, a PGDATA (and a worker's state directory) belongs to a container
+  // user, and the native operation is refused.
+  const ops = treeOpsFor(ctx, [...found.manifest.resources, ...current])
   const stagingDir = `${liveDir}.restoring-${id}`
   const asideDir = `${liveDir}.pre-restore-${id}`
 
@@ -875,11 +888,11 @@ async function restoreInPlace(ctx: DaemonContext, found: FoundSnapshot, opts: Re
   // leftover from a restore that died during step 1 and holds nothing that
   // is not also in the snapshot. cloneTree refuses a destination that exists
   // (assertDestinationAbsent, packages/core/src/copy.ts), so it goes.
-  await rm(stagingDir, { recursive: true, force: true })
+  await ops.remove(stagingDir)
   try {
-    await cloneTree(join(found.dir, 'data'), stagingDir)
+    await ops.clone(join(found.dir, 'data'), stagingDir)
   } catch (err: unknown) {
-    await rm(stagingDir, { recursive: true, force: true })
+    await ops.remove(stagingDir)
     throw err
   }
 
@@ -905,7 +918,7 @@ async function restoreInPlace(ctx: DaemonContext, found: FoundSnapshot, opts: Re
       throw err
     }
   } catch (err: unknown) {
-    await rm(stagingDir, { recursive: true, force: true })
+    await ops.remove(stagingDir)
     throw err
   } finally {
     // resume never throws (its own comment above), which is what makes an
@@ -920,14 +933,14 @@ async function restoreInPlace(ctx: DaemonContext, found: FoundSnapshot, opts: Re
   let preRestoreDir: string | null = liveExisted ? asideDir : null
   if (preRestoreDir !== null && restartFailures.length === 0) {
     try {
-      await rm(preRestoreDir, { recursive: true, force: true })
+      await ops.remove(preRestoreDir)
       preRestoreDir = null
     } catch (err: unknown) {
-      // On Linux a PGDATA is owned by the container's postgres uid, not by
-      // whoever runs the daemon (createDefaultRemoveDataDir's comment,
-      // packages/pg/src/postgres.ts), so this can fail with EACCES. The
-      // restore itself has succeeded by now; the leftover is reported, not
-      // turned into a failure.
+      // ops.remove retries as root in a container when the daemon is
+      // refused (tree-ops.ts), so this fails only if that fails too: no
+      // local image, or Docker unreachable. The restore itself has
+      // succeeded by now; the leftover is reported, not turned into a
+      // failure.
       console.error(`restore: could not remove ${preRestoreDir}: ${errorMessage(err)}`)
     }
   }
@@ -971,7 +984,8 @@ export async function restoreSnapshot(
     )
   }
 
-  await cloneTree(join(found.dir, 'data'), targetDir)
+  // Through tree-ops.ts so a PGDATA keeps its container owner and mode.
+  await treeOpsFor(ctx, found.manifest.resources).clone(join(found.dir, 'data'), targetDir)
 
   const project = ctx.store.createProject({
     name: target,

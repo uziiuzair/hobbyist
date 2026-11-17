@@ -30,7 +30,7 @@ const CADDY_CONTAINER_NAME = 'hobby-caddy'
 // Where the image's own default Caddyfile lives, and therefore where the
 // bootstrap file below is bind-mounted so `caddy run` reads ours instead.
 const CADDY_CONFIG_PATH = '/etc/caddy/Caddyfile'
-const CADDY_IMAGE = 'caddy:2-alpine'
+export const CADDY_IMAGE = 'caddy:2-alpine'
 const CADDY_SERVER_NAME = 'hobby'
 const FALLBACK_ROUTE_ID = 'hobby-fallback'
 const STOP_TIMEOUT_SEC = 10

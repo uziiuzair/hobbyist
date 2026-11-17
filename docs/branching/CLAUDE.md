@@ -273,3 +273,67 @@ fails with a hint to retry.
   which case it is reported and kept, and the next reset refuses until it is
   moved.
 - No list of children, no merge, and no data diff.
+
+## Amendment, 2026-11-17: Linux ownership is built, and CI is what proves it
+
+"Linux ownership: still open" above, and the same item in the reset
+amendment, are superseded. The first CI smoke run on GitHub's ubuntu-latest,
+with the daemon as the ordinary `runner` user in the docker group (a setup
+the install guide and `scripts/hobby.service` both support), hit exactly the
+predicted failure: `hobby branch` stopped with `EACCES: permission denied,
+scandir '<HOBBY_HOME>/projects/<p>/primary/pgdata/18/docker'` from
+`cloneTree`, because that directory is uid 70, mode 0700.
+
+**What is built.** The fix this file named: the copy runs inside a
+throwaway container, as `createDefaultRemoveDataDir`
+(`packages/pg/src/postgres.ts`) already did for removal.
+
+- `copyTree` and `removeTree` (`packages/core/src/copy.ts`) run the native
+  operation first (`cloneTree`, `fs.rm`) and only on EACCES or EPERM hand it
+  to an `ElevatedTreeOps`. On macOS, and for a root daemon, the native
+  operation succeeds and nothing changes. A failed fallback is one error
+  naming the path, the native refusal and why the retry failed, with the
+  EACCES code kept.
+- `createContainerTreeOps` (`packages/core/src/docker.ts`) is the Docker
+  implementation: `docker run --rm --pull never --user 0:0`, one bind mount
+  of the deepest directory holding source and destination (FICLONE refuses
+  to reflink across two mounts), then `cp -a --reflink=always`, falling back
+  to plain `cp -a` reported as `copy`. `cp -a` as root keeps owner, group,
+  mode and symlinks, which is what Postgres requires of a PGDATA. Removal is
+  `rm -rf` of one entry under a bind-mounted parent.
+- The image is never pulled. `treeOpsFor` (`packages/cli/src/daemon/tree-ops.ts`)
+  lists candidates: the resources' own postgres images (for a PGDATA, the
+  image that wrote it), their app and worker images, the configured default
+  postgres image, every other postgres image on the box, `caddy:2-alpine`,
+  then the worker base image. The first one `docker image inspect` finds is
+  used. The later entries exist because `destroyWorker` removes the worker's
+  image before `hobby rm` removes the project directory.
+- Call sites: `branchProject`'s clone and `discardBranch`'s cleanup
+  (`branch.ts`); `resetBranch`'s clone into staging, staging cleanup and the
+  `.pre-reset` removal (`reset.ts`), so a successful reset no longer leaves
+  `.pre-reset` behind on Linux; and every snapshot path (backups/CLAUDE.md
+  has those).
+
+**Cost on Linux, stated plainly.** The default image, `postgres:18-alpine`,
+has busybox `cp`, which has no `--reflink`. A non-root daemon on Linux
+therefore branches by full copy even on XFS, and `hobby branch` says `copy`.
+A root daemon, or a GNU-cp image earlier in the candidate list, keeps the
+reflink path. Not measured: the container adds one `docker run` per
+resource copied, and its cost has not been timed.
+
+**What is proven where.**
+
+- Unit tests: `packages/core/test/copy.test.ts` (real EACCES made with chmod,
+  fallback injected), `packages/core/test/docker.test.ts` (argv, image
+  choice, no pull), `packages/cli/test/tree-ops.test.ts` (image order,
+  `hobby rm` and a snapshot reaching the fallback).
+- On Docker Desktop 28.4.0 (macOS) against a named volume, which lives in
+  the Linux VM: a uid 1000 process got the CI's EACCES on a 70:70 0700
+  directory, and the container copy reproduced it at the destination as
+  70:70 0700 with `postgres:18-alpine` and `postgres:16`. The helper itself
+  ran end to end against a macOS bind mount.
+- Docker Desktop masks uids on bind mounts, so none of that proves the Linux
+  bind-mount case. **The CI smoke job on ubuntu-latest is the proof**, and it
+  is expected to show `hobby branch`, `hobby snapshot` and `hobby rm` of a
+  project with workers passing as the `runner` user. Until it has, treat this
+  as built, not verified.
