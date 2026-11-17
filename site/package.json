@@ -6,6 +6,7 @@
     "sync:adrs": "node scripts/sync-adrs.mjs",
     "check:adrs": "node scripts/sync-adrs.mjs --check",
     "check:cli": "node scripts/check-cli-reference.mjs",
+    "check:plugin": "node scripts/check-plugin-skills.mjs",
     "prebuild": "npm run sync:adrs && npm run sync:install",
     "dev": "npm run sync:adrs && npm run sync:install && astro dev",
     "build": "astro build",
