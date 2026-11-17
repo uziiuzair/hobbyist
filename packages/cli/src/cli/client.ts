@@ -409,6 +409,12 @@ export interface Api {
   // Undefined sends no field, and the daemon applies its own default
   // (issue #110): the box-wide value, not this process's.
   setSleepPolicy(project: string, sleepAfterSeconds: number | null | undefined): Promise<ProjectResponse>
+  // The project's IP allowlist for the wake-on-connect proxy, carried on the
+  // returned project as `allowlist` (null: open to any address).
+  // GET, POST and DELETE /v1/projects/:name/allowlist.
+  getAllowlist(project: string): Promise<ProjectResponse>
+  setAllowlist(project: string, change: { add?: string[]; remove?: string[] }): Promise<ProjectResponse>
+  clearAllowlist(project: string): Promise<ProjectResponse>
   getProject(name: string): Promise<ProjectDetailResponse>
   // A new project whose postgres resources start from a clone of the
   // source's data. allowPause is the pinned-project guard's override.
@@ -602,6 +608,9 @@ export function createApi(transport: string | DaemonClient): Api {
         `/v1/projects/${p(project)}/sleep-policy`,
         sleepAfterSeconds === undefined ? {} : { sleepAfterSeconds }
       ),
+    getAllowlist: (project) => call(client, 'GET', `/v1/projects/${p(project)}/allowlist`),
+    setAllowlist: (project, change) => call(client, 'POST', `/v1/projects/${p(project)}/allowlist`, change),
+    clearAllowlist: (project) => call(client, 'DELETE', `/v1/projects/${p(project)}/allowlist`),
     getProject: (name) => call(client, 'GET', `/v1/projects/${p(name)}`),
     branchProject: (source, name, opts) =>
       call(

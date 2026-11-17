@@ -991,6 +991,15 @@ export async function restoreSnapshot(
     name: target,
     sleepAfterSeconds: found.manifest.project.sleepAfterSeconds,
   })
+  // The same data as the project it came from, so the same IP allowlist
+  // (the 2026-11-17 allowlist amendment in docs/proxy/CLAUDE.md), copied from
+  // that project as it is now. The manifest does not record one, so a
+  // snapshot restored after its project was deleted comes back open; the
+  // amendment says so.
+  const source = ctx.store.getProjectByName(found.manifest.project.name)
+  if (source?.allowlist != null) {
+    ctx.store.setProjectAllowlist(project.id, [...source.allowlist])
+  }
 
   // Two passes. Every row is created first so that `idMap` (snapshot id to
   // restored id) is complete before any config is rewritten: an app's

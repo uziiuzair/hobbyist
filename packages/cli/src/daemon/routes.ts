@@ -18,6 +18,7 @@ import {
   HobbyError,
   guardFor,
   type ActivityGuardResult,
+  canonicalAllowlist,
   openDatabaseReadOnly,
   validateName,
   type AppResource,
@@ -302,6 +303,53 @@ async function setSleepPolicyRoute(ctx: DaemonContext, req: IncomingMessage, nam
     sleepAfterSeconds = parseSleepAfterSeconds(fields['sleepAfterSeconds'], 'POST /v1/projects/:name/sleep-policy') ?? null
   }
   ctx.store.setProjectSleepAfterSeconds(project.id, sleepAfterSeconds)
+  return { status: 200, body: { project: ctx.store.getProject(project.id) } }
+}
+
+// GET, POST and DELETE /v1/projects/:name/allowlist: which client addresses
+// the wake-on-connect proxy accepts for this project (the 2026-11-17
+// allowlist amendment in docs/proxy/CLAUDE.md). The list lives on the project
+// row and the proxy reads it per connection (createProxyDeps), so a change
+// applies to the next connection; sessions already open are not cut.
+//
+// POST adds and removes entries, canonicalised (core's canonicalAllowlist),
+// so `10.1.2.3/8` is stored and removed as `10.0.0.0/8`. Adding to an open
+// project restricts it. Removing the last entry leaves it restricted to the
+// box itself: taking an address away must never open the project to every
+// address. Only DELETE lifts the restriction, which is `hobby allow off`.
+async function setAllowlistRoute(ctx: DaemonContext, req: IncomingMessage, name: string): Promise<RouteResult> {
+  const route = 'POST /v1/projects/:name/allowlist'
+  const expects = `${route} expects { "add"?: string[], "remove"?: string[] }`
+  const project = getProjectByNameOrThrow(ctx, name)
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const entriesOf = (raw: unknown, field: string): string[] => {
+    if (raw === undefined) return []
+    if (!Array.isArray(raw) || raw.some((entry) => typeof entry !== 'string')) {
+      throw new HobbyError('usage', `${field} must be an array of strings`, expects)
+    }
+    return canonicalAllowlist(raw as string[])
+  }
+  const add = entriesOf(fields['add'], 'add')
+  const remove = entriesOf(fields['remove'], 'remove')
+  if (add.length === 0 && remove.length === 0) {
+    throw new HobbyError('usage', 'nothing to change', expects)
+  }
+  const both = add.filter((entry) => remove.includes(entry))
+  if (both.length > 0) {
+    throw new HobbyError('usage', `${both.join(', ')} is both added and removed in one request`)
+  }
+  const current = project.allowlist ?? []
+  const absent = remove.filter((entry) => !current.includes(entry))
+  if (absent.length > 0) {
+    throw new HobbyError(
+      'not_found',
+      `${absent.join(', ')} ${absent.length === 1 ? 'is' : 'are'} not on project ${project.name}'s allowlist`,
+      current.length === 0 ? 'its allowlist is empty' : `it holds: ${current.join(', ')}`
+    )
+  }
+  const next = canonicalAllowlist([...current.filter((entry) => !remove.includes(entry)), ...add])
+  ctx.store.setProjectAllowlist(project.id, next)
   return { status: 200, body: { project: ctx.store.getProject(project.id) } }
 }
 
@@ -2885,6 +2933,21 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       const name = decodeURIComponent(segments[2] as string)
       getProjectByNameOrThrow(ctx, name)
       return { status: 200, body: { crons: listCrons(ctx, name) } }
+    }
+
+    if (segments.length === 4 && segments[3] === 'allowlist') {
+      const name = decodeURIComponent(segments[2] as string)
+      if (method === 'GET') {
+        return { status: 200, body: { project: getProjectByNameOrThrow(ctx, name) } }
+      }
+      if (method === 'POST') {
+        return await setAllowlistRoute(ctx, req, name)
+      }
+      if (method === 'DELETE') {
+        const project = getProjectByNameOrThrow(ctx, name)
+        ctx.store.setProjectAllowlist(project.id, null)
+        return { status: 200, body: { project: ctx.store.getProject(project.id) } }
+      }
     }
 
     if (segments.length === 4 && method === 'POST' && segments[3] === 'sleep-policy') {

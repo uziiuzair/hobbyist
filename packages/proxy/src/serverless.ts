@@ -56,6 +56,7 @@
 import http from 'node:http'
 import net from 'node:net'
 import type { Duplex } from 'node:stream'
+import type { ClientAddress } from './access.js'
 import { bridgeWithPipelinedPassword } from './pipelined-auth.js'
 import { socketPair } from './socket-pair.js'
 import { handleSql, handleSqlPreflight } from './sql-over-http.js'
@@ -76,12 +77,18 @@ export interface ConnectionOrigin {
   // proxy.ts's plaintextAllowed: loopback in production, every peer on a
   // project network's gateway listener.
   plaintextAllowed: (address: string | undefined) => boolean
+  // Who the client is, read from the socket the proxy accepted (access.ts).
+  // Every in-memory connection this request opens carries it, which is what
+  // keeps a /sql request or a WebSocket session under its project's IP
+  // allowlist: the pair side itself has no address, and the internal HTTP
+  // server below sees only its own loopback relay.
+  client: ClientAddress
 }
 
 export interface ServerlessFrontDeps {
   // Gives one side of an in-memory connection to the proxy's connection
-  // handler, as if it had just been accepted.
-  connectToProxy(stream: Duplex): void
+  // handler, as if it had just been accepted from `client`.
+  connectToProxy(stream: Duplex, client: ClientAddress): void
   // Overrides for tests.
   maxRequestBytes?: number
   maxResponseBytes?: number
@@ -179,9 +186,9 @@ export function createServerlessFront(deps: ServerlessFrontDeps): ServerlessFron
   let inner: Promise<{ server: http.Server; port: number }> | null = null
   let closed = false
 
-  const openConnection = (): Duplex => {
+  const openConnection = (client: ClientAddress): Duplex => {
     const [ours, theirs] = socketPair()
-    deps.connectToProxy(theirs)
+    deps.connectToProxy(theirs, client)
     return ours
   }
 
@@ -205,8 +212,9 @@ export function createServerlessFront(deps: ServerlessFrontDeps): ServerlessFron
             req.resume()
             return
           }
+          const client = entry.origin.client
           void handleSql(req, res, {
-            openConnection,
+            openConnection: () => openConnection(client),
             ...(deps.maxRequestBytes === undefined ? {} : { maxRequestBytes: deps.maxRequestBytes }),
             ...(deps.maxResponseBytes === undefined ? {} : { maxResponseBytes: deps.maxResponseBytes }),
           })
@@ -312,9 +320,7 @@ export function createServerlessFront(deps: ServerlessFrontDeps): ServerlessFron
     live.delete(socket)
     sessions.add(ws)
     ws.once('close', () => sessions.delete(ws))
-    const [ours, theirs] = socketPair()
-    deps.connectToProxy(theirs)
-    bridgeWithPipelinedPassword(ws, ours)
+    bridgeWithPipelinedPassword(ws, openConnection(origin.client))
     socket.resume()
   }
 

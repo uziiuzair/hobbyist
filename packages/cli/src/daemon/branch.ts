@@ -404,6 +404,13 @@ export async function branchProject(
     parentId: source.id,
     expiresAt: opts.expiresAt ?? null,
   })
+  // A branch holds the same data and the same passwords as its source, so
+  // it starts with the source's IP allowlist, copied now. A copy, not a
+  // link: each project's list changes on its own after this (the 2026-11-17
+  // allowlist amendment in docs/proxy/CLAUDE.md).
+  if (source.allowlist != null) {
+    ctx.store.setProjectAllowlist(project.id, [...source.allowlist])
+  }
 
   try {
     const cloned = await cloneSourceAtRest(ctx, source, resources, {

@@ -438,6 +438,41 @@ Accepts `--json`.
 the hibernator is allowed to do from now on. Different tense, different verb.
 :::
 
+### `hobby allow [ls] <project>`
+
+Shows which client addresses the Postgres proxy accepts for this project's
+databases. With no allowlist (the default) it is any address that can reach
+the proxy, which is what `proxyHost` decides.
+
+### `hobby allow add <project> <address|cidr>...`
+
+Restricts the project to these IPv4 or IPv6 addresses and CIDR ranges, plus
+the box itself. Entries are stored canonical, so `192.168.1.7/24` is shown and
+removed as `192.168.1.0/24`. The list covers every postgres in the project,
+over plain TCP, TLS, cancel requests and the serverless driver's `/sql` and
+WebSocket endpoints. A refused client gets `FATAL 28000` naming the project
+and its address (HTTP 403 on `/sql`), and never wakes a sleeping database.
+
+Connections from the box itself are always accepted: loopback, and the
+docker gateway addresses its own apps and workers dial. A change applies to
+the next connection; sessions already open are not ended. `hobby branch`
+copies the list to the branch. Refusals are logged in the daemon log, at
+most one line per address per minute. Accepts `--json`.
+
+The proxy judges the address of the TCP connection it accepted. A tunnel or
+forwarder on the box (an SSH tunnel, `tailscale serve`) makes every client
+look like loopback, and loopback is always accepted.
+
+### `hobby allow rm <project> <address|cidr>...`
+
+Removes entries. Removing the last one leaves the project accepting this box
+only, never every address. Accepts `--json`.
+
+### `hobby allow off <project>`
+
+Lifts the restriction: any address that reaches the proxy may connect again.
+Accepts `--json`.
+
 ### `hobby logs <target> [--tail N]`
 
 Tails the resource's logs.
@@ -552,7 +587,7 @@ hobby sleep other            # a project named other, since blog has no resource
 Three things follow from a link, in `packages/cli/src/cli/commands.ts`:
 
 - `hobby deploy` and the `create` verbs use it when `--project` is absent.
-- `connect`, `sleep`, `wake`, `logs`, `pin`, `unpin`, `eject`, `adopt`,
+- `connect`, `sleep`, `wake`, `logs`, `pin`, `unpin`, `allow`, `eject`, `adopt`,
   `snapshot` and `snapshot ls` act on it when given no target
   (`targetOrLinked`).
 - A bare name is resolved against the linked project's resources before it is

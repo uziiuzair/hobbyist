@@ -21,7 +21,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { assertSocketPathFits, HobbyError, type ProxyTlsConfig, type Resource } from '@hobby.sh/core'
 import { startAlarmMirror } from '@hobby.sh/do'
-import { startHttpRouter, startPgProxy, TLS_ASK_PATH, type ProxyTlsFiles } from '@hobby.sh/proxy'
+import { defaultSameBox, startHttpRouter, startPgProxy, TLS_ASK_PATH, type ProxyTlsFiles } from '@hobby.sh/proxy'
 import { startQueueTick } from '@hobby.sh/queue'
 import { durableObjectNamespaces } from './alarms.js'
 import { cronState, postScheduled, scheduledWorkers, startCronScheduler } from './crons.js'
@@ -478,6 +478,17 @@ export async function startDaemon(
   // the traffic never leaves the machine, and an app's DATABASE_URL carries
   // no sslmode. A listener on an operator-chosen address keeps ADR 0019's
   // rule exactly as it was.
+  // The docker network gateways this box's own apps and workers dial the
+  // proxy at (host.docker.internal on Linux). A connection that arrived on
+  // one of them, or on loopback, is the box itself and is exempt from every
+  // project's IP allowlist (the 2026-11-17 allowlist amendment in
+  // docs/proxy/CLAUDE.md). Judged by the address the client dialed, not by
+  // which listener took it, because with proxyHost "all" there is no
+  // gateway listener: the 0.0.0.0 one takes that traffic, from container
+  // addresses no allowlist would name. Grows with addProxyGateway below.
+  const gatewayAddresses = new Set<string>(await proxyGatewayHosts(ctx))
+  const sameBox = (local: string | undefined, peer: string | undefined): boolean =>
+    defaultSameBox(local, peer) || (local !== undefined && gatewayAddresses.has(local.replace(/^::ffff:/, '')))
   const startProxyOn = async (host: string, local: boolean): Promise<void> => {
     if (proxyBound.has(host)) return
     proxies.push(
@@ -486,6 +497,7 @@ export async function startDaemon(
         host,
         deps: createProxyDeps(ctx),
         wakeTimeoutMs: ctx.config.wakeTimeoutMs,
+        sameBox,
         ...(proxyTls === undefined ? {} : { tls: proxyTls }),
         ...(local ? { plaintextAllowed: () => true } : {}),
       })
@@ -503,7 +515,7 @@ export async function startDaemon(
   // that cannot be bound is logged, not fatal. A "0.0.0.0" bind already
   // covers them and binding again would fail, hence the `all` check.
   if (!proxyHosts.includes('0.0.0.0')) {
-    for (const gateway of await proxyGatewayHosts(ctx)) {
+    for (const gateway of gatewayAddresses) {
       try {
         await startProxyOn(gateway, true)
       } catch (err) {
@@ -514,6 +526,7 @@ export async function startDaemon(
     }
   }
   const addProxyGateway = async (gateway: string): Promise<void> => {
+    gatewayAddresses.add(gateway)
     if (proxyHosts.includes('0.0.0.0')) return
     try {
       await startProxyOn(gateway, true)

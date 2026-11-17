@@ -52,6 +52,7 @@ export {
   cmdLs,
   cmdNew,
   cmdPg,
+  cmdAllow,
   cmdPin,
   cmdQueue,
   cmdQueueCreate,

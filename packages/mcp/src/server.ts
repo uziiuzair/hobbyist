@@ -14,6 +14,10 @@ import { resolvePaths } from '@hobby.sh/core'
 import { createApi, type Api } from '@hobby.sh/cli'
 import { z } from 'zod'
 import {
+  allowAddTool,
+  allowListTool,
+  allowOffTool,
+  allowRmTool,
   branchTool,
   connectionStringTool,
   diffTool,
@@ -228,6 +232,57 @@ export function createServer(api: Api): McpServer {
       },
     },
     async (args) => connectionStringTool(api, args)
+  )
+
+  const ALLOW_ENTRIES = z
+    .array(z.string().min(1))
+    .min(1)
+    .describe('IPv4 or IPv6 addresses and CIDR ranges, for example ["203.0.113.7", "192.168.1.0/24", "2001:db8::/32"]')
+
+  server.registerTool(
+    'hobby_allow_ls',
+    {
+      description:
+        "show a project's IP allowlist for its databases. mirrors `hobby allow ls <project>`. " +
+        '`project.allowlist` null means any address that reaches the proxy may connect; [] means only this box; ' +
+        'otherwise the listed addresses and ranges plus this box (loopback and its own apps and workers are always allowed).',
+      inputSchema: { project: z.string().min(1).describe('project name') },
+    },
+    async (args) => allowListTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_allow_add',
+    {
+      description:
+        "add addresses or CIDR ranges to a project's IP allowlist, restricting it if it was open. mirrors " +
+        '`hobby allow add <project> <address|cidr>...`. applies to new connections to every postgres in the project; ' +
+        'other addresses get FATAL 28000 (HTTP 403 on /sql) and never wake a sleeping database.',
+      inputSchema: { project: z.string().min(1).describe('project name'), entries: ALLOW_ENTRIES },
+    },
+    async (args) => allowAddTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_allow_rm',
+    {
+      description:
+        "remove entries from a project's IP allowlist. mirrors `hobby allow rm <project> <address|cidr>...`. " +
+        'removing the last entry leaves the project restricted to this box, it never opens it; use hobby_allow_off for that.',
+      inputSchema: { project: z.string().min(1).describe('project name'), entries: ALLOW_ENTRIES },
+    },
+    async (args) => allowRmTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_allow_off',
+    {
+      description:
+        "lift a project's IP allowlist: any address that can reach the proxy may connect again. mirrors " +
+        '`hobby allow off <project>`.',
+      inputSchema: { project: z.string().min(1).describe('project name') },
+    },
+    async (args) => allowOffTool(api, args)
   )
 
   server.registerTool(
