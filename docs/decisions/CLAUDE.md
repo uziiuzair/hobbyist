@@ -62,6 +62,7 @@ that matters, because it is the difference between a decision and a dogma.
 | [0012](0012-durable-objects-and-the-alarm-mirror.md) | Durable Objects as a resource kind, and the alarm mirror that lets them sleep |
 | [0013](0013-queues-and-the-broker-outside-the-runtime.md) | Queues as a resource kind, with the broker held outside the runtime |
 | [0019](0019-the-proxy-terminates-tls.md) | The proxy terminates TLS from operator-provided certificate files, and refuses plaintext from other machines once it does |
+| [0020](0020-no-autoprewarm-and-no-declared-roles-or-databases.md) | No autoprewarm after a wake, and no declared roles or databases |
 
 0007 supersedes the scope section of the original root `CLAUDE.md` and is the one
 to read first if you are wondering why this is bigger than a database tool. 0001
@@ -70,3 +71,8 @@ through 0005 survive it unchanged.
 0010 removes 0007's 30-day daily-use gate, which was the guard this folder's
 own text above calls the one that matters. Read it before concluding the gate
 still protects anything. 0007's other three guards are unaffected.
+
+0020 records what was taken from Neon's compute manager and not built:
+autoprewarm after a wake (measured slower for the first queries), and declared
+roles and databases (they would change the routing contract or make the daemon
+a user store). 0019 already records the third, proxy login throttling.
