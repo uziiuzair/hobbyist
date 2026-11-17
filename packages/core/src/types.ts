@@ -103,6 +103,12 @@ export interface PostgresConfig extends ResourceConfigBase {
   // record of what is installed: that lives in the data directory's own
   // pg_extension and is read live.
   extensions?: string[]
+  // Server settings, allowlisted and normalized by packages/pg/src/
+  // settings.ts, passed as `postgres -c name=value` by containerSpec and
+  // by the eject compose file's `command:`, never written into the data
+  // directory. Optional and absent on every row written before the field
+  // existed, which reads as none: the image's default command.
+  settings?: Record<string, string>
 }
 
 // A container the user brought, either built here from their Dockerfile or

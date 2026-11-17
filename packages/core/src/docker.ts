@@ -221,6 +221,9 @@ function buildCreateArgs(spec: ContainerSpec): string[] {
     args.push('--add-host', `${host.name}:${host.address}`)
   }
   args.push(spec.image)
+  // After the image, as `docker create IMAGE [COMMAND] [ARG...]` reads it.
+  // Every element is its own argv entry, never a shell string.
+  args.push(...(spec.command ?? []))
   return args
 }
 

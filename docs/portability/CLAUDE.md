@@ -96,3 +96,31 @@ inflexible is the point.
 `hobby eject` is the best asset this project will ever have, because no
 competitor dares ship it. It belongs in the README's first screen, not buried in
 a reference page.
+
+## Amendment, 2026-11-17: eject carries server settings in `command:`
+
+A postgres resource can now declare server settings (`docs/engine/CLAUDE.md`,
+amendment of the same date). They are server arguments, `postgres -c
+name=value`, and never written into the data directory, so invariant 2 is
+unchanged: a stock `postgres` pointed at `<host data directory>/18/docker`
+starts it, with Postgres's defaults. What the settings change is what eject
+must emit for invariant 3 to keep meaning "the same database, running the
+same way": `renderCompose` (`packages/cli/src/daemon/routes.ts`) writes a
+`command:` line with exactly the arguments `containerSpec` gives hobby's own
+container, from the same function (`settingsCommand`,
+`packages/pg/src/settings.ts`), for example:
+
+```
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "work_mem=24MB"]
+```
+
+A resource with no settings gets no `command:` and runs the image's own CMD,
+as before. This matters most for `shared_preload_libraries`: an ejected
+database whose catalog holds `pg_stat_statements` would otherwise come up
+with the extension present and every read of it failing. Verified live on
+2026-11-17: the rendered file, started with `docker compose --profile
+hobby-released up -d` on the same data directory, reported every declared
+setting with source `command line`, and `pg_stat_statements` answered.
+Someone leaving can edit or drop the line; it is the only place the settings
+live after a release, which is also why a released project refuses a
+settings change.

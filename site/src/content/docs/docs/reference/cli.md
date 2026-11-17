@@ -99,7 +99,7 @@ Takes no flags.
 
 ## Projects and resources
 
-### `hobby new <name> [--empty] [--pin] [--extension <ext>...]`
+### `hobby new <name> [--empty] [--pin] [--extension <ext>...] [--setting <name=value>...]`
 
 Creates a project, puts a `postgres` resource named `primary` in it, boots that
 database once so it is initialised, and prints a connection string. The new
@@ -119,6 +119,11 @@ when the default later changes.
 that first boot (`CREATE EXTENSION IF NOT EXISTS ... CASCADE`), so it costs no
 extra start. An extension the image does not ship is refused, naming the
 image, and nothing is left behind. See `hobby pg ext` below.
+
+`--setting <name=value>`, repeatable, declares a Postgres server setting, so
+the first boot already runs with it. Only allowlisted settings are accepted;
+see `hobby pg config` below. `pg_stat_statements` needs
+`--setting shared_preload_libraries=pg_stat_statements` in the same command.
 
 Accepts `--json`.
 
@@ -172,11 +177,11 @@ not exist yet.
 
 Accepts `--json`.
 
-### `hobby pg create --project <p> <name> [--extension <ext>...]`
+### `hobby pg create --project <p> <name> [--extension <ext>...] [--setting <name=value>...]`
 
 The explicit form, for creating a second database. An alias for
-`hobby create postgres`, not a second implementation. `--extension` works as
-it does on `hobby new`.
+`hobby create postgres`, not a second implementation. `--extension` and
+`--setting` work as they do on `hobby new`.
 
 Accepts `--json`.
 
@@ -205,12 +210,56 @@ and the declaration is left unchanged. The image is box-wide today
 the extension, columns included, so run it from psql if you mean it.
 
 Extensions live in the data directory, so they survive sleep, branches,
-snapshots and `hobby eject` with nothing re-applied. An extension that needs
-`shared_preload_libraries` (`pg_stat_statements`, `pg_cron`) can be created
-but will not work: hobby passes no server arguments to Postgres.
+snapshots and `hobby eject` with nothing re-applied.
+
+An extension that only works with a preloaded library (`pg_stat_statements`
+in the stock image) is refused by `add` until the library is in
+`shared_preload_libraries`, and the error prints the `hobby pg config set`
+that adds it. `ls` marks one that is installed while its library is not
+preloaded. `pg_cron` is refused outright: its jobs run only while the
+database is awake.
 
 In a linked directory, `hobby pg ext add <ext>` with one argument acts on the
 linked project. Accepts `--json`.
+
+### `hobby pg config [ls|set|unset] <target>`
+
+Postgres server settings for a postgres resource, from an allowlist.
+
+```
+hobby pg config blog                                  # declared settings; never wakes anything
+hobby pg config ls blog --all                         # plus every allowed setting, range and default
+hobby pg config set blog shared_buffers=256MB work_mem=16MB
+hobby pg config set blog shared_preload_libraries=pg_stat_statements
+hobby pg config unset blog work_mem                   # back to the Postgres default
+```
+
+Settings are passed to Postgres as server arguments (`postgres -c
+name=value`) and never written into `postgresql.conf` or
+`postgresql.auto.conf`, so the data directory stays plain. That means every
+change replaces the container, even for a setting Postgres could reload:
+
+- **Asleep:** the container is replaced and nothing is woken. The settings
+  take effect on the next wake.
+- **Awake:** the database is restarted, which is a pause of a second or two.
+  A pinned project needs `--allow-pause`, as `hobby branch` does. A database
+  with a query or transaction running is waited for, then refused if it stays
+  busy. If Postgres will not start with the new settings, the previous ones
+  are restored and it is started again, and the error carries its log lines.
+
+Anything not on the allowlist is refused, and so is a value outside its
+range. `shared_preload_libraries` accepts `pg_stat_statements` and
+`auto_explain`. `pg_prewarm` is left out (ADR 0020: autoprewarm made the first
+queries after a wake slower), and `pg_cron` is refused because its schedule
+silently stops while the database sleeps; worker cron triggers wake what they
+run instead. A setting that belongs to a library (`pg_stat_statements.max`,
+`auto_explain.log_min_duration`) needs that library preloaded.
+
+Branches and snapshot restores carry the settings. `hobby reset` takes the
+parent's, as it takes the parent's data. `hobby eject` writes them into the
+compose file's `command:`.
+
+In a linked directory the target can be left out. Accepts `--json`.
 
 ### `hobby branch <project> <name> [--allow-pause]`
 

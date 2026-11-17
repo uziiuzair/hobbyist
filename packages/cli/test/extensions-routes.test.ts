@@ -161,6 +161,7 @@ test('GET extensions wakes a sleeping database, reads installed with versions, a
       declared: ['pg_trgm'],
       installed: [{ name: 'plpgsql', version: '1.0' }],
       missing: ['pg_trgm'],
+      needsPreload: [],
     })
     assert.equal(ctx.store.getResource(id)?.state, 'running')
     assert.notEqual(ctx.activity.idleSeconds(id), null)
@@ -192,7 +193,7 @@ test('POST extensions remove only undeclares, never applies anything, and wakes 
     const appliedBefore = ctx.extensions.applied.length
     const res = await call(baseUrl, 'POST', `/v1/resources/${id}/extensions`, { remove: ['pg_trgm'] })
     assert.equal(res.status, 200)
-    assert.deepEqual(res.body.extensions, { declared: [], installed: null, missing: null })
+    assert.deepEqual(res.body.extensions, { declared: [], installed: null, missing: null, needsPreload: [] })
     assert.deepEqual(res.body.removed, ['pg_trgm'])
     assert.equal(ctx.extensions.applied.length, appliedBefore)
     assert.equal(ctx.extensions.listed, 0)
