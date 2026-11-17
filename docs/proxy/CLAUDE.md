@@ -388,3 +388,113 @@ service by name, since there is no proxy in an ejected stack.
   `createProxyDeps` and used by every refusal and wake error the Postgres
   proxy sends; `startPostgres` names `postgres project/name` rather than the
   resource UUID. App and worker errors already named the container.
+
+## Amendment, 2026-11-17: Neon's serverless driver on the proxy port (issue #155)
+
+`@neondatabase/serverless` now works against a Hobbyist Postgres, in both of
+its modes: `neon()` (`POST /sql`, JSON) and `Pool`/`Client` (the Postgres
+protocol inside a WebSocket). The protocol was taken from Neon's proxy, which
+is Apache-2.0 (`proxy/src/serverless/sql_over_http.rs`, `json.rs`,
+`websocket.rs`, `mod.rs`), and checked against the built source of the driver,
+pinned at 1.2.0 as a devDependency of `packages/proxy`. User guide:
+`site/src/content/docs/docs/guides/serverless-driver.md`.
+
+**Same port, told apart by its first byte.** `handleConnectionInner`
+(`packages/proxy/src/proxy.ts`) sniffs the first chunk of an accepted
+connection (`sniff`): an uppercase ASCII letter is an HTTP method, `0x16` is a
+TLS ClientHello. Neither can begin a startup packet, whose first byte is the
+high byte of a length `parseStartup` accepts, so nothing a Postgres client
+sends changes path. HTTP goes to the serverless front
+(`createServerlessFront`, `packages/proxy/src/serverless.ts`). A ClientHello
+with no SSLRequest goes to the same `TlsTerminator.relay` an SSLRequest gets,
+and the decrypted connection is sniffed again. So the endpoints bind exactly
+where `proxyHost` binds (ADR 0017), use the `proxyTls` certificate (ADR 0019),
+and need no setting, listener or route of their own. The daemon is
+unchanged, since `startPgProxy` builds the front itself. Nothing was added
+to the daemon API (ADR 0008), and Caddy is not involved (ADR 0009). Caddy's
+https was the alternative for TLS. It was not taken, for the reasons ADR 0019
+gives for not sharing Caddy's certificate.
+
+**Every request is a proxied connection.** Each WebSocket and each `/sql`
+request becomes one side of an in-memory socket pair (`socketPair`,
+`packages/proxy/src/socket-pair.ts`). The other side is handed to
+`handleConnectionInner` exactly as an accepted socket, with no TLS and no
+front. Routing by database name, wake-on-connect, the wake refusal backoff,
+`holdUntilServing`, cancel key minting and the ActivityTracker all apply
+unchanged, with no second implementation. `/sql` (`handleSql`,
+`packages/proxy/src/sql-over-http.ts`) uses the `pg` package over that pair,
+with **one connection per request and no pool** (Neon pools). A request that
+names `application_name=hobby` gets `hobby-serverless-driver`, so the
+hibernator's guard (`HOBBY_APPLICATION_NAME`, `packages/pg/src/activity-guard.ts`)
+never ignores driver traffic. `packages/cli/test/serverless-driver.test.ts`
+holds the two packages' spellings to each other. A client that disconnects
+mid-query has its query cancelled through the proxy's own cancel routing.
+
+**"Auth passes through" has an exception here.** `/sql` receives the password
+in `Neon-Connection-String`. The driver's default `pipelineConnect:
+"password"` sends a cleartext PasswordMessage before the server asks, which
+a SCRAM Postgres rejects. So `PipelinedPasswordShim`
+(`packages/proxy/src/pipelined-auth.ts`) holds that early password, answers
+SCRAM-SHA-256, MD5 or cleartext for the client, and shows the client the
+AuthenticationOk it expects, as Neon's proxy does. A client that does not
+pipeline is passed through untouched, and its SCRAM runs end to end. The
+password is held in memory for one handshake and never logged.
+
+**TLS is stricter than for TCP.** Over TCP, SCRAM keeps the password off the
+wire even without TLS. Here it does not. So a request from another machine is
+refused with a 403 unless it arrived over TLS, **whether or not `proxyTls`
+is set**. Loopback and the gateway listeners count as this machine. Before
+this change, an HTTP request line on this port got a `08P01` from
+`parseStartup`. Now it gets an HTTP answer. A ClientHello with no proxy
+certificate still gets `08P01`.
+
+**Two Bun gaps shaped the plumbing**, both measured on Bun 1.3.5 and 1.3.14
+on 2026-11-17, and both working under Node:
+
+- `http.Server.emit('connection', socket)` hangs.
+- A node:http `'upgrade'` socket silently drops every byte written to it,
+  through `write` and through `pipe` alike.
+
+So the request head is read off the raw socket (`parseHttpHead`,
+`packages/proxy/src/websocket.ts`), a WebSocket handshake is answered there,
+and framing is the hand-written RFC 6455 subset in the same file. ADR 0006
+asks a runtime dependency to justify itself, and `ws` sits on the same broken
+event. Any other request is piped to an internal node:http server on an
+ephemeral loopback port, the tls.ts pattern. Before any byte is sent, the
+relay's local port is recorded with whether the request may proceed. Node's
+undici does send a WebSocket upgrade down a kept-alive connection that a
+`/sql` request just used (measured). That upgrade reaches the internal server,
+which takes the client's socket back from the relay (`RelayEntry.takeOver`)
+and answers it on the raw socket.
+
+**The second gap probably affects the HTTP router** (`packages/proxy/src/http.ts`,
+`handleUpgrade`), which proxies app and worker WebSockets through node:http's
+`'upgrade'` event. That was not tested here and is not fixed by this change.
+It needs its own issue.
+
+**Verified.** `packages/proxy/test/serverless.test.ts` drives the real driver
+(`neon`, `transaction`, `Pool`, `Client`, `poolQueryViaFetch`, both
+`pipelineConnect` settings, https, the 403) through `startPgProxy`. It runs
+against `test/fixtures/fake-postgres.ts`, which speaks SCRAM and both query
+protocols, with no Docker. `websocket.test.ts` covers the framer, the shim's
+other paths and the value conversion. Both pass under `node --test` and under
+`bun test` on Bun 1.3.14. By hand, the same flows ran against a real
+`postgres:18-alpine` (SCRAM, as shipped) under Node and Bun:
+
+- wake on first request and activity counted
+- transaction, a 42P01 error and a wrong password
+- a prepared statement refusing two commands
+- cancel during `pg_sleep`
+- `https://` and `wss://` with a throwaway certificate, with plaintext refused
+
+**Not done, not measured.**
+
+- The per-request cost of `/sql` over a network is not measured.
+- No JWT (`authToken`).
+- The `Neon-Pool-Opt-In` header is ignored.
+- `sslnegotiation=direct` for libpq is still not supported. Its ClientHello
+  now reaches the terminator, but no ALPN `postgresql` is offered, so libpq
+  aborts as before.
+- A daemon shutdown with `wss://` sessions open waits out tls.ts's existing
+  one-second grace for the relayed socket.
+- Nothing has run through a real daemon yet.

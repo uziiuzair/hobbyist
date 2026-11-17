@@ -25,6 +25,7 @@
 
 import { statSync, readFileSync } from 'node:fs'
 import net from 'node:net'
+import type { Duplex } from 'node:stream'
 import tls from 'node:tls'
 
 // Matches proxy.ts's grace for the same purpose.
@@ -84,7 +85,7 @@ export interface TlsTerminator {
   // Called after the proxy has written 'S'. Takes over the socket: pipes it
   // to the inner TLS server, whose decrypted connection arrives at the
   // onConnection handler given to startTlsTerminator.
-  relay(client: net.Socket): void
+  relay(client: Duplex): void
   close(): Promise<void>
 }
 
@@ -127,7 +128,7 @@ export async function startTlsTerminator(
   }
 
   return {
-    relay(client: net.Socket): void {
+    relay(client: Duplex): void {
       // Paused before anything asynchronous: the client sends its
       // ClientHello the moment it reads the 'S', and a flowing socket with
       // no 'data' listener drops what arrives. pipe() resumes it.
