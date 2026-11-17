@@ -27,10 +27,8 @@
 // id simply stops resolving.
 
 import { existsSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
-  cloneTree,
   HobbyError,
   validateName,
   type CloneMechanism,
@@ -43,6 +41,7 @@ import {
 import { createPostgresFromClone } from '@hobby.sh/pg'
 import type { DaemonContext } from './context.js'
 import { quiesce, resume, type QuiesceOptions } from './snapshots.js'
+import { treeOpsFor } from './tree-ops.js'
 
 export interface BranchOptions {
   // The pinned-project guard's explicit override. See assertPauseAllowed.
@@ -53,7 +52,8 @@ export interface BranchOptions {
   // Forwarded to quiesce, so a test can supply a guard instead of the real
   // pg_stat_activity check and skip the real two-second retry wait.
   quiesce?: QuiesceOptions
-  // Test seams. Production uses cloneTree and Date.now.
+  // Test seams. Production uses treeOpsFor's clone (tree-ops.ts: cloneTree,
+  // retried as root in a container when the daemon is refused) and Date.now.
   clone?: (src: string, dst: string) => Promise<CloneResult>
   now?: () => number
 }
@@ -346,12 +346,15 @@ export async function cloneSourceAtRest(
 // call and nothing else, which preflight's directory check and the early
 // createProject (which reserves the name) are what guarantee.
 //
-// The clone's files are owned by the daemon's own user (cloneTree copies as
-// that user, and no container has ever started on them to chown them), so a
-// plain rm is enough here, unlike destroyPostgres's container-based removal.
-async function discardBranch(ctx: DaemonContext, project: Project): Promise<string[]> {
+// Usually the clone's files are the daemon's own and a plain rm works. When
+// the clone needed the container fallback (a non-root daemon on Linux,
+// tree-ops.ts) they kept the source's container owner, so the removal goes
+// through the same fallback.
+async function discardBranch(ctx: DaemonContext, project: Project, source: Resource[]): Promise<string[]> {
   const failures: string[] = []
-  for (const resource of ctx.store.listResources(project.id)) {
+  const resources = ctx.store.listResources(project.id)
+  const ops = treeOpsFor(ctx, [...resources, ...source])
+  for (const resource of resources) {
     try {
       await ctx.runtime.remove(resource.config.containerName)
     } catch (err) {
@@ -366,7 +369,7 @@ async function discardBranch(ctx: DaemonContext, project: Project): Promise<stri
   ctx.store.deleteProject(project.id)
   const dir = join(ctx.paths.projectsDir, project.name)
   try {
-    await rm(dir, { recursive: true, force: true })
+    await ops.remove(dir)
   } catch (err) {
     failures.push(`remove ${dir}: ${errorMessage(err)}`)
   }
@@ -380,8 +383,8 @@ export async function branchProject(
   opts: BranchOptions = {}
 ): Promise<BranchResult> {
   const now = opts.now ?? Date.now
-  const clone = opts.clone ?? cloneTree
   const { source, resources } = preflight(ctx, sourceName, targetName, opts.allowPause === true)
+  const clone = opts.clone ?? treeOpsFor(ctx, resources).clone
 
   // Created first, before anything is cloned, so the name is reserved for the
   // whole of what may be a minutes-long copy on ext4. Created last, a
@@ -425,7 +428,7 @@ export async function branchProject(
       resumeFailures: cloned.resumeFailures,
     }
   } catch (err: unknown) {
-    const leftovers = await discardBranch(ctx, project)
+    const leftovers = await discardBranch(ctx, project, resources)
     if (leftovers.length > 0) {
       throw new HobbyError(
         'internal',

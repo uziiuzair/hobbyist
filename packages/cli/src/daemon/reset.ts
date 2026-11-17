@@ -44,9 +44,8 @@
 // branch's databases stays bound to it, because the resource ids do not
 // change.
 
-import { lstat, rename, rm } from 'node:fs/promises'
+import { lstat, rename } from 'node:fs/promises'
 import {
-  cloneTree,
   HobbyError,
   type CloneMechanism,
   type CloneResult,
@@ -65,6 +64,7 @@ import {
 } from './branch.js'
 import { holdProjectAsleep, type DaemonContext } from './context.js'
 import { quiesce, resume, type QuiesceOptions } from './snapshots.js'
+import { treeOpsFor } from './tree-ops.js'
 
 export interface ResetOptions {
   // The pinned-project guard's override, for the parent and the branch
@@ -216,8 +216,12 @@ function preflight(
 
 export async function resetBranch(ctx: DaemonContext, branchName: string, opts: ResetOptions = {}): Promise<ResetResult> {
   const now = opts.now ?? Date.now
-  const clone = opts.clone ?? cloneTree
   const { branch, parent, pairs, parentResources } = preflight(ctx, branchName, opts.allowPause === true)
+  // Staging and .pre-reset directories hold PGDATA trees, which on Linux keep
+  // the postgres image's uid and mode 0700, so they are removed through the
+  // same fallback the clone uses (tree-ops.ts).
+  const ops = treeOpsFor(ctx, [...pairs.map((pair) => pair.branch), ...parentResources])
+  const clone = opts.clone ?? ops.clone
 
   // Never deleted on our own initiative, the rule restoreInPlace keeps for
   // its own set-aside directory: one under this name is the data an earlier
@@ -236,7 +240,7 @@ export async function resetBranch(ctx: DaemonContext, branchName: string, opts: 
   // reset that died during step 2 and holds nothing the parent does not.
   const staging = pairs.map(({ branch: resource }) => stagingDirFor(resource))
   for (const dir of staging) {
-    await rm(dir, { recursive: true, force: true })
+    await ops.remove(dir)
   }
 
   const branchOf = new Map(pairs.map((pair) => [pair.parent.id, pair.branch]))
@@ -251,7 +255,7 @@ export async function resetBranch(ctx: DaemonContext, branchName: string, opts: 
     })
   } catch (err: unknown) {
     for (const dir of staging) {
-      await rm(dir, { recursive: true, force: true })
+      await ops.remove(dir)
     }
     throw err
   }
@@ -324,7 +328,7 @@ export async function resetBranch(ctx: DaemonContext, branchName: string, opts: 
     }
   } catch (err: unknown) {
     for (const dir of staging) {
-      await rm(dir, { recursive: true, force: true })
+      await ops.remove(dir)
     }
     throw err
   } finally {
@@ -352,7 +356,7 @@ export async function resetBranch(ctx: DaemonContext, branchName: string, opts: 
       continue
     }
     try {
-      await rm(aside, { recursive: true, force: true })
+      await ops.remove(aside)
     } catch (err: unknown) {
       // The reset has succeeded by now; the leftover is reported, not turned
       // into a failure, as restoreInPlace does.

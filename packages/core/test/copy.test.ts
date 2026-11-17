@@ -1,18 +1,20 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises'
 import { lstat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 import { promisify } from 'node:util'
-import { cloneTree } from '../src/copy.js'
+import { isDiskFullError } from '../src/errors.js'
+import { cloneTree, copyTree, isPermissionError, removeTree, type ElevatedTreeOps } from '../src/copy.js'
 
 const execFileAsync = promisify(execFile)
 
 const roots: string[] = []
 after(async () => {
+  await unlockAll()
   for (const root of roots) {
     await rm(root, { recursive: true, force: true })
   }
@@ -161,4 +163,196 @@ test('cloneTree rejects rather than silently nesting into an existing destinatio
   await assert.rejects(() => cloneTree(src, dst))
 
   assert.deepEqual(await readdir(dst), ['sentinel.txt'])
+})
+
+// ---------------------------------------------------------------------------
+// copyTree and removeTree: the native operation first, the elevated fallback
+// only on EACCES or EPERM. The refusals here are real ones, made with chmod,
+// so the test exercises the same errno a non-root daemon on Linux gets from
+// a container-owned PGDATA. root ignores directory modes, so they are
+// skipped when the suite runs as root.
+
+const asRoot = typeof process.getuid === 'function' && process.getuid() === 0
+
+// Directories this block locked, so after() can unlock them before the
+// shared cleanup removes the scratch roots.
+const locked: string[] = []
+async function unlockAll(): Promise<void> {
+  for (const dir of locked) {
+    await chmod(dir, 0o755).catch(() => undefined)
+  }
+}
+
+async function lock(dir: string, mode: number): Promise<void> {
+  locked.push(dir)
+  await chmod(dir, mode)
+}
+
+interface FakeElevated extends ElevatedTreeOps {
+  clones: Array<{ src: string; dst: string; dstExisted: boolean; parentExisted: boolean }>
+  removes: string[]
+}
+
+function fakeElevated(opts: { fail?: Error } = {}): FakeElevated {
+  const fake: FakeElevated = {
+    clones: [],
+    removes: [],
+    async clone(src, dst) {
+      const exists = async (p: string): Promise<boolean> =>
+        lstat(p).then(
+          () => true,
+          () => false
+        )
+      fake.clones.push({ src, dst, dstExisted: await exists(dst), parentExisted: await exists(join(dst, '..')) })
+      if (opts.fail) throw opts.fail
+      await mkdir(dst)
+      await writeFile(join(dst, 'copied-as-root'), 'x')
+      return { mechanism: 'copy', files: 7, bytes: 70 }
+    },
+    async remove(path) {
+      fake.removes.push(path)
+      if (opts.fail) throw opts.fail
+      await unlockAll()
+      await rm(path, { recursive: true, force: true })
+    },
+  }
+  return fake
+}
+
+// A tree like a Linux PGDATA seen by a non-root daemon: the top is readable,
+// and one directory inside is not.
+async function treeWithUnreadableDir(root: string): Promise<string> {
+  const src = join(root, 'pgdata')
+  await mkdir(join(src, '18', 'docker'), { recursive: true })
+  await writeFile(join(src, 'readable.txt'), 'ok')
+  await writeFile(join(src, '18', 'docker', 'PG_VERSION'), '18')
+  await lock(join(src, '18', 'docker'), 0o000)
+  return src
+}
+
+test('isPermissionError matches EACCES and EPERM only', () => {
+  assert.equal(isPermissionError(Object.assign(new Error('x'), { code: 'EACCES' })), true)
+  assert.equal(isPermissionError(Object.assign(new Error('x'), { code: 'EPERM' })), true)
+  assert.equal(isPermissionError(Object.assign(new Error('x'), { code: 'ENOENT' })), false)
+  assert.equal(isPermissionError(null), false)
+  assert.equal(isPermissionError('EACCES'), false)
+})
+
+test('copyTree does not touch the fallback when the native copy works', async () => {
+  const root = await scratch()
+  await mkdir(join(root, 'src'))
+  await writeFile(join(root, 'src', 'a.txt'), 'hello')
+  const elevated = fakeElevated()
+
+  const result = await copyTree(join(root, 'src'), join(root, 'out', 'dst'), { elevated })
+
+  assert.equal(await readFile(join(root, 'out', 'dst', 'a.txt'), 'utf8'), 'hello')
+  assert.equal(result.files, 1)
+  assert.deepEqual(elevated.clones, [])
+})
+
+test('copyTree retries in the fallback on EACCES, after clearing the partial copy', { skip: asRoot }, async () => {
+  const root = await scratch()
+  const src = await treeWithUnreadableDir(root)
+  const dst = join(root, 'branch', 'primary', 'pgdata')
+  const elevated = fakeElevated()
+
+  const result = await copyTree(src, dst, { elevated })
+
+  assert.deepEqual(result, { mechanism: 'copy', files: 7, bytes: 70 })
+  assert.equal(elevated.clones.length, 1)
+  assert.equal(elevated.clones[0]?.src, src)
+  assert.equal(elevated.clones[0]?.dst, dst)
+  // The native attempt's half-copied tree was gone before the fallback ran,
+  // and the parent the fallback mounts was there.
+  assert.equal(elevated.clones[0]?.dstExisted, false)
+  assert.equal(elevated.clones[0]?.parentExisted, true)
+  assert.deepEqual(await readdir(dst), ['copied-as-root'])
+})
+
+test('copyTree without a fallback throws the native EACCES unchanged', { skip: asRoot }, async () => {
+  const root = await scratch()
+  const src = await treeWithUnreadableDir(root)
+
+  await assert.rejects(copyTree(src, join(root, 'dst')), (err: NodeJS.ErrnoException) => {
+    assert.equal(err.code, 'EACCES')
+    return true
+  })
+})
+
+test('copyTree does not use the fallback for errors that are not permission errors', async () => {
+  const root = await scratch()
+  const elevated = fakeElevated()
+
+  await assert.rejects(copyTree(join(root, 'missing'), join(root, 'dst'), { elevated }), (err: NodeJS.ErrnoException) => {
+    assert.equal(err.code, 'ENOENT')
+    return true
+  })
+  assert.deepEqual(elevated.clones, [])
+})
+
+test('a failed fallback copy names both paths and keeps the EACCES code', { skip: asRoot }, async () => {
+  const root = await scratch()
+  const src = await treeWithUnreadableDir(root)
+  const dst = join(root, 'dst')
+  const elevated = fakeElevated({ fail: new Error('no local image to run it in (tried postgres:18-alpine)') })
+
+  await assert.rejects(copyTree(src, dst, { elevated }), (err: NodeJS.ErrnoException) => {
+    assert.equal(err.code, 'EACCES')
+    assert.match(err.message, new RegExp(`copying ${src} to ${dst} failed: EACCES`))
+    assert.match(err.message, /retrying as root in a container also failed: no local image/)
+    return true
+  })
+})
+
+test('removeTree does not touch the fallback when the native rm works', async () => {
+  const root = await scratch()
+  await mkdir(join(root, 'gone', 'deep'), { recursive: true })
+  const elevated = fakeElevated()
+
+  await removeTree(join(root, 'gone'), { elevated })
+  await removeTree(join(root, 'never-existed'), { elevated })
+
+  assert.deepEqual(await readdir(root), [])
+  assert.deepEqual(elevated.removes, [])
+})
+
+test('removeTree finishes in the fallback when rm is refused', { skip: asRoot }, async () => {
+  const root = await scratch()
+  const target = join(root, 'project')
+  await mkdir(join(target, 'state', 'cache'), { recursive: true })
+  await writeFile(join(target, 'state', 'cache', 'blob'), 'x')
+  // A directory the daemon cannot write to: its entries cannot be unlinked,
+  // the same refusal a root-owned miniflare cache directory gives.
+  await lock(join(target, 'state', 'cache'), 0o555)
+  const elevated = fakeElevated()
+
+  await removeTree(target, { elevated })
+
+  assert.deepEqual(elevated.removes, [target])
+  assert.deepEqual(await readdir(root), [])
+})
+
+test('a failed fallback removal names the path and keeps the EACCES code', { skip: asRoot }, async () => {
+  const root = await scratch()
+  const target = join(root, 'project')
+  await mkdir(join(target, 'locked'), { recursive: true })
+  await writeFile(join(target, 'locked', 'file'), 'x')
+  await lock(join(target, 'locked'), 0o555)
+
+  await assert.rejects(removeTree(target, { elevated: fakeElevated({ fail: new Error('docker unreachable') }) }), (err: NodeJS.ErrnoException) => {
+    assert.equal(err.code, 'EACCES')
+    assert.match(err.message, new RegExp(`removing ${target} failed`))
+    assert.match(err.message, /docker unreachable/)
+    return true
+  })
+  await assert.rejects(removeTree(target), (err: NodeJS.ErrnoException) => err.code === 'EACCES')
+})
+
+test('a full disk inside the fallback copy is still recognised as a full disk', { skip: asRoot }, async () => {
+  const root = await scratch()
+  const src = await treeWithUnreadableDir(root)
+  const elevated = fakeElevated({ fail: new Error("docker run exited with an error: cp: write error: No space left on device") })
+
+  await assert.rejects(copyTree(src, join(root, 'dst'), { elevated }), (err: unknown) => isDiskFullError(err))
 })

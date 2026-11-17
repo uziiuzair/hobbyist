@@ -170,3 +170,107 @@ export async function cloneTree(src: string, dst: string): Promise<CloneResult> 
   await copyEntry(src, dst, 0, retry)
   return { mechanism: 'copy', files: retry.files, bytes: retry.bytes }
 }
+
+// ---------------------------------------------------------------------------
+// Copying and removing trees the daemon does not own.
+//
+// On Linux the files a container writes into a bind mount belong to the
+// container's user, not to whoever runs the daemon: a PGDATA is owned by the
+// postgres image's uid (70 on alpine) with mode 0700, and a worker's state
+// directory fills with root-owned files. A daemon running as an ordinary
+// user in the docker group (a supported setup: the install guide says to add
+// the user to the group, and scripts/hobby.service says User= may be
+// changed) then gets EACCES from both cloneTree and fs.rm. On macOS Docker
+// Desktop masks the uid and the daemon owns everything it sees, and a root
+// daemon can read and remove anything, so in both of those cases the native
+// operation succeeds and nothing below changes behaviour.
+//
+// copyTree and removeTree try the native operation first and, only on
+// EACCES or EPERM, hand the same operation to an ElevatedTreeOps: something
+// able to act as root. core does not know how that is done; the Docker
+// implementation is createContainerTreeOps (docker.ts), which runs cp -a or
+// rm -rf in a throwaway root container. Injectable so the fallback logic is
+// tested without Docker (packages/core/test/copy.test.ts).
+
+export interface ElevatedTreeOps {
+  // Same contract as cloneTree: dst must not exist, its parent does, and the
+  // result reports the mechanism honestly. Ownership and modes must be
+  // preserved, because Postgres refuses a PGDATA with the wrong owner or a
+  // mode other than 0700 or 0750.
+  clone(src: string, dst: string): Promise<CloneResult>
+  // rm -rf: a path that does not exist is not an error.
+  remove(path: string): Promise<void>
+}
+
+export interface TreeOptions {
+  // Null or absent means there is no way to act as root, and a permission
+  // error is thrown as it was before this existed.
+  elevated?: ElevatedTreeOps | null
+}
+
+export function isPermissionError(err: unknown): boolean {
+  if (err === null || typeof err !== 'object') {
+    return false
+  }
+  const code = (err as { code?: unknown }).code
+  return code === 'EACCES' || code === 'EPERM'
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+// Both failures go into one message, with the native error's code kept, so
+// a caller that tests for EACCES still sees it and the person reading the
+// error learns which path was refused and why the retry did not help.
+function bothFailed(action: string, native: unknown, fallback: unknown): Error {
+  const err = new Error(
+    `${action} failed: ${messageOf(native)}; retrying as root in a container also failed: ${messageOf(fallback)}`,
+    { cause: fallback }
+  )
+  const code = (native as { code?: unknown }).code
+  if (typeof code === 'string') {
+    Object.assign(err, { code })
+  }
+  return err
+}
+
+export async function removeTree(path: string, opts: TreeOptions = {}): Promise<void> {
+  try {
+    await rm(path, { recursive: true, force: true })
+    return
+  } catch (err: unknown) {
+    if (!isPermissionError(err) || !opts.elevated) {
+      throw err
+    }
+    // Whatever rm managed to delete before it was refused is gone, which is
+    // fine: the instruction was to remove all of it, and the container
+    // finishes the job.
+    try {
+      await opts.elevated.remove(path)
+    } catch (fallbackErr: unknown) {
+      throw bothFailed(`removing ${path}`, err, fallbackErr)
+    }
+  }
+}
+
+export async function copyTree(src: string, dst: string, opts: TreeOptions = {}): Promise<CloneResult> {
+  try {
+    return await cloneTree(src, dst)
+  } catch (err: unknown) {
+    if (!isPermissionError(err) || !opts.elevated) {
+      throw err
+    }
+    // cloneTree's plain-copy retry stopped at the first unreadable entry and
+    // left what it had written so far, all of it owned by the daemon. It
+    // goes before the container copies, which refuses an existing dst for
+    // the same reason cloneTree does.
+    try {
+      await removeTree(dst, opts)
+      await mkdir(dirname(dst), { recursive: true })
+      return await opts.elevated.clone(src, dst)
+    } catch (fallbackErr: unknown) {
+      throw bothFailed(`copying ${src} to ${dst}`, err, fallbackErr)
+    }
+  }
+}
