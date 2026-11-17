@@ -385,6 +385,35 @@ export async function pgExtRmTool(api: Api, args: PgExtArgs): Promise<ToolResult
   return run(async () => await api.setExtensions(await pgResourceId(api, args.target), { remove: args.extensions }))
 }
 
+// The allowlist tools mirror `hobby allow ls|add|rm|off` over
+// GET/POST/DELETE /v1/projects/:name/allowlist. Each returns the project,
+// whose `allowlist` is null (open to any address), [] (this box only) or the
+// canonical entries.
+export interface ProjectArgs {
+  project: string
+}
+
+export interface AllowArgs {
+  project: string
+  entries: string[]
+}
+
+export async function allowListTool(api: Api, args: ProjectArgs): Promise<ToolResult> {
+  return run(async () => await api.getAllowlist(args.project))
+}
+
+export async function allowAddTool(api: Api, args: AllowArgs): Promise<ToolResult> {
+  return run(async () => await api.setAllowlist(args.project, { add: args.entries }))
+}
+
+export async function allowRmTool(api: Api, args: AllowArgs): Promise<ToolResult> {
+  return run(async () => await api.setAllowlist(args.project, { remove: args.entries }))
+}
+
+export async function allowOffTool(api: Api, args: ProjectArgs): Promise<ToolResult> {
+  return run(async () => await api.clearAllowlist(args.project))
+}
+
 export async function rmTool(api: Api, args: RmArgs): Promise<ToolResult> {
   return run(async () => {
     if (args.confirm !== true) {

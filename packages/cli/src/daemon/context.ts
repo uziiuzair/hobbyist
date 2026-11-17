@@ -40,6 +40,9 @@ import {
   type HttpTarget,
   type ProxyDeps,
   type ProxyTarget,
+  RefusalLimiter,
+  refusalLogLine,
+  type AccessRefusal,
 } from '@hobby.sh/proxy'
 import { createTailnetDetector } from './tailnet.js'
 import { formatRetryDelay, redactWakeError, wakeRetryDelayMs } from './wake-backoff.js'
@@ -566,6 +569,23 @@ export function getOrCreateWake(ctx: DaemonContext): (resourceId: string) => Pro
 // for real readiness before resolving, satisfying ProxyDeps.wake's
 // contract that it must not resolve until Postgres is actually accepting
 // connections.
+// One limiter per daemon, shared by every proxy listener (one per bind
+// address, server.ts's startProxyOn), so a scanner hitting the box on two
+// addresses still gets one log line a minute, not one per listener.
+const refusalLimiters = new WeakMap<DaemonContext, RefusalLimiter>()
+
+// The daemon log line for an allowlist refusal, rate limited (access.ts in
+// @hobby.sh/proxy). Exported for its test.
+export function logAccessRefusal(ctx: DaemonContext, refusal: AccessRefusal, log: (line: string) => void = console.error): void {
+  let limiter = refusalLimiters.get(ctx)
+  if (limiter === undefined) {
+    limiter = new RefusalLimiter()
+    refusalLimiters.set(ctx, limiter)
+  }
+  const verdict = limiter.admit(refusal.address ?? '(unknown)')
+  if (verdict.log) log(refusalLogLine(refusal, verdict.key, verdict.suppressed))
+}
+
 export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
   async function resolve(projectName: string, databaseSegment: string | null = null): Promise<ProxyTarget | null> {
     const project = ctx.store.getProjectByName(projectName)
@@ -656,6 +676,11 @@ export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
     resolve,
     wake: getOrCreateWake(ctx),
     isWakeRefused: (resourceId: string) => isWakeRefused(ctx, resourceId),
+    // Read per connection, so `hobby allow` takes effect on the next
+    // connection with no restart. A project that does not exist has no
+    // allowlist, and resolve then answers "unknown database" as before.
+    allowlist: (projectName: string) => ctx.store.getProjectByName(projectName)?.allowlist ?? null,
+    onAccessRefused: (refusal: AccessRefusal) => logAccessRefusal(ctx, refusal),
     activity: ctx.activity,
   }
 }

@@ -423,9 +423,11 @@ function errorJson(err: unknown): { status: number; body: Record<string, unknown
   }
   if (err instanceof pg.DatabaseError) {
     // The fields Neon returns (sql_over_http.rs, the json! in `handle`),
-    // which the driver copies onto its NeonDbError.
+    // which the driver copies onto its NeonDbError. 28000 is a refusal of
+    // the client itself, the project's IP allowlist (access.ts) or a
+    // pg_hba.conf reject, so it is a 403 rather than a bad query.
     return {
-      status: 400,
+      status: err.code === '28000' ? 403 : 400,
       body: {
         message: err.message,
         code: err.code,

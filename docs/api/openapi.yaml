@@ -294,6 +294,53 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /v1/projects/{name}/allowlist:
+    get:
+      summary: "The project's IP allowlist for the wake-on-connect proxy, as Project.allowlist. Same body as GET /v1/projects/{name} without resources."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: "Add and remove allowlist entries (IPv4 or IPv6 addresses and CIDR ranges), stored canonical (192.168.1.7/24 becomes 192.168.1.0/24). Adding to an open project restricts it. Removing the last entry leaves the list empty, which admits only this box, never every address. Applies to the next connection; open sessions are not ended. 400 for an entry that does not parse, 404 for removing an entry that is not there."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                add: { type: array, items: { type: string }, maxItems: 256 }
+                remove: { type: array, items: { type: string } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: "Lift the restriction: allowlist becomes null and any address that can reach the proxy may connect, as before allowlists existed."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+        "404": { $ref: "#/components/responses/Error" }
+
   /v1/projects/{name}/branch:
     post:
       summary: "Make a new project from a clone of this one's postgres data directories (branchProject, packages/cli/src/daemon/branch.ts). A sleeping source is cloned as it rests; an awake one is quiesced and resumed, and the pause is reported. Refused for a source holding an app, worker or queue, a released source, a resource mid-transition or failed, a taken name, or a pinned source that is awake unless allowPause. The branch starts asleep, unpinned, with the box-wide sleep policy."
@@ -1045,6 +1092,10 @@ components:
         releasedAt: { type: [string, "null"], format: date-time, description: "Set by eject --release; hobby stops acting on the project while set" }
         parentId: { type: [string, "null"], description: "The project this one was branched from, by id. null for a project not made by branching, and for branches made before 2026-11-17. May name a project that has since been removed." }
         expiresAt: { type: [string, "null"], format: date-time, description: "When the expiry sweep may delete this branch (packages/cli/src/daemon/expiry.ts). Only ever set on a branch; a pinned or awake branch is skipped until it is neither." }
+        allowlist:
+          type: [array, "null"]
+          items: { type: string }
+          description: "Which client addresses the Postgres proxy accepts for this project's databases, over TCP, TLS, CancelRequest, /sql and WebSocket. null: any address that reaches the proxy. []: this box only. Otherwise these canonical addresses and CIDR ranges plus this box (loopback and the docker gateways its own apps and workers dial are always allowed). A refused client gets FATAL 28000, or HTTP 403 on /sql, before anything is resolved or woken. Copied to a branch at branch time. Absent from daemons older than 2026-11-17."
 
     SnapshotManifest:
       description: "manifest.json as written by takeSnapshot, with each resource's config redacted the same way a WireResource's is (wire.ts, toWireSnapshotManifest). The file on disk is not redacted."

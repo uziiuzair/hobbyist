@@ -70,6 +70,7 @@ be called with a token, only with the password.
 | `POST /v1/projects/{name}/eject` | Render the compose file. `?release=true` also hands the project over |
 | `POST /v1/projects/{name}/adopt` | Manage a released project again |
 | `POST /v1/projects/{name}/sleep-policy` | Body `{ sleepAfterSeconds }`. `null` pins the project awake, a positive integer is its own idle threshold |
+| `GET` `POST` `DELETE /v1/projects/{name}/allowlist` | The project's IP allowlist as `project.allowlist`. POST `{ add?, remove? }` with addresses and CIDR ranges; DELETE lifts it (`null`). `[]` means this box only |
 | `POST /v1/snapshots/{id}/restore` | Body `{ as?, inPlace?, allowPause? }`. 201 into a new project, 200 in place |
 | `DELETE /v1/snapshots/{id}` | `{ deleted: true }` |
 | `GET` `DELETE /v1/resources/{id}` | Detail, destroy |

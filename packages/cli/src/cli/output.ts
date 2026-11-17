@@ -97,6 +97,30 @@ export function sleepPolicyTrailer(
   return ''
 }
 
+// The project line's IP allowlist marker in `hobby ls`: nothing for an open
+// project (the common case stays quiet), a count for a restricted one, and
+// "box only" for an empty list, which refuses every other machine.
+// `!= null` because a daemon older than allowlists sends no field at all.
+export function allowlistTrailer(project: Pick<Project, 'allowlist'>): string {
+  if (project.allowlist == null) return ''
+  const n = project.allowlist.length
+  return n === 0 ? '  (allowlist: this box only)' : `  (allowlist: ${n} ${n === 1 ? 'entry' : 'entries'})`
+}
+
+// `hobby allow ls`, and the answer to add, rm and off.
+export function renderAllowlist(project: Pick<Project, 'name' | 'allowlist'>): string[] {
+  if (project.allowlist == null) {
+    return [`project ${project.name}: no allowlist, any address that can reach the proxy may connect`]
+  }
+  if (project.allowlist.length === 0) {
+    return [`project ${project.name}: allowlist is empty, only this box may connect (loopback and its own apps and workers)`]
+  }
+  return [
+    `project ${project.name}: allowlist, plus this box (loopback and its own apps and workers):`,
+    ...project.allowlist.map((entry) => `  ${entry}`),
+  ]
+}
+
 // Long enough to recognise the failure ("exec format error", "did not become
 // ready within 30000ms"), short enough to keep a listing a listing. The full
 // message is in `hobby ls --json`, and the full story in `hobby logs`.

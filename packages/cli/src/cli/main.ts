@@ -33,6 +33,7 @@ import {
   cmdUpdate,
   cmdNew,
   cmdPg,
+  cmdAllow,
   cmdPin,
   cmdQueue,
   cmdReset,
@@ -218,6 +219,10 @@ const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]>
   ['wake', 'hobby wake <target>', 'wake it back up'],
   ['pin', 'hobby pin <project>', 'never auto-sleep this project'],
   ['unpin', 'hobby unpin <project> [--sleep-after N]', 'auto-sleep it again'],
+  ['allow', 'hobby allow [ls] <project>', 'which addresses may connect to its databases'],
+  ['allow', 'hobby allow add <project> <address|cidr>...', 'restrict it to these, plus this box'],
+  ['allow', 'hobby allow rm <project> <address|cidr>...', 'remove entries; the last leaves this box only'],
+  ['allow', 'hobby allow off <project>', 'lift the restriction: any address that reaches the proxy'],
   ['logs', 'hobby logs <target> [--tail N]', 'tail its logs'],
   ['rm', 'hobby rm <target> [--yes]', 'destroy, with confirmation'],
   ['eject', 'hobby eject <project>', 'emit docker-compose.yml plus data'],
@@ -528,6 +533,10 @@ export async function run(argv: string[], io: Io): Promise<number> {
       case 'unpin': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json'], value: ['sleep-after'] })
         return await cmdUnpin(ctx, positionals, flags)
+      }
+      case 'allow': {
+        const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+        return await cmdAllow(ctx, positionals, flags)
       }
       case 'logs': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json'], value: ['tail'] })

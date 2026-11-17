@@ -501,3 +501,116 @@ other paths and the value conversion. Both pass under `node --test` and under
 - A daemon shutdown with `wss://` sessions open waits out tls.ts's existing
   one-second grace for the relayed socket.
 - Nothing has run through a real daemon yet.
+
+## Amendment, 2026-11-17: per-project IP allowlists
+
+**What.** A project can carry an allowlist of IPv4 and IPv6 addresses and CIDR
+ranges (`Project.allowlist`, a JSON column added by `migrate` in
+`packages/core/src/store.ts`). It decides which client addresses this proxy
+accepts for every postgres in the project. Three states:
+
+- `null`: no restriction. Every project before this, and every new one.
+- `[]`: this box only.
+- a list: those addresses and ranges, plus this box.
+
+`hobby allow [ls|add|rm|off]`, the MCP tools `hobby_allow_*` and
+`GET/POST/DELETE /v1/projects/:name/allowlist` (`setAllowlistRoute` in
+`packages/cli/src/daemon/routes.ts`) are the one control surface. Removing the
+last entry leaves `[]`, never `null`: taking an address away must not open the
+project to every address. Only `off` (DELETE) lifts it. Inspired by Xata's
+gateway filter (`services/gateway/ipfiltering/filter.go`, Apache-2.0), which
+also treats an enabled empty list as deny-all and an unparseable client
+address as refused. No code is copied; parsing and matching are our own, on
+bigints, in `packages/core/src/allowlist.ts`.
+
+**The box is always allowed.** A connection is exempt when its peer is
+loopback, or when the address it dialed is loopback or a docker network
+gateway the daemon knows (`sameBox` in `startDaemon`,
+`packages/cli/src/daemon/server.ts`, built from `proxyGatewayHosts` and grown
+by `addProxyGateway`). Judged by the dialed address, not the listener, because
+with `proxyHost: "all"` there is no gateway listener and container traffic
+arrives on the 0.0.0.0 one from container addresses no allowlist would name.
+On Docker Desktop and OrbStack, an app reaching `host.docker.internal` lands
+on the host's loopback listener, which counts. The box's own apps and workers
+are the same box, so restricting them would only break them.
+
+**Where it is enforced.** `allowedOrRefuse` in `proxy.ts`, on every path:
+
+- *Startups*, plain TCP, TLS, and the serverless driver's `/sql` and
+  WebSocket (each an in-memory connection into the same handler).
+  `handleStartup` checks first, with the routing key's project, before
+  `resolve`. So a refused address never learns what the project holds,
+  never calls `wake`, and never reaches `activity.open`: it cannot wake a
+  sleeping database or keep one awake. The answer is `FATAL 28000` (what
+  Postgres sends when `pg_hba.conf` has no line for the client), naming the
+  project and the client address. On `/sql` that FATAL becomes HTTP 403 with
+  the usual Neon-shaped JSON (`errorJson` in `sql-over-http.ts` maps 28000 to
+  403). A WebSocket has already upgraded before the startup packet names a
+  project, so its client gets the FATAL inside the session, which the driver
+  reports as an ordinary error with code 28000.
+- *CancelRequests* are checked too, against the project the minted key's
+  session was opened for (`CancelRoute.project`). Refused cancels close
+  silently, as an unknown key does. A cancel carries no credentials, but it
+  does interrupt the project's queries, and an address the project refuses
+  should not be able to.
+- A lookup that throws refuses.
+
+**The client's real address.** Through a plain TCP connection it is the
+socket peer. Two paths lost it before this change, and both now carry a
+`ClientAddress` (`packages/proxy/src/access.ts`) read from the socket the
+outer server accepted:
+
+- the TLS terminator dials its inner server from 127.0.0.1, so `tls.ts`
+  records the context against the relay's local port before the handshake,
+  the same trick `serverless.ts` already used for its own relay;
+- the serverless front hands the proxy a `PairSide` with no address at all,
+  so `connectToProxy` takes the client alongside the stream.
+
+A connection whose record is missing is judged as an unknown address, which
+no list matches.
+
+**What it does not cover.** The proxy sees the TCP peer. A tunnel or
+forwarder on the box (`ssh -L`, `tailscale serve`, a local TCP proxy) makes
+every client look like loopback, and loopback is exempt. There is no PROXY
+protocol support. The HTTP router for apps and workers, Studio (ADR 0008) and
+the daemon API (ADR 0018) are not filtered by this; it is the Postgres port
+only. Sessions already open when a list changes are not ended. A snapshot
+restored into a new project copies the allowlist of the project it was taken
+from as that project is now (`restoreSnapshot` in `snapshots.ts`); the
+manifest does not record one, so a snapshot restored after its project was
+deleted comes back open.
+
+**Branches inherit at branch time.** A branch is its own project, holding the
+same data and passwords as its source, so `branchProject` (`branch.ts`) copies
+the source's list into it. A copy, not a link: each list changes on its own
+afterwards, and `hobby reset` leaves the branch's own list alone.
+
+**Logging.** Each refusal is reported through `ProxyDeps.onAccessRefused`;
+the daemon writes at most one line per address per minute to its log, with a
+count of what it folded in (`RefusalLimiter` in `access.ts`, one per daemon,
+shared by every listener). The tracked-address map is capped at 1024; past
+that, untracked addresses share one bucket, so a scanner sweeping an IPv6
+range cannot grow it. No user name or credential is logged.
+
+**ADR fit.** ADR 0017 (where the proxy listens) is unchanged: an allowlist
+narrows who may use a bind, it never widens one, and loopback stays the
+default. ADR 0019 (TLS) is unchanged, and its plaintext rule still runs
+before the allowlist. It lists rate limiting and blocking scanners under what
+it does not do, and defers login throttling. This is neither: it is a static,
+operator-written address filter, with no counting of attempts. ADR 0008
+(Studio) and ADR 0018 (the remote CLI) are about other listeners and are
+unaffected. ADR 0021 is unaffected: `/sql` and WebSocket requests are checked
+inside the same handler, and a refused one is turned away before any
+password the proxy holds is used.
+
+**Verified.** `packages/proxy/test/allowlist.test.ts` drives `startPgProxy`
+against the fake SCRAM Postgres for TCP, TLS (from `::1`, so the relay's
+127.0.0.1 cannot pass for the client), cancels, `/sql` and WebSocket. It
+asserts no resolve, no wake and no activity on a refusal. Parsing and
+matching are in `packages/core/test/allowlist.test.ts`; routes, deps,
+logging, branch inheritance and the CLI in `packages/cli/test/allowlist.test.ts`.
+
+**Not verified.** Nothing here has run through a real daemon, against a
+client on another machine, or under Bun. The same-box rule for container
+traffic on Linux, and on Docker Desktop or OrbStack, is reasoned from the
+code paths above, not measured.

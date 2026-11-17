@@ -58,6 +58,15 @@ export interface Project {
   // the routes that write it refuse anything else, so `hobby new` projects
   // can never expire. Null means never.
   expiresAt: Date | null
+  // Which client addresses the wake-on-connect proxy accepts for this
+  // project's databases, as canonical entries (core's canonicalAllowlist).
+  // Null means no restriction, the behaviour every project had before this
+  // existed. A list, even an empty one, means only those addresses plus this
+  // box itself (loopback and the docker gateways); see the 2026-11-17
+  // allowlist amendment in docs/proxy/CLAUDE.md. Optional because a daemon
+  // older than the field sends a project without it, and a hand-built
+  // fixture may omit it; the store always sets it.
+  allowlist?: string[] | null
 }
 
 // The fields every kind's config carries, so the many existing call sites

@@ -37,6 +37,10 @@ export interface CancelRoute {
   readonly host: string
   readonly port: number
   backendKey: CancelKey | null
+  // The routing key's project the session was opened for, so a cancel can be
+  // held to that project's IP allowlist (access.ts). Optional for callers
+  // that predate it; absent means no allowlist is consulted.
+  readonly project?: string
 }
 
 // What a lookup that succeeded hands back. Separate from CancelRoute so that
@@ -46,6 +50,7 @@ export interface ResolvedCancelRoute {
   readonly host: string
   readonly port: number
   readonly backendKey: CancelKey
+  readonly project?: string
 }
 
 // Unreachable with real randomness, and present so that a degenerate mint
@@ -101,7 +106,12 @@ export class CancelRegistry {
     if (route === undefined || route.backendKey === null) {
       return null
     }
-    return { host: route.host, port: route.port, backendKey: route.backendKey }
+    return {
+      host: route.host,
+      port: route.port,
+      backendKey: route.backendKey,
+      ...(route.project === undefined ? {} : { project: route.project }),
+    }
   }
 
   remove(key: CancelKey): void {

@@ -66,6 +66,10 @@ There is nothing secret in it: access is whoever can open the daemon's socket.
 | `hobby_pg_ext_ls` | `hobby pg ext ls` |
 | `hobby_pg_ext_add` | `hobby pg ext add` |
 | `hobby_pg_ext_rm` | `hobby pg ext rm` |
+| `hobby_allow_ls` | `hobby allow ls` |
+| `hobby_allow_add` | `hobby allow add` |
+| `hobby_allow_rm` | `hobby allow rm` |
+| `hobby_allow_off` | `hobby allow off` |
 | `hobby_rm` | `hobby rm` |
 | `hobby_queue_list` | `hobby queue ls` |
 | `hobby_queue_create` | `hobby queue create` |

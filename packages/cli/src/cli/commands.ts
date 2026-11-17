@@ -39,12 +39,14 @@ import {
   type Api,
   type ExtensionsResponse,
   type IgnoredKey,
+  type ProjectResponse,
   type RawResponse,
 } from './client.js'
 import { CLI_VERSION } from '../version.js'
 import { activeRemote, forgetRemote, listRemotes, saveRemote } from './remote.js'
 import { EXIT_UPDATE_AVAILABLE, exitCodeForError } from './exit.js'
 import {
+  allowlistTrailer,
   branchCopyNote,
   branchTrailer,
   diskWarning,
@@ -54,6 +56,7 @@ import {
   proxyBindNote,
   reflinkWarning,
   tmpfsWarning,
+  renderAllowlist,
   renderDuration,
   renderPreflight,
   renderQueueLine,
@@ -1401,7 +1404,9 @@ export async function cmdLs(c: Ctx, flags: Flags): Promise<number> {
     // process's config (issue #110).
     const released = project.releasedAt != null ? `${project.name}  (released, not managed)` : project.name
     const parentName = project.parentId == null ? null : (projects.find((p) => p.id === project.parentId)?.name ?? null)
-    c.io.out(`${released}${sleepPolicyTrailer(project, defaultSleepAfterSeconds)}${branchTrailer(project, parentName, Date.now())}`)
+    c.io.out(
+      `${released}${sleepPolicyTrailer(project, defaultSleepAfterSeconds)}${branchTrailer(project, parentName, Date.now())}${allowlistTrailer(project)}`
+    )
     if (resources.length === 0) {
       c.io.out('  (no resources)')
       continue
@@ -1719,6 +1724,48 @@ function renderSleepPolicyLine(project: Project): string {
   return project.sleepAfterSeconds === null
     ? `project ${project.name}: pinned awake, never sleeps`
     : `project ${project.name}: sleeps after ${project.sleepAfterSeconds}s idle`
+}
+
+const ALLOW_USAGE = [
+  'usage: hobby allow [ls] <project>',
+  '       hobby allow add <project> <address|cidr>...',
+  '       hobby allow rm <project> <address|cidr>...',
+  '       hobby allow off <project>',
+].join('\n')
+
+// `hobby allow`: the CLI face of GET, POST and DELETE
+// /v1/projects/:name/allowlist, which decide which client addresses the
+// wake-on-connect proxy accepts for a project's databases. Shaped like
+// `hobby pg ext`: a bare project lists, add and rm take entries, and in a
+// linked directory the project may be left out. `off` is its own word
+// because removing the last entry does not open the project (the daemon
+// keeps it restricted to this box), and lifting a restriction should be
+// something nobody does by accident.
+export async function cmdAllow(c: Ctx, args: string[], flags: Flags): Promise<number> {
+  const first = args[0]
+  const op = first === 'add' || first === 'rm' || first === 'ls' || first === 'off' ? first : 'ls'
+  const rest = op === 'ls' && first !== 'ls' ? args : args.slice(1)
+
+  let result: ProjectResponse
+  if (op === 'ls' || op === 'off') {
+    if (rest.length > 1) throw new UsageError(ALLOW_USAGE)
+    const project = targetOrLinked(c, rest, ALLOW_USAGE)
+    result = op === 'ls' ? await c.api.getAllowlist(project) : await c.api.clearAllowlist(project)
+  } else {
+    const linked = c.config.project ?? null
+    const { project, entries } =
+      rest.length >= 2 || linked === null ? { project: rest[0], entries: rest.slice(1) } : { project: linked, entries: rest }
+    if (project === undefined || entries.length === 0) throw new UsageError(ALLOW_USAGE)
+    result = await c.api.setAllowlist(project, op === 'add' ? { add: entries } : { remove: entries })
+  }
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+    return 0
+  }
+  for (const line of renderAllowlist(result.project)) c.io.out(line)
+  if (op !== 'ls') c.io.out('applies to new connections; sessions already open are not ended.')
+  return 0
 }
 
 // `hobby pin <project>` and `hobby unpin <project> [--sleep-after N]`: the
