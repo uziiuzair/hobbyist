@@ -117,12 +117,16 @@ function say(line = '') {
   appendFileSync(SUMMARY_LOG, `${line}\n`)
 }
 
-// Anything that might carry a password is passed through this before it is
-// printed: postgres URLs, and POSTGRES_PASSWORD lines from eject output.
+// Anything that might carry a credential is passed through this before it is
+// printed or written to the failure artifacts: postgres URLs, PASSWORD, TOKEN
+// and SECRET assignments, and JSON keys ending in token, secret or password,
+// including the escaped JSON inside a worker's HOBBY_WORKER_MANIFEST env var
+// (its queueToken reached a CI artifact on the first Linux run).
 function redact(text) {
   return String(text)
     .replace(/(postgres(?:ql)?:\/\/[^:\s/]+:)[^@\s]+@/g, '$1***@')
-    .replace(/(PASSWORD[^:=\n]*[:=]\s*)\S+/gi, '$1***')
+    .replace(/((?:PASSWORD|TOKEN|SECRET)[^:=\n"]*[:=]\s*)[^\s"\\]+/gi, '$1***')
+    .replace(/((?:token|secret|password)\\*"\s*:\s*\\*")[^"\\]+/gi, '$1***')
 }
 
 function since(start) {

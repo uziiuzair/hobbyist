@@ -210,10 +210,12 @@ function buildCreateArgs(spec: ContainerSpec): string[] {
   if (spec.network) {
     args.push('--network', spec.network)
   }
-  // host-gateway is docker's own token for "the bridge gateway of whichever
-  // network this container is on", which is the address the daemon's queue
-  // endpoint binds on Linux. Emitting a literal address here instead would be
-  // wrong the moment a project gets a different network.
+  // host-gateway is docker's own token for the host as seen from a
+  // container: the default bridge's gateway (docker0) unless the docker
+  // daemon sets host-gateway-ip. It is NOT the gateway of the network the
+  // container is attached to. The hobby daemon binds that default bridge
+  // gateway on Linux (queueEndpointHosts, packages/cli/src/daemon/server.ts),
+  // so the token is enough and no literal address is emitted here.
   for (const host of spec.extraHosts ?? []) {
     args.push('--add-host', `${host.name}:${host.address}`)
   }

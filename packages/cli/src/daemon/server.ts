@@ -181,6 +181,28 @@ async function queueEndpointHosts(ctx: DaemonContext): Promise<string[]> {
     return [...hosts]
   }
 
+  // The address `--add-host=host.docker.internal:host-gateway` actually
+  // writes into a container's /etc/hosts. Docker resolves host-gateway to the
+  // default bridge's gateway (docker0, usually 172.17.0.1) or to the daemon's
+  // configured host-gateway-ip, NOT to the gateway of the network the
+  // container is attached to. The 2026-08-22 Linux research note measured
+  // 172.17.0.1 for a container on the default network and assumed a project
+  // container would see its own gateway instead; the first CI smoke run on
+  // ubuntu-latest (2026-11-17) showed a producer on hobby-<project>
+  // (gateway 172.19.0.1) failing with "Network connection lost" because the
+  // daemon was bound only to loopback and 172.19.0.1. Binding the default
+  // bridge gateway too is what makes host.docker.internal reach this
+  // listener. A daemon.json host-gateway-ip set to something else is not
+  // read here; that is a documented gap, not a silent one.
+  const bridge = await networkGateway('bridge')
+  if (bridge !== null) {
+    hosts.add(bridge)
+  } else {
+    console.error(
+      'daemon: could not read the default docker bridge gateway; containers reaching the host as host.docker.internal may not reach the queue endpoint or the proxy'
+    )
+  }
+
   for (const project of ctx.store.listProjects()) {
     try {
       const gateway = await networkGateway(project.networkName)

@@ -217,3 +217,27 @@ Docker" wording above is out of date.
   provenance; `hobby queue ls` shows retention and effective tuning; `hobby
   queue set` echoes the value** (#170). `peek()` takes `nowMs` and returns
   `PeekedMessage`.
+
+## Amendment, 2026-11-17: host-gateway is the default bridge, not the project network
+
+The first run of the live smoke test on GitHub's ubuntu-latest
+(`scripts/smoke.mjs`, the `smoke` job in `.github/workflows/ci.yml`) failed the
+producer scenario with `send failed: Network connection lost.`. The producer
+container had `host.docker.internal:host-gateway` (the container half of the
+#14 fix) and the daemon had bound loopback plus the project network's gateway,
+`172.19.0.1` (the daemon half). The two halves did not meet: Docker resolves
+`host-gateway` to the default bridge's gateway (`docker0`, normally
+`172.17.0.1`) or to the docker daemon's `host-gateway-ip`, whatever network the
+container is on. `docs/queues/research/2026-08-22-the-producer-path-on-real-linux.md`
+measured `172.17.0.1` for a container on the default network and then assumed a
+project container would resolve to its own gateway; that assumption was never
+measured, and it is wrong.
+
+`queueEndpointHosts` (`packages/cli/src/daemon/server.ts`) now also binds the
+default bridge gateway, read with `docker network inspect bridge`, and the
+proxy inherits it through `proxyGatewayHosts`, which fixes the same latent bug
+for an app's `DATABASE_URL` by `host.docker.internal` (#53). Project gateways
+stay bound; they are harmless and cover a container that reaches its own
+gateway directly. Not handled: a docker daemon configured with a
+`host-gateway-ip` other than the bridge gateway. Proven on Linux only by the
+CI smoke job, not by a box anyone owns.
