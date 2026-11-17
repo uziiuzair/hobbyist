@@ -109,6 +109,35 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Preflight" }
 
+  /v1/import:
+    post:
+      summary: "Copy an existing Postgres database into a hobby postgres resource with stock pg_dump and pg_restore, run in a throwaway container from the target's own image (runImport, packages/cli/src/daemon/import.ts). The project, and a postgres resource, are created when absent and removed again if the import fails before restoring. An existing target must be empty (409 otherwise; there is no override). Refused before anything is restored: a source newer than the image's pg_dump, and extensions the image does not ship. The source string is a credential: it reaches pg_dump only through a service file on the container's stdin, and every message in the response is redacted. Blocks until the restore finishes."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [project, source]
+              properties:
+                project: { type: string, description: "Created when it does not exist" }
+                resource: { type: string, description: "A postgres resource in the project, created when absent. Omitted: the project's only postgres, or a new one named primary" }
+                source: { type: string, description: "The source connection string, URI or keyword=value. Clients resolve it from stdin, a file or an environment variable; it is never echoed." }
+                schemas: { type: array, items: { type: string }, description: "pg_dump --schema patterns. When set, the source's extensions the image ships are added with --extension and their schemas created" }
+                excludeSchemas: { type: array, items: { type: string }, description: "pg_dump --exclude-schema patterns" }
+                strict: { type: boolean, default: false, description: "pg_restore --single-transaction --exit-on-error" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  import: { $ref: "#/components/schemas/ImportReport" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
   /v1/projects:
     get:
       summary: List projects.
@@ -1001,6 +1030,50 @@ components:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }
 
   schemas:
+    ImportReport:
+      type: object
+      description: "What an import copied (ImportReport, packages/cli/src/daemon/import.ts). Never contains the source string, its password or its user."
+      properties:
+        project: { type: string }
+        resource: { type: string }
+        resourceId: { type: string }
+        created: { type: [string, "null"], enum: [project, resource, null] }
+        source:
+          type: object
+          properties:
+            host: { type: string }
+            database: { type: [string, "null"] }
+            serverVersion: { type: string }
+            bytes: { type: [integer, "null"] }
+            viaHostAlias: { type: boolean, description: "A loopback host was reached as host.docker.internal" }
+        image: { type: string }
+        pgDumpMajor: { type: integer }
+        dumpBytes: { type: integer }
+        dumpTables: { type: integer }
+        tables: { type: integer }
+        rows: { type: integer, description: "pg_class.reltuples after ANALYZE" }
+        rowsAreEstimates: { type: boolean }
+        targetBytes: { type: integer }
+        durationMs: { type: integer }
+        extensions:
+          type: object
+          properties:
+            copied: { type: array, items: { type: string } }
+            notCopied:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  schema: { type: string }
+                  shipped: { type: boolean }
+        restore:
+          type: object
+          properties:
+            errors: { type: integer }
+            messages: { type: array, items: { type: string } }
+            expected: { type: array, items: { type: string } }
+        warnings: { type: array, items: { type: string } }
     ExtensionReport:
       type: object
       properties:

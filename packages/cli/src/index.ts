@@ -81,4 +81,5 @@ export {
   type Ctx,
 } from './cli/commands.js'
 export * from './cli/output.js'
+export { cmdImport, renderImportReport, resolveImportSource, type SourceReference } from './cli/import.js'
 export * from './version.js'

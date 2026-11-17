@@ -84,3 +84,9 @@ parse the duration with the CLI's own `parseDuration`
 compares and says so in its description. The SDK's tool annotations
 (`readOnlyHint`, `destructiveHint`) are still not used anywhere in
 `packages/mcp/src/server.ts`; the `confirm` argument remains the convention.
+
+**2026-11-17 amendment (import).** `hobby_import` mirrors `hobby import` and
+takes the source connection string by reference only, as `sourceEnv` or
+`sourceFile`, resolved in the MCP server process; there is no argument for the
+string itself. The reasoning is in `docs/portability/CLAUDE.md`'s 2026-11-17
+import amendment.

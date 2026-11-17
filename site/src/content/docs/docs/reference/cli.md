@@ -695,6 +695,46 @@ Accepts `--json`.
 
 Deletes one snapshot, with confirmation. `--yes` skips the prompt.
 
+## Moving a database in
+
+### `hobby import <project> [--from-file <path> | --from-env <NAME>] [--resource <name>] [--schema <s>]... [--exclude-schema <s>]... [--strict]`
+
+Copies an existing Postgres database (Neon, Supabase, RDS, a server on your
+laptop, anything this box can reach) into a Hobbyist project, with stock
+`pg_dump` and `pg_restore`. The project, and a postgres resource named
+`primary`, are created when they do not exist. `--resource` names the postgres
+resource to import into, created when absent. An existing database must be
+empty: an import never restores over data, and there is no flag that makes it.
+
+The connection string is a password, so it is never an argument (an argument
+lands in shell history and in the process list). It is read from stdin by
+default, with a hidden prompt on a terminal or from a pipe; from a file with
+`--from-file`; or from an environment variable with `--from-env`, which takes
+the variable's name.
+
+```sh
+hobby import shop                                  # prompts, input hidden
+op read op://dev/neon/url | hobby import shop      # from a pipe
+hobby import shop --from-file ~/.config/neon-url   # chmod 600 first
+hobby import shop --from-env NEON_DATABASE_URL --schema public
+```
+
+`--schema` keeps only the named schemas (repeatable, `pg_dump` patterns), and
+`--exclude-schema` leaves some out. With `--schema`, the source's extensions
+that this box's image ships are copied too, into their own schemas. `--strict`
+restores in one transaction, so any error rolls the whole restore back; without
+it, `pg_restore` restores everything it can and the errors are summarised.
+
+`pg_dump` runs inside a container from the target's own image, so it cannot
+dump a server newer than that image's Postgres; that is refused before
+anything is copied, as are extensions the image does not ship. `sslmode` in the
+connection string is honoured. Prints tables, rows (estimated by `ANALYZE`),
+bytes, the duration and any restore errors. Exits 1 when `pg_restore` reported
+errors, like `pg_restore` itself. The guide is
+[Move a database into Hobbyist](/docs/guides/import/).
+
+Accepts `--json`.
+
 ## Leaving
 
 ### `hobby eject <project> [--release]`

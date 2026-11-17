@@ -22,6 +22,7 @@ import {
   openStore,
   type ComputeRuntime,
   type ElevatedTreeOps,
+  type ExecFn,
   type HobbyConfig,
   type KindRegistry,
   type Paths,
@@ -106,6 +107,11 @@ export interface DaemonContext {
   // createContainerTreeOps (packages/core/src/docker.ts), a throwaway root
   // container; a test sets it to watch the fallback run without Docker.
   elevatedTreeOps?: (images: string[]) => ElevatedTreeOps
+  // How `hobby import` runs its throwaway pg_dump/pg_restore container
+  // (import.ts). Production leaves it unset and gets the real docker CLI
+  // (core's defaultDockerExec); a test sets it to read the argv and the
+  // service file on stdin, and to play the script's output.
+  importExec?: ExecFn
 }
 
 // A convenience factory for the real, production wiring: opens the real

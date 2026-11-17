@@ -17,6 +17,7 @@ import {
   envSetTool,
   envUnsetTool,
   expireTool,
+  importTool,
   listTool,
   logsTool,
   newTool,
@@ -107,6 +108,7 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     listSnapshots: notWired('listSnapshots'),
     restoreSnapshot: notWired('restoreSnapshot'),
     deleteSnapshot: notWired('deleteSnapshot'),
+    importDatabase: notWired('importDatabase'),
   }
   const api = { ...base } as unknown as Record<string, unknown>
   for (const [key, fn] of Object.entries(overrides)) {
@@ -480,4 +482,35 @@ test('hobby_expire sets a parsed duration or clears with null; hobby_diff passes
     'diffSchemas("blog-exp", )',
     'diffSchemas("b", "a")',
   ])
+})
+
+// The source is a reference only: a variable name or a path, resolved by
+// this process. The tool result carries the daemon's report and never the
+// string itself, and a call with no reference (or both) makes no request.
+test('hobby_import: resolves sourceEnv in this process and sends one POST /v1/import; never echoes the value', async () => {
+  const secret = 'postgresql://alex:McpS3cret@ep-x.neon.tech/neondb?sslmode=require'
+  process.env['HOBBY_TEST_IMPORT_URL'] = secret
+  try {
+    const report = { project: 'shop', tables: 3 }
+    const { api, calls } = fakeApi({ importDatabase: async () => ({ import: report }) as never })
+    const result = await importTool(api, { project: 'shop', sourceEnv: 'HOBBY_TEST_IMPORT_URL', schemas: ['public'] })
+    assert.equal(result.isError, undefined)
+    assert.deepEqual(resultText(result), { import: report })
+    assert.equal(calls.length, 1)
+    assert.ok(calls[0]?.startsWith('importDatabase('))
+    assert.ok(!result.content[0]?.text.includes('McpS3cret'))
+
+    const none = fakeApi({})
+    const refused = await importTool(none.api, { project: 'shop' })
+    assert.equal(refused.isError, true)
+    assert.match(refused.content[0]?.text ?? '', /exactly one of sourceEnv or sourceFile/)
+    const both = await importTool(none.api, { project: 'shop', sourceEnv: 'HOBBY_TEST_IMPORT_URL', sourceFile: '/x' })
+    assert.equal(both.isError, true)
+    assert.equal(none.calls.length, 0)
+
+    const unset = await importTool(none.api, { project: 'shop', sourceEnv: 'HOBBY_TEST_IMPORT_UNSET' })
+    assert.match(unset.content[0]?.text ?? '', /HOBBY_TEST_IMPORT_UNSET is not set/)
+  } finally {
+    delete process.env['HOBBY_TEST_IMPORT_URL']
+  }
 })
