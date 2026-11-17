@@ -148,6 +148,16 @@ Environment=HOBBY_PROXY_TLS_HOSTNAME=db.example.com
 hostname ending in `?sslmode=require`. The certificate files are re-read when
 they change, so certbot's renewals need no restart. All three settings or none:
 a partial set stops the daemon from starting.
+
+### The same port serves Neon's serverless driver
+
+The proxy port also answers `POST /sql` and WebSocket upgrades for
+`@neondatabase/serverless`, told apart from Postgres by their first bytes, so
+there is no separate setting or port for it. It binds wherever `proxyHost`
+binds and uses the `proxyTls` certificate for `https://` and `wss://`. One rule
+is stricter than for Postgres: a request from another machine is refused unless
+it arrived over TLS, whether or not `proxyTls` is set. See
+[Neon's serverless driver](/docs/guides/serverless-driver/).
 [ADR 0019](/docs/decisions/0019-the-proxy-terminates-tls/).
 
 ## Paths
