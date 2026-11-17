@@ -164,3 +164,6 @@ worse, so nothing was shipped. No server argument, no config and no compose
 change exist for it. The research note says what measurement would reopen
 this: a Linux box whose page cache has really been evicted between sleep and
 wake.
+
+Recorded as ADR 0020
+(`docs/decisions/0020-no-autoprewarm-and-no-declared-roles-or-databases.md`).

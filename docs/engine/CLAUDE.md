@@ -197,3 +197,6 @@ declares roles and databases. Neither fits here without changing a contract.
   `docs/proxy/CLAUDE.md` says it never maintains, and moves toward secrets
   management, which the root out-of-scope list names. `CREATE ROLE` from psql
   works and lives in the data directory like everything else.
+
+Both non-builds are recorded as ADR 0020
+(`docs/decisions/0020-no-autoprewarm-and-no-declared-roles-or-databases.md`).
