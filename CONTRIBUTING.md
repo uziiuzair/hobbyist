@@ -109,6 +109,41 @@ and then reintroduced for two more.
 If your change touches lifecycle, readiness, wake or sleep, say in the pull
 request what you ran and what you saw.
 
+### The live smoke test
+
+`scripts/smoke.mjs` does the running for you, against real Docker, and CI runs
+the same script on `ubuntu-latest` as the `live smoke (real Docker, Linux)`
+job. Locally it needs Docker (Docker Desktop and OrbStack both work), the
+`docker compose` plugin, `psql`, and no other `hobby daemon` running, because
+the daemon lock is machine-wide:
+
+```sh
+npm ci
+node scripts/smoke.mjs                     # builds first; about 75s on an M-series Mac
+SMOKE_SKIP_BUILD=1 node scripts/smoke.mjs  # reuse packages/*/dist as they are
+```
+
+It starts its own daemon under a throwaway `HOBBY_HOME` in `/tmp` on ports
+27430 to 27433 (move them with `SMOKE_PORT_BASE`), with Caddy off and a 10
+second idle threshold, then checks, through the shipped CLI and real clients:
+a Postgres project answering `psql` through the proxy, that database going to
+sleep by itself and waking on the next connection, an app woken from sleep by
+an HTTP request, a worker calling `send()` from inside its container and a
+second worker consuming the message, `hobby branch`, `hobby snapshot` and a
+restore, `hobby eject` producing compose files `docker compose` accepts, and
+`hobby rm` leaving nothing behind. It prints PASS, FAIL or SKIP per scenario
+and exits non-zero on any failure.
+
+It always tears down: every project, the daemon, any container, network or
+`hobby/*` image whose name carries this run's prefix, and the `HOBBY_HOME`.
+Nothing else on your Docker is touched. On a failure, the daemon log, every
+container's log and `hobby ls --json` are kept under `/tmp` (the path is
+printed), with passwords redacted; `SMOKE_ARTIFACTS=<dir>` puts them
+somewhere else, and `SMOKE_KEEP=1` leaves everything running to poke at.
+
+Passing on macOS says little about Linux, where Docker does not paper over
+`host.docker.internal` or file ownership. That is what the CI job is for.
+
 ## Pull requests
 
 - One change per pull request. A refactor bundled with a fix gets reviewed as
