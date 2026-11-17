@@ -8,6 +8,7 @@
 // leak here: filesystem permissions on that socket are the whole
 // authentication story, per docs/mcp/CLAUDE.md.
 
+import type { Readable, Writable } from 'node:stream'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { resolvePaths } from '@hobby.sh/core'
@@ -435,13 +436,48 @@ export function createServer(api: Api): McpServer {
   return server
 }
 
-// The real entry point: resolves the real $HOBBY_HOME paths, builds a real
-// Api bound to the real unix socket, and connects over stdio. Never called
-// from tests; see test/tools.test.ts for the pure, socket-free path.
-export async function runStdioServer(): Promise<void> {
-  const paths = resolvePaths(process.env)
-  const api = createApi(paths.socketPath)
-  const server = createServer(api)
-  const transport = new StdioServerTransport()
+// What `hobby mcp` (packages/cli/src/cli/mcp.ts) and bin/hobby-mcp.js both
+// call. socketPath defaults to the real $HOBBY_HOME socket; stdin and stdout
+// default to the process's own, and tests pass in-memory streams instead.
+export interface StdioServerOptions {
+  socketPath?: string
+  stdin?: Readable
+  stdout?: Writable
+}
+
+// A running server. `closed` settles when the client hangs up (stdin ends
+// or closes) and the server has been closed in turn, which is when a caller
+// that owns the process may exit.
+export interface StdioServerHandle {
+  closed: Promise<void>
+}
+
+// The real entry point: builds an Api bound to the unix socket and connects
+// over stdio. Starting needs no daemon: the Api connects per request, so a
+// client can initialize and list tools against a box whose daemon is down,
+// and each tool call then fails with the CLI's own daemon_unreachable error.
+// The SDK's StdioServerTransport never listens for end of input itself, so
+// this does, and closes the server when the client goes away.
+export async function runStdioServer(opts: StdioServerOptions = {}): Promise<StdioServerHandle> {
+  const socketPath = opts.socketPath ?? resolvePaths(process.env).socketPath
+  const stdin = opts.stdin ?? process.stdin
+  const stdout = opts.stdout ?? process.stdout
+  const server = createServer(createApi(socketPath))
+  const transport = new StdioServerTransport(stdin, stdout)
+  const closed = new Promise<void>((resolve) => {
+    let done = false
+    const finish = (): void => {
+      if (done) {
+        return
+      }
+      done = true
+      stdin.off('end', finish)
+      stdin.off('close', finish)
+      server.close().then(resolve, resolve)
+    }
+    stdin.once('end', finish)
+    stdin.once('close', finish)
+  })
   await server.connect(transport)
+  return { closed }
 }

@@ -159,5 +159,6 @@ jobs:
         run: |
           npm ci
           npm run check:cli
+          npm run check:plugin
           npm run build
           node scripts/check-links.mjs

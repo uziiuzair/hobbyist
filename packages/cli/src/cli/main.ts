@@ -9,6 +9,7 @@
 import { resolveConfig, resolvePaths, HobbyError } from '@hobby.sh/core'
 import { createApi, createRemoteClient, DaemonUnreachableError } from './client.js'
 import { activeRemote, type RemoteCredential } from './remote.js'
+import { cmdMcp } from './mcp.js'
 import {
   cmdConnect,
   cmdDaemon,
@@ -245,6 +246,7 @@ const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]>
   ['token', 'hobby token rm <name>', 'revoke one'],
   ['update', 'hobby update', 'update to the latest release'],
   ['update', 'hobby update --check', 'say whether one is available, change nothing'],
+  ['mcp', 'hobby mcp', "serve the MCP tools over stdio, against this box's daemon"],
   ['studio', 'hobby studio passwd', 'set the studio operator password'],
   ['studio', 'hobby studio', 'print the studio URL and open it'],
   ['version', 'hobby version', 'this CLI and the daemon it talks to'],
@@ -429,6 +431,17 @@ export async function run(argv: string[], io: Io): Promise<number> {
     if (cmd === 'update') {
       const { flags } = parseArgs(rest, { bool: ['json', 'check'] })
       return await cmdUpdate(io, paths, flags)
+    }
+
+    // stdio belongs to the MCP protocol from here on, and the transport is
+    // the unix socket even when a remote is active (ADR 0018), so this runs
+    // before the Api below is built. See mcp.ts.
+    if (cmd === 'mcp') {
+      const { positionals } = parseArgs(rest, {})
+      if (positionals.length > 0) {
+        throw new UsageError(`usage: hobby mcp (got: ${positionals.join(' ')})`)
+      }
+      return await cmdMcp({ socketPath: paths.socketPath, remoteUrl: remote?.url ?? null, err: io.err })
     }
 
     if (cmd === 'studio') {

@@ -1,0 +1,10 @@
+{
+  "name": "hobbyist",
+  "version": "0.1.0-alpha.4",
+  "description": "Skills and the local hobby MCP server for a self-hosted Hobbyist box: Postgres that sleeps and wakes, branches for risky migrations, deploys, snapshots and eject.",
+  "author": { "name": "Uzair Hayat" },
+  "homepage": "https://hobbyist.sh/docs/guides/agent-plugin/",
+  "repository": "https://github.com/uziiuzair/hobbyist",
+  "license": "Apache-2.0",
+  "keywords": ["postgres", "self-hosted", "branching", "scale-to-zero", "mcp"]
+}
