@@ -105,14 +105,15 @@ export function assertPauseAllowed(
   source: Project,
   running: Resource[],
   allowPause: boolean,
-  what: string = 'branching it'
+  what: string = 'branching it',
+  howLong: string = 'for the length of the clone'
 ): void {
   if (source.sleepAfterSeconds !== null || running.length === 0 || allowPause) {
     return
   }
   throw new HobbyError(
     'conflict',
-    `project ${source.name} is pinned awake, and ${what} would stop ${running.map((r) => r.name).join(', ')} for the length of the clone`,
+    `project ${source.name} is pinned awake, and ${what} would stop ${running.map((r) => r.name).join(', ')} ${howLong}`,
     'pass --allow-pause (API: "allowPause": true) to accept the pause, or `hobby sleep` it first'
   )
 }

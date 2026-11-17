@@ -82,10 +82,45 @@ hobby pg ext rm blog hstore            # undeclare only, never drops anything
 ```
 
 `ls` and `add` wake the database. An extension the image does not ship is
-refused with the image named. Extensions needing `shared_preload_libraries`
-(`pg_stat_statements`, `pg_cron`) can be created but will not work.
+refused with the image named. `pg_stat_statements` needs its library
+preloaded first, and `add` refuses it with the exact
+`hobby pg config set` command to run (see Server settings). `pg_cron` is
+refused outright: its jobs would silently stop while the database sleeps.
 Dropping an extension is a psql `DROP EXTENSION`, which also drops dependent
 columns: only do that when the user explicitly asks.
+
+## Server settings
+
+```sh
+hobby pg config ls blog                    # what is set, never wakes anything
+hobby pg config ls blog --all              # every setting hobby allows, with ranges
+hobby pg config set blog work_mem=16MB shared_preload_libraries=pg_stat_statements
+hobby pg config unset blog work_mem
+hobby new shop --setting work_mem=16MB     # declared at creation
+```
+
+Only allowlisted settings are accepted, and values outside their range are
+refused. Settings are passed to Postgres as server arguments, so `eject`
+carries them. On a sleeping database a change applies at the next wake and
+wakes nothing. On an awake one it restarts Postgres, a pause of a second or
+two that closes open connections: tell the user before doing that. A pinned,
+awake project is refused unless `--allow-pause` is passed, and only pass it
+after the user agrees to the pause.
+
+## Who can connect
+
+```sh
+hobby allow blog                           # the project's allowlist, if any
+hobby allow add blog 203.0.113.7 10.0.0.0/8
+hobby allow rm blog 203.0.113.7            # removing the last entry keeps it box only
+hobby allow off blog                       # open again to any address that can reach the proxy
+```
+
+An allowlist applies to every database in the project, through plain
+Postgres, TLS and the serverless driver. Connections from the box itself
+(loopback, and the project's own apps and workers) are always allowed.
+Changes apply to new connections; open sessions are not ended. `allow off`
+widens access, so confirm it with the user first.
 
 ## Logs
 

@@ -125,7 +125,7 @@ export async function applyPostgresSettings(
 
   const awake = resource.state === 'running'
   if (awake) {
-    assertPauseAllowed(project, [resource], change.allowPause === true, 'applying these settings')
+    assertPauseAllowed(project, [resource], change.allowPause === true, 'applying these settings', 'while Postgres restarts')
   }
 
   const release = holdProjectAsleep(ctx, project.id, project.name)
@@ -152,7 +152,7 @@ export async function applyPostgresSettings(
 
     // Awake. The pinned guard again, for a resource that woke between the
     // first read and the hold.
-    assertPauseAllowed(project, [current], change.allowPause === true, 'applying these settings')
+    assertPauseAllowed(project, [current], change.allowPause === true, 'applying these settings', 'while Postgres restarts')
     const guard = change.quiesce?.guard ?? ((r: Resource) => guardFor(ctx.kinds, ctx, r))
     await waitForIdle(
       current,

@@ -1,6 +1,6 @@
 ---
 name: hobbyist-backups-and-leaving
-description: Take, list, restore and delete local snapshots of a Hobbyist project, and eject a project to a standalone docker-compose.yml plus its data. Use before a risky change the user wants to be able to undo, when the user asks to back up or restore, or when they want to move a project off Hobbyist or stop it being managed.
+description: Take, list, restore and delete local snapshots of a Hobbyist project, import an existing Postgres (Neon, Supabase, RDS, a local server) into Hobbyist, and eject a project to a standalone docker-compose.yml plus its data. Use before a risky change the user wants to be able to undo, when the user asks to back up or restore, when they want to move a database onto Hobbyist, or when they want to move a project off Hobbyist or stop it being managed.
 ---
 
 # Hobbyist backups and leaving
@@ -10,7 +10,7 @@ not survive losing the disk, and there is no point-in-time recovery: you get
 back exactly what was there when it was taken. For an off-box backup,
 `pg_dump` always works against a Hobbyist database.
 
-Snapshots and eject have no MCP tools; run the CLI.
+Snapshots and eject have no MCP tools; run the CLI. Import has one, `hobby_import`.
 
 ## Snapshot
 
@@ -69,6 +69,29 @@ where it is and that it holds a secret.
 `--release` stops hobby managing the project: no more sleep, wake, branches
 or snapshots for it until `hobby adopt`. Confirm with the user before
 passing it.
+
+## Move a database in: import
+
+```sh
+hobby import shop --from-env SOURCE_DATABASE_URL     # a new project named shop
+hobby import shop --from-file ~/.config/shop-source  # the string in a 0600 file
+hobby import shop --from-env SOURCE_DATABASE_URL --schema public   # Supabase: public only
+```
+
+The source connection string holds a password. Never ask the user to paste
+it into the conversation, never pass it as an argument, and never print it.
+Ask them to put it in an environment variable or a file only they can read,
+then pass the name or path. `hobby_import` takes the same reference as
+`sourceEnv` or `sourceFile`, resolved by the MCP server, so the string never
+reaches you.
+
+An import is a one-shot `pg_dump` and restore with no owners or grants, into a
+new project or an empty resource. A database that already holds tables is
+refused, never restored over. A source newer than the box's Postgres is
+refused before anything is copied. The report lists tables, rows, extensions
+that could not be copied, and any restore errors (a policy naming a role the
+box does not have is the common one); the command exits 1 when there were
+restore errors, though everything else is there.
 
 ## Before risky work
 
