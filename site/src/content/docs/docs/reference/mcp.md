@@ -1,6 +1,6 @@
 ---
 title: MCP tools
-description: Eighteen tools over the daemon API, so an agent drives the same control surface the CLI does.
+description: Twenty-one tools over the daemon API, so an agent drives the same control surface the CLI does.
 sidebar:
   order: 4
 ---
@@ -17,7 +17,10 @@ drifting: there is no second path for them to drift along.
 |---|---|
 | `hobby_list` | `hobby ls` |
 | `hobby_new` | `hobby new` |
-| `hobby_branch` | `hobby branch` |
+| `hobby_branch` | `hobby branch`, with `expires` for `--expires` |
+| `hobby_reset` | `hobby reset` |
+| `hobby_expire` | `hobby expire`, `expires: null` for `--never` |
+| `hobby_diff` | `hobby diff`, `project` is the new side and `against` the old |
 | `hobby_connection_string` | `hobby connect --json` |
 | `hobby_sleep` | `hobby sleep` |
 | `hobby_wake` | `hobby wake` |
@@ -39,7 +42,7 @@ drifting: there is no second path for them to drift along.
 
 ## Destructive tools require confirmation twice
 
-`hobby_rm`, `hobby_queue_purge` and `hobby_queue_rm` refuse unless called with
+`hobby_rm`, `hobby_reset`, `hobby_queue_purge` and `hobby_queue_rm` refuse unless called with
 `confirm: true`, and the refusal says so. That mirrors the CLI's own prompt, for
 the same reason: these are irreversible, and an agent that reaches for one
 should have to mean it in a way that shows up in the transcript.

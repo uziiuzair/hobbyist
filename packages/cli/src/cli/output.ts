@@ -196,6 +196,63 @@ export function renderDuration(seconds: number): string {
   return `${seconds}s`
 }
 
+const DURATION_UNITS: Record<string, number> = { s: 1, m: 60, h: 3600, d: 86400, w: 604800 }
+
+// renderDuration's inverse, for `hobby branch --expires` and `hobby
+// expire`: whole numbers with a unit, summed, so `7d`, `36h`, `1d12h` and
+// `90m` all work, and a bare number is seconds, as --sleep-after takes. Every
+// string renderDuration produces parses back to the seconds it came from.
+// Null for anything else, including zero, so a caller can say what it
+// expected rather than guess.
+export function parseDuration(text: string): number | null {
+  const trimmed = text.trim().toLowerCase()
+  if (/^[0-9]+$/.test(trimmed)) {
+    const seconds = Number(trimmed)
+    return seconds > 0 && Number.isSafeInteger(seconds) ? seconds : null
+  }
+  if (!/^([0-9]+[smhdw])+$/.test(trimmed)) {
+    return null
+  }
+  let seconds = 0
+  for (const match of trimmed.matchAll(/([0-9]+)([smhdw])/g)) {
+    seconds += Number(match[1]) * (DURATION_UNITS[match[2] as string] as number)
+  }
+  return seconds > 0 && Number.isSafeInteger(seconds) ? seconds : null
+}
+
+// How far off a moment is, coarsely: the largest whole unit, since an
+// expiry line in `hobby ls` needs "about how long", not a countdown.
+export function renderUntil(at: Date | string, now: number): string {
+  const seconds = Math.floor((new Date(at).getTime() - now) / 1000)
+  if (seconds <= 0) return 'now'
+  if (seconds >= 86400) return `${Math.floor(seconds / 86400)}d`
+  if (seconds >= 3600) return `${Math.floor(seconds / 3600)}h`
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}m`
+  return `${seconds}s`
+}
+
+// The project line's branch facts, for `hobby ls`: which project it was
+// branched from (by name, when that project still exists), and its expiry.
+// Nothing at all for a project that is not a branch, so the common line is
+// unchanged. `parentName` null means the parent is gone. Read with loose
+// null checks for the reason cmdLs gives about releasedAt: a daemon older
+// than these fields sends neither.
+export function branchTrailer(
+  project: { parentId?: string | null; expiresAt?: Date | string | null },
+  parentName: string | null,
+  now: number
+): string {
+  const parts: string[] = []
+  if (project.parentId != null) {
+    parts.push(parentName === null ? 'branch, parent removed' : `branch of ${parentName}`)
+  }
+  if (project.expiresAt != null) {
+    const until = renderUntil(project.expiresAt, now)
+    parts.push(until === 'now' ? 'expired, deleted once asleep and unpinned' : `expires in ${until}`)
+  }
+  return parts.length === 0 ? '' : `  (${parts.join(', ')})`
+}
+
 // One line per message for `hobby queue peek`. The body is already decoded
 // JSON (routes.ts's peek route runs decodeBody before this ever sees it), so
 // this is a plain JSON.stringify, the same rendering --json would show for

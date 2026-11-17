@@ -7,7 +7,7 @@ import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { openStore, type PostgresConfig, type WorkerConfig } from '../src/index.js'
+import { openDatabase, openStore, type PostgresConfig, type WorkerConfig } from '../src/index.js'
 
 function samplePostgresConfig(hostPort: number): PostgresConfig {
   return {
@@ -199,5 +199,67 @@ test('openStore restricts the state file, and its WAL sidecars, to the owner', (
   } finally {
     store.close()
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// Branch workflows (2026-11-17): a store written before parent_id and
+// expires_at existed opens, gains both columns, and reads every old row as
+// "not a branch, never expires". That reading is what makes `hobby reset`
+// refuse an old branch with a message rather than guess at its parent.
+test('an older store gains parent_id and expires_at, and old rows read as neither', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hobby-store-migrate-'))
+  const path = join(dir, 'state.db')
+  try {
+    const old = openDatabase(path)
+    old.exec(`CREATE TABLE projects (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, network_name TEXT NOT NULL,
+      sleep_after_seconds INTEGER, created_at TEXT NOT NULL, released_at TEXT)`)
+    old.prepare('INSERT INTO projects (id, name, network_name, sleep_after_seconds, created_at) VALUES (?, ?, ?, ?, ?)').run(
+      'p-old',
+      'blog-exp',
+      'hobby-blog-exp',
+      300,
+      new Date().toISOString()
+    )
+    old.close()
+
+    const store = openStore(path)
+    try {
+      const project = store.getProjectByName('blog-exp')
+      assert.ok(project !== null)
+      assert.equal(project.parentId, null)
+      assert.equal(project.expiresAt, null)
+
+      // And the new columns are writable afterwards, through every path.
+      const child = store.createProject({ name: 'blog-exp-2', sleepAfterSeconds: 300, parentId: project.id })
+      assert.equal(store.getProject(child.id)?.parentId, project.id)
+      const at = new Date('2026-12-01T00:00:00.000Z')
+      store.setProjectExpiresAt(child.id, at)
+      assert.deepEqual(store.getProject(child.id)?.expiresAt, at)
+      store.setProjectExpiresAt(child.id, null)
+      assert.equal(store.getProject(child.id)?.expiresAt, null)
+    } finally {
+      store.close()
+    }
+    // Opening twice is a no-op: the migration asks before it alters.
+    openStore(path).close()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('createProject records a parent and an expiry, and round-trips them', () => {
+  const store = openStore(':memory:')
+  try {
+    const parent = store.createProject({ name: 'blog', sleepAfterSeconds: 300 })
+    assert.equal(parent.parentId, null)
+    assert.equal(parent.expiresAt, null)
+    const expiresAt = new Date('2026-11-24T12:00:00.000Z')
+    const branch = store.createProject({ name: 'blog-exp', sleepAfterSeconds: 300, parentId: parent.id, expiresAt })
+    assert.deepEqual(store.getProject(branch.id), branch)
+    assert.equal(branch.parentId, parent.id)
+    assert.deepEqual(branch.expiresAt, expiresAt)
+  } finally {
+    store.close()
   }
 })

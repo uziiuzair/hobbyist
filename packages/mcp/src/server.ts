@@ -16,9 +16,11 @@ import { z } from 'zod'
 import {
   branchTool,
   connectionStringTool,
+  diffTool,
   envListTool,
   envSetTool,
   envUnsetTool,
+  expireTool,
   listTool,
   logsTool,
   newTool,
@@ -32,6 +34,7 @@ import {
   queueRmTool,
   queueSendTool,
   queueSetRetentionTool,
+  resetTool,
   rmTool,
   sleepTool,
   wakeTool,
@@ -142,9 +145,75 @@ export function createServer(api: Api): McpServer {
           .boolean()
           .optional()
           .describe('accept pausing a pinned project that is awake; leave unset unless the user asked for it'),
+        expires: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('optional expiry such as "7d" or "36h": the daemon deletes the branch after that, once it is asleep and unpinned'),
       },
     },
     async (args) => branchTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_reset',
+    {
+      description:
+        'replace a branch\'s data with a fresh copy of its parent\'s current data, keeping the branch\'s name, port and ' +
+        'resources. mirrors `hobby reset <branch>`. DESTRUCTIVE: everything written to the branch is lost. requires ' +
+        'confirm: true; without it, this tool refuses and makes no request to the daemon at all. an awake parent or ' +
+        'branch is paused for the copy; a pinned, awake one is refused unless allowPause is true. a project not made ' +
+        'with hobby_branch, or whose parent is gone, is refused.',
+      inputSchema: {
+        branch: z.string().min(1).describe('the branch project to reset'),
+        allowPause: z
+          .boolean()
+          .optional()
+          .describe('accept pausing a pinned project that is awake; leave unset unless the user asked for it'),
+        confirm: z
+          .boolean()
+          .describe('must be exactly true to proceed; any other value (including omitting it) is refused'),
+      },
+    },
+    async (args) => resetTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_expire',
+    {
+      description:
+        'set or clear when the daemon deletes a branch. mirrors `hobby expire <branch> <duration>` and ' +
+        '`hobby expire <branch> --never`. only projects made with hobby_branch can expire. an expired branch is ' +
+        'deleted once it is asleep and unpinned; a pinned or awake one is skipped and logged, never forced.',
+      inputSchema: {
+        branch: z.string().min(1).describe('the branch project'),
+        expires: z
+          .string()
+          .min(1)
+          .nullable()
+          .describe('a duration from now such as "7d", "36h" or "1d12h", or null to clear the expiry'),
+      },
+    },
+    async (args) => expireTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_diff',
+    {
+      description:
+        'compare the database schemas of two projects with pg_dump --schema-only, as a unified diff per postgres ' +
+        'resource. mirrors `hobby diff`. WAKES every database it compares that is asleep; they sleep again once idle, ' +
+        'and the dump itself does not keep them awake. read-only otherwise.',
+      inputSchema: {
+        project: z.string().min(1).describe('the project whose schema is the new side (lines it adds are "+")'),
+        against: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('the project to compare against (the old side); defaults to the parent project was branched from'),
+      },
+    },
+    async (args) => diffTool(api, args)
   )
 
   server.registerTool(

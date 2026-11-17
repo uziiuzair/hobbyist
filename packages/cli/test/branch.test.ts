@@ -539,7 +539,7 @@ function cliCtx(response: BranchResponse): { ctx: Ctx; calls: unknown[]; out: st
 
 function response(overrides: Partial<BranchResponse> = {}): BranchResponse {
   return {
-    project: { id: 'p2', name: 'blog-exp', networkName: 'hobby-blog-exp', sleepAfterSeconds: 300, createdAt: new Date(), releasedAt: null },
+    project: { id: 'p2', name: 'blog-exp', networkName: 'hobby-blog-exp', sleepAfterSeconds: 300, createdAt: new Date(), releasedAt: null, parentId: null, expiresAt: null },
     resources: [],
     clone: 'reflink',
     paused: [],

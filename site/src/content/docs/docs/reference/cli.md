@@ -127,8 +127,11 @@ Accepts `--json`.
 Every project, with every resource and its sleep state. A released project is
 still listed, marked `(released, not managed)`. A pinned project is marked
 `(pinned)`, and one whose idle threshold differs from the daemon's default is
-marked `(sleeps after Ns)`; a project on the default says nothing. An
-`undeployed` app or worker is marked `(no code yet)`.
+marked `(sleeps after Ns)`; a project on the default says nothing. A branch
+is marked with the project it came from, `(branch of blog)`, and with its
+expiry when it has one, `(branch of blog, expires in 6d)`; in `--json` these
+are the project's `parentId` and `expiresAt`. An `undeployed` app or worker is
+marked `(no code yet)`.
 
 A Postgres line ends with how to reach it, `connect: hobby connect
 <project>/<name>`, rather than a port. The container's own host port is in
@@ -226,7 +229,56 @@ pinned source that is awake is refused unless you pass `--allow-pause`, because
 pinning it said it must stay up. A project holding apps, workers or queues
 cannot be branched yet. Remove a branch with `hobby rm`.
 
+The branch records which project it came from, which is what `hobby reset` and
+`hobby diff` use. `--expires <duration>` (for example `7d`, `36h`, `1d12h` or
+`90m`) gives it an expiry: once that time has passed, the daemon deletes the
+branch on its next sweep, but only while it is asleep and unpinned. A pinned or
+awake branch is skipped, with a line in the daemon log, and deleted once it is
+neither. Branches do not expire unless you ask.
+
 Accepts `--json`.
+
+### `hobby reset <branch> [--allow-pause] [--yes]`
+
+Replaces the branch's data with a fresh copy of its parent's current data, the
+way Neon resets a branch from its parent. Everything written to the branch is
+lost, so it asks you to type the branch's name, as `hobby rm` does; `--yes`
+skips the prompt. The branch keeps its name, port, container and resources, so
+anything pointed at it keeps working; its database user and password become the
+parent's, which live inside the copied data.
+
+The parent is copied exactly as `hobby branch` copies a source: asleep as it
+is, awake paused for the copy and resumed. The branch is then stopped for the
+swap and started again if it was running, and both pauses are printed. A pinned
+parent or branch that is awake is refused unless you pass `--allow-pause`. A
+branch with a session in use is refused rather than cut off. Refused too: a
+project that was not made with `hobby branch` (or was branched before hobby
+recorded parents), a branch whose parent has been removed, and a branch whose
+postgres resources no longer match its parent's by name. The old data is kept
+beside the new until everything has come back up, and its path is printed if
+anything did not. Accepts `--json`.
+
+### `hobby expire <branch> <duration>`
+
+Sets when the daemon may delete a branch, counted from now: `hobby expire
+blog-exp 7d`. `hobby expire <branch> --never` clears it. Only a project made
+with `hobby branch` can expire. The same skip rules as `hobby branch --expires`
+apply: a pinned or awake branch is never deleted by its expiry. Accepts
+`--json`.
+
+### `hobby diff <branch>`
+
+Compares the branch's database schema with its parent's and prints a unified
+diff per postgres resource. `hobby diff <project> <other>` compares any two
+projects, with lines only in `<other>` marked `+`. Each schema comes from
+`pg_dump --schema-only` run inside the database's own container, and resources
+are matched by name; one that exists on only one side is listed, not compared.
+
+It wakes every database it compares that is asleep, and says so on stderr.
+They go back to sleep after the usual idle time: the dump itself is invisible
+to the activity check, so a diff does not keep anything awake. Exits 0 whether
+or not anything differs. Accepts `--json`, which gives each resource's status,
+its diff text and its hunks as data.
 
 ### `hobby rm <target> [--yes]`
 

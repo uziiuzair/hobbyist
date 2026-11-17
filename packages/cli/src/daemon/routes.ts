@@ -69,6 +69,9 @@ import {
   resolveWorkerSourcePath,
 } from '@hobby.sh/worker'
 import { branchProject } from './branch.js'
+import { parseExpiresInSeconds, setBranchExpiry } from './expiry.js'
+import { resetBranch } from './reset.js'
+import { diffSchemas } from './schema-diff.js'
 import { CLI_VERSION } from '../version.js'
 import { listCrons } from './crons.js'
 import { clearWakeRefusal, getOrCreateWake, waitForProjectAwakeable, wakeBoundDatabase, type DaemonContext } from './context.js'
@@ -362,6 +365,13 @@ async function getProjectRoute(ctx: DaemonContext, name: string): Promise<RouteR
 // itself is gone. Marking each resource `destroying` before tearing it down
 // is what lets reconcile resume this exact operation if the daemon dies
 // partway through it, see reconcile.ts.
+// Exported for the branch expiry sweep (expiry.ts), which deletes an
+// expired branch through exactly the teardown `hobby rm` runs rather than a
+// second one.
+export async function deleteProject(ctx: DaemonContext, name: string): Promise<void> {
+  await deleteProjectRoute(ctx, name)
+}
+
 async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<RouteResult> {
   const project = getProjectByNameOrThrow(ctx, name)
   const resources = ctx.store.listResources(project.id)
@@ -499,14 +509,18 @@ async function branchProjectRoute(ctx: DaemonContext, req: IncomingMessage, sour
     throw new HobbyError(
       'usage',
       'name is required',
-      'POST /v1/projects/:name/branch expects { "name": string, "allowPause"?: boolean }'
+      'POST /v1/projects/:name/branch expects { "name": string, "allowPause"?: boolean, "expiresInSeconds"?: number }'
     )
   }
   const allowPause = fields['allowPause']
   if (allowPause !== undefined && typeof allowPause !== 'boolean') {
     throw new HobbyError('usage', 'allowPause must be a boolean', 'send true to accept pausing a pinned project')
   }
-  const result = await branchProject(ctx, sourceName, name, { allowPause: allowPause === true })
+  // Resolved against the daemon's clock, before anything is cloned, so a
+  // malformed expiry refuses the branch rather than leaving one behind.
+  const expiresInSeconds = parseExpiresInSeconds(fields['expiresInSeconds'], 'POST /v1/projects/:name/branch')
+  const expiresAt = expiresInSeconds === undefined || expiresInSeconds === null ? null : new Date(Date.now() + expiresInSeconds * 1000)
+  const result = await branchProject(ctx, sourceName, name, { allowPause: allowPause === true, expiresAt })
   return {
     status: 201,
     body: {
@@ -518,6 +532,64 @@ async function branchProjectRoute(ctx: DaemonContext, req: IncomingMessage, sour
       resumeFailures: result.resumeFailures,
     },
   }
+}
+
+// POST /v1/projects/:name/reset: replace a branch's data with a fresh clone
+// of its parent's (reset.ts has the order and every refusal). Destructive
+// for the branch, so the CLI and MCP gate it on a typed confirmation and
+// confirm: true respectively, as they gate `rm`; the route itself takes the
+// same allowPause override `branch` does, as a literal boolean only.
+async function resetBranchRoute(ctx: DaemonContext, req: IncomingMessage, name: string): Promise<RouteResult> {
+  const route = 'POST /v1/projects/:name/reset'
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const allowPause = readOptionalBoolean(fields, 'allowPause', route)
+  const result = await resetBranch(ctx, name, { allowPause })
+  return {
+    status: 200,
+    body: {
+      project: result.project,
+      parent: result.parent.name,
+      resources: await toWireResources(ctx, result.resources),
+      clone: result.clone,
+      parentPaused: result.parentPaused,
+      parentPausedMs: result.parentPausedMs,
+      parentResumeFailures: result.parentResumeFailures,
+      paused: result.paused,
+      pausedMs: result.pausedMs,
+      restartFailures: result.restartFailures,
+      preResetDirs: result.preResetDirs,
+    },
+  }
+}
+
+// POST /v1/projects/:name/expiry: set (`expiresInSeconds`: a number of
+// seconds from now, on the daemon's clock) or clear (`null`) a branch's
+// expiry. The field is required, so an empty body is a usage error rather
+// than a silent clear. Refused for a project that was not made as a branch.
+async function setExpiryRoute(ctx: DaemonContext, req: IncomingMessage, name: string): Promise<RouteResult> {
+  const route = 'POST /v1/projects/:name/expiry'
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const expiresInSeconds = parseExpiresInSeconds(fields['expiresInSeconds'], route)
+  if (expiresInSeconds === undefined) {
+    throw new HobbyError('usage', 'expiresInSeconds is required', `${route} expects { "expiresInSeconds": number | null }, null to clear it`)
+  }
+  const project = setBranchExpiry(ctx, name, expiresInSeconds, Date.now())
+  return { status: 200, body: { project } }
+}
+
+// POST /v1/projects/:name/diff: the schema of :name compared against
+// `against`, or against its recorded parent when that is absent. A POST and
+// not a GET because it wakes every database it compares (schema-diff.ts).
+async function diffSchemasRoute(ctx: DaemonContext, req: IncomingMessage, name: string): Promise<RouteResult> {
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const against = fields['against']
+  if (against !== undefined && (typeof against !== 'string' || against.length === 0)) {
+    throw new HobbyError('usage', 'against must be a project name', 'POST /v1/projects/:name/diff expects { "against"?: string }')
+  }
+  return { status: 200, body: await diffSchemas(ctx, name, against) }
 }
 
 // The default port an app's process is asked to listen on. Handed to the
@@ -2816,6 +2888,18 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
     if (segments.length === 4 && method === 'POST' && segments[3] === 'branch') {
       const name = decodeURIComponent(segments[2] as string)
       return await branchProjectRoute(ctx, req, name)
+    }
+
+    if (segments.length === 4 && method === 'POST' && segments[3] === 'reset') {
+      return await resetBranchRoute(ctx, req, decodeURIComponent(segments[2] as string))
+    }
+
+    if (segments.length === 4 && method === 'POST' && segments[3] === 'expiry') {
+      return await setExpiryRoute(ctx, req, decodeURIComponent(segments[2] as string))
+    }
+
+    if (segments.length === 4 && method === 'POST' && segments[3] === 'diff') {
+      return await diffSchemasRoute(ctx, req, decodeURIComponent(segments[2] as string))
     }
 
     if (segments.length === 4 && method === 'POST' && segments[3] === 'eject') {

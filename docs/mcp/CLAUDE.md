@@ -1,6 +1,6 @@
 # `docs/mcp/` the MCP server
 
-**Status:** BUILT. Eighteen tools registered in `packages/mcp/src/server.ts`
+**Status:** BUILT. Eighteen tools registered (twenty-one since the 2026-11-17 amendment below) in `packages/mcp/src/server.ts`
 over the daemon API on the unix socket, mirroring the CLI verbs for projects,
 databases, env and queues; no deploy tool, and `hobby_new` creates only
 postgres. The body below is the original scope guard and still governs the
@@ -69,3 +69,18 @@ it. Response shaping matters more here than anywhere else in the tool set:
 an agent is handed a secret to set, and what comes back is the key names and
 whether the resource was stopped, never a value. `ls` reads names off the
 daemon's redacted wire config, so there is no tool that could return one.
+
+## Amendment, 2026-11-17: branch workflow tools
+
+Three tools, mirroring three new verbs over three new routes, so the count
+in the status line above is now twenty-one. `hobby_reset` (`hobby reset`,
+`POST /v1/projects/:name/reset`) replaces a branch's data with its parent's
+and is gated on `confirm: true` exactly as `hobby_rm` is: no request is made
+without it. `hobby_expire` (`hobby expire`, `POST /v1/projects/:name/expiry`)
+sets or clears a branch's expiry, and `hobby_branch` gained `expires`; both
+parse the duration with the CLI's own `parseDuration`
+(`packages/cli/src/cli/output.ts`), so "7d" means one thing on both surfaces.
+`hobby_diff` (`hobby diff`, `POST /v1/projects/:name/diff`) wakes what it
+compares and says so in its description. The SDK's tool annotations
+(`readOnlyHint`, `destructiveHint`) are still not used anywhere in
+`packages/mcp/src/server.ts`; the `confirm` argument remains the convention.

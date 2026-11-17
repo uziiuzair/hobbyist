@@ -308,6 +308,7 @@ paths:
               properties:
                 name: { type: string, description: "The new project's name" }
                 allowPause: { type: boolean, default: false, description: "Accept stopping a pinned, awake source for the copy" }
+                expiresInSeconds: { type: integer, minimum: 1, maximum: 315360000, description: "Optional expiry, seconds from now on the daemon's clock. Absent means the branch never expires." }
       responses:
         "201":
           content:
@@ -321,6 +322,115 @@ paths:
                   paused: { type: array, items: { type: string }, description: "Names of the source's resources stopped for the clone and started again; empty for a sleeping source" }
                   pausedMs: { type: [integer, "null"], description: "How long the source was paused; an upper bound that includes the idle check" }
                   resumeFailures: { type: array, items: { type: string }, description: "Source resources that did not start again after the copy" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{name}/reset:
+    post:
+      summary: "Replace a branch's postgres data with a fresh clone of its parent's (resetBranch, packages/cli/src/daemon/reset.ts). Destroys the branch's data; the CLI asks for the name to be typed back and the MCP tool needs confirm: true. The parent is cloned as branch clones a source (an awake one is quiesced and resumed), then the branch is quiesced, its data directories swapped, each resource rebound (credentials and image from the parent; id, container name and host port kept) and resumed. Refused for a project with no recorded parent, a parent that no longer exists, a released branch or parent, postgres resources that differ by name, a branch whose activity guard reports a session in use, a leftover <dataDir>.pre-reset, a snapshot or restore in progress, and a pinned awake parent or branch unless allowPause."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                allowPause: { type: boolean, default: false, description: "Accept stopping a pinned, awake parent or branch" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+                  parent: { type: string, description: "The parent's name" }
+                  resources: { type: array, items: { $ref: "#/components/schemas/WireResource" } }
+                  clone: { type: string, enum: [reflink, copy] }
+                  parentPaused: { type: array, items: { type: string } }
+                  parentPausedMs: { type: [integer, "null"] }
+                  parentResumeFailures: { type: array, items: { type: string } }
+                  paused: { type: array, items: { type: string }, description: "The branch's resources stopped for the swap and started again" }
+                  pausedMs: { type: [integer, "null"] }
+                  restartFailures: { type: array, items: { type: string }, description: "Branch resources that did not come back on the new data" }
+                  preResetDirs: { type: array, items: { type: string }, description: "Previous data directories kept on disk because something failed; empty on a clean reset" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{name}/expiry:
+    post:
+      summary: "Set or clear a branch's expiry (setBranchExpiry, packages/cli/src/daemon/expiry.ts). Refused with usage for a project that was not made by branching. The daemon deletes an expired branch on its next sweep (every 60 seconds) only while every resource is asleep, no proxied connection is open, it is not pinned, not released and not held by a snapshot or restore; otherwise it logs one line and retries on later sweeps."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expiresInSeconds]
+              properties:
+                expiresInSeconds: { type: [integer, "null"], minimum: 1, maximum: 315360000, description: "Seconds from now on the daemon's clock, or null to clear" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{name}/diff:
+    post:
+      summary: "Compare this project's database schema with another's, or with its recorded parent (diffSchemas, packages/cli/src/daemon/schema-diff.ts). Each same-named postgres pair is dumped with pg_dump --schema-only inside its own container over the local socket, as application_name hobby so the activity guard ignores the session, and diffed as a unified diff with three lines of context. WAKES every compared database that is asleep (listed in woke); it is not counted as a connection, so they sleep again after the usual idle time. A POST because of those wakes."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                against: { type: string, description: "The project to compare against (the old side, ---). Defaults to the parent." }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  old: { type: object, properties: { project: { type: string } } }
+                  new: { type: object, properties: { project: { type: string } } }
+                  identical: { type: boolean }
+                  woke: { type: array, items: { type: string }, description: "project/resource for each database this diff woke" }
+                  resources:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        status: { type: string, enum: [same, changed, only-old, only-new] }
+                        diff: { type: string, description: "Unified diff text; empty unless changed" }
+                        hunks:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              oldStart: { type: integer }
+                              oldLines: { type: integer }
+                              newStart: { type: integer }
+                              newLines: { type: integer }
+                              lines:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    op: { type: string, enum: [" ", "-", "+"] }
+                                    text: { type: string }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -933,6 +1043,8 @@ components:
         sleepAfterSeconds: { type: [integer, "null"], description: "null pins the project awake forever" }
         createdAt: { type: string, format: date-time }
         releasedAt: { type: [string, "null"], format: date-time, description: "Set by eject --release; hobby stops acting on the project while set" }
+        parentId: { type: [string, "null"], description: "The project this one was branched from, by id. null for a project not made by branching, and for branches made before 2026-11-17. May name a project that has since been removed." }
+        expiresAt: { type: [string, "null"], format: date-time, description: "When the expiry sweep may delete this branch (packages/cli/src/daemon/expiry.ts). Only ever set on a branch; a pinned or awake branch is skipped until it is neither." }
 
     SnapshotManifest:
       description: "manifest.json as written by takeSnapshot, with each resource's config redacted the same way a WireResource's is (wire.ts, toWireSnapshotManifest). The file on disk is not redacted."

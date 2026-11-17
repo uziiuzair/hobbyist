@@ -17,8 +17,10 @@ import {
   cmdCreate,
   cmdCron,
   cmdDeploy,
+  cmdDiff,
   cmdEject,
   cmdEnv,
+  cmdExpire,
   cmdInit,
   cmdLink,
   cmdLogin,
@@ -32,6 +34,7 @@ import {
   cmdPg,
   cmdPin,
   cmdQueue,
+  cmdReset,
   cmdRm,
   cmdSleep,
   cmdSnapshot,
@@ -184,6 +187,12 @@ const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]>
   ['ls', 'hobby ls', 'everything, with sleep state'],
   ['branch', 'hobby branch <project> <name>', 'a new project from a copy of its data, unpinned'],
   ['branch', 'hobby branch ... --allow-pause', 'accept pausing a pinned, awake source'],
+  ['branch', 'hobby branch ... --expires <duration>', 'delete the branch after 7d, 36h... once asleep'],
+  ['reset', 'hobby reset <branch> [--allow-pause] [--yes]', "replace its data with its parent's, with confirmation"],
+  ['expire', 'hobby expire <branch> <duration>', 'delete the branch after this long, once asleep'],
+  ['expire', 'hobby expire <branch> --never', 'clear its expiry'],
+  ['diff', 'hobby diff <branch>', "schema diff against its parent; wakes both"],
+  ['diff', 'hobby diff <project> <other>', 'schema diff between two projects; wakes both'],
   ['deploy', 'hobby deploy [path]', 'build a Dockerfile here and serve it'],
   ['deploy', 'hobby deploy [path] --database <r>', 'the same, bound to a sibling database'],
   ['deploy', 'hobby deploy [path] --env-file <f>', 'the same, with variables from a dotenv file'],
@@ -457,8 +466,23 @@ export async function run(argv: string[], io: Io): Promise<number> {
         return await cmdNew(ctx, positionals, flags)
       }
       case 'branch': {
-        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'allow-pause'] })
+        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'allow-pause'], value: ['expires'] })
         return await cmdBranch(ctx, positionals, flags)
+      }
+      case 'reset': {
+        // --yes and --allow-pause are separate gates, as they are for
+        // `snapshot restore --in-place`: one says "replace my data", the
+        // other "pausing a pinned project is fine".
+        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'yes', 'allow-pause'] })
+        return await cmdReset(ctx, positionals, flags)
+      }
+      case 'expire': {
+        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'never'] })
+        return await cmdExpire(ctx, positionals, flags)
+      }
+      case 'diff': {
+        const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+        return await cmdDiff(ctx, positionals, flags)
       }
       case 'ls': {
         const { flags } = parseArgs(rest, { bool: ['json'] })

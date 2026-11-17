@@ -46,7 +46,9 @@ import { activeRemote, forgetRemote, listRemotes, saveRemote } from './remote.js
 import { EXIT_UPDATE_AVAILABLE, exitCodeForError } from './exit.js'
 import {
   branchCopyNote,
+  branchTrailer,
   diskWarning,
+  parseDuration,
   hostNetworkingWarning,
   preflightBlockers,
   proxyBindNote,
@@ -1191,10 +1193,15 @@ export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promi
 export async function cmdBranch(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const [source, name] = positionals
   if (source === undefined || name === undefined || positionals.length > 2) {
-    throw new UsageError('usage: hobby branch <source-project> <new-project> [--allow-pause]')
+    throw new UsageError('usage: hobby branch <source-project> <new-project> [--allow-pause] [--expires <duration>]')
   }
+  const expires = flagString(flags, 'expires')
+  const expiresInSeconds = expires === undefined ? undefined : expiryDuration(expires)
 
-  const result = await c.api.branchProject(source, name, { allowPause: flags['allow-pause'] === true })
+  const result = await c.api.branchProject(source, name, {
+    allowPause: flags['allow-pause'] === true,
+    ...(expiresInSeconds === undefined ? {} : { expiresInSeconds }),
+  })
 
   if (flags.json) {
     c.io.out(JSON.stringify(result))
@@ -1212,6 +1219,9 @@ export async function cmdBranch(c: Ctx, positionals: string[], flags: Flags): Pr
           'any open connections to it were closed and will need to reconnect'
       )
     }
+    if (result.project.expiresAt != null) {
+      c.io.out(`it expires at ${new Date(result.project.expiresAt).toISOString()} and is deleted then, once asleep and unpinned`)
+    }
     c.io.out(`connect with: hobby connect ${result.project.name}`)
   }
 
@@ -1222,6 +1232,135 @@ export async function cmdBranch(c: Ctx, positionals: string[], flags: Flags): Pr
   }
   for (const failure of result.resumeFailures) {
     c.io.err(`${source} did not come back after the clone: ${failure}. try \`hobby wake ${source}\``)
+  }
+  return 0
+}
+
+function expiryDuration(text: string): number {
+  const seconds = parseDuration(text)
+  if (seconds === null) {
+    throw new UsageError(`not a duration: ${text} (examples: 7d, 36h, 1d12h, 90m)`)
+  }
+  return seconds
+}
+
+// `hobby reset <branch>`: replace the branch's data with a fresh clone of
+// its parent's (POST /v1/projects/:name/reset; packages/cli/src/daemon/
+// reset.ts). The branch's own data is gone afterwards, so this asks for the
+// branch's name to be typed back exactly as `hobby rm` does, and --yes skips
+// the prompt. --allow-pause is the separate gate `hobby branch` has: it
+// accepts pausing a pinned, awake parent or branch, and says nothing about
+// whether the data may be replaced.
+export async function cmdReset(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const name = positionals[0]
+  if (name === undefined || positionals.length > 1) {
+    throw new UsageError('usage: hobby reset <branch> [--allow-pause] [--yes]')
+  }
+
+  if (!flags.yes) {
+    c.io.out(`type "${name}" to confirm replacing its data with a fresh copy of its parent's, this cannot be undone:`)
+    const typed = await c.io.readLine()
+    if (typed.trim() !== name) {
+      c.io.err('confirmation did not match, aborted')
+      return 1
+    }
+  }
+
+  const result = await c.api.resetBranch(name, { allowPause: flags['allow-pause'] === true })
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+  } else {
+    c.io.out(`reset ${name} to a fresh copy of ${result.parent}`)
+    for (const resource of result.resources) {
+      c.io.out(`  ${renderResourceLine(resource, Date.now(), name)}`)
+    }
+    if (result.parentPaused.length > 0 && result.parentPausedMs !== null) {
+      c.io.out(
+        `${result.parent} was paused for ${result.parentPausedMs}ms while ${result.parentPaused.join(', ')} was cloned; ` +
+          'any open connections to it were closed and will need to reconnect'
+      )
+    }
+    if (result.paused.length > 0 && result.pausedMs !== null) {
+      c.io.out(
+        `${name} was paused for ${result.pausedMs}ms while its data was replaced; ` +
+          'any open connections to it were closed and will need to reconnect'
+      )
+    }
+  }
+
+  if (result.clone === 'copy') {
+    c.io.err(branchCopyNote())
+  }
+  for (const failure of result.parentResumeFailures) {
+    c.io.err(`${result.parent} did not come back after the clone: ${failure}. try \`hobby wake ${result.parent}\``)
+  }
+  for (const failure of result.restartFailures) {
+    c.io.err(`${name} did not come back on its new data: ${failure}`)
+  }
+  for (const dir of result.preResetDirs) {
+    c.io.err(`${name}'s previous data was kept at ${dir}; remove it once you know nothing in it is needed`)
+  }
+  return result.restartFailures.length > 0 ? 1 : 0
+}
+
+// `hobby expire <branch> <duration>` sets when the daemon may delete a
+// branch, counted from now; `hobby expire <branch> --never` clears it.
+// POST /v1/projects/:name/expiry. Only a project made with `hobby branch`
+// can expire, which the daemon enforces.
+export async function cmdExpire(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const usage = 'usage: hobby expire <branch> <duration> | hobby expire <branch> --never'
+  const [name, duration] = positionals
+  const never = flags.never === true
+  if (name === undefined || positionals.length > 2 || (duration === undefined) === !never) {
+    throw new UsageError(usage)
+  }
+  const result = await c.api.setExpiry(name, never ? null : expiryDuration(duration as string))
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+  } else if (result.project.expiresAt == null) {
+    c.io.out(`${name} no longer expires`)
+  } else {
+    c.io.out(
+      `${name} expires at ${new Date(result.project.expiresAt).toISOString()} and is deleted then, once asleep and unpinned`
+    )
+  }
+  return 0
+}
+
+// `hobby diff <branch>` compares a branch's schema with its parent's;
+// `hobby diff <a> <b>` compares b's with a's (lines only in b are `+`).
+// POST /v1/projects/:name/diff. Prints a unified diff per postgres
+// resource; --json gives the structured result. Exit 0 either way, so the
+// output, not the exit code, says whether anything differs, unlike
+// diff(1): a failed diff and a found difference must not look alike to a
+// script.
+export async function cmdDiff(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  if (positionals.length === 0 || positionals.length > 2) {
+    throw new UsageError('usage: hobby diff <branch> | hobby diff <project> <other-project>')
+  }
+  const [first, second] = positionals as [string, string | undefined]
+  const result = second === undefined ? await c.api.diffSchemas(first) : await c.api.diffSchemas(second, first)
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+  } else {
+    for (const resource of result.resources) {
+      if (resource.status === 'changed') {
+        c.io.out(resource.diff.replace(/\n$/, ''))
+      } else if (resource.status === 'only-old') {
+        c.io.out(`${resource.name}: only in ${result.old.project}, not compared`)
+      } else if (resource.status === 'only-new') {
+        c.io.out(`${resource.name}: only in ${result.new.project}, not compared`)
+      }
+    }
+    if (result.identical) {
+      c.io.out(`no schema differences between ${result.old.project} and ${result.new.project}`)
+    }
+  }
+  if (result.woke.length > 0) {
+    c.io.err(`woke ${result.woke.join(', ')} to read the schema; they sleep again once idle`)
   }
   return 0
 }
@@ -1261,7 +1400,8 @@ export async function cmdLs(c: Ctx, flags: Flags): Promise<number> {
     // than that field gets only the pin marker, never a guess from this
     // process's config (issue #110).
     const released = project.releasedAt != null ? `${project.name}  (released, not managed)` : project.name
-    c.io.out(`${released}${sleepPolicyTrailer(project, defaultSleepAfterSeconds)}`)
+    const parentName = project.parentId == null ? null : (projects.find((p) => p.id === project.parentId)?.name ?? null)
+    c.io.out(`${released}${sleepPolicyTrailer(project, defaultSleepAfterSeconds)}${branchTrailer(project, parentName, Date.now())}`)
     if (resources.length === 0) {
       c.io.out('  (no resources)')
       continue
