@@ -1,0 +1,10 @@
+# Consumes the producer's queue. A full batch of one with no batching wait, so
+# delivery does not sit out the default one second max_batch_timeout.
+name = "smoke-consumer"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+[[queues.consumers]]
+queue = "smoke-jobs"
+max_batch_size = 1
+max_batch_timeout = 0

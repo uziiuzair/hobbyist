@@ -1,0 +1,12 @@
+# Produces to a queue from inside its container. This is the path issue #14 is
+# about: on Linux the container must resolve host.docker.internal (the
+# --add-host the daemon passes) and reach the queue endpoint on its project
+# network's bridge gateway (the bind the daemon adds when the network is
+# created after startup).
+name = "smoke-producer"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+[[queues.producers]]
+queue = "smoke-jobs"
+binding = "JOBS"
