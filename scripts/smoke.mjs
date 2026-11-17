@@ -49,7 +49,7 @@ import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -547,14 +547,20 @@ async function stopDaemon() {
 }
 
 async function removeHome() {
-  rmSync(RUN_DIR, { recursive: true, force: true, maxRetries: 2 })
+  try {
+    rmSync(RUN_DIR, { recursive: true, force: true, maxRetries: 2 })
+  } catch {
+    // EACCES on a container-owned file: fall through to the container below.
+    // force: true only ignores a missing path, not a refused one, which is
+    // why the first Linux run reported a snapshot's pgdata here.
+  }
   if (!existsSync(RUN_DIR)) return
   // On Linux a data directory is owned by the container's postgres uid (70 on
   // alpine), not by whoever runs this, so a plain rm as this user fails with
   // EACCES when `hobby rm` did not get to it. Remove it from inside a
   // container, as createDefaultRemoveDataDir does. postgres:18-alpine is
   // already on the box: every scenario above that did anything pulled it.
-  await run('docker', ['run', '--rm', '-v', `${RUN_DIR}:/doomed`, '--entrypoint', 'sh', 'postgres:18-alpine', '-c', 'rm -rf /doomed/*'], {
+  await run('docker', ['run', '--rm', '-v', `${dirname(RUN_DIR)}:/doomed`, '--entrypoint', 'rm', 'postgres:18-alpine', '-rf', `/doomed/${basename(RUN_DIR)}`], {
     timeoutMs: 120_000,
   })
   rmSync(RUN_DIR, { recursive: true, force: true })
