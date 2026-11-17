@@ -637,6 +637,23 @@ prints `{ url }` and opens nothing.
 Sets the operator password. The prompt never echoes. A password shorter than
 12 characters is refused before the confirm prompt, and nothing is changed.
 
+## Agents
+
+### `hobby mcp`
+
+Serves the [MCP tools](/docs/reference/mcp/) over stdio, for an agent client
+to start as a subprocess. It talks to this box's daemon over the unix socket
+and never to the remote from `hobby login`
+([ADR 0018](/docs/decisions/0018-the-cli-talks-to-a-remote-daemon/)); when a
+remote is active it says so on stderr. stdout carries the protocol, so the
+verb prints nothing else there. It starts without a daemon, and each tool call
+then fails with the daemon-unreachable error. It exits when the client closes
+its stdin. Registering it with a client:
+
+```sh
+claude mcp add hobby -- hobby mcp
+```
+
 ## Snapshots
 
 A snapshot is a copy of a whole project's data, taken on this box. It is local:

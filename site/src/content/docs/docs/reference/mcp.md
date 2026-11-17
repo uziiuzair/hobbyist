@@ -11,6 +11,41 @@ sidebar:
 [HTTP API](/docs/reference/api/) the CLI uses, which is what keeps the two from
 drifting: there is no second path for them to drift along.
 
+## Running it
+
+`hobby mcp` is the server: a stdio MCP server that runs under the same runtime
+as `hobby` itself, so `install.sh` installs nothing extra for it. An MCP client
+starts it as a subprocess. It needs no daemon to start and list its tools; each
+tool call needs one, and fails with the daemon-unreachable error without it.
+
+**Claude Code:**
+
+```sh
+claude mcp add hobby -- hobby mcp
+```
+
+Add `--scope user` to have it in every project rather than only the current
+one. The [agent plugin](/docs/guides/agent-plugin/) registers the same server
+and adds skills that teach an agent the workflows.
+
+**Claude Desktop** reads `claude_desktop_config.json` (on macOS in
+`~/Library/Application Support/Claude/`). Desktop apps do not see your shell's
+`PATH`, so give the full path that `command -v hobby` prints:
+
+```json
+{
+  "mcpServers": {
+    "hobby": { "command": "/usr/local/bin/hobby", "args": ["mcp"] }
+  }
+}
+```
+
+**Cursor** reads the same shape from `~/.cursor/mcp.json`, or from
+`.cursor/mcp.json` in a project.
+
+The client gets no connection string, password or token from this config.
+There is nothing secret in it: access is whoever can open the daemon's socket.
+
 ## The tools
 
 | Tool | Mirrors |
@@ -69,5 +104,7 @@ The CLI half of reaching a box from a laptop is built:
 [`hobby login`](/docs/reference/cli/#hobby-login-url) exchanges the operator
 password for an API token and every CLI command then runs against that box
 ([ADR 0018](/docs/decisions/0018-the-cli-talks-to-a-remote-daemon/)). MCP
-does not use that path. To drive a remote box from an agent, run the MCP
-server on the box itself, over SSH or a Tailscale node.
+does not use that path: `hobby mcp` on a laptop that is logged in to a box
+still serves the laptop's own socket, and says so on stderr. To drive a remote
+box from an agent, run `hobby mcp` on the box itself, for example as the
+client command `ssh box hobby mcp`.
