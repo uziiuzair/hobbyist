@@ -63,6 +63,7 @@ that matters, because it is the difference between a decision and a dogma.
 | [0013](0013-queues-and-the-broker-outside-the-runtime.md) | Queues as a resource kind, with the broker held outside the runtime |
 | [0019](0019-the-proxy-terminates-tls.md) | The proxy terminates TLS from operator-provided certificate files, and refuses plaintext from other machines once it does |
 | [0020](0020-no-autoprewarm-and-no-declared-roles-or-databases.md) | No autoprewarm after a wake, and no declared roles or databases |
+| [0021](0021-the-proxy-sees-passwords-for-serverless-driver-traffic.md) | PROPOSED: the proxy handles passwords for serverless driver traffic only, and requires TLS for it from other machines |
 
 0007 supersedes the scope section of the original root `CLAUDE.md` and is the one
 to read first if you are wondering why this is bigger than a database tool. 0001
