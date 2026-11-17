@@ -63,6 +63,12 @@ export interface ListArgs {
 
 export interface NewArgs {
   name: string
+  extensions?: string[]
+}
+
+export interface PgExtArgs {
+  target: string
+  extensions: string[]
 }
 
 export interface BranchArgs {
@@ -164,7 +170,11 @@ export async function listTool(api: Api): Promise<ToolResult> {
 export async function newTool(api: Api, args: NewArgs): Promise<ToolResult> {
   return run(async () => {
     const { project } = await api.createProject(args.name)
-    const { resource } = await api.createResource(project.name, { kind: 'postgres', name: 'primary' })
+    const { resource } = await api.createResource(project.name, {
+      kind: 'postgres',
+      name: 'primary',
+      ...(args.extensions !== undefined && args.extensions.length > 0 ? { extensions: args.extensions } : {}),
+    })
     return {
       project,
       resource,
@@ -282,6 +292,30 @@ export async function envListTool(api: Api, args: TargetArgs): Promise<ToolResul
       ...(kind === 'worker' ? { vars: Object.keys(manifest?.vars ?? {}).sort() } : {}),
     }
   })
+}
+
+// The extension tools mirror `hobby pg ext ls|add|rm` over
+// GET/POST /v1/resources/:id/extensions. ls and add wake a sleeping
+// database (only a running Postgres can say what it has installed); rm
+// only undeclares and never drops anything.
+async function pgResourceId(api: Api, target: string): Promise<string> {
+  const { resource } = await resolveTarget(api, target)
+  if (resource.kind !== 'postgres') {
+    throw new HobbyError('usage', `${target} is a ${resource.kind}, and only a postgres resource has extensions`)
+  }
+  return resource.id
+}
+
+export async function pgExtListTool(api: Api, args: TargetArgs): Promise<ToolResult> {
+  return run(async () => await api.getExtensions(await pgResourceId(api, args.target)))
+}
+
+export async function pgExtAddTool(api: Api, args: PgExtArgs): Promise<ToolResult> {
+  return run(async () => await api.setExtensions(await pgResourceId(api, args.target), { add: args.extensions }))
+}
+
+export async function pgExtRmTool(api: Api, args: PgExtArgs): Promise<ToolResult> {
+  return run(async () => await api.setExtensions(await pgResourceId(api, args.target), { remove: args.extensions }))
 }
 
 export async function rmTool(api: Api, args: RmArgs): Promise<ToolResult> {

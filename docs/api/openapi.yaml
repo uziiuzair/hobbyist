@@ -192,6 +192,7 @@ paths:
                   properties:
                     kind: { const: postgres }
                     name: { type: string }
+                    extensions: { type: array, items: { type: string }, description: "Extensions to declare and create on the first boot (CREATE EXTENSION IF NOT EXISTS ... CASCADE). One the image does not ship is a usage error and no resource is left behind. Stored as config.extensions" }
                 - type: object
                   required: [kind, name]
                   properties:
@@ -650,6 +651,43 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /v1/resources/{id}/extensions:
+    get:
+      summary: "Declared and installed extensions of a postgres resource (getExtensionsRoute). Wakes a sleeping database, as the query route does, because only a running Postgres can say what it has installed; the daemon's connection carries application_name hobby and never counts as activity. Other kinds answer usage."
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  extensions: { $ref: "#/components/schemas/ExtensionReport" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: "Change the declared extensions (setExtensionsRoute). `add` wakes the database and applies the whole declared list with CREATE EXTENSION IF NOT EXISTS ... CASCADE before the declaration is stored; a name the image does not ship is refused (usage, naming the image and issue #2) and nothing is stored. `remove` only undeclares: nothing is ever dropped, and a remove-only change wakes nothing."
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                add: { type: array, items: { type: string } }
+                remove: { type: array, items: { type: string } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  extensions: { $ref: "#/components/schemas/ExtensionReport" }
+                  removed: { type: array, items: { type: string }, description: "Names undeclared by this call. Still installed" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
   /v1/resources/{id}/queue/messages:
     get:
       summary: "Peek at the oldest messages without leasing them (peekQueueRoute), so looking does not change what the consumer receives. Queue resources only."
@@ -853,6 +891,26 @@ components:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }
 
   schemas:
+    ExtensionReport:
+      type: object
+      properties:
+        declared: { type: array, items: { type: string } }
+        installed:
+          description: "Every row of pg_extension, sorted by name, or null when the database was not read (a remove-only change to a sleeping one)"
+          oneOf:
+            - type: "null"
+            - type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  version: { type: string }
+        missing:
+          description: "Declared but not installed (dropped by hand), or null when not read"
+          oneOf:
+            - type: "null"
+            - type: array
+              items: { type: string }
     ErrorEnvelope:
       type: object
       properties:
@@ -1007,6 +1065,7 @@ components:
                 dataDir: { type: string }
                 superuser: { type: string }
                 database: { type: string }
+                extensions: { type: array, items: { type: string }, description: "Declared extensions. Absent when none were ever declared. What is installed is read live from GET /v1/resources/{id}/extensions" }
 
     WireAppResource:
       allOf:

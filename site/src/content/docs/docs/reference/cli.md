@@ -99,7 +99,7 @@ Takes no flags.
 
 ## Projects and resources
 
-### `hobby new <name> [--empty] [--pin]`
+### `hobby new <name> [--empty] [--pin] [--extension <ext>...]`
 
 Creates a project, puts a `postgres` resource named `primary` in it, boots that
 database once so it is initialised, and prints a connection string. The new
@@ -114,6 +114,11 @@ first real start out of crash recovery (`createPostgres`,
 box-wide `sleepAfterSeconds` at the moment it is created; see
 [configuration](/docs/reference/configuration/#settings) for what that means
 when the default later changes.
+
+`--extension <ext>`, repeatable, declares an extension and creates it during
+that first boot (`CREATE EXTENSION IF NOT EXISTS ... CASCADE`), so it costs no
+extra start. An extension the image does not ship is refused, naming the
+image, and nothing is left behind. See `hobby pg ext` below.
 
 Accepts `--json`.
 
@@ -164,12 +169,45 @@ not exist yet.
 
 Accepts `--json`.
 
-### `hobby pg create --project <p> <name>`
+### `hobby pg create --project <p> <name> [--extension <ext>...]`
 
 The explicit form, for creating a second database. An alias for
-`hobby create postgres`, not a second implementation.
+`hobby create postgres`, not a second implementation. `--extension` works as
+it does on `hobby new`.
 
 Accepts `--json`.
+
+### `hobby pg ext [ls|add|rm] <target>`
+
+The extensions a postgres resource declares, and what its database actually
+has installed, with versions.
+
+```
+hobby pg ext blog                     # same as: hobby pg ext ls blog
+hobby pg ext add blog pg_trgm hstore  # declare, then CREATE EXTENSION IF NOT EXISTS ... CASCADE
+hobby pg ext rm blog hstore           # undeclare only
+```
+
+`ls` and `add` wake a sleeping database, because only a running Postgres can
+say what it has installed. The daemon's session does not count as activity,
+so the database sleeps again on its usual schedule. `add` applies the whole
+declared list, which also recreates a declared extension someone dropped by
+hand. `ls` lists such an extension as declared but not installed.
+
+An extension the image does not ship is refused, the error names the image,
+and the declaration is left unchanged. The image is box-wide today
+(`HOBBY_IMAGE`); choosing one per project is issue #2.
+
+`rm` never drops anything. `DROP EXTENSION` also drops whatever depends on
+the extension, columns included, so run it from psql if you mean it.
+
+Extensions live in the data directory, so they survive sleep, branches,
+snapshots and `hobby eject` with nothing re-applied. An extension that needs
+`shared_preload_libraries` (`pg_stat_statements`, `pg_cron`) can be created
+but will not work: hobby passes no server arguments to Postgres.
+
+In a linked directory, `hobby pg ext add <ext>` with one argument acts on the
+linked project. Accepts `--json`.
 
 ### `hobby branch <project> <name> [--allow-pause]`
 

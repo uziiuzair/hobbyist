@@ -32,7 +32,15 @@ import {
   type Resource,
 } from '@hobby.sh/core'
 import { createAppResource, deployApp, type AppSource } from '@hobby.sh/app'
-import { connectionString, createPostgres, runQuery } from '@hobby.sh/pg'
+import {
+  connectionString,
+  createPostgres,
+  realExtensionOps,
+  reportExtensions,
+  runQuery,
+  validateExtensionNames,
+  type ExtensionReport,
+} from '@hobby.sh/pg'
 import {
   DEFAULT_RETENTION_SECONDS,
   MAX_RETENTION_SECONDS,
@@ -751,7 +759,11 @@ async function createResourceRoute(
   }
 
   if (kind === 'postgres') {
-    return { resource: await createPostgres(ctx, { project, name }), ignored: [], logs: '' }
+    const extensions =
+      fields['extensions'] === undefined
+        ? []
+        : validateExtensionNames(fields['extensions'], 'POST /v1/projects/:name/resources')
+    return { resource: await createPostgres(ctx, { project, name, extensions }), ignored: [], logs: '' }
   }
 
   if (kind === 'app') {
@@ -1818,6 +1830,86 @@ async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string):
   }
 }
 
+// GET and POST /v1/resources/:id/extensions: the declared extensions of a
+// postgres resource, and what its database actually has installed, with
+// versions (docs/engine/CLAUDE.md, 2026-11-17 amendment).
+//
+// Both wake a sleeping database the way the query route does, through the
+// same single-flight getOrCreateWake: "what is installed" is a question
+// only a running Postgres can answer, and asking it is an explicit,
+// per-resource request (like Studio's SQL), never a list page. The
+// declared list alone is on every wire resource (config.extensions) and
+// costs no wake. Every connection here carries HOBBY_APPLICATION_NAME, so
+// it never counts as someone using the database.
+//
+// POST { add?: string[], remove?: string[] }. `add` is applied with
+// CREATE EXTENSION IF NOT EXISTS ... CASCADE before the declaration is
+// written, so a name the image does not ship is refused and the stored
+// declaration never names something that is not there. The whole declared
+// list is re-applied, not just the additions, which also repairs one that
+// was dropped by hand. `remove` only undeclares: nothing is ever dropped,
+// because DROP EXTENSION drops the objects that depend on it, and a
+// platform that deletes a column of vectors because a list got shorter is
+// the "losing data quietly" this project refuses to ship. A remove-only
+// change touches no running Postgres and wakes nothing.
+function declaredExtensions(resource: PostgresResource): string[] {
+  return resource.config.extensions ?? []
+}
+
+async function wakeForExtensions(ctx: DaemonContext, resource: PostgresResource): Promise<PostgresResource> {
+  if (resource.state !== 'running') {
+    await getOrCreateWake(ctx)(resource.id)
+  }
+  return expectPostgres(getResourceOrThrow(ctx, resource.id), 'extensions')
+}
+
+async function getExtensionsRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
+  const resource = await wakeForExtensions(ctx, expectPostgres(getResourceOrThrow(ctx, id), 'extensions'))
+  ctx.activity.touch(resource.id)
+  const installed = await (ctx.extensions ?? realExtensionOps).list(resource.config)
+  const report: ExtensionReport = reportExtensions(declaredExtensions(resource), installed)
+  return { status: 200, body: { extensions: report } }
+}
+
+async function setExtensionsRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
+  const route = 'POST /v1/resources/:id/extensions'
+  const resource = expectPostgres(getResourceOrThrow(ctx, id), 'extensions')
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const add = fields['add'] === undefined ? [] : validateExtensionNames(fields['add'], route)
+  const remove = fields['remove'] === undefined ? [] : validateExtensionNames(fields['remove'], route)
+  if (add.length === 0 && remove.length === 0) {
+    throw new HobbyError('usage', 'nothing to change', `${route} expects { "add"?: string[], "remove"?: string[] }`)
+  }
+  const both = add.filter((name) => remove.includes(name))
+  if (both.length > 0) {
+    throw new HobbyError('usage', `${both.join(', ')} is both added and removed in one request`)
+  }
+
+  const current = declaredExtensions(resource)
+  const next = [...current.filter((name) => !remove.includes(name)), ...add.filter((name) => !current.includes(name))]
+
+  if (add.length === 0) {
+    ctx.store.updateResourceConfig(resource.id, { ...resource.config, extensions: next })
+    const installed =
+      resource.state === 'running' ? await (ctx.extensions ?? realExtensionOps).list(resource.config) : null
+    return { status: 200, body: { extensions: reportExtensions(next, installed), removed: remove } }
+  }
+
+  const ready = await wakeForExtensions(ctx, resource)
+  ctx.activity.touch(ready.id)
+  try {
+    const installed = await (ctx.extensions ?? realExtensionOps).apply(ready.config, next)
+    // Re-read before writing: the wake may have changed state, never config,
+    // but the write must not resurrect a stale state field either.
+    const latest = expectPostgres(getResourceOrThrow(ctx, id), 'extensions')
+    ctx.store.updateResourceConfig(latest.id, { ...latest.config, extensions: next })
+    return { status: 200, body: { extensions: reportExtensions(next, installed), removed: remove } }
+  } finally {
+    ctx.activity.touch(ready.id)
+  }
+}
+
 // Two calls in one route, and what `release` does NOT do is the design.
 //
 // Without `release` this is a pure read: a compose file rendered from real
@@ -2779,6 +2871,8 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       if (method === 'GET' && action === 'connection') return connectionRoute(ctx, id)
       if (method === 'GET' && action === 'logs') return logsRoute(ctx, id, url)
       if (method === 'POST' && action === 'query') return queryRoute(ctx, req, id)
+      if (method === 'GET' && action === 'extensions') return getExtensionsRoute(ctx, id)
+      if (method === 'POST' && action === 'extensions') return setExtensionsRoute(ctx, req, id)
       if (method === 'POST' && action === 'deploy') return deployResourceRoute(ctx, req, id)
       if (method === 'POST' && action === 'env') return envRoute(ctx, req, id)
     }

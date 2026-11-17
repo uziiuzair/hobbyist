@@ -25,6 +25,9 @@ drifting: there is no second path for them to drift along.
 | `hobby_env_set` | `hobby env set` |
 | `hobby_env_ls` | `hobby env ls` |
 | `hobby_env_unset` | `hobby env unset` |
+| `hobby_pg_ext_ls` | `hobby pg ext ls` |
+| `hobby_pg_ext_add` | `hobby pg ext add` |
+| `hobby_pg_ext_rm` | `hobby pg ext rm` |
 | `hobby_rm` | `hobby rm` |
 | `hobby_queue_list` | `hobby queue ls` |
 | `hobby_queue_create` | `hobby queue create` |

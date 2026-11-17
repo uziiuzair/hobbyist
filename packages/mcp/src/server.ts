@@ -22,6 +22,9 @@ import {
   listTool,
   logsTool,
   newTool,
+  pgExtAddTool,
+  pgExtListTool,
+  pgExtRmTool,
   queueCreateTool,
   queueListTool,
   queuePeekTool,
@@ -72,9 +75,56 @@ export function createServer(api: Api): McpServer {
         'hobby_connection_string afterward to get it.',
       inputSchema: {
         name: z.string().min(1).describe('the new project name, for example "blog"'),
+        extensions: z
+          .array(z.string().min(1))
+          .optional()
+          .describe('extensions to declare and create on first boot, for example ["pg_trgm"]. mirrors --extension'),
       },
     },
     async (args) => newTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_pg_ext_ls',
+    {
+      description:
+        'list a postgres resource\'s declared extensions and every installed extension with its version. ' +
+        'mirrors `hobby pg ext ls <target>`. wakes a sleeping database to read it. ' +
+        '`missing` names declared extensions that are no longer installed.',
+      inputSchema: {
+        target: z.string().min(1).describe(TARGET_DESCRIPTION),
+      },
+    },
+    async (args) => pgExtListTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_pg_ext_add',
+    {
+      description:
+        'declare extensions on a postgres resource and create them (CREATE EXTENSION IF NOT EXISTS ... CASCADE). ' +
+        'mirrors `hobby pg ext add <target> <ext>...`. wakes a sleeping database. an extension the image does ' +
+        'not ship is refused and nothing is declared.',
+      inputSchema: {
+        target: z.string().min(1).describe(TARGET_DESCRIPTION),
+        extensions: z.array(z.string().min(1)).min(1).describe('extension names, as pg_available_extensions lists them'),
+      },
+    },
+    async (args) => pgExtAddTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_pg_ext_rm',
+    {
+      description:
+        'undeclare extensions on a postgres resource. mirrors `hobby pg ext rm <target> <ext>...`. ' +
+        'never drops anything from the database; the extension stays installed.',
+      inputSchema: {
+        target: z.string().min(1).describe(TARGET_DESCRIPTION),
+        extensions: z.array(z.string().min(1)).min(1).describe('extension names to undeclare'),
+      },
+    },
+    async (args) => pgExtRmTool(api, args)
   )
 
   server.registerTool(

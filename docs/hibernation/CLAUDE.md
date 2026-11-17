@@ -139,3 +139,28 @@ this where the setting is documented.
   (`packages/cli/src/daemon/context.ts`) logs `woke in Nms` and, on failure,
   the redacted reason and how long automatic wakes are refused; a manual stop
   logs too. Previously the daemon printed its listen line and nothing else.
+
+## Amendment, 2026-11-17: autoprewarm after a wake was measured and not built
+
+Neon prewarms a compute's cache after a restart, and stock Postgres ships the
+same idea (`pg_prewarm` with `autoprewarm`). It was measured on an M2 Pro with
+plain containers, stopped and started the way the hibernator does, against a
+1.5 GB database with 128 MB of shared_buffers. The full numbers and method are
+in `research/2026-11-17-autoprewarm-after-wake.md`. In short:
+
+- Time to ready did not change. The worker loads blocks after Postgres accepts
+  connections.
+- The first 100 queries after a wake got slower at the median, by about 40 to
+  70 ms, because the worker competes with them. With the page cache warm,
+  every run with autoprewarm was slower than every run without.
+- About 170 ms was saved over 2,000 sequential lookups with the OS page cache
+  warm, which is the normal state on one box. Nothing was saved with the VM
+  cache dropped.
+- The worker reports as `backend_type = 'autoprewarm worker'`, so it would
+  never have kept a database awake through the guard.
+
+The first queries after a wake are the ones the wedge is about, and they got
+worse, so nothing was shipped. No server argument, no config and no compose
+change exist for it. The research note says what measurement would reopen
+this: a Linux box whose page cache has really been evicted between sleep and
+wake.

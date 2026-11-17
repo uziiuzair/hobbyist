@@ -25,6 +25,7 @@ import {
   isHostPortFree,
 } from '@hobby.sh/core'
 import { pgProbe, waitReady, type ProbeOutcome } from './readiness.js'
+import { realExtensionOps, type ExtensionOps } from './extensions.js'
 
 export interface PgDeps {
   store: Store
@@ -69,6 +70,10 @@ export interface PgDeps {
   // tricks, which is fragile and platform-dependent. Additive and optional,
   // same reasoning as probeFactory above.
   removeDataDir?: (path: string) => Promise<void>
+  // Optional seam for tests, same reasoning as probeFactory: against the
+  // fake runtime there is no Postgres to run CREATE EXTENSION in. Production
+  // leaves it unset and gets realExtensionOps (extensions.ts).
+  extensions?: ExtensionOps
 }
 
 const SUPERUSER = 'postgres'
@@ -118,9 +123,10 @@ function containerSpec(config: PostgresConfig, network: string): ContainerSpec {
 
 export async function createPostgres(
   deps: PgDeps,
-  opts: { project: Project; name: string }
+  opts: { project: Project; name: string; extensions?: string[] }
 ): Promise<PostgresResource> {
   validateName(opts.name)
+  const extensions = opts.extensions ?? []
 
   const hostPort = await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO)
   const password = randomBytes(PASSWORD_BYTES).toString('hex')
@@ -135,6 +141,7 @@ export async function createPostgres(
     superuser: SUPERUSER,
     password,
     database: opts.project.name,
+    ...(extensions.length > 0 ? { extensions } : {}),
   }
 
   const resource = deps.store.createResource({
@@ -192,18 +199,46 @@ export async function createPostgres(
       )
     }
 
+    // Declared extensions are applied on this first boot, while Postgres is
+    // already up for initdb, so creating with extensions costs no extra
+    // start. A failure here (an extension the image does not ship) is held
+    // until after the clean stop below, then the whole resource is torn
+    // down: a database the caller asked to have `vector` in, without it,
+    // is not what they asked for, and leaving it behind would make the
+    // obvious retry fail with name_taken.
+    let extensionFailure: unknown
+    if (extensions.length > 0) {
+      try {
+        await (deps.extensions ?? realExtensionOps).apply(config, extensions)
+      } catch (err) {
+        extensionFailure = err
+      }
+    }
+
     // Boot once so initdb and CREATE DATABASE happen, then stop cleanly.
     // Sleeping, not running, is the correct resting state for a system whose
     // entire premise is sleep: a clean stop here is what keeps the *next*
     // start out of crash recovery.
     await deps.runtime.stop(containerName, { timeoutSec: STOP_TIMEOUT_SEC })
     deps.store.setResourceState(resource.id, 'sleeping')
+
+    if (extensionFailure !== undefined) {
+      const row = deps.store.getResource(resource.id)
+      if (row !== null) {
+        try {
+          await destroyPostgres(deps, expectKind(row, 'postgres'))
+        } catch (cleanupErr) {
+          console.error(`could not remove ${opts.project.name}/${opts.name} after its extensions failed: ${errorMessage(cleanupErr)}`)
+        }
+      }
+      throw extensionFailure
+    }
   } catch (err) {
     // The wake_failed branch above already recorded `failed`; every other
     // failure path here (mkdir, ensureNetwork, ensureCreated, start, the
     // final stop) still needs the row to reflect that creation did not
     // finish cleanly, so it does not read as `creating` forever.
-    if (!(err instanceof HobbyError && err.code === 'wake_failed')) {
+    if (!(err instanceof HobbyError && err.code === 'wake_failed') && deps.store.getResource(resource.id) !== null) {
       deps.store.setResourceState(resource.id, 'failed')
     }
     throw err
@@ -272,6 +307,12 @@ export async function createPostgresFromClone(
     superuser: opts.source.superuser,
     password: opts.source.password,
     database: opts.source.database,
+    // Kept for the same reason as the password: the extensions themselves
+    // are in the cloned catalog, so the declaration that made them comes
+    // along with them.
+    ...(opts.source.extensions !== undefined && opts.source.extensions.length > 0
+      ? { extensions: [...opts.source.extensions] }
+      : {}),
   }
 
   const resource = deps.store.createResource({

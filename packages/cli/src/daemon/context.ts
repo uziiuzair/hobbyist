@@ -30,7 +30,7 @@ import {
   type Store,
 } from '@hobby.sh/core'
 import { appKindHandler } from '@hobby.sh/app'
-import { postgresKindHandler, type ProbeOutcome } from '@hobby.sh/pg'
+import { postgresKindHandler, type ExtensionOps, type ProbeOutcome } from '@hobby.sh/pg'
 import { queueKindHandler } from '@hobby.sh/queue'
 import { workerKindHandler } from '@hobby.sh/worker'
 import {
@@ -95,6 +95,11 @@ export interface DaemonContext {
   // already read a field called `now`, to name an image tag. A fake clock
   // set here for the refusal must not also rename every image a test builds.
   wakeClock?: () => number
+  // PgDeps.extensions, the same structural pass-through as probeFactory:
+  // read by createPostgres and by the extensions route (routes.ts), so a
+  // test can play a Postgres that ships some extensions and not others.
+  // Production leaves it unset and gets real CREATE EXTENSION.
+  extensions?: ExtensionOps
 }
 
 // A convenience factory for the real, production wiring: opens the real

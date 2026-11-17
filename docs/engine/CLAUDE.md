@@ -123,3 +123,77 @@ comparison and the decision not to add a capped buildx builder are in
 instance" in the scope above still holds for running containers
 (`ContainerSpec`), which `docker run` does enforce; it never held for
 builds.
+
+## Amendment, 2026-11-17: declared extensions, and why roles and databases are not declared
+
+**Built.** A postgres resource can declare extensions
+(`PostgresConfig.extensions`, `packages/core/src/types.ts`). They are applied
+with `CREATE EXTENSION IF NOT EXISTS ... CASCADE` by `applyExtensions`
+(`packages/pg/src/extensions.ts`) at two moments only:
+
+- **At creation**, inside `createPostgres`'s existing first boot, before its
+  clean stop, so declaring costs no extra start. If the image does not ship
+  one, the resource is torn down (`destroyPostgres`) and the create fails, so
+  the obvious retry does not hit `name_taken`.
+- **When the declaration changes**, through `POST /v1/resources/:id/extensions`
+  (`setExtensionsRoute`, `packages/cli/src/daemon/routes.ts`). `add` wakes the
+  database through the same `getOrCreateWake` the query route uses, applies
+  the whole declared list (which also recreates one dropped by hand), and only
+  then stores the declaration. `remove` only undeclares. Nothing is ever
+  dropped, because `DROP EXTENSION` drops what depends on it, and a shorter
+  list is not consent to delete a column.
+
+**Not on wake, on purpose.** An extension is catalog rows and objects inside
+the data directory. Once created it survives every stop, start, branch,
+snapshot restore and eject with nothing re-applied (`createPostgresFromClone`
+carries the declaration with the cloned catalog). Re-applying on wake would
+put a connection and a catalog read inside the cold start, whose ceiling is 3
+seconds, to re-confirm what the data directory already guarantees. Drift
+(someone dropped a declared extension) is reported rather than silently
+repaired: `GET /v1/resources/:id/extensions` returns `declared`, `installed`
+with versions from `pg_extension`, and `missing`. That GET wakes a sleeping
+database, since only a running Postgres can answer. The declared list alone is
+on every wire resource as `config.extensions`, which costs no wake.
+
+Every connection this opens carries `HOBBY_APPLICATION_NAME`
+(`packages/pg/src/activity-guard.ts`), so it never counts as activity. An
+extension the image does not ship is checked against `pg_available_extensions`
+before anything is created, and the `usage` error names the image and points
+at issue #2 (an image per project). "Postgres is unmodified" still holds: this
+only runs the stock image's own `CREATE EXTENSION`, and nothing in core
+function needs an extension. An extension that requires
+`shared_preload_libraries` (`pg_stat_statements`, `pg_cron`) can be created
+but will not work, because hobby passes no server arguments.
+
+Surfaces: `hobby new --extension`, `hobby pg create --extension`, and
+`hobby pg ext [ls|add|rm] <target>` under the existing `pg` verb (no new
+verb); MCP `hobby_pg_ext_ls`, `hobby_pg_ext_add`, `hobby_pg_ext_rm` and an
+`extensions` field on `hobby_new`; `docs/api/openapi.yaml`. Verified live on
+2026-11-17 against `postgres:18-alpine`: `pg_trgm`, `uuid-ossp` and
+`earthdistance` (CASCADE added `cube`) were created and reported with
+versions; `vector` and `postgis` were refused with nothing created; then the
+compose file rendered by the real eject route (`renderCompose`, unchanged)
+was started with `docker compose` on the same data directory, and all three
+extensions were present and answered queries.
+
+**Declared roles and databases: considered, not built.** Neon's spec also
+declares roles and databases. Neither fits here without changing a contract.
+
+- **Databases.** The proxy routes on the project name and resolves the
+  segment after the first dot resource first: `blog.analytics` is a resource
+  named `analytics` if one exists, otherwise a database named `analytics`
+  inside the default resource (`docs/proxy/CLAUDE.md`, the resolve order in
+  `createProxyDeps`). A declared database would claim a name in a namespace
+  where any later resource of that name silently shadows it, and a database
+  inside a non-default resource has no routing key at all
+  (`blog.reports.x` is not a form the proxy parses). Making that work means a
+  third key segment or a different resolve order, which is a change to the
+  routing contract, not to this capability. Today `CREATE DATABASE` from psql
+  already gives everything a declaration would for the default resource, and
+  branching and snapshots carry it in the data directory.
+- **Roles.** These do not conflict with routing (auth is passthrough and the
+  user name is never read), but a declared role needs a password the daemon
+  generates, stores and hands out. That makes the daemon a user store, which
+  `docs/proxy/CLAUDE.md` says it never maintains, and moves toward secrets
+  management, which the root out-of-scope list names. `CREATE ROLE` from psql
+  works and lives in the data directory like everything else.

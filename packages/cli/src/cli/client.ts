@@ -221,6 +221,19 @@ export interface CronListEntry {
 export interface CronListResponse {
   crons: CronListEntry[]
 }
+// GET and POST /v1/resources/:id/extensions. `installed` and `missing` are
+// null only when the database was not read (a remove-only change to a
+// sleeping one); a GET always wakes it and reads.
+export interface ExtensionsResponse {
+  extensions: {
+    declared: string[]
+    installed: Array<{ name: string; version: string }> | null
+    missing: string[] | null
+  }
+  // POST only: names undeclared by this call. Never dropped from the database.
+  removed?: string[]
+}
+
 export interface EnvResponse {
   resource: WireResource
   keys: string[]
@@ -368,7 +381,7 @@ export interface Api {
   createResource(
     project: string,
     input:
-      | { kind: 'postgres'; name: string }
+      | { kind: 'postgres'; name: string; extensions?: string[] }
       | {
           kind: 'app'
           name: string
@@ -413,6 +426,9 @@ export interface Api {
     id: string,
     input: { set?: Record<string, string>; unset?: string[]; replace?: Record<string, string> }
   ): Promise<EnvResponse>
+  // Declared and installed extensions of a postgres resource. Both wake it.
+  getExtensions(id: string): Promise<ExtensionsResponse>
+  setExtensions(id: string, input: { add?: string[]; remove?: string[] }): Promise<ExtensionsResponse>
   deleteResource(id: string): Promise<DeletedResponse>
   startResource(id: string): Promise<ResourceResponse>
   stopResource(id: string, opts?: { force?: boolean }): Promise<StopResponse>
@@ -552,6 +568,8 @@ export function createApi(transport: string | DaemonClient): Api {
     deployResource: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/deploy`, input ?? {}),
     getResource: (id) => call(client, 'GET', `/v1/resources/${p(id)}`),
     setEnv: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/env`, input),
+    getExtensions: (id) => call(client, 'GET', `/v1/resources/${p(id)}/extensions`),
+    setExtensions: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/extensions`, input),
     deleteResource: (id) => call(client, 'DELETE', `/v1/resources/${p(id)}`),
     startResource: (id) => call(client, 'POST', `/v1/resources/${p(id)}/start`),
     stopResource: (id, opts) => call(client, 'POST', `/v1/resources/${p(id)}/stop`, opts?.force === true ? { force: true } : {}),
