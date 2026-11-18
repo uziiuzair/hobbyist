@@ -28,8 +28,9 @@ import { findWranglerManifest } from '@hobby.sh/worker'
 import { createDaemonContext } from '../daemon/context.js'
 import { runPreflight } from '../daemon/preflight.js'
 import { reconcile } from '../daemon/reconcile.js'
-import { acquireDaemonLock } from '../daemon/single-instance.js'
+import { acquireDaemonLock, DAEMON_LOCK_PATH, inspectDaemonLock } from '../daemon/single-instance.js'
 import { startDaemon } from '../daemon/server.js'
+import { attachProxy, dialProxy, isAlive, proxySocketPath } from '../daemon/proxy-link.js'
 import { MIN_PASSWORD_LENGTH, hasOperatorCredential, setOperatorPassword } from '../daemon/studio/auth.js'
 import { issueToken, readTokens, revokeToken } from '../daemon/studio/tokens.js'
 import type { WireResource } from '../daemon/wire.js'
@@ -364,7 +365,16 @@ export async function cmdDaemon(io: Io, paths: Paths, config: HobbyConfig): Prom
   const ctx = createDaemonContext({ paths, config })
   try {
     await reconcile(ctx)
-    await startDaemon(ctx, { socketPath: paths.socketPath, apiPort: config.apiPort, onShutdown: () => lock.release() })
+    // The proxy runs as its own process and outlives a restart
+    // (docs/proxy/specs/2026-11-18-proxy-outlives-the-daemon.md), unless
+    // HOBBY_PROXY_MODE=in-process asks for the old single-process shape.
+    const inProcess = io.env.HOBBY_PROXY_MODE === 'in-process'
+    await startDaemon(ctx, {
+      socketPath: paths.socketPath,
+      apiPort: config.apiPort,
+      onShutdown: () => lock.release(),
+      ...(inProcess ? {} : { proxyProcess: {} }),
+    })
   } catch (err) {
     lock.release()
     throw err
@@ -373,6 +383,47 @@ export async function cmdDaemon(io: Io, paths: Paths, config: HobbyConfig): Prom
   await new Promise<void>(() => {
     // Deliberately never resolves; see the file comment above.
   })
+  return 0
+}
+
+// `hobby daemon stop`: the full stop. The daemon stops its resources as it
+// always has and, unlike SIGTERM (a restart, which leaves the proxy process
+// and its sessions up), stops the proxy process too. Sent as SIGUSR2 to the
+// pid in the daemon lock, so it is a verb about a process on this box, like
+// `hobby daemon` itself, and has no API route or MCP tool: a client talking
+// through the daemon has no business ending it. With no daemon running, a
+// proxy left behind by a restart is stopped directly over its socket.
+export async function cmdDaemonStop(
+  io: Io,
+  paths: Paths,
+  opts: { lockPath?: string; timeoutMs?: number } = {}
+): Promise<number> {
+  const timeoutMs = opts.timeoutMs ?? 120_000
+  const status = inspectDaemonLock(opts.lockPath ?? DAEMON_LOCK_PATH)
+  if (status !== null && status.running && !status.self) {
+    process.kill(status.pid, 'SIGUSR2')
+    const deadline = Date.now() + timeoutMs
+    while (isAlive(status.pid) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    if (isAlive(status.pid)) {
+      throw new HobbyError(
+        'internal',
+        `the daemon (pid ${status.pid}) is still stopping after ${Math.round(timeoutMs / 1000)}s`,
+        'it stops resources one at a time; check its log, or wait and run this again'
+      )
+    }
+    io.out(`daemon stopped (pid ${status.pid}, serving ${status.home}), with the proxy`)
+    return 0
+  }
+  const dialed = await dialProxy(proxySocketPath(paths.home))
+  if (dialed !== null) {
+    const link = await attachProxy(dialed, { wake: async () => {}, activity: { open: (r) => ({ resourceId: r, id: 0 }), close: () => {} }, refusalRetryAt: () => null }, true, () => {})
+    await link.stopProxy()
+    io.out(`no daemon was running; stopped the proxy it left (pid ${link.pid})`)
+    return 0
+  }
+  io.out('nothing to stop: no daemon and no proxy are running')
   return 0
 }
 

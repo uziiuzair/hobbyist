@@ -722,3 +722,46 @@ how often a client lands in Postgres's own shutdown window (`57P03` "the
 database system is shutting down", retried by `holdUntilServing` against
 the old port) versus the fenced window, and whether a TLS or WebSocket
 client's own connect timeout fires before a long restart finishes.
+
+## Amendment, 2026-11-18: the proxy is its own process, and outlives the daemon
+
+Phase A2 of the standby-pair design. Spec:
+`specs/2026-11-18-proxy-outlives-the-daemon.md`.
+
+`hobby daemon` no longer runs the Postgres proxy inside itself. It dials
+`$HOBBY_HOME/proxy.sock` and adopts the proxy process it finds there, or
+spawns one (`adoptOrStartProxy`, `packages/cli/src/daemon/proxy-link.ts`;
+the process is `startProxyHost`, `packages/cli/src/proxyd/host.ts`). A daemon
+restart or upgrade therefore leaves established proxied sessions up, cancel
+keys included, since `CancelRegistry` lives in the proxy process.
+
+The seam is unchanged: `startPgProxy` and `ProxyDeps` are the same, and the
+proxy still only asks. Across the process boundary:
+
+- `resolve` and `allowlist` run the daemon's own resolver
+  (`resolveProxyTarget`, `allowlistOf` in
+  `packages/cli/src/daemon/proxy-resolve.ts`) against `state.db` opened
+  read-only (`openStoreReadOnly`, `packages/core/src/store.ts`). They work
+  with the daemon down.
+- `wake` is a request on the link, answered by `getOrCreateWake`. With no
+  daemon linked, or a daemon that is shutting down, it waits for the next one,
+  and gives up just inside `wakeTimeoutMs` with "the hobby daemon is not
+  running".
+- `isWakeRefused` answers from the `retryAt` a failed wake reported.
+- `activity` (now typed `ProxyActivity`, the `open`/`close` half of
+  `ActivityTracker`) is mirrored into the daemon's tracker as events, with a
+  snapshot when a daemon attaches, so the hibernator reads what it always did.
+
+The daemon adopts a proxy only if its link protocol, its code fingerprint and
+its settings (TLS file contents included) match; otherwise it restarts it and
+logs how many sessions that ended. **An upgrade that changes `packages/proxy`,
+`packages/core` or `packages/cli/src/proxyd` ends every proxied session once.**
+SIGTERM and SIGINT to the daemon are a restart (proxy kept, and any sleepable
+database with a session open kept running); `hobby daemon stop` (SIGUSR2) is
+the full stop, proxy included. `HOBBY_PROXY_MODE=in-process` and every
+existing test keep the single-process mode. The HTTP router for apps and
+workers still runs in the daemon.
+
+Tested under Node with a fake backend (`packages/cli/test/proxy-process.test.ts`),
+including the real `bin/hobby-proxy.js` as a child process. **Not verified**
+under Bun, with a real daemon, or with Docker.
