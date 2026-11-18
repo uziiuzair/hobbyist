@@ -83,6 +83,7 @@ docs/<capability>/
 | [`queues/`](queues/) | The broker that holds messages outside the runtime, so a backlog survives sleep and a message can wake its consumer. | Phase 2 |
 | [`storage/`](storage/) | S3-compatible buckets and volumes for compute. | Phase 3 |
 | [`sdk/`](sdk/) | Client libraries, React first, if they earn their place. | Phase 3 |
+| [`availability/`](availability/) | The standby pair: an opt-in second box for pinned projects that cannot go down, and single-box zero-downtime work. PROPOSED (ADR 0023). | Proposed |
 
 The When column is the intended build sequence, not a priority ranking. The
 proxy is second on purpose: it is the component most likely to prove the whole
