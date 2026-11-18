@@ -1,6 +1,6 @@
 # 0021. The proxy sees passwords for serverless driver traffic, and only for it
 
-Status: PROPOSED
+Status: ACCEPTED
 Date:   2026-11-17
 
 ## Context
@@ -63,3 +63,9 @@ docs, so #155 would be half closed.
   only alternative.
 - The driver changing its default away from pipelining, which would remove the
   shim's reason to exist, leaving only `/sql`.
+
+## Amendment, 2026-11-18: accepted
+
+Accepted by merging #222, which shipped the serverless driver support this
+decision covers. The Status line above changed from PROPOSED to ACCEPTED on
+this date. Nothing else in the decision changed.
