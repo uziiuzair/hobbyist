@@ -233,9 +233,22 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
       // promise, a first query that is slow rather than one that errors, and
       // the snapshot's own resume has usually started the resource again by
       // the time the wait ends, which is why the row is read a second time.
-      const fence = wakeFence(ctx, resource.projectId)
-      if (fence !== undefined) {
-        await fence
+      //
+      // Since 2026-11-18 (Phase A3) the same fence covers every operation
+      // that restarts an awake database on purpose: a settings change
+      // (pg-settings.ts), and a branch or reset quiescing its source
+      // (cloneSourceAtRest, branch.ts), as well as the snapshot, restore
+      // and reset holds. A connection that arrives while the container is
+      // being stopped, replaced and started again waits here instead of
+      // being refused, and is served by the restarted container. The wait
+      // is bounded by the caller's own budget (the proxy races this whole
+      // function against wakeTimeoutMs). If the operation could not bring
+      // this resource back, it says so when it releases the hold, and the
+      // waiter gets that error at once rather than starting the container
+      // a further time on its own (heldRestartFailed below).
+      const hold = wakeFence(ctx, resource.projectId)
+      if (hold !== undefined) {
+        await hold.fence
         resource = ctx.store.getResource(resourceId)
         if (resource === null) {
           throw new HobbyError('resource_not_found', `no resource with id ${resourceId}`)
@@ -245,6 +258,11 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
           // purposes: whatever failed before evidently no longer does.
           refusals.delete(resourceId)
           return
+        }
+        const failed = hold.failures.get(resourceId)
+        if (failed !== undefined) {
+          const project = ctx.store.getProject(resource.projectId)
+          throw heldRestartFailed(project === null ? resource.name : `${project.name}/${resource.name}`, hold.what, failed)
         }
       }
       // An app or worker bound to a database is no use awake with the
@@ -453,9 +471,38 @@ const wakeRegistry = new WeakMap<DaemonContext, (resourceId: string) => Promise<
 // other, and two maps would be two locks that each think they are the only
 // one. Only a hold that stopped something has anything to fence the wake
 // path against.
+//
+// `what` names the operation for the two messages a hold can cause: the
+// refusal of a second hold, and the error a fenced wake gets when the
+// operation could not bring its resource back. `failures` is filled by the
+// release function (see holdProject): resource id to the message of the
+// start that failed, for each resource the operation stopped and could not
+// start again.
 interface ProjectHold {
   fence: Promise<void>
   blocksWake: boolean
+  what: string
+  failures: Map<string, string>
+}
+
+// What releases a hold. `failures`, when given, names the resources the
+// operation stopped and could not start again, each with the message of
+// its failed start: a wake waiting on the fence for one of those is
+// answered with that message (buildWake) instead of making another start
+// attempt of its own.
+export type ReleaseHold = (failures?: ReadonlyMap<string, string>) => void
+
+// The error a fenced wake gets for a resource the operation holding its
+// project stopped and could not start again. Named for the operation, so a
+// client that connected during `hobby pg config set` reads that its
+// database did not come back from the settings change, not that some
+// unexplained wake failed.
+function heldRestartFailed(target: string, what: string, message: string): HobbyError {
+  return new HobbyError(
+    'wake_failed',
+    `${target} was restarted by ${what}, and did not come back: ${message}`,
+    `\`hobby logs ${target}\` shows what it printed; \`hobby wake ${target}\` tries again`
+  )
 }
 
 const projectHolds = new WeakMap<DaemonContext, Map<string, ProjectHold>>()
@@ -467,16 +514,17 @@ const projectHolds = new WeakMap<DaemonContext, Map<string, ProjectHold>>()
 // for an online snapshot too, even though it resumes nothing: an in-place
 // restore swapping the data directory out from under a pg_basebackup, or a
 // quiesce stopping the database it is reading, would each fail it at best.
-function holdProject(ctx: DaemonContext, projectId: string, projectName: string, blocksWake: boolean): () => void {
+function holdProject(ctx: DaemonContext, projectId: string, projectName: string, blocksWake: boolean, what: string): ReleaseHold {
   let holds = projectHolds.get(ctx)
   if (holds === undefined) {
     holds = new Map()
     projectHolds.set(ctx, holds)
   }
-  if (holds.has(projectId)) {
+  const existing = holds.get(projectId)
+  if (existing !== undefined) {
     throw new HobbyError(
       'conflict',
-      `a snapshot or restore of ${projectName} is already in progress`,
+      `${existing.what} of ${projectName} is already in progress`,
       'wait for it to finish, then try again'
     )
   }
@@ -484,10 +532,14 @@ function holdProject(ctx: DaemonContext, projectId: string, projectName: string,
   const fence = new Promise<void>((resolve) => {
     release = resolve
   })
-  const hold: ProjectHold = { fence, blocksWake }
+  const hold: ProjectHold = { fence, blocksWake, what, failures: new Map() }
   holds.set(projectId, hold)
   const held = holds
-  return () => {
+  return (failures) => {
+    // Recorded before the fence settles, so every waiter reads them.
+    for (const [id, message] of failures ?? []) {
+      hold.failures.set(id, message)
+    }
     if (held.get(projectId) === hold) {
       held.delete(projectId)
     }
@@ -513,8 +565,17 @@ function holdProject(ctx: DaemonContext, projectId: string, projectName: string,
 // below). It does not cover a queue's enqueue endpoint or delivery tick,
 // which write messages.sqlite without waking anything; docs/backups/CLAUDE.md
 // records that gap.
-export function holdProjectAsleep(ctx: DaemonContext, projectId: string, projectName: string): () => void {
-  return holdProject(ctx, projectId, projectName, true)
+//
+// `what` names the operation ("a settings change", "a branch"): it is what
+// a second hold's refusal and a failed restart's error call it. The default
+// is the wording every hold used before it was a parameter.
+export function holdProjectAsleep(
+  ctx: DaemonContext,
+  projectId: string,
+  projectName: string,
+  what = 'a snapshot or restore'
+): ReleaseHold {
+  return holdProject(ctx, projectId, projectName, true, what)
 }
 
 // The same mutual exclusion as holdProjectAsleep, and nothing else: wakes
@@ -524,23 +585,39 @@ export function holdProjectAsleep(ctx: DaemonContext, projectId: string, project
 // ordinary traffic rather than a hot copy in the making. Holding wakes there
 // would turn "a snapshot with no pause" into a snapshot that pauses every
 // sleeping resource in the project for the length of the copy.
-export function holdProjectExclusive(ctx: DaemonContext, projectId: string, projectName: string): () => void {
-  return holdProject(ctx, projectId, projectName, false)
+export function holdProjectExclusive(
+  ctx: DaemonContext,
+  projectId: string,
+  projectName: string,
+  what = 'a snapshot or restore'
+): ReleaseHold {
+  return holdProject(ctx, projectId, projectName, false, what)
 }
 
 // What a wake of a resource in this project must wait for, if anything:
-// only a hold that blocks wakes.
-function wakeFence(ctx: DaemonContext, projectId: string): Promise<void> | undefined {
+// only a hold that blocks wakes. The hold itself rather than only its
+// fence, so the waiter can read the failures its release recorded.
+function wakeFence(ctx: DaemonContext, projectId: string): ProjectHold | undefined {
   const hold = projectHolds.get(ctx)?.get(projectId)
-  return hold?.blocksWake === true ? hold.fence : undefined
+  return hold?.blocksWake === true ? hold : undefined
+}
+
+// Whether any operation holds this project right now, of either kind. Read
+// by the hibernator (tick in packages/cli/src/daemon/hibernator.ts), which
+// leaves a held project's resources alone: a settings change or a quiesce
+// is stopping and starting them on purpose, and an online snapshot is
+// copying one that must stay up, and a sleep landing in the middle of any
+// of those would race the operation's own stop or start.
+export function isProjectHeld(ctx: DaemonContext, projectId: string): boolean {
+  return projectHolds.get(ctx)?.has(projectId) === true
 }
 
 // For a caller that starts a resource without going through the wake
 // function above (startResourceRoute): the same wait, and nothing else.
 export async function waitForProjectAwakeable(ctx: DaemonContext, projectId: string): Promise<void> {
-  const fence = wakeFence(ctx, projectId)
-  if (fence !== undefined) {
-    await fence
+  const hold = wakeFence(ctx, projectId)
+  if (hold !== undefined) {
+    await hold.fence
   }
 }
 

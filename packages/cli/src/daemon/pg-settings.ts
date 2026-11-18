@@ -18,7 +18,9 @@
 //                       snapshot's fail-loudly rule) before anything stops;
 //                       wakes are held off (holdProjectAsleep) so a pool
 //                       reconnecting mid-swap waits instead of starting the
-//                       old container. Then stop, recreate, start, release.
+//                       old container, and a new connection waits for the
+//                       restarted one instead of being refused. Then stop,
+//                       recreate, start, release.
 //
 // A start that fails with the new settings (a shared_buffers the box
 // cannot allocate, say) is rolled back: the previous settings are stored,
@@ -128,7 +130,23 @@ export async function applyPostgresSettings(
     assertPauseAllowed(project, [resource], change.allowPause === true, 'applying these settings', 'while Postgres restarts')
   }
 
-  const release = holdProjectAsleep(ctx, project.id, project.name)
+  // The hold is what keeps a restart from refusing new connections (Phase
+  // A3, 2026-11-18): every wake path (the Postgres proxy over plain TCP,
+  // TLS and the serverless driver's /sql and WebSocket, the HTTP router,
+  // the query route, `hobby wake`) waits on its fence, so a connection that
+  // arrives while the container is down is held until the restart is done
+  // and then served by the new container. If the database does not come
+  // back, the release names it, and those waiters get this operation's
+  // error instead of each starting the container again (buildWake,
+  // context.ts). Waiting is bounded by the proxy's wakeTimeoutMs, the same
+  // budget a cold wake gets. Sessions that were open when it stopped still
+  // end: Postgres is restarted, and nothing carries a session across that.
+  const release = holdProjectAsleep(ctx, project.id, project.name, 'a settings change')
+  // Set once this function has stopped the database, and the message of
+  // whatever went wrong after that. Read in finally: a database this call
+  // stopped and that is not running at the end is reported to the waiters.
+  let stoppedHere = false
+  let failure: string | null = null
   try {
     // Re-read under the hold: a wake that finished just before it was
     // taken changed the state this decision rests on.
@@ -164,6 +182,7 @@ export async function applyPostgresSettings(
 
     const started = now()
     const handler = ctx.kinds.get('postgres')
+    stoppedHere = true
     await handler.stop(ctx, current)
     const updated = await recreatePostgresContainer(ctx, {
       project,
@@ -193,7 +212,15 @@ export async function applyPostgresSettings(
     }
     const final = ctx.store.getResource(resource.id) as PostgresResource
     return { resource: final, settings, applied: 'restarted', pausedMs: now() - started, needsPreload }
+  } catch (err) {
+    failure = errorMessage(err)
+    throw err
   } finally {
-    release()
+    const after = stoppedHere ? ctx.store.getResource(resource.id) : null
+    if (stoppedHere && after?.state !== 'running') {
+      release(new Map([[resource.id, failure ?? 'it was not running when the settings change finished']]))
+    } else {
+      release()
+    }
   }
 }

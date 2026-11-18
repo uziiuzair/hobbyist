@@ -62,7 +62,7 @@ import {
   refuseReleasedSource,
   type CloneAtRestResult,
 } from './branch.js'
-import { holdProjectAsleep, type DaemonContext } from './context.js'
+import { holdProjectAsleep, type DaemonContext, type ReleaseHold } from './context.js'
 import { quiesce, resume, type QuiesceOptions } from './snapshots.js'
 import { treeOpsFor } from './tree-ops.js'
 
@@ -265,9 +265,9 @@ export async function resetBranch(ctx: DaemonContext, branchName: string, opts: 
   const restartFailures: string[] = []
   let pauseStartedAt: number | null = null
   let pausedMs: number | null = null
-  let release: (() => void) | null = null
+  let release: ReleaseHold | null = null
   try {
-    release = holdProjectAsleep(ctx, branch.id, branch.name)
+    release = holdProjectAsleep(ctx, branch.id, branch.name, 'a reset')
     const running = ctx.store.listResources(branch.id).filter((resource) => resource.state === 'running')
     if (running.length > 0) {
       pauseStartedAt = now()
@@ -334,7 +334,8 @@ export async function resetBranch(ctx: DaemonContext, branchName: string, opts: 
   } finally {
     // resume never throws (snapshots.ts), which is what makes an unguarded
     // await safe in a finally that may be carrying an error.
-    const failures = await resume(ctx, stopped)
+    const failed = new Map<string, string>()
+    const failures = await resume(ctx, stopped, failed)
     for (const failure of failures) {
       console.error(`reset: ${failure}`)
     }
@@ -342,7 +343,7 @@ export async function resetBranch(ctx: DaemonContext, branchName: string, opts: 
     if (pauseStartedAt !== null) {
       pausedMs = now() - pauseStartedAt
     }
-    release?.()
+    release?.(failed)
   }
 
   const preResetDirs: string[] = []

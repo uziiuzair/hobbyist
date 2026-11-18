@@ -85,7 +85,7 @@ be called with a token, only with the password.
 | `GET /v1/resources/{id}/extensions` | Postgres only. Wakes it. Returns `{ extensions: { declared, installed: [{ name, version }], missing, needsPreload } }` |
 | `POST /v1/resources/{id}/extensions` | Body `{ add?, remove? }`. `add` applies `CREATE EXTENSION IF NOT EXISTS ... CASCADE` before storing; `remove` undeclares and drops nothing. Adding one whose preload library is missing is refused |
 | `GET /v1/resources/{id}/settings` | Postgres only. Never wakes it. Returns `{ settings, needsPreload, available }`, `available` being the allowlist with ranges, defaults and docs links |
-| `POST /v1/resources/{id}/settings` | Body `{ set?, unset?, allowPause? }`. Asleep: replaces the stopped container, applied on next wake. Awake: restarts it (pinned needs `allowPause`); a failed start is rolled back |
+| `POST /v1/resources/{id}/settings` | Body `{ set?, unset?, allowPause? }`. Asleep: replaces the stopped container, applied on next wake. Awake: restarts it (pinned needs `allowPause`), holding new proxy connections until it is back; a failed start is rolled back |
 | `GET /v1/resources/{id}/queue/messages` | Peek without leasing. `?limit=` defaults to 10. `{ messages: [{ id, timestampMs, attempts, contentType, body }] }` |
 | `POST /v1/resources/{id}/queue/messages` | Enqueue. Body `{ body, delaySeconds? }`, 201 with `{ id }` |
 | `DELETE /v1/resources/{id}/queue/messages` | Purge. `{ purged }` |

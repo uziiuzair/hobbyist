@@ -527,7 +527,7 @@ export async function runImport(ctx: DaemonContext, request: ImportRequest, deps
   let handle: ReturnType<DaemonContext['activity']['open']> | null = null
   let succeeded = false
   try {
-    release = holdProjectExclusive(ctx, target.project.id, target.project.name)
+    release = holdProjectExclusive(ctx, target.project.id, target.project.name, 'an import')
     if (target.resource.state !== 'running') {
       await getOrCreateWake(ctx)(target.resource.id)
     }
