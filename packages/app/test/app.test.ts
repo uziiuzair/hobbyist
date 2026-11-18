@@ -20,7 +20,16 @@ import {
   type Store,
 } from '@hobby.sh/core'
 import { buildTag, resolveSource, withBuildLock } from '../src/build.js'
-import { createAppResource, deployApp, destroyApp, startApp, stopApp, type AppDeps } from '../src/app.js'
+import {
+  alternateContainerName,
+  createAppResource,
+  deployApp,
+  destroyApp,
+  removeStrayAppContainer,
+  startApp,
+  stopApp,
+  type AppDeps,
+} from '../src/app.js'
 
 function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
   return {
@@ -902,4 +911,300 @@ test('an app whose process exits on boot fails fast with the exit code and its l
   )
   assert.equal(probes, 1, 'noticed on the first failed probe, not after the timeout')
   assert.ok(Date.now() - started < 5000)
+})
+
+// Phase A1: a running app is redeployed with no gap. These tests drive
+// deployApp's rollOver path against the fake runtime and record the order of
+// everything that matters: the runtime calls, the store write that moves the
+// route (the HTTP router resolves every request from config.hostPort), and
+// the drain wait.
+
+interface Recorded {
+  events: string[]
+  drains: number[]
+}
+
+// Wraps the deps so every container call, every config write and every drain
+// wait lands in one ordered list. The config write is recorded with the name
+// and port it commits, because that write is the route switch.
+function recordDeploy(deps: AppDeps & { store: Store }): Recorded {
+  const recorded: Recorded = { events: [], drains: [] }
+  const runtime = deps.runtime
+  const wrap = <K extends 'ensureCreated' | 'start' | 'stop' | 'remove'>(key: K): void => {
+    const original = runtime[key].bind(runtime) as (...args: unknown[]) => Promise<unknown>
+    ;(runtime as unknown as Record<string, unknown>)[key] = async (...args: unknown[]) => {
+      const first = args[0]
+      const name = typeof first === 'string' ? first : (first as { name: string }).name
+      recorded.events.push(`${key} ${name}`)
+      return original(...args)
+    }
+  }
+  wrap('ensureCreated')
+  wrap('start')
+  wrap('stop')
+  wrap('remove')
+  const update = deps.store.updateResourceConfig.bind(deps.store)
+  deps.store.updateResourceConfig = ((id: string, config: { containerName: string; hostPort: number }) => {
+    recorded.events.push(`route ${config.containerName}:${config.hostPort}`)
+    return update(id as never, config as never)
+  }) as typeof deps.store.updateResourceConfig
+  deps.appDrainWait = async (ms: number) => {
+    recorded.drains.push(ms)
+    recorded.events.push('drain')
+  }
+  return recorded
+}
+
+async function runningApp(deps: AppDeps & { store: Store }, project: Project) {
+  const created = await createAppResource(deps, {
+    project,
+    name: 'web',
+    source: sourceDir(),
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+  await startApp(deps, created)
+  const running = deps.store.getResource(created.id)
+  assert.ok(running !== null && running.kind === 'app')
+  assert.equal(running.state, 'running')
+  return running
+}
+
+test('alternateContainerName flips between the plain name and one no other resource can have', () => {
+  assert.equal(alternateContainerName('hobby-blog-web'), 'hobby-blog-web_b')
+  assert.equal(alternateContainerName('hobby-blog-web_b'), 'hobby-blog-web')
+  // A resource called `web-b` has the plain name hobby-blog-web-b, which the
+  // alternate of `web` must never collide with.
+  assert.notEqual(alternateContainerName('hobby-blog-web'), 'hobby-blog-web-b')
+})
+
+test('redeploying a running app starts the new container, moves the route, drains, then stops the old one', async () => {
+  const deps = buildDeps({ config: testConfig({ deployDrainMs: 1234 }) })
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const before = await runningApp(deps, project)
+  const oldName = before.config.containerName
+  const oldPort = before.config.hostPort
+  assert.equal(oldName, 'hobby-blog-web')
+
+  const recorded = recordDeploy(deps)
+  deps.now = () => 1_754_870_500_000
+  const result = await deployApp(deps, before)
+
+  const after = deps.store.getResource(before.id)
+  assert.ok(after !== null && after.kind === 'app')
+  const newName = 'hobby-blog-web_b'
+  assert.equal(after.config.containerName, newName)
+  assert.notEqual(after.config.hostPort, oldPort)
+  assert.equal(after.config.image, result.image)
+  // Still serving, not put to sleep: a deploy of a live site leaves it live.
+  assert.equal(after.state, 'running')
+  assert.equal(result.resource.state, 'running')
+
+  const at = (event: string): number => {
+    const index = recorded.events.indexOf(event)
+    assert.ok(index >= 0, `expected ${event} in ${recorded.events.join(', ')}`)
+    return index
+  }
+  const created = at(`ensureCreated ${newName}`)
+  const started = at(`start ${newName}`)
+  const route = at(`route ${newName}:${after.config.hostPort}`)
+  const drain = at('drain')
+  const stopOld = at(`stop ${oldName}`)
+  const removeOld = at(`remove ${oldName}`)
+  assert.ok(created < started && started < route && route < drain && drain < stopOld && stopOld < removeOld, recorded.events.join(', '))
+  // Exactly one config write, and it is the switch: nothing pointed the
+  // route anywhere in between.
+  assert.equal(recorded.events.filter((e) => e.startsWith('route ')).length, 1)
+  // The old container is never touched before the new one is up and routed.
+  assert.ok(recorded.events.slice(0, route).every((e) => !e.endsWith(` ${oldName}`)), recorded.events.join(', '))
+  assert.deepEqual(recorded.drains, [1234])
+
+  assert.equal((await runtime.inspect(newName)).running, true)
+  assert.equal(runtime._specs.get(newName)?.image, result.image)
+  assert.equal(runtime._specs.get(newName)?.ports[0]?.host, after.config.hostPort)
+  assert.equal((await runtime.inspect(oldName)).exists, false)
+})
+
+test('a running app whose new container fails readiness keeps serving from the old one, with no route change', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const before = await runningApp(deps, project)
+  const recorded = recordDeploy(deps)
+
+  deps.now = () => 1_754_870_500_000
+  // Only the old port answers: the new container never listens.
+  deps.appProbeFactory = (config) => async () => config.hostPort === before.config.hostPort
+  await assert.rejects(
+    () => deployApp(deps, before),
+    (err: unknown) => {
+      assert.ok(err instanceof HobbyError)
+      assert.equal(err.code, 'wake_timeout')
+      assert.match(err.message, /hobby-blog-web_b did not start listening/)
+      assert.match(err.hint ?? '', /kept serving .* from its running container throughout, and the new container was removed/)
+      return true
+    }
+  )
+
+  const after = deps.store.getResource(before.id)
+  assert.ok(after !== null && after.kind === 'app')
+  assert.equal(after.state, 'running')
+  assert.deepEqual(after.config, before.config)
+  assert.equal(recorded.events.filter((e) => e.startsWith('route ')).length, 0)
+  assert.deepEqual(recorded.drains, [])
+  assert.ok(!recorded.events.includes(`stop ${before.config.containerName}`), recorded.events.join(', '))
+  assert.equal((await runtime.inspect(before.config.containerName)).running, true)
+  assert.equal((await runtime.inspect('hobby-blog-web_b')).exists, false)
+})
+
+test('redeploying a sleeping app replaces it in place and leaves it asleep, with no drain', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const created = await createAppResource(deps, {
+    project,
+    name: 'web',
+    source: sourceDir(),
+    image: null,
+    containerPort: 3000,
+    env: {},
+    databaseResourceId: null,
+  })
+  assert.equal(created.state, 'sleeping')
+  const recorded = recordDeploy(deps)
+
+  deps.now = () => 1_754_870_500_000
+  const result = await deployApp(deps, created)
+
+  const after = deps.store.getResource(created.id)
+  assert.ok(after !== null && after.kind === 'app')
+  assert.equal(after.state, 'sleeping')
+  assert.equal(after.config.containerName, created.config.containerName)
+  assert.equal(after.config.hostPort, created.config.hostPort)
+  assert.deepEqual(recorded.drains, [])
+  assert.equal(runtime._specs.get(created.config.containerName)?.image, result.image)
+  assert.equal((await runtime.inspect('hobby-blog-web_b')).exists, false)
+})
+
+test('after a rolling deploy, stop, wake and rm all act on the container the deploy left serving', async () => {
+  const deps = buildDeps({ config: testConfig({ deployDrainMs: 0 }) })
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const before = await runningApp(deps, project)
+  deps.now = () => 1_754_870_500_000
+  await deployApp(deps, before)
+
+  const deployed = deps.store.getResource(before.id)
+  assert.ok(deployed !== null && deployed.kind === 'app')
+  const name = deployed.config.containerName
+  assert.equal(name, 'hobby-blog-web_b')
+
+  await stopApp(deps, deployed)
+  assert.equal((await runtime.inspect(name)).running, false)
+  assert.equal(deps.store.getResource(before.id)?.state, 'sleeping')
+
+  const asleep = deps.store.getResource(before.id)
+  assert.ok(asleep !== null && asleep.kind === 'app')
+  await startApp(deps, asleep)
+  assert.equal((await runtime.inspect(name)).running, true)
+  // Woken from the container the deploy built, not a fresh one under the
+  // old name.
+  assert.equal((await runtime.inspect('hobby-blog-web')).exists, false)
+
+  const awake = deps.store.getResource(before.id)
+  assert.ok(awake !== null && awake.kind === 'app')
+  await destroyApp(deps, awake)
+  assert.equal((await runtime.inspect(name)).exists, false)
+  assert.equal(runtime._state.size, 0)
+})
+
+test('a second rolling deploy flips back to the plain name and removes the first deploy\'s container', async () => {
+  const deps = buildDeps({ config: testConfig({ deployDrainMs: 0 }) })
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const original = await runningApp(deps, project)
+
+  deps.now = () => 1_754_870_500_000
+  const first = await deployApp(deps, original)
+  assert.equal(first.resource.config.containerName, 'hobby-blog-web_b')
+
+  deps.now = () => 1_754_870_600_000
+  // Passed the stale snapshot on purpose: deployApp re-reads the resource, so
+  // a caller holding an old copy still rolls from what is actually serving.
+  const second = await deployApp(deps, original)
+  assert.equal(second.resource.config.containerName, 'hobby-blog-web')
+  assert.equal(second.resource.state, 'running')
+  assert.notEqual(second.resource.config.hostPort, first.resource.config.hostPort)
+  assert.equal(runtime._specs.get('hobby-blog-web')?.image, second.image)
+  assert.equal((await runtime.inspect('hobby-blog-web')).running, true)
+  assert.equal((await runtime.inspect('hobby-blog-web_b')).exists, false)
+})
+
+test('a rolling deploy clears a leftover container under the alternate name before creating its own', async () => {
+  const deps = buildDeps({ config: testConfig({ deployDrainMs: 0 }) })
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const before = await runningApp(deps, project)
+  // What a daemon that died mid-drain leaves: a container no config names.
+  await runtime.ensureCreated({ name: 'hobby-blog-web_b', image: 'stale:1', env: {}, ports: [], binds: [], network: project.networkName })
+  await runtime.start('hobby-blog-web_b')
+
+  deps.now = () => 1_754_870_500_000
+  const result = await deployApp(deps, before)
+  assert.equal(runtime._specs.get('hobby-blog-web_b')?.image, result.image)
+  assert.equal(result.resource.config.containerName, 'hobby-blog-web_b')
+})
+
+test('overlapping deploys of one running app run one after the other', async () => {
+  const deps = buildDeps({ config: testConfig({ deployDrainMs: 0 }) })
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const before = await runningApp(deps, project)
+
+  let tick = 1_754_870_500_000
+  deps.now = () => (tick += 100_000)
+  const [a, b] = await Promise.all([deployApp(deps, before), deployApp(deps, before)])
+  assert.equal(a.resource.config.containerName, 'hobby-blog-web_b')
+  assert.equal(b.resource.config.containerName, 'hobby-blog-web')
+  const final = deps.store.getResource(before.id)
+  assert.ok(final !== null && final.kind === 'app')
+  assert.equal(final.state, 'running')
+  assert.equal((await runtime.inspect(final.config.containerName)).running, true)
+  assert.equal(runtime._state.size, 1)
+})
+
+test('removeStrayAppContainer waits for a deploy in progress and never removes the container it left serving', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const before = await runningApp(deps, project)
+
+  let releaseDrain!: () => void
+  const drainHeld = new Promise<void>((resolve) => {
+    releaseDrain = resolve
+  })
+  let drainStarted!: () => void
+  const inDrain = new Promise<void>((resolve) => {
+    drainStarted = resolve
+  })
+  deps.appDrainWait = async () => {
+    drainStarted()
+    await drainHeld
+  }
+  deps.now = () => 1_754_870_500_000
+  const deploying = deployApp(deps, before)
+  await inDrain
+  // Mid-drain both containers exist. A cleanup that ran now, outside the
+  // lock and from the stale snapshot, would remove the new one.
+  const cleanup = removeStrayAppContainer(deps, before)
+  await Promise.resolve()
+  assert.equal((await runtime.inspect('hobby-blog-web_b')).running, true)
+  releaseDrain()
+  await deploying
+  assert.equal(await cleanup, null)
+  assert.equal((await runtime.inspect('hobby-blog-web_b')).running, true)
+  assert.equal(runtime._state.size, 1)
 })

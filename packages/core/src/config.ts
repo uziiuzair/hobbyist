@@ -115,6 +115,14 @@ export interface HobbyConfig {
   sleepAfterSeconds: number | null
   wakeTimeoutMs: number
   readinessPollMs: number
+  // How long a redeploy of a running app keeps the previous container up
+  // after the route has moved to the new one, so requests that started on
+  // the old one can finish (deployApp's rolling path, packages/app/src/app.ts).
+  // For a running worker, the most its swap waits for in-flight requests
+  // before stopping the old container (drainWorker, packages/worker/src/worker.ts).
+  // Optional so the many test config literals need not name it; absent
+  // means 10 seconds (DEFAULT_DEPLOY_DRAIN_MS, packages/app/src/app.ts).
+  deployDrainMs?: number
   // Where the daemon's queue enqueue listener answers `POST /enqueue`.
   // Separate from apiPort: a compromised container should be able to reach
   // only this endpoint, with its own per-resource token, not the operator
@@ -162,6 +170,7 @@ const DEFAULT_CONFIG: HobbyConfig = {
   sleepAfterSeconds: 300,
   wakeTimeoutMs: 30000,
   readinessPollMs: 25,
+  deployDrainMs: 10_000,
   queuePort: 7434,
   caddyEnabled: false,
   caddyAdminPort: 2019,
@@ -309,6 +318,11 @@ function readEnvConfig(env: NodeJS.ProcessEnv): Partial<HobbyConfig> {
   }
   if (env.HOBBY_READINESS_POLL_MS !== undefined) {
     config.readinessPollMs = envInteger('HOBBY_READINESS_POLL_MS', env.HOBBY_READINESS_POLL_MS, 1, Number.MAX_SAFE_INTEGER)
+  }
+  if (env.HOBBY_DEPLOY_DRAIN_MS !== undefined) {
+    // Zero is allowed: it means stop the old container as soon as the route
+    // has moved, which is what a test or an impatient operator wants.
+    config.deployDrainMs = envInteger('HOBBY_DEPLOY_DRAIN_MS', env.HOBBY_DEPLOY_DRAIN_MS, 0, Number.MAX_SAFE_INTEGER)
   }
   if (env.HOBBY_QUEUE_PORT !== undefined) {
     config.queuePort = envInteger('HOBBY_QUEUE_PORT', env.HOBBY_QUEUE_PORT, 0, PORT_MAX)

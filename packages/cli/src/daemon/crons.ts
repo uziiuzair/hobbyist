@@ -100,6 +100,13 @@ export interface CronTickOptions {
   workers: () => ScheduledWorker[]
   wake: (resourceId: string) => Promise<void>
   stateOf: (resourceId: string) => ResourceState
+  // True while a redeploy is swapping this worker's container
+  // (isResourceWakeHeld, packages/cli/src/daemon/context.ts). A firing that
+  // comes due then is left for the next tick rather than recorded as
+  // `unreachable` and lost: its last-fired time is not moved, so the next
+  // tick after the swap finds it still due and fires it once, with its
+  // original scheduled time. Optional; absent means nothing is ever held.
+  isHeld?: (resourceId: string) => boolean
   fire: (firing: CronFiring) => Promise<CronOutcome>
   state: CronState
   now?: () => number
@@ -133,6 +140,9 @@ export async function tickCrons(opts: CronTickOptions): Promise<CronFiring[]> {
         continue
       }
       if (due > nowMs) {
+        continue
+      }
+      if (opts.isHeld?.(worker.resourceId) === true) {
         continue
       }
       // Recorded before the wake, not after it succeeds: a wake that takes

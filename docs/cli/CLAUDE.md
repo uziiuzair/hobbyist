@@ -340,3 +340,75 @@ path. A `hobby-caddy` container created before this has no bind and keeps
 2019; the unreachable-admin error now names the configured port and says to
 `docker rm -f hobby-caddy` once. The fixed `:80, :443` listen and the fixed
 container name the issue also mentions are unchanged.
+
+## Amendment, 2026-11-18: the daemon adopts a proxy process; `hobby daemon stop`
+
+The daemon is now two processes on a box: `hobby daemon` and the Postgres
+proxy it spawns and adopts (`docs/proxy/specs/2026-11-18-proxy-outlives-the-daemon.md`,
+and the amendment of the same date in `docs/proxy/CLAUDE.md`).
+
+- **Shutdown has two meanings** (`ShutdownMode`, `packages/cli/src/daemon/server.ts`).
+  SIGTERM and SIGINT are a restart: the daemon answers the proxy's wakes with
+  "leaving", stops the sleepable resources that have no proxied session
+  (`resourcesToStopOnRestart`), leaves pinned ones and busy ones running,
+  detaches from the proxy and exits. SIGUSR2 is the full stop it always was,
+  with the proxy process stopped before any resource is. `close()` on the
+  value `startDaemon` returns defaults to the full stop.
+- **`hobby daemon stop`** (`cmdDaemonStop`, `packages/cli/src/cli/commands.ts`)
+  sends SIGUSR2 to the pid in the daemon lock and waits for it to exit. With no
+  daemon running it stops a proxy left behind, over its socket. It is a verb
+  about a process on this box, like `hobby daemon`, so it has no API route
+  and no MCP tool; the "CLI and MCP never diverge" rule is about the control
+  API, which this does not touch.
+- **The lock is unchanged** and still the daemon's alone. The proxy takes
+  none: its socket under `HOBBY_HOME` and its bound port keep it single, and
+  only the lock holder spawns, adopts or stops it.
+- **`hobby init`** reports `proxyPort` held by a proxy that answers on
+  `proxy.sock` as adoptable rather than as a blocker (`PreflightReport.proxyProcess`,
+  `packages/cli/src/daemon/preflight.ts`).
+- **systemd**: `scripts/hobby.service` sets `KillMode=process`, so `systemctl
+  restart hobby` signals only the daemon. `systemctl stop hobby` then also
+  leaves the proxy up; `hobby daemon stop` is the full stop.
+- `HOBBY_PROXY_MODE=in-process` keeps the old single process.
+
+Not verified under Bun, with a real daemon, or under systemd.
+
+## Amendment, 2026-11-18: `hobby daemon restart`; SIGTERM is a full stop under systemd
+
+Supersedes the systemd bullet of the amendment above, which described
+`systemctl stop hobby` leaving the proxy up and holding its port.
+systemd cannot tell the daemon whether it is stopping or restarting it: a
+restart is a stop then a start, `ExecStop=`/`ExecStopPost=` run for both, and
+nothing passed names the operation (systemd.service(5); the reasoning is in
+`docs/proxy/specs/2026-11-18-proxy-outlives-the-daemon.md`, "Stop versus
+restart under systemd"). So:
+
+- **`HOBBY_SIGTERM`** (`sigtermModeFromEnv`,
+  `packages/cli/src/daemon/restart-request.ts`), read by `cmdDaemon` before the
+  lock and passed as `StartDaemonOptions.sigterm`: `restart` (default, as
+  before) or `stop`. Anything else refuses to start. `scripts/hobby.service`
+  sets `stop`, so `systemctl stop hobby` stops the daemon and the proxy and
+  frees the port, and `systemctl restart hobby` ends proxied sessions.
+- **`hobby daemon restart`** (`cmdDaemonRestart`,
+  `packages/cli/src/cli/commands.ts`): the restart that keeps the proxy and
+  its sessions, under any SIGTERM setting. It writes the daemon's pid to
+  `$HOBBY_HOME/restart-request` and sends SIGTERM; the daemon (`onSigterm`)
+  takes a request that names its pid and is under a minute old, shuts down in
+  restart mode and exits `RESTART_EXIT_CODE` (75), which the unit's
+  `RestartForceExitStatus=75` restarts. The CLI waits up to 30 s for a new
+  daemon pid in the lock and reports it, or throws `internal` saying nothing
+  started one (a hand-started daemon has no supervisor), with the proxy and
+  its sessions still up. Like `hobby daemon stop`, a verb about a process on
+  this box: no API route, no MCP tool.
+- SIGINT is still a restart, exit 0; SIGUSR2 (`hobby daemon stop`) still the
+  full stop.
+
+The daemon also supervises the proxy now: one that dies while the daemon runs
+is started again with backoff, and a crash loop is given up on and reported
+in `GET /v1/health` and `hobby init` (`superviseProxy`,
+`packages/cli/src/daemon/proxy-supervisor.ts`; see the amendment of the same
+date in `docs/proxy/CLAUDE.md`).
+
+Tested: `packages/cli/test/proxy-supervisor.test.ts` (the request file and
+`onSigterm`'s decision). **Not verified on a real systemd box**, and
+`cmdDaemonRestart` itself has no test, since it signals a real daemon pid.

@@ -22,6 +22,38 @@ A `wrangler.toml`, `wrangler.jsonc` or `wrangler.json` in the directory is what
 makes it a worker rather than an [app](/docs/guides/apps/). Your existing
 wrangler manifest is read directly; there is no second config format to learn.
 
+## Redeploying a live worker
+
+A redeploy of a worker that is awake fails no request. Two copies of a worker
+cannot run side by side the way an [app's](/docs/guides/apps/#redeploying-a-live-app)
+do, because both would open the same Durable Object, KV and D1 files, so the
+swap goes like this once the new version is built:
+
+1. New requests stop going to the old version and wait, exactly as they wait
+   for a worker that is waking up.
+2. Requests already running on the old version finish, for up to 10 seconds
+   (`HOBBY_DEPLOY_DRAIN_MS`). It moves on as soon as nothing is in flight.
+3. The old version stops, the new one starts and has to answer, and every
+   waiting request is sent to it. The worker stays awake.
+
+Queue batches, Durable Object alarms and cron triggers that come due during
+the swap are not lost: a queue message stays queued and is delivered on the
+next tick, an alarm fires when the new version starts, and a cron firing is
+sent to the new version a tick later than it would have been.
+
+A WebSocket open on the old version is closed when it stops, and the client
+reconnects to the new one.
+
+If the new version fails to start, the old version is started again from its
+previous image, the waiting requests are served by it, and the deploy fails
+and says so. Waiting requests give up after the wake timeout (30 seconds), so
+a new version that hangs rather than crashing can run the clock out before
+the old one is back; those requests get a 504.
+
+A worker that is asleep has nothing to keep up, so a redeploy replaces it in
+place, checks the new version starts, and leaves it asleep for the next
+request to wake, as before.
+
 ## Monorepos
 
 The build context defaults to the worker's own directory. A worker inside a

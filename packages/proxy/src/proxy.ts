@@ -95,8 +95,14 @@ export interface ProxyDeps {
   // Told about every allowlist refusal; the daemon rate-limits and logs it
   // (RefusalLimiter in access.ts). Must not throw.
   onAccessRefused?(refusal: AccessRefusal): void
-  activity: ActivityTracker
+  // Only open and close are used here. In the daemon this is its own
+  // ActivityTracker; in the separate proxy process (packages/cli/src/proxyd)
+  // it is a tracker that also reports each open and close to the daemon.
+  activity: ProxyActivity
 }
+
+// The part of ActivityTracker the proxy itself calls.
+export type ProxyActivity = Pick<ActivityTracker, 'open' | 'close'>
 
 const PROTOCOL_VIOLATION = '08P01'
 // What Postgres itself answers when pg_hba.conf rejects a connection, which
@@ -398,7 +404,7 @@ function raceTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => Error)
 function spliceAndTrackActivity(
   client: ClientSocket,
   upstream: net.Socket,
-  activity: ActivityTracker,
+  activity: ProxyActivity,
   handle: ConnectionHandle,
   cancels: CancelRegistry,
   target: ProxyTarget,
@@ -639,7 +645,7 @@ async function holdUntilServing(
   packet: Buffer,
   deadline: number,
   budgetMs: number,
-  activity: ActivityTracker
+  activity: ProxyActivity
 ): Promise<HoldResult> {
   let handle: ConnectionHandle | null = null
   const release = <T extends HoldResult>(result: T): T => {

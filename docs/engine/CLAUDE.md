@@ -311,3 +311,31 @@ eject route rendered was started with `docker compose` on the same data
 directory and reported every setting with source `command line`, with
 `pg_stat_statements` answering. Not run: `hobby daemon` and
 `scripts/smoke.mjs`, which the integrated run covers.
+
+## Amendment, 2026-11-18: what a connection sees during a settings restart (Phase A3)
+
+Adds to the 2026-11-17 settings amendment above, which is unchanged.
+`applyPostgresSettings` (`packages/cli/src/daemon/pg-settings.ts`) already
+held wakes for the swap (`holdProjectAsleep`); the full account of what that
+means for clients is the same-dated amendment in `docs/proxy/CLAUDE.md`. In
+short:
+
+- A connection made while an awake database is being restarted waits on the
+  wake fence (`buildWake`, `packages/cli/src/daemon/context.ts`) and is
+  served by the restarted container, over plain TCP, TLS, `/sql` and the
+  serverless WebSocket alike, for up to `wakeTimeoutMs`.
+- If neither the new settings nor the rolled-back ones start, the hold is
+  released naming the resource (`ReleaseHold`), and the waiting connections
+  get "`<project>/<db>` was restarted by a settings change, and did not come
+  back: ..." at once, rather than each starting the container again.
+- The hibernator skips a held project (`isProjectHeld`), so it cannot stop
+  the database between the restart's own stop and start.
+- Sessions open at the stop end, and the CLI now says so on a restart
+  (`printSettingsChange` in `packages/cli/src/cli/commands.ts`): "sessions
+  open before the restart were ended; new connections made during it were
+  held until it was back, up to the wake timeout."
+- A concurrent snapshot, restore, branch or reset of the same project is
+  refused with a conflict that names the operation in progress.
+
+Covered by `packages/cli/test/restart-wait.test.ts`. Not run against real
+Docker.

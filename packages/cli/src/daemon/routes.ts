@@ -1441,7 +1441,7 @@ async function startResourceRoute(ctx: DaemonContext, id: string): Promise<Route
   // clone an automatic wake would cause (holdProjectAsleep's comment,
   // packages/cli/src/daemon/context.ts), so it waits the same way. Re-read
   // afterwards: the snapshot's own resume may have started it already.
-  await waitForProjectAwakeable(ctx, resource.projectId)
+  await waitForProjectAwakeable(ctx, resource.projectId, resource.id)
   resource = getResourceOrThrow(ctx, id)
   // An explicit start is the way out of a refused wake that does not wait
   // for its backoff (issue #10, see buildWake in context.ts): someone looked
@@ -2961,7 +2961,14 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
   }
 
   if (method === 'GET' && segments.length === 2 && segments[1] === 'health') {
-    return { status: 200, body: { status: 'ok' } }
+    // With the proxy as its own process, its supervisor's state too
+    // (proxy-supervisor.ts): `failed` after a crash loop it gave up on, when
+    // every database is unreachable, which makes the daemon `degraded`. Only
+    // the state word, no pid or reason: this route is unauthenticated on the
+    // studio listener. The detail is in GET /v1/preflight (`hobby init`).
+    const proxy = ctx.proxyHealth?.().state
+    if (proxy === undefined) return { status: 200, body: { status: 'ok' } }
+    return { status: 200, body: { status: proxy === 'failed' ? 'degraded' : 'ok', proxy } }
   }
 
   // Its own route, not a field on /v1/health, because health is the one

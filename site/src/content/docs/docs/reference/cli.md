@@ -95,6 +95,41 @@ Runs the daemon in the foreground. It owns all state and all lifecycle, listens
 on a unix socket for the CLI and MCP, and on loopback TCP for Studio. Only one
 may run at a time, and that is enforced rather than assumed.
 
+The Postgres proxy runs as its own process, which the daemon starts the first
+time and adopts on every later start, so restarting the daemon (SIGTERM,
+Ctrl-C, `hobby daemon restart`) leaves open database sessions up. Under the
+shipped systemd unit SIGTERM is a full stop instead (`HOBBY_SIGTERM=stop`),
+because systemd sends the same SIGTERM for `systemctl stop` and `systemctl
+restart`; there, `hobby daemon restart` is the restart that keeps sessions. If
+the proxy process dies while the daemon runs, the daemon starts a new one. A
+restart after an upgrade that changed the proxy's code restarts the proxy too,
+which ends its sessions, and the daemon's log says so. Its own log is
+`~/.hobby/proxy.log`. `HOBBY_PROXY_MODE=in-process` runs it inside the daemon
+instead, as before.
+
+Takes no flags.
+
+### `hobby daemon restart`
+
+Restarts the daemon and keeps the proxy process and its open sessions. It asks
+the running daemon for a restart (a request file naming its pid, then
+SIGTERM); the daemon shuts down as on any restart and exits with code 75, which
+the systemd unit's `RestartForceExitStatus=75` turns into a new start, and the
+new daemon adopts the proxy. It waits for the new daemon and prints its pid.
+With no supervisor to start one (a `hobby daemon` you ran by hand), it says so
+and exits non-zero; start `hobby daemon` again and it adopts the proxy. It acts
+on this machine's processes, so it has no API route and no MCP tool.
+
+Takes no flags.
+
+### `hobby daemon stop`
+
+The full stop: the daemon stops its resources as on any shutdown, and stops
+the proxy process too, ending every proxied session. With no daemon running,
+it stops a proxy left behind by one. Run it before leaving hobby for good, so
+nothing keeps the proxy's port. It acts on this machine's processes, so it has
+no API route and no MCP tool.
+
 Takes no flags.
 
 ## Projects and resources
@@ -246,6 +281,11 @@ change replaces the container, even for a setting Postgres could reload:
   with a query or transaction running is waited for, then refused if it stays
   busy. If Postgres will not start with the new settings, the previous ones
   are restored and it is started again, and the error carries its log lines.
+  Sessions open at the restart end. A new connection made during it, through
+  the proxy on any of its paths (plain, TLS, the serverless driver), waits
+  for the restarted database instead of being refused, for up to the wake
+  timeout (`HOBBY_WAKE_TIMEOUT_MS`), and gets the error if it does not come
+  back.
 
 Anything not on the allowlist is refused, and so is a value outside its
 range. `shared_preload_libraries` accepts `pg_stat_statements` and
@@ -372,6 +412,20 @@ error, which then points at it. A successful build is quiet unless
 `--verbose` is passed. After a successful deploy the newest three image tags
 under the resource's repository (`hobby/<project>-<resource>`, workers with a
 `-worker` suffix) are kept for rollback and older ones removed.
+
+Redeploying an app that is awake starts the new version beside the old one
+and moves traffic only once it answers; the old one drains for
+`deployDrainMs` (10 seconds) and is then stopped, and the app stays awake. If
+the new version fails to start, the old one keeps serving and the deploy
+fails. An app that is asleep is replaced in place and left asleep. See
+[Apps](/docs/guides/apps/#redeploying-a-live-app).
+
+Redeploying a worker that is awake holds new requests, lets the ones in flight
+finish (up to `deployDrainMs`), stops the old version, starts the new one and
+then serves the held requests from it, so no request fails; it stays awake. If
+the new version fails to start, the old one is started again and serves them,
+and the deploy fails. A worker that is asleep is replaced in place and left
+asleep. See [Workers](/docs/guides/workers/#redeploying-a-live-worker).
 
 A deploy that had to create its project and then fails before putting a
 resource in it removes that project again, so a refused name or a build error

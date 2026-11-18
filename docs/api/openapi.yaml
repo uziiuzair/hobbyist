@@ -78,14 +78,17 @@ security:
 paths:
   /v1/health:
     get:
-      summary: Liveness. Always unauthenticated, even studio-fronted.
+      summary: "Liveness. Always unauthenticated, even studio-fronted. With the Postgres proxy as its own process, also that process's state as the daemon's supervisor sees it (packages/cli/src/daemon/proxy-supervisor.ts): `failed` means it gave up restarting a crash-looping proxy and every database is unreachable, and makes `status` `degraded`. Only the state word, since this route is unauthenticated; the detail is in /v1/preflight."
       responses:
         "200":
           content:
             application/json:
               schema:
                 type: object
-                properties: { status: { const: ok } }
+                required: [status]
+                properties:
+                  status: { enum: [ok, degraded] }
+                  proxy: { enum: [up, recovering, failed] }
 
   /v1/version:
     get:
@@ -582,7 +585,7 @@ paths:
 
   /v1/projects/{name}/snapshots:
     post:
-      summary: "Snapshot the whole project now (ADR 0016): quiesce, clone, write the manifest, resume what was running. With `online: true`, nothing is paused: each running postgres is copied with pg_basebackup inside its own container and each sleeping one is cloned; only a project whose resources are all postgres qualifies (409 otherwise), and the pinned check does not apply. 400 for online and allowPause together. 409 for a pinned project with something running unless allowPause or online, for a released project, or while another snapshot or restore of it is in progress."
+      summary: "Snapshot the whole project now (ADR 0016): quiesce, clone, write the manifest, resume what was running. With `online: true`, nothing is paused: each running postgres is copied with pg_basebackup inside its own container and each sleeping one is cloned; only a project whose resources are all postgres qualifies (409 otherwise), and the pinned check does not apply. 400 for online and allowPause together. 409 for a pinned project with something running unless allowPause or online, for a released project, or while another operation holds it (a snapshot, restore, settings change, or a branch or reset pausing it), the message naming which."
       parameters: [{ $ref: "#/components/parameters/projectName" }]
       requestBody:
         content:
@@ -858,7 +861,7 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
     post:
-      summary: "Change the declared settings (setSettingsRoute, applyPostgresSettings in packages/cli/src/daemon/pg-settings.ts). Settings are server arguments, never written to postgresql.conf or postgresql.auto.conf, so every change replaces the container. A sleeping database gets a new stopped container and is not woken (applied: next-start). An awake one is restarted (applied: restarted): a pinned project needs allowPause (409 otherwise), the activity guard must report idle (409 if it stays active or cannot answer), and wakes are held for the swap. A start that fails with the new settings restores the previous ones, starts it again, and answers usage with the failed start's log lines. A released project answers 409."
+      summary: "Change the declared settings (setSettingsRoute, applyPostgresSettings in packages/cli/src/daemon/pg-settings.ts). Settings are server arguments, never written to postgresql.conf or postgresql.auto.conf, so every change replaces the container. A sleeping database gets a new stopped container and is not woken (applied: next-start). An awake one is restarted (applied: restarted): a pinned project needs allowPause (409 otherwise), the activity guard must report idle (409 if it stays active or cannot answer), and wakes are held for the swap: a new connection through the proxy waits for the restarted container instead of being refused, up to wakeTimeoutMs, and gets this call's failure if the database does not come back. Sessions open at the stop end. 409 while another operation holds the project. A start that fails with the new settings restores the previous ones, starts it again, and answers usage with the failed start's log lines. A released project answers 409."
       parameters: [{ $ref: "#/components/parameters/resourceId" }]
       requestBody:
         content:
@@ -1460,6 +1463,27 @@ components:
     Preflight:
       type: object
       properties:
+        proxyProcess:
+          type: object
+          nullable: true
+          description: "A proxy process answering on $HOBBY_HOME/proxy.sock (preflight.ts). It holds proxyPort for the daemon to adopt, so that port being taken is not a blocker."
+          properties:
+            pid: { type: integer }
+        proxySupervisor:
+          type: object
+          description: "Only when served by a daemon running the proxy as its own process: its supervisor's view (ProxyHealth, proxy-supervisor.ts). state failed means it gave up after maxFastCrashes fast crashes in a row."
+          properties:
+            state: { enum: [up, recovering, failed] }
+            pid: { type: integer, nullable: true }
+            port: { type: integer }
+            restarts: { type: integer }
+            consecutiveFastCrashes: { type: integer }
+            lastLoss:
+              type: object
+              nullable: true
+              properties:
+                at: { type: string }
+                reason: { type: string }
         runtimeAvailable: { type: boolean }
         filesystem:
           type: object

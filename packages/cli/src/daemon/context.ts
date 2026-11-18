@@ -17,7 +17,6 @@
 import {
   createDockerRuntime,
   createKindRegistry,
-  DEFAULT_POSTGRES_NAME,
   HobbyError,
   openStore,
   type ComputeRuntime,
@@ -40,11 +39,12 @@ import {
   type HttpProxyDeps,
   type HttpTarget,
   type ProxyDeps,
-  type ProxyTarget,
   RefusalLimiter,
   refusalLogLine,
   type AccessRefusal,
 } from '@hobby.sh/proxy'
+import type { ProxyHealth } from './proxy-supervisor.js'
+import { allowlistOf, resolveProxyTarget } from './proxy-resolve.js'
 import { createTailnetDetector } from './tailnet.js'
 import { formatRetryDelay, redactWakeError, wakeRetryDelayMs } from './wake-backoff.js'
 
@@ -115,6 +115,16 @@ export interface DaemonContext {
   // (core's defaultDockerExec); a test sets it to read the argv and the
   // service file on stdin, and to play the script's output.
   importExec?: ExecFn
+  // WorkerDeps.holdResourceWakes, the same structural pass-through as
+  // probeFactory: a redeploy of a running worker takes it for its swap
+  // (swapWorker, packages/worker/src/worker.ts). createDaemonContext wires it
+  // to holdResourceWakes below. A hand-built test context without it gets a
+  // running worker redeployed in place, as before Phase A.
+  holdResourceWakes?: (resourceId: string, what: string) => (failure?: string) => void
+  // Set by startDaemon when the proxy runs as its own process: the
+  // supervisor's view of it (proxy-supervisor.ts), which GET /v1/health and
+  // GET /v1/preflight report. Unset with the proxy in-process.
+  proxyHealth?: () => ProxyHealth
 }
 
 // A convenience factory for the real, production wiring: opens the real
@@ -127,7 +137,7 @@ export function createDaemonContext(opts: {
   config: HobbyConfig
   runtime?: ComputeRuntime
 }): DaemonContext {
-  return {
+  const ctx: DaemonContext = {
     store: openStore(opts.paths.statePath),
     runtime: opts.runtime ?? createDockerRuntime(),
     paths: opts.paths,
@@ -135,6 +145,19 @@ export function createDaemonContext(opts: {
     activity: new ActivityTracker(),
     kinds: createDefaultKindRegistry(),
     detectTailnet: createTailnetDetector(),
+  }
+  ctx.holdResourceWakes = resourceWakeHoldFor(ctx)
+  return ctx
+}
+
+// DaemonContext.holdResourceWakes for a given context: holdResourceWakes
+// below, in the shape WorkerDeps.holdResourceWakes takes (one resource, one
+// optional failure message). Exported so a daemon-level test can wire the
+// same thing into a context it built by hand.
+export function resourceWakeHoldFor(ctx: DaemonContext): NonNullable<DaemonContext['holdResourceWakes']> {
+  return (resourceId, what) => {
+    const release = holdResourceWakes(ctx, resourceId, what)
+    return (failure) => release(failure === undefined ? undefined : new Map([[resourceId, failure]]))
   }
 }
 
@@ -233,9 +256,33 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
       // promise, a first query that is slow rather than one that errors, and
       // the snapshot's own resume has usually started the resource again by
       // the time the wait ends, which is why the row is read a second time.
-      const fence = wakeFence(ctx, resource.projectId)
-      if (fence !== undefined) {
-        await fence
+      //
+      // Since 2026-11-18 (Phase A3) the same fence covers every operation
+      // that restarts an awake database on purpose: a settings change
+      // (pg-settings.ts), and a branch or reset quiescing its source
+      // (cloneSourceAtRest, branch.ts), as well as the snapshot, restore
+      // and reset holds. A connection that arrives while the container is
+      // being stopped, replaced and started again waits here instead of
+      // being refused, and is served by the restarted container. The wait
+      // is bounded by the caller's own budget (the proxy races this whole
+      // function against wakeTimeoutMs). If the operation could not bring
+      // this resource back, it says so when it releases the hold, and the
+      // waiter gets that error at once rather than starting the container
+      // a further time on its own (heldRestartFailed below).
+      //
+      // A redeploy of a running worker holds that one resource the same way
+      // (holdResourceWakes below, taken by swapWorker in
+      // packages/worker/src/worker.ts): its wakes wait while the old
+      // container drains and the new one starts, and nothing else in the
+      // project is held. Read after the project's hold, and read afresh,
+      // since a swap can begin while a wake waits on a project hold.
+      const projectId = resource.projectId
+      for (const fenceOf of [() => wakeFence(ctx, projectId), () => resourceWakeFence(ctx, resourceId)]) {
+        const hold = fenceOf()
+        if (hold === undefined) {
+          continue
+        }
+        await hold.fence
         resource = ctx.store.getResource(resourceId)
         if (resource === null) {
           throw new HobbyError('resource_not_found', `no resource with id ${resourceId}`)
@@ -245,6 +292,11 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
           // purposes: whatever failed before evidently no longer does.
           refusals.delete(resourceId)
           return
+        }
+        const failed = hold.failures.get(resourceId)
+        if (failed !== undefined) {
+          const project = ctx.store.getProject(resource.projectId)
+          throw heldRestartFailed(project === null ? resource.name : `${project.name}/${resource.name}`, hold.what, failed)
         }
       }
       // An app or worker bound to a database is no use awake with the
@@ -453,9 +505,38 @@ const wakeRegistry = new WeakMap<DaemonContext, (resourceId: string) => Promise<
 // other, and two maps would be two locks that each think they are the only
 // one. Only a hold that stopped something has anything to fence the wake
 // path against.
+//
+// `what` names the operation for the two messages a hold can cause: the
+// refusal of a second hold, and the error a fenced wake gets when the
+// operation could not bring its resource back. `failures` is filled by the
+// release function (see holdProject): resource id to the message of the
+// start that failed, for each resource the operation stopped and could not
+// start again.
 interface ProjectHold {
   fence: Promise<void>
   blocksWake: boolean
+  what: string
+  failures: Map<string, string>
+}
+
+// What releases a hold. `failures`, when given, names the resources the
+// operation stopped and could not start again, each with the message of
+// its failed start: a wake waiting on the fence for one of those is
+// answered with that message (buildWake) instead of making another start
+// attempt of its own.
+export type ReleaseHold = (failures?: ReadonlyMap<string, string>) => void
+
+// The error a fenced wake gets for a resource the operation holding its
+// project stopped and could not start again. Named for the operation, so a
+// client that connected during `hobby pg config set` reads that its
+// database did not come back from the settings change, not that some
+// unexplained wake failed.
+function heldRestartFailed(target: string, what: string, message: string): HobbyError {
+  return new HobbyError(
+    'wake_failed',
+    `${target} was restarted by ${what}, and did not come back: ${message}`,
+    `\`hobby logs ${target}\` shows what it printed; \`hobby wake ${target}\` tries again`
+  )
 }
 
 const projectHolds = new WeakMap<DaemonContext, Map<string, ProjectHold>>()
@@ -467,16 +548,17 @@ const projectHolds = new WeakMap<DaemonContext, Map<string, ProjectHold>>()
 // for an online snapshot too, even though it resumes nothing: an in-place
 // restore swapping the data directory out from under a pg_basebackup, or a
 // quiesce stopping the database it is reading, would each fail it at best.
-function holdProject(ctx: DaemonContext, projectId: string, projectName: string, blocksWake: boolean): () => void {
+function holdProject(ctx: DaemonContext, projectId: string, projectName: string, blocksWake: boolean, what: string): ReleaseHold {
   let holds = projectHolds.get(ctx)
   if (holds === undefined) {
     holds = new Map()
     projectHolds.set(ctx, holds)
   }
-  if (holds.has(projectId)) {
+  const existing = holds.get(projectId)
+  if (existing !== undefined) {
     throw new HobbyError(
       'conflict',
-      `a snapshot or restore of ${projectName} is already in progress`,
+      `${existing.what} of ${projectName} is already in progress`,
       'wait for it to finish, then try again'
     )
   }
@@ -484,10 +566,14 @@ function holdProject(ctx: DaemonContext, projectId: string, projectName: string,
   const fence = new Promise<void>((resolve) => {
     release = resolve
   })
-  const hold: ProjectHold = { fence, blocksWake }
+  const hold: ProjectHold = { fence, blocksWake, what, failures: new Map() }
   holds.set(projectId, hold)
   const held = holds
-  return () => {
+  return (failures) => {
+    // Recorded before the fence settles, so every waiter reads them.
+    for (const [id, message] of failures ?? []) {
+      hold.failures.set(id, message)
+    }
     if (held.get(projectId) === hold) {
       held.delete(projectId)
     }
@@ -513,8 +599,17 @@ function holdProject(ctx: DaemonContext, projectId: string, projectName: string,
 // below). It does not cover a queue's enqueue endpoint or delivery tick,
 // which write messages.sqlite without waking anything; docs/backups/CLAUDE.md
 // records that gap.
-export function holdProjectAsleep(ctx: DaemonContext, projectId: string, projectName: string): () => void {
-  return holdProject(ctx, projectId, projectName, true)
+//
+// `what` names the operation ("a settings change", "a branch"): it is what
+// a second hold's refusal and a failed restart's error call it. The default
+// is the wording every hold used before it was a parameter.
+export function holdProjectAsleep(
+  ctx: DaemonContext,
+  projectId: string,
+  projectName: string,
+  what = 'a snapshot or restore'
+): ReleaseHold {
+  return holdProject(ctx, projectId, projectName, true, what)
 }
 
 // The same mutual exclusion as holdProjectAsleep, and nothing else: wakes
@@ -524,24 +619,100 @@ export function holdProjectAsleep(ctx: DaemonContext, projectId: string, project
 // ordinary traffic rather than a hot copy in the making. Holding wakes there
 // would turn "a snapshot with no pause" into a snapshot that pauses every
 // sleeping resource in the project for the length of the copy.
-export function holdProjectExclusive(ctx: DaemonContext, projectId: string, projectName: string): () => void {
-  return holdProject(ctx, projectId, projectName, false)
+export function holdProjectExclusive(
+  ctx: DaemonContext,
+  projectId: string,
+  projectName: string,
+  what = 'a snapshot or restore'
+): ReleaseHold {
+  return holdProject(ctx, projectId, projectName, false, what)
 }
 
 // What a wake of a resource in this project must wait for, if anything:
-// only a hold that blocks wakes.
-function wakeFence(ctx: DaemonContext, projectId: string): Promise<void> | undefined {
+// only a hold that blocks wakes. The hold itself rather than only its
+// fence, so the waiter can read the failures its release recorded.
+function wakeFence(ctx: DaemonContext, projectId: string): ProjectHold | undefined {
   const hold = projectHolds.get(ctx)?.get(projectId)
-  return hold?.blocksWake === true ? hold.fence : undefined
+  return hold?.blocksWake === true ? hold : undefined
+}
+
+// Whether any operation holds this project right now, of either kind. Read
+// by the hibernator (tick in packages/cli/src/daemon/hibernator.ts), which
+// leaves a held project's resources alone: a settings change or a quiesce
+// is stopping and starting them on purpose, and an online snapshot is
+// copying one that must stay up, and a sleep landing in the middle of any
+// of those would race the operation's own stop or start.
+export function isProjectHeld(ctx: DaemonContext, projectId: string): boolean {
+  return projectHolds.get(ctx)?.has(projectId) === true
 }
 
 // For a caller that starts a resource without going through the wake
 // function above (startResourceRoute): the same wait, and nothing else.
-export async function waitForProjectAwakeable(ctx: DaemonContext, projectId: string): Promise<void> {
-  const fence = wakeFence(ctx, projectId)
-  if (fence !== undefined) {
-    await fence
+// Given a resource id, it also waits out that resource's own hold
+// (holdResourceWakes), so `hobby wake` during a worker swap waits for the
+// swap rather than starting a second container under the same name.
+export async function waitForProjectAwakeable(ctx: DaemonContext, projectId: string, resourceId?: string): Promise<void> {
+  const hold = wakeFence(ctx, projectId)
+  if (hold !== undefined) {
+    await hold.fence
   }
+  if (resourceId !== undefined) {
+    const own = resourceWakeFence(ctx, resourceId)
+    if (own !== undefined) {
+      await own.fence
+    }
+  }
+}
+
+// Per-context, keyed by resource id: the one-resource counterpart of
+// projectHolds, taken by a redeploy of a running worker (swapWorker,
+// packages/worker/src/worker.ts, through DaemonContext.holdResourceWakes).
+// The same ProjectHold record and the same fence semantics in buildWake, so
+// a waiter reads `running` and goes on, or reads the failure the release
+// recorded and is told the worker did not come back. Narrower than a project
+// hold on purpose: the worker's in-flight requests may need its database
+// woken while it drains, and a project hold would make that wake wait on the
+// very drain that is waiting for it.
+const resourceHolds = new WeakMap<DaemonContext, Map<string, ProjectHold>>()
+
+export function holdResourceWakes(ctx: DaemonContext, resourceId: string, what: string): ReleaseHold {
+  let holds = resourceHolds.get(ctx)
+  if (holds === undefined) {
+    holds = new Map()
+    resourceHolds.set(ctx, holds)
+  }
+  const existing = holds.get(resourceId)
+  if (existing !== undefined) {
+    throw new HobbyError('conflict', `${existing.what} of this resource is already in progress`, 'wait for it to finish, then try again')
+  }
+  let release: () => void = () => {}
+  const fence = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const hold: ProjectHold = { fence, blocksWake: true, what, failures: new Map() }
+  holds.set(resourceId, hold)
+  const held = holds
+  return (failures) => {
+    for (const [id, message] of failures ?? []) {
+      hold.failures.set(id, message)
+    }
+    if (held.get(resourceId) === hold) {
+      held.delete(resourceId)
+    }
+    release()
+  }
+}
+
+function resourceWakeFence(ctx: DaemonContext, resourceId: string): ProjectHold | undefined {
+  return resourceHolds.get(ctx)?.get(resourceId)
+}
+
+// Whether a resource's own hold is taken right now. Read by the cron
+// scheduler (tickCrons, packages/cli/src/daemon/crons.ts), which leaves a
+// firing due during a worker swap for its next tick instead of counting it
+// as missed.
+export function isResourceWakeHeld(ctx: DaemonContext, resourceId: string): boolean {
+  return resourceHolds.get(ctx)?.has(resourceId) === true
 }
 
 // Memoized per DaemonContext in a WeakMap, the same pattern
@@ -593,99 +764,15 @@ export function logAccessRefusal(ctx: DaemonContext, refusal: AccessRefusal, log
 }
 
 export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
-  async function resolve(projectName: string, databaseSegment: string | null = null): Promise<ProxyTarget | null> {
-    const project = ctx.store.getProjectByName(projectName)
-    if (project === null) {
-      return null
-    }
-
-    // A released project is one hobby handed over: its data directory now
-    // belongs to whatever the user started from the emitted compose file.
-    // Waking it here would open a second postgres on that same PGDATA, which
-    // is not a conflict the user gets an error about, it is corruption. The
-    // rows are all still here, which is why this is a refusal with a reason
-    // rather than a "no such project".
-    if (project.releasedAt != null) {
-      throw new HobbyError(
-        'conflict',
-        `project ${projectName} was released and is no longer managed by hobby`,
-        'it is running from the compose file hobby eject --release gave you. Run `hobby adopt ' +
-          projectName +
-          '` to take it back, after stopping that stack.'
-      )
-    }
-
-    // Only postgres resources are candidates. Port 5432 speaks one protocol
-    // and a startup packet cannot name an app or a worker, so a project
-    // holding a database and two apps must still route cleanly to the
-    // database rather than reading as ambiguous. Filtering by kind here,
-    // before the count checks below, is what keeps that true: without it,
-    // deploying an app to a project would have broken psql against its
-    // database, which is exactly the kind of cross-phase breakage ADR 0007
-    // guard 1 exists to prevent.
-    const resources = ctx.store.listResources(project.id).filter((r) => r.kind === 'postgres') as PostgresResource[]
-    if (resources.length === 0) {
-      return null
-    }
-
-    // The routing key's dotted segment names a RESOURCE first (issue #66):
-    // `blog.analytics` reaches the postgres called analytics, whatever
-    // database it holds inside, and that is the string `hobby connect
-    // blog/analytics` prints (core's routingKeyFor, the inverse of this
-    // match). Only when no resource has that name does the segment keep its
-    // older meaning, a database inside the default resource, substituted on
-    // the wire by the proxy. A resource and a database sharing a name is
-    // therefore resolved as the resource; name the database through the
-    // resource's own direct string if both are wanted.
-    const byName = databaseSegment === null ? undefined : resources.find((r) => r.name === databaseSegment)
-    if (byName !== undefined) {
-      return targetFor(byName, true)
-    }
-
-    if (resources.length === 1) {
-      return targetFor(resources[0] as PostgresResource, false)
-    }
-
-    // Several, and the key did not name one. The default resource is what a
-    // bare project name has always meant, and `hobby new` creates exactly
-    // it, so a project that grew a second postgres keeps its first string
-    // working, which is what #66 was about: before this, `pg create` cut
-    // off the existing database's connection string the moment it ran.
-    const primary = resources.find((r) => r.name === DEFAULT_POSTGRES_NAME)
-    if (primary !== undefined) {
-      return targetFor(primary, false)
-    }
-    // No default to fall back on: the same error identity the CLI's
-    // resolveTarget (packages/cli/src/cli/commands.ts) uses for a
-    // `project/resource` target it cannot pick, and proxy.ts's try/catch
-    // around deps.resolve turns it into a FATAL on the wire.
-    throw new HobbyError(
-      'ambiguous_target',
-      `project ${projectName} has more than one postgres resource and none is named ${DEFAULT_POSTGRES_NAME}: ${resources.map((r) => r.name).join(', ')}`,
-      `name one as the database: ${resources.map((r) => `${projectName}.${r.name}`).join(' or ')} (\`hobby connect ${projectName}/<name>\` prints the string)`
-    )
-  }
-
-  function targetFor(resource: PostgresResource, databaseSegmentIsResource: boolean): ProxyTarget {
-    return {
-      resourceId: resource.id,
-      label: `${ctx.store.getProject(resource.projectId)?.name ?? resource.projectId}/${resource.name}`,
-      host: '127.0.0.1',
-      port: resource.config.hostPort,
-      state: resource.state,
-      database: resource.config.database,
-      databaseSegmentIsResource,
-    }
-  }
-
   return {
-    resolve,
+    resolve: async (projectName: string, databaseSegment: string | null = null) =>
+      resolveProxyTarget(ctx.store, projectName, databaseSegment),
     wake: getOrCreateWake(ctx),
     isWakeRefused: (resourceId: string) => isWakeRefused(ctx, resourceId),
     // Read per connection, so `hobby allow` takes effect on the next
     // connection with no restart. A project that does not exist has no
     // allowlist, and resolve then answers "unknown database" as before.
-    allowlist: (projectName: string) => ctx.store.getProjectByName(projectName)?.allowlist ?? null,
+    allowlist: (projectName: string) => allowlistOf(ctx.store, projectName),
     onAccessRefused: (refusal: AccessRefusal) => logAccessRefusal(ctx, refusal),
     activity: ctx.activity,
   }

@@ -128,6 +128,14 @@ sudo systemctl enable --now hobby
 journalctl -u hobby -f          # the daemon logs every sleep, wake and failed wake
 ```
 
+Under the unit, `systemctl stop hobby` stops the daemon and the Postgres proxy
+process and frees the proxy port, and `systemctl restart hobby` does the same
+and then starts again, so open database sessions end. systemd gives the daemon
+no way to tell a stop from a restart, so the unit makes both a full stop. To
+restart without ending sessions, run `sudo hobby daemon restart`: the daemon
+exits for systemd to start it again, and the proxy, with its sessions, stays
+up for the new daemon to adopt.
+
 The unit runs as root because the Docker socket is root-owned on most
 installs; to run as another user, add them to the `docker` group and change
 `User=` in the unit. There is no launchd plist for macOS yet: a Mac that
@@ -144,9 +152,18 @@ other than this project.
 The running daemon keeps the old code until it is restarted. After an upgrade:
 
 ```sh
-sudo systemctl restart hobby    # under systemd
-# or: stop the `hobby daemon` you started by hand and start it again
+sudo hobby daemon restart       # under systemd: keeps open database sessions
+# or: stop the `hobby daemon` you started by hand (Ctrl-C) and start it again
 ```
+
+Open database sessions survive the restart: the Postgres proxy is its own
+process and the new daemon adopts it. If the upgrade changed the proxy's own
+code, the daemon restarts the proxy as well, which ends those sessions once,
+and its log says so. `sudo systemctl restart hobby` works too, but ends every
+session. The unit sets `KillMode=process`, `HOBBY_SIGTERM=stop` and
+`RestartForceExitStatus=75` for this; a unit copied before those lines existed
+either kills the proxy with the daemon or leaves it holding its port after
+`systemctl stop`, so copy it again.
 
 ## Uninstalling
 
@@ -156,7 +173,8 @@ you can see.
 ```sh
 hobby eject <project> --release   # for each project you want to keep
 hobby rm <project> --yes          # for each project you do not: removes its containers, network and images
-# stop the daemon (systemctl stop hobby, or end `hobby daemon`)
+sudo systemctl disable --now hobby   # if you installed the unit: stops the daemon and the proxy
+hobby daemon stop                 # otherwise: the daemon and the proxy process
 docker ps -a --filter name=hobby- -q | xargs -r docker rm -f     # anything hobby rm did not reach
 docker network ls --filter name=hobby- -q | xargs -r docker network rm
 docker images 'hobby/*' -q | xargs -r docker rmi

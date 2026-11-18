@@ -117,6 +117,7 @@
 // `destroying` is not in the table above because it is not a relabeling
 // problem at all. See the comment on the function below.
 
+import { removeStrayAppContainer } from '@hobby.sh/app'
 import type { Resource, ResourceState } from '@hobby.sh/core'
 import type { DaemonContext } from './context.js'
 
@@ -247,6 +248,24 @@ export async function reconcile(ctx: DaemonContext, opts: ReconcileOptions = {})
     // "correcting" that would stop somebody's database.
     if (ctx.store.getProject(resource.projectId)?.releasedAt != null) {
       continue
+    }
+
+    // A rolling app deploy the previous daemon did not finish (rollOver,
+    // packages/app/src/app.ts) can leave a container under the alternate
+    // name that no config points at. Removed before the recorded one is
+    // inspected; removeStrayAppContainer never touches config.containerName.
+    // Logged, and a failure is logged rather than stopping the daemon.
+    if (resource.kind === 'app') {
+      try {
+        const removed = await removeStrayAppContainer(ctx, resource)
+        if (removed !== null) {
+          console.error(
+            `reconcile: removed container ${removed}, left by an unfinished deploy of ${resource.name}; ${resource.config.containerName} is the one serving`
+          )
+        }
+      } catch (err) {
+        console.error(`reconcile: could not remove a leftover deploy container for ${resource.name}: ${errorMessage(err)}`)
+      }
     }
 
     const status = await ctx.runtime.inspect(resource.config.containerName)

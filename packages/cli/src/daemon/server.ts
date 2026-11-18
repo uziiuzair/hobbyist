@@ -26,7 +26,11 @@ import { startQueueTick } from '@hobby.sh/queue'
 import { durableObjectNamespaces } from './alarms.js'
 import { cronState, postScheduled, scheduledWorkers, startCronScheduler } from './crons.js'
 import { createCaddyManager, type CaddyManager } from './caddy.js'
-import { createHttpProxyDeps, createProxyDeps, getOrCreateWake, type DaemonContext } from './context.js'
+import { createHttpProxyDeps, createProxyDeps, getOrCreateWake, getWakeRefusal, isResourceWakeHeld, type DaemonContext } from './context.js'
+import { proxySocketPath } from './proxy-link.js'
+import { onSigterm } from './restart-request.js'
+import { superviseProxy, type ProxyBackoff, type SupervisedProxy } from './proxy-supervisor.js'
+import { SOCKET_MODE, type ProxydConfig } from '../proxyd/protocol.js'
 import { startExpirySweeper } from './expiry.js'
 import { startHibernator } from './hibernator.js'
 import { startQueueEndpoint } from './queue-endpoint.js'
@@ -36,8 +40,6 @@ import { createStudioApp } from './studio/routes.js'
 import { resolveProxyHosts } from './proxy-hosts.js'
 
 const execFileAsync = promisify(execFile)
-
-const SOCKET_MODE = 0o600
 
 // How often the hibernator re-checks every resource for a sleep candidate.
 // docs/hibernation/CLAUDE.md cites Xata's CNPG sidecar polling once a minute
@@ -385,6 +387,45 @@ export interface StartDaemonOptions {
   // wires the real createCaddyManager and tests either leave this unset,
   // getting no Caddy involved at all, or inject a fake that records calls.
   caddy?: CaddyManager
+  // Run the Postgres proxy as its own process, adopting one that is already
+  // running (docs/proxy/specs/2026-11-18-proxy-outlives-the-daemon.md).
+  // Unset: the proxy runs inside this process, as it always did, which is
+  // what tests and HOBBY_PROXY_MODE=in-process use.
+  proxyProcess?: {
+    logPath?: string
+    // Tests only, passed through to adoptOrStartProxy.
+    fingerprint?: string
+    spawn?: (config: ProxydConfig) => Promise<number | null>
+    // Tests only: the respawn backoff (proxy-supervisor.ts).
+    backoff?: Partial<ProxyBackoff>
+  }  // What a plain SIGTERM means (restart-request.ts): `restart` by default,
+  // `stop` under the shipped systemd unit (HOBBY_SIGTERM=stop), where
+  // `systemctl stop` and `systemctl restart` cannot be told apart. A SIGTERM
+  // that `hobby daemon restart` asked for is always a restart.
+  sigterm?: ShutdownMode
+}
+
+// How the daemon is going down.
+//
+//   restart  SIGINT (Ctrl-C), SIGTERM unless opts.sigterm says `stop`, and a
+//            SIGTERM `hobby daemon restart` asked for (restart-request.ts),
+//            which also exits RESTART_EXIT_CODE so a supervisor starts the
+//            next daemon. A separate proxy process is left running with its
+//            sessions, and so is every resource one of them is using.
+//   stop     SIGUSR2, which `hobby daemon stop` sends, SIGTERM under the
+//            shipped systemd unit (HOBBY_SIGTERM=stop), and close() by
+//            default: the whole thing, the proxy process included.
+//
+// With the proxy in-process the two are the same, since the proxy cannot
+// outlive this process.
+export type ShutdownMode = 'restart' | 'stop'
+
+// What a restart stops: what a full stop would, less any resource that has a
+// proxied session open right now. Those stay up for the next daemon, which
+// adopts the proxy and finds them running (reconcile); its hibernator puts
+// them to sleep once their sessions end.
+export function resourcesToStopOnRestart(ctx: DaemonContext): Resource[] {
+  return resourcesToStopOnShutdown(ctx).filter((resource) => ctx.activity.count(resource.id) === 0)
 }
 
 // Which resources the daemon stops on its way down: every `running` one,
@@ -420,7 +461,7 @@ export function resourcesToStopOnShutdown(ctx: DaemonContext): Resource[] {
 export async function startDaemon(
   ctx: DaemonContext,
   opts: StartDaemonOptions
-): Promise<{ close(): Promise<void> }> {
+): Promise<{ close(mode?: ShutdownMode): Promise<void> }> {
   warnOnUnrecognizedCaddyEnabled()
 
   // Before anything binds: a socket path past sun_path's limit fails inside
@@ -470,52 +511,105 @@ export async function startDaemon(
   // database lives on.
   const proxyHosts = await resolveProxyHosts(ctx)
   const proxyTls = proxyTlsFiles(ctx.config.proxyTls)
+  // Two ways to run the proxy. In-process (tests, and HOBBY_PROXY_MODE=
+  // in-process) is exactly what it always was. As its own process
+  // (opts.proxyProcess, what `hobby daemon` uses) it outlives this daemon, so a
+  // restart or an upgrade leaves proxied sessions up:
+  // docs/proxy/specs/2026-11-18-proxy-outlives-the-daemon.md.
+  let proxyLink: SupervisedProxy | null = null
   const proxies: Array<{ port: number; close: () => Promise<void> }> = []
-  const proxyBound = new Set<string>()
-  // `local`: a listener only this box's own containers can reach (a project
-  // network's bridge gateway, see proxyGatewayHosts below). Plaintext is
-  // allowed on it even with TLS configured, the same way it is on loopback:
-  // the traffic never leaves the machine, and an app's DATABASE_URL carries
-  // no sslmode. A listener on an operator-chosen address keeps ADR 0019's
-  // rule exactly as it was.
-  // The docker network gateways this box's own apps and workers dial the
-  // proxy at (host.docker.internal on Linux). A connection that arrived on
-  // one of them, or on loopback, is the box itself and is exempt from every
-  // project's IP allowlist (the 2026-11-17 allowlist amendment in
-  // docs/proxy/CLAUDE.md). Judged by the address the client dialed, not by
-  // which listener took it, because with proxyHost "all" there is no
-  // gateway listener: the 0.0.0.0 one takes that traffic, from container
-  // addresses no allowlist would name. Grows with addProxyGateway below.
-  const gatewayAddresses = new Set<string>(await proxyGatewayHosts(ctx))
-  const sameBox = (local: string | undefined, peer: string | undefined): boolean =>
-    defaultSameBox(local, peer) || (local !== undefined && gatewayAddresses.has(local.replace(/^::ffff:/, '')))
-  const startProxyOn = async (host: string, local: boolean): Promise<void> => {
-    if (proxyBound.has(host)) return
-    proxies.push(
-      await startPgProxy({
+  let addProxyGateway: (gateway: string) => Promise<void>
+  if (opts.proxyProcess !== undefined) {
+    // Supervised: a proxy that dies while this daemon runs is started again
+    // (proxy-supervisor.ts), as Restart=on-failure did when it was in-process.
+    const link = await superviseProxy({
+      config: {
+        socketPath: proxySocketPath(ctx.paths.home),
+        statePath: ctx.paths.statePath,
         port: ctx.config.proxyPort,
-        host,
-        deps: createProxyDeps(ctx),
+        hosts: proxyHosts,
         wakeTimeoutMs: ctx.config.wakeTimeoutMs,
-        sameBox,
-        ...(proxyTls === undefined ? {} : { tls: proxyTls }),
-        ...(local ? { plaintextAllowed: () => true } : {}),
-      })
-    )
-    proxyBound.add(host)
-  }
-  for (const host of proxyHosts) {
-    await startProxyOn(host, false)
-  }
-  // Issue #53: an app or worker reaches its database through the proxy by
-  // host.docker.internal (packages/app/src/app.ts's databaseUrlFor), which
-  // on Linux is each project network's bridge gateway, an address a proxy
-  // bound to loopback never sees. The same addresses the enqueue listener
-  // binds, for the same reason, with the same best-effort rule: a gateway
-  // that cannot be bound is logged, not fatal. A "0.0.0.0" bind already
-  // covers them and binding again would fail, hence the `all` check.
-  if (!proxyHosts.includes('0.0.0.0')) {
-    for (const gateway of gatewayAddresses) {
+        tls: proxyTls ?? null,
+      },
+      logPath: opts.proxyProcess.logPath ?? join(ctx.paths.home, 'proxy.log'),
+      daemon: {
+        wake: getOrCreateWake(ctx),
+        activity: ctx.activity,
+        refusalRetryAt: (resourceId) => getWakeRefusal(ctx, resourceId)?.retryAt ?? null,
+      },
+      ...(opts.proxyProcess.fingerprint === undefined ? {} : { fingerprint: opts.proxyProcess.fingerprint }),
+      ...(opts.proxyProcess.spawn === undefined ? {} : { spawn: opts.proxyProcess.spawn }),
+      ...(opts.proxyProcess.backoff === undefined ? {} : { backoff: opts.proxyProcess.backoff }),
+    })
+    proxyLink = link
+    ctx.proxyHealth = () => link.health()
+    // The gateways the proxy also listens on (issue #53) and counts as this
+    // box for allowlists. Sent on adoption too: a gateway the proxy already
+    // has is a no-op on its side.
+    for (const gateway of await proxyGatewayHosts(ctx)) {
+      link.addGateway(gateway)
+    }
+    addProxyGateway = async (gateway: string): Promise<void> => {
+      link.addGateway(gateway)
+    }
+  } else {
+    const proxyBound = new Set<string>()
+    // `local`: a listener only this box's own containers can reach (a project
+    // network's bridge gateway, see proxyGatewayHosts below). Plaintext is
+    // allowed on it even with TLS configured, the same way it is on loopback:
+    // the traffic never leaves the machine, and an app's DATABASE_URL carries
+    // no sslmode. A listener on an operator-chosen address keeps ADR 0019's
+    // rule exactly as it was.
+    // The docker network gateways this box's own apps and workers dial the
+    // proxy at (host.docker.internal on Linux). A connection that arrived on
+    // one of them, or on loopback, is the box itself and is exempt from every
+    // project's IP allowlist (the 2026-11-17 allowlist amendment in
+    // docs/proxy/CLAUDE.md). Judged by the address the client dialed, not by
+    // which listener took it, because with proxyHost "all" there is no
+    // gateway listener: the 0.0.0.0 one takes that traffic, from container
+    // addresses no allowlist would name. Grows with addProxyGateway below.
+    const gatewayAddresses = new Set<string>(await proxyGatewayHosts(ctx))
+    const sameBox = (local: string | undefined, peer: string | undefined): boolean =>
+      defaultSameBox(local, peer) || (local !== undefined && gatewayAddresses.has(local.replace(/^::ffff:/, '')))
+    const startProxyOn = async (host: string, local: boolean): Promise<void> => {
+      if (proxyBound.has(host)) return
+      proxies.push(
+        await startPgProxy({
+          port: ctx.config.proxyPort,
+          host,
+          deps: createProxyDeps(ctx),
+          wakeTimeoutMs: ctx.config.wakeTimeoutMs,
+          sameBox,
+          ...(proxyTls === undefined ? {} : { tls: proxyTls }),
+          ...(local ? { plaintextAllowed: () => true } : {}),
+        })
+      )
+      proxyBound.add(host)
+    }
+    for (const host of proxyHosts) {
+      await startProxyOn(host, false)
+    }
+    // Issue #53: an app or worker reaches its database through the proxy by
+    // host.docker.internal (packages/app/src/app.ts's databaseUrlFor), which
+    // on Linux is each project network's bridge gateway, an address a proxy
+    // bound to loopback never sees. The same addresses the enqueue listener
+    // binds, for the same reason, with the same best-effort rule: a gateway
+    // that cannot be bound is logged, not fatal. A "0.0.0.0" bind already
+    // covers them and binding again would fail, hence the `all` check.
+    if (!proxyHosts.includes('0.0.0.0')) {
+      for (const gateway of gatewayAddresses) {
+        try {
+          await startProxyOn(gateway, true)
+        } catch (err) {
+          console.error(
+            `daemon: could not bind the wake-on-connect proxy on docker gateway ${gateway}, apps in that project may not reach their database: ${errorMessage(err)}`
+          )
+        }
+      }
+    }
+    addProxyGateway = async (gateway: string): Promise<void> => {
+      gatewayAddresses.add(gateway)
+      if (proxyHosts.includes('0.0.0.0')) return
       try {
         await startProxyOn(gateway, true)
       } catch (err) {
@@ -525,18 +619,6 @@ export async function startDaemon(
       }
     }
   }
-  const addProxyGateway = async (gateway: string): Promise<void> => {
-    gatewayAddresses.add(gateway)
-    if (proxyHosts.includes('0.0.0.0')) return
-    try {
-      await startProxyOn(gateway, true)
-    } catch (err) {
-      console.error(
-        `daemon: could not bind the wake-on-connect proxy on docker gateway ${gateway}, apps in that project may not reach their database: ${errorMessage(err)}`
-      )
-    }
-  }
-  const proxy = proxies[0]!
 
   // The HTTP half of the same router (M7, docs/compute/specs/2026-08-10-
   // phase-2-compute-design.md). Caddy holds :80 and :443 and forwards
@@ -705,6 +787,9 @@ export async function startDaemon(
     workers: () => scheduledWorkers(ctx),
     wake: getOrCreateWake(ctx),
     stateOf: queueStateOf(ctx),
+    // A worker being swapped by a redeploy has its due firings deferred to
+    // the next tick rather than missed (tickCrons).
+    isHeld: (resourceId) => isResourceWakeHeld(ctx, resourceId),
     // A cron firing is activity too (issue #160), for the same reason a
     // queue delivery is.
     fire: async (firing) => {
@@ -722,11 +807,18 @@ export async function startDaemon(
   // close(): whichever fires first runs the real shutdown, and every other
   // caller (including a second SIGTERM arriving while the first is still in
   // flight) just awaits the same promise instead of racing a second one.
-  function performShutdown(): Promise<void> {
+  function performShutdown(mode: ShutdownMode): Promise<void> {
     if (shutdownPromise !== null) {
       return shutdownPromise
     }
+    const keepProxy = mode === 'restart' && proxyLink !== null
+    // Before anything else: a proxy lost from here on is not respawned.
+    proxyLink?.beginShutdown()
     shutdownPromise = (async () => {
+      // From here on a wake the proxy asks for is answered "daemon leaving",
+      // and the proxy asks the next daemon instead.
+      if (keepProxy) proxyLink?.beginLeaving()
+
       // server.close() stops accepting new connections and waits for
       // in-flight requests to finish before its callback fires: this is
       // "stop accepting, finish in-flight requests" from the brief, for
@@ -784,6 +876,12 @@ export async function startDaemon(
         // Every one, not just the first: "tailnet" binds two, and a listener
         // left open holds the port and stops the daemon restarting cleanly.
         await Promise.all(proxies.map((p) => p.close()))
+        // A full stop stops the proxy process too, and waits for it to exit,
+        // for the same ordering reason. A restart leaves it accepting: its
+        // wakes are held until the next daemon (beginLeaving above).
+        if (proxyLink !== null && !keepProxy) {
+          await proxyLink.stopProxy()
+        }
       } catch (err) {
         console.error(`daemon shutdown: failed to close the wake-on-connect proxy cleanly: ${errorMessage(err)}`)
       }
@@ -804,13 +902,20 @@ export async function startDaemon(
       // unclean daemon exit here is exactly the failure mode this step
       // exists to prevent. Pinned projects are left running, see
       // resourcesToStopOnShutdown.
-      for (const resource of resourcesToStopOnShutdown(ctx)) {
+      for (const resource of keepProxy ? resourcesToStopOnRestart(ctx) : resourcesToStopOnShutdown(ctx)) {
+        // Re-read right before each stop, as the hibernator does: a session
+        // may have opened through the proxy that is staying up.
+        if (keepProxy && ctx.activity.count(resource.id) > 0) continue
         try {
           await ctx.kinds.get(resource.kind).stop(ctx, resource)
         } catch (err) {
           console.error(`daemon shutdown: failed to stop resource ${resource.id} cleanly: ${errorMessage(err)}`)
         }
       }
+
+      // Last thing touching the proxy: the link closes and the proxy keeps
+      // running with its sessions.
+      if (keepProxy) proxyLink?.detach()
 
       try {
         await rm(opts.socketPath, { force: true })
@@ -830,23 +935,32 @@ export async function startDaemon(
     return shutdownPromise
   }
 
-  const onSignal = (): void => {
-    performShutdown()
-      .then(() => process.exit(0))
+  const shutdownAndExit = (mode: ShutdownMode, exitCode: number): void => {
+    performShutdown(mode)
+      .then(() => process.exit(exitCode))
       .catch((err: unknown) => {
         console.error(`daemon: shutdown failed: ${errorMessage(err)}`)
         process.exit(1)
       })
   }
 
-  process.on('SIGTERM', onSignal)
-  process.on('SIGINT', onSignal)
+  const onRestart = (): void => shutdownAndExit('restart', 0)
+  const onStop = (): void => shutdownAndExit('stop', 0)
+  const onTerm = (): void => {
+    const { mode, exitCode, requested } = onSigterm(ctx.paths.home, opts.sigterm ?? 'restart')
+    if (requested) console.error('daemon: restarting as `hobby daemon restart` asked; the proxy and its sessions stay up')
+    shutdownAndExit(mode, exitCode)
+  }
+  process.on('SIGTERM', onTerm)
+  process.on('SIGINT', onRestart)
+  process.on('SIGUSR2', onStop)
 
   return {
-    async close(): Promise<void> {
-      process.off('SIGTERM', onSignal)
-      process.off('SIGINT', onSignal)
-      await performShutdown()
+    async close(mode: ShutdownMode = 'stop'): Promise<void> {
+      process.off('SIGTERM', onTerm)
+      process.off('SIGINT', onRestart)
+      process.off('SIGUSR2', onStop)
+      await performShutdown(mode)
     },
   }
 }

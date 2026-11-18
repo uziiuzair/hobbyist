@@ -11,7 +11,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync } from 'node:fs'
-import { openDatabase, type SqliteDatabase } from './sqlite.js'
+import { openDatabase, openDatabaseReadOnly, type SqliteDatabase } from './sqlite.js'
 import { HobbyError } from './errors.js'
 import type {
   Project,
@@ -208,12 +208,34 @@ function migrate(db: SqliteDatabase): void {
   }
 }
 
+// The reads a process that is not the daemon may make: the separate proxy
+// process (packages/cli/src/proxyd) resolves routing keys and allowlists from
+// the daemon's state.db, including while the daemon is down. Read-only, so it
+// never runs the schema, never migrates and never writes; a WAL reader does not
+// block the daemon's writer. The daemon must have opened the file at least
+// once (openStore below) so the schema exists.
+export type StoreReader = Pick<Store, 'getProject' | 'getProjectByName' | 'listResources' | 'close'>
+
+export function openStoreReadOnly(path: string): StoreReader {
+  const store = storeOver(openDatabaseReadOnly(path))
+  return {
+    getProject: store.getProject,
+    getProjectByName: store.getProjectByName,
+    listResources: store.listResources,
+    close: store.close,
+  }
+}
+
 export function openStore(path: string): Store {
   const db = openDatabase(path)
   db.exec('PRAGMA journal_mode = WAL;')
   db.exec(SCHEMA)
   migrate(db)
   restrictStateFiles(path)
+  return storeOver(db)
+}
+
+function storeOver(db: SqliteDatabase): Store {
 
   function getProject(id: ProjectId): Project | null {
     const row = db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as

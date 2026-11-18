@@ -1565,3 +1565,123 @@ test('a worker build with nothing ahead of it is not told it queued', async () =
   })
   assert.doesNotMatch(created.logs ?? '', /queued behind/)
 })
+
+// Phase A, workers: a running worker is redeployed by drain, hold, swap
+// (swapWorker). The end-to-end tests with real sockets, the real router and
+// the real wake hold are in packages/cli/test/worker-swap.test.ts; these pin
+// the kind's own half against the fake runtime.
+
+function recordSwap(deps: WorkerDeps & { store: Store }): { events: string[] } {
+  const events: string[] = []
+  const runtime = deps.runtime
+  for (const key of ['start', 'stop', 'remove'] as const) {
+    const original = runtime[key].bind(runtime) as (...args: unknown[]) => Promise<void>
+    ;(runtime as unknown as Record<string, unknown>)[key] = async (...args: unknown[]) => {
+      events.push(key)
+      return original(...args)
+    }
+  }
+  const setState = deps.store.setResourceState.bind(deps.store)
+  deps.store.setResourceState = ((id: string, state: string) => {
+    events.push(`state ${state}`)
+    return setState(id as never, state as never)
+  }) as typeof deps.store.setResourceState
+  deps.holdResourceWakes = () => {
+    events.push('hold')
+    return (failure?: string) => events.push(failure === undefined ? 'release' : `release failed: ${failure}`)
+  }
+  return { events }
+}
+
+async function runningWorker(deps: WorkerDeps & { store: Store }): Promise<WorkerResource> {
+  const project = makeProject(deps.store)
+  const created = await createWorkerResource(deps, { project, name: 'api', sourcePath: workerSource(), databaseResourceId: null })
+  await startWorker(deps, created.resource)
+  const running = deps.store.getResource(created.resource.id)
+  assert.ok(running !== null && running.kind === 'worker' && running.state === 'running')
+  return running
+}
+
+test('a running worker redeploy holds, drains, stops the old container, starts the new one, then releases', async () => {
+  const deps = buildDeps({ config: { ...testConfig(), deployDrainMs: 1000 } })
+  const before = await runningWorker(deps)
+  const { events } = recordSwap(deps)
+  deps.now = () => 1_754_870_500_000
+
+  const result = await deployWorker(deps, before)
+
+  assert.deepEqual(events, ['hold', 'state starting', 'stop', 'remove', 'state starting', 'start', 'state running', 'release'])
+  assert.equal(result.resource.state, 'running')
+  assert.notEqual(result.image, before.config.image)
+  assert.equal(result.resource.config.image, result.image)
+})
+
+test('the drain waits for in-flight requests, and stops waiting at the drain period', async () => {
+  let open = 2
+  const deps = buildDeps({
+    config: { ...testConfig(), deployDrainMs: 150 },
+    activity: { touch: () => {}, reset: () => {}, count: () => open },
+  })
+  const before = await runningWorker(deps)
+  const { events } = recordSwap(deps)
+  deps.now = () => 1_754_870_500_000
+
+  // Finishes in flight after 60 ms: the stop follows it, not the drain period.
+  setTimeout(() => (open = 0), 60)
+  let started = Date.now()
+  await deployWorker(deps, before)
+  let waited = Date.now() - started
+  assert.ok(waited >= 55 && waited < 150, `drained in ${waited}ms`)
+  assert.equal(events.filter((e) => e === 'stop').length, 1)
+
+  // A connection that never closes (an open WebSocket) is waited for only
+  // up to deployDrainMs, then the old container is stopped under it.
+  open = 1
+  const current = deps.store.getResource(before.id) as WorkerResource
+  deps.now = () => 1_754_870_600_000
+  started = Date.now()
+  await deployWorker(deps, current)
+  waited = Date.now() - started
+  assert.ok(waited >= 145 && waited < 1000, `drained in ${waited}ms`)
+})
+
+test('a sleeping worker redeploy takes no hold and is left asleep, as before', async () => {
+  const deps = buildDeps()
+  const project = makeProject(deps.store)
+  const created = await createWorkerResource(deps, { project, name: 'api', sourcePath: workerSource(), databaseResourceId: null })
+  assert.equal(created.resource.state, 'sleeping')
+  const { events } = recordSwap(deps)
+  deps.now = () => 1_754_870_500_000
+
+  const result = await deployWorker(deps, created.resource)
+
+  assert.ok(!events.includes('hold'))
+  assert.equal(result.resource.state, 'sleeping')
+})
+
+test('with no wake hold to take, a running worker is redeployed in place and left asleep', async () => {
+  const deps = buildDeps()
+  const before = await runningWorker(deps)
+  deps.now = () => 1_754_870_500_000
+  const result = await deployWorker(deps, before)
+  assert.equal(result.resource.state, 'sleeping')
+})
+
+test('a swap whose new version and previous version both fail leaves the worker failed and tells the held wakes', async () => {
+  const deps = buildDeps()
+  const before = await runningWorker(deps)
+  const { events } = recordSwap(deps)
+  deps.now = () => 1_754_870_500_000
+  deps.workerProbeFactory = () => async () => false
+
+  await assert.rejects(deployWorker(deps, before), (err: unknown) => {
+    assert.ok(err instanceof HobbyError)
+    assert.match(err.hint ?? '', /could not be started again either/)
+    return true
+  })
+  assert.match(events.at(-1) ?? '', /^release failed: .*did not start serving.*starting the previous image .* again failed too/)
+  const after = deps.store.getResource(before.id)
+  assert.ok(after !== null && after.kind === 'worker')
+  assert.equal(after.state, 'failed')
+  assert.equal(after.config.image, before.config.image)
+})

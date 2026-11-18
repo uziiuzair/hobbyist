@@ -25,6 +25,8 @@ import { promisify } from 'node:util'
 import type { DaemonContext } from './context.js'
 import { resolveProxyHosts } from './proxy-hosts.js'
 import { DAEMON_LOCK_PATH, inspectDaemonLock } from './single-instance.js'
+import { dialProxy, proxySocketPath } from './proxy-link.js'
+import type { ProxyHealth } from './proxy-supervisor.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -88,6 +90,16 @@ export interface PortCheck {
 const TMPFS_MAGIC = 0x01021994
 
 export interface PreflightReport {
+  // A proxy process left running by a daemon restart
+  // (docs/proxy/specs/2026-11-18-proxy-outlives-the-daemon.md). It holds
+  // proxyPort, and the next daemon adopts it rather than binding the port
+  // itself, so that port being taken is not a blocker. Absent in reports
+  // built before this existed.
+  proxyProcess?: { pid: number } | null
+  // The running daemon's supervisor view of that proxy (proxy-supervisor.ts):
+  // restarts, a crash loop it gave up on. Only when this report is served by
+  // a daemon that runs the proxy as its own process; absent otherwise.
+  proxySupervisor?: ProxyHealth
   runtimeAvailable: boolean
   filesystem: {
     // The directory the probe actually ran against: paths.home if it
@@ -420,8 +432,12 @@ export async function runPreflight(ctx: DaemonContext, opts: PreflightOptions = 
     ])
 
   const lock = inspectDaemonLock(opts.lockPath ?? DAEMON_LOCK_PATH)
+  const proxyProcess = await dialProxy(proxySocketPath(ctx.paths.home), CONNECT_PROBE_TIMEOUT_MS)
+  proxyProcess?.socket.destroy()
 
   return {
+    proxyProcess: proxyProcess === null ? null : { pid: proxyProcess.hello.pid },
+    ...(ctx.proxyHealth === undefined ? {} : { proxySupervisor: ctx.proxyHealth() }),
     runtimeAvailable,
     filesystem: {
       path: probeDir,

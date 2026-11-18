@@ -323,7 +323,26 @@ export function renderPreflight(report: PreflightReport): string[] {
   if (report.proxyHost.error !== null) {
     lines.push(`proxy host "${report.proxyHost.setting}": ${report.proxyHost.error}`)
   }
-  lines.push(portLine('proxy', report.ports.proxy))
+  const adoptable = report.proxyProcess ?? null
+  lines.push(
+    adoptable !== null && report.ports.proxy.bound
+      ? `proxy port ${report.ports.proxy.port} on ${report.ports.proxy.host}: held by the hobby proxy (pid ${adoptable.pid}), which the daemon adopts`
+      : portLine('proxy', report.ports.proxy)
+  )
+  // Served by a daemon that supervises its proxy (proxy-supervisor.ts): say
+  // when it has had to restart it, and loudly when it gave up.
+  const supervisor = report.proxySupervisor
+  if (supervisor !== undefined && supervisor.state === 'failed') {
+    lines.push(
+      `proxy process: FAILED, not restarting after ${supervisor.consecutiveFastCrashes - 1} crashes in a row` +
+        `${supervisor.lastLoss === null ? '' : ` (last: ${supervisor.lastLoss.reason})`}; every database is unreachable until the daemon is restarted`
+    )
+  } else if (supervisor !== undefined && (supervisor.state === 'recovering' || supervisor.restarts > 0)) {
+    lines.push(
+      `proxy process: ${supervisor.state === 'recovering' ? 'being restarted' : `up (pid ${supervisor.pid})`}, restarted ${supervisor.restarts} time${supervisor.restarts === 1 ? '' : 's'} by the daemon` +
+        `${supervisor.lastLoss === null ? '' : ` (last loss ${supervisor.lastLoss.at}: ${supervisor.lastLoss.reason})`}`
+    )
+  }
   lines.push(portLine('api (daemon API and studio)', report.ports.api))
   lines.push(portLine('http', report.ports.http))
   lines.push(portLine('queue', report.ports.queue))
@@ -390,6 +409,9 @@ export function preflightBlockers(report: PreflightReport): string[] {
     ...(report.ports.caddy ?? []).map((check): [string, PortCheck] => ['caddy', check]),
   ]
   for (const [label, check] of checks) {
+    // The hobby proxy itself, left running by a daemon restart: the daemon
+    // adopts it instead of binding the port.
+    if (label === 'proxy' && check.bound && (report.proxyProcess ?? null) !== null) continue
     if (check.error !== null) {
       reasons.push(
         `${label} port ${check.port} cannot be bound on ${check.host} (${check.error}); hobby daemon would fail the same way`
