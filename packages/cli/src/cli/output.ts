@@ -97,6 +97,30 @@ export function sleepPolicyTrailer(
   return ''
 }
 
+// The project line's IP allowlist marker in `hobby ls`: nothing for an open
+// project (the common case stays quiet), a count for a restricted one, and
+// "box only" for an empty list, which refuses every other machine.
+// `!= null` because a daemon older than allowlists sends no field at all.
+export function allowlistTrailer(project: Pick<Project, 'allowlist'>): string {
+  if (project.allowlist == null) return ''
+  const n = project.allowlist.length
+  return n === 0 ? '  (allowlist: this box only)' : `  (allowlist: ${n} ${n === 1 ? 'entry' : 'entries'})`
+}
+
+// `hobby allow ls`, and the answer to add, rm and off.
+export function renderAllowlist(project: Pick<Project, 'name' | 'allowlist'>): string[] {
+  if (project.allowlist == null) {
+    return [`project ${project.name}: no allowlist, any address that can reach the proxy may connect`]
+  }
+  if (project.allowlist.length === 0) {
+    return [`project ${project.name}: allowlist is empty, only this box may connect (loopback and its own apps and workers)`]
+  }
+  return [
+    `project ${project.name}: allowlist, plus this box (loopback and its own apps and workers):`,
+    ...project.allowlist.map((entry) => `  ${entry}`),
+  ]
+}
+
 // Long enough to recognise the failure ("exec format error", "did not become
 // ready within 30000ms"), short enough to keep a listing a listing. The full
 // message is in `hobby ls --json`, and the full story in `hobby logs`.
@@ -194,6 +218,63 @@ export function renderDuration(seconds: number): string {
   if (seconds % 3600 === 0 && seconds !== 0) return `${seconds / 3600}h`
   if (seconds % 60 === 0 && seconds !== 0) return `${seconds / 60}m`
   return `${seconds}s`
+}
+
+const DURATION_UNITS: Record<string, number> = { s: 1, m: 60, h: 3600, d: 86400, w: 604800 }
+
+// renderDuration's inverse, for `hobby branch --expires` and `hobby
+// expire`: whole numbers with a unit, summed, so `7d`, `36h`, `1d12h` and
+// `90m` all work, and a bare number is seconds, as --sleep-after takes. Every
+// string renderDuration produces parses back to the seconds it came from.
+// Null for anything else, including zero, so a caller can say what it
+// expected rather than guess.
+export function parseDuration(text: string): number | null {
+  const trimmed = text.trim().toLowerCase()
+  if (/^[0-9]+$/.test(trimmed)) {
+    const seconds = Number(trimmed)
+    return seconds > 0 && Number.isSafeInteger(seconds) ? seconds : null
+  }
+  if (!/^([0-9]+[smhdw])+$/.test(trimmed)) {
+    return null
+  }
+  let seconds = 0
+  for (const match of trimmed.matchAll(/([0-9]+)([smhdw])/g)) {
+    seconds += Number(match[1]) * (DURATION_UNITS[match[2] as string] as number)
+  }
+  return seconds > 0 && Number.isSafeInteger(seconds) ? seconds : null
+}
+
+// How far off a moment is, coarsely: the largest whole unit, since an
+// expiry line in `hobby ls` needs "about how long", not a countdown.
+export function renderUntil(at: Date | string, now: number): string {
+  const seconds = Math.floor((new Date(at).getTime() - now) / 1000)
+  if (seconds <= 0) return 'now'
+  if (seconds >= 86400) return `${Math.floor(seconds / 86400)}d`
+  if (seconds >= 3600) return `${Math.floor(seconds / 3600)}h`
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}m`
+  return `${seconds}s`
+}
+
+// The project line's branch facts, for `hobby ls`: which project it was
+// branched from (by name, when that project still exists), and its expiry.
+// Nothing at all for a project that is not a branch, so the common line is
+// unchanged. `parentName` null means the parent is gone. Read with loose
+// null checks for the reason cmdLs gives about releasedAt: a daemon older
+// than these fields sends neither.
+export function branchTrailer(
+  project: { parentId?: string | null; expiresAt?: Date | string | null },
+  parentName: string | null,
+  now: number
+): string {
+  const parts: string[] = []
+  if (project.parentId != null) {
+    parts.push(parentName === null ? 'branch, parent removed' : `branch of ${parentName}`)
+  }
+  if (project.expiresAt != null) {
+    const until = renderUntil(project.expiresAt, now)
+    parts.push(until === 'now' ? 'expired, deleted once asleep and unpinned' : `expires in ${until}`)
+  }
+  return parts.length === 0 ? '' : `  (${parts.join(', ')})`
 }
 
 // One line per message for `hobby queue peek`. The body is already decoded

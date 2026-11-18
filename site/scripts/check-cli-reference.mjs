@@ -31,10 +31,9 @@
 import { readFile } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { CLI_SRC, MAIN, parseFlags, parseVerbs } from './cli-surface.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const CLI_SRC = join(here, '..', '..', 'packages', 'cli', 'src', 'cli')
-const MAIN = join(CLI_SRC, 'main.ts')
 const EXIT = join(CLI_SRC, 'exit.ts')
 const PAGE = join(here, '..', 'src', 'content', 'docs', 'docs', 'reference', 'cli.md')
 
@@ -47,13 +46,7 @@ const problems = []
 // Subcommands are documented under their parent's heading, so the check is on
 // the top-level verb only. `hobby queue peek` living under a `### hobby queue
 // peek` heading is fine; what matters is that `queue` itself is covered.
-const table = source.slice(source.indexOf('const USAGE'))
-const tableBody = table.slice(0, table.indexOf('\n]'))
-
-const verbs = new Set()
-for (const match of tableBody.matchAll(/^\s*\['([a-z]+)', 'hobby /gm)) {
-  verbs.add(match[1])
-}
+const verbs = parseVerbs(source)
 
 if (verbs.size === 0) {
   console.error(`could not parse any verbs out of the USAGE table in ${MAIN}`)
@@ -84,30 +77,9 @@ if (invented.length > 0) {
 
 // Each verb's dispatch branch is either `case 'verb': {` or `if (cmd ===
 // 'verb') {`; the parseArgs spec(s) inside it name every flag that verb
-// accepts. The source is split at those markers and each slice is read up to
-// the next marker.
-const markerRe = /case '([a-z]+)':|cmd === '([a-z]+)'/g
-const markers = []
-for (const match of source.matchAll(markerRe)) {
-  markers.push({ verb: match[1] ?? match[2], at: match.index })
-}
-
-const flagsByVerb = new Map()
-for (let i = 0; i < markers.length; i++) {
-  const { verb, at } = markers[i]
-  if (!verbs.has(verb)) continue
-  const end = i + 1 < markers.length ? markers[i + 1].at : source.length
-  const slice = source.slice(at, end)
-  const flags = flagsByVerb.get(verb) ?? new Set()
-  for (const spec of slice.matchAll(/parseArgs\([^,]+,\s*\{([\s\S]*?)\}\)/g)) {
-    for (const list of spec[1].matchAll(/(?:bool|value|multi):\s*\[([^\]]*)\]/g)) {
-      for (const name of list[1].matchAll(/'([a-z-]+)'/g)) {
-        if (name[1] !== 'json') flags.add(name[1])
-      }
-    }
-  }
-  flagsByVerb.set(verb, flags)
-}
+// accepts (parseFlags, cli-surface.mjs). --json is documented once, above.
+const flagsByVerb = parseFlags(source, verbs)
+for (const flags of flagsByVerb.values()) flags.delete('json')
 
 if (flagsByVerb.size === 0) {
   console.error(`could not find any parseArgs specs in ${MAIN}`)

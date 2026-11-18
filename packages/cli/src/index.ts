@@ -43,13 +43,16 @@ export {
   cmdCronLs,
   cmdDaemon,
   cmdDeploy,
+  cmdDiff,
   cmdEject,
   cmdEnv,
+  cmdExpire,
   cmdInit,
   cmdLogs,
   cmdLs,
   cmdNew,
   cmdPg,
+  cmdAllow,
   cmdPin,
   cmdQueue,
   cmdQueueCreate,
@@ -59,6 +62,7 @@ export {
   cmdQueueRm,
   cmdQueueSend,
   cmdQueueSet,
+  cmdReset,
   cmdRm,
   cmdSleep,
   cmdSnapshot,
@@ -78,4 +82,5 @@ export {
   type Ctx,
 } from './cli/commands.js'
 export * from './cli/output.js'
+export { cmdImport, renderImportReport, resolveImportSource, type SourceReference } from './cli/import.js'
 export * from './version.js'

@@ -13,7 +13,17 @@ import net from 'node:net'
 import { HobbyError, parseRoutingKey } from '@hobby.sh/core'
 import type { ActivityTracker, ConnectionHandle } from './activity.js'
 import { isLoopbackAddress, startTlsTerminator, type ProxyTlsFiles, type TlsTerminator } from './tls.js'
+import {
+  clientAllowed,
+  defaultSameBox,
+  refusalMessage,
+  UNKNOWN_CLIENT,
+  type AccessRefusal,
+  type AllowlistLookup,
+  type ClientAddress,
+} from './access.js'
 import { CancelRegistry, type CancelRoute } from './cancel.js'
+import { createServerlessFront, type ClientSocket, type ServerlessFront } from './serverless.js'
 import {
   buildCancelRequest,
   buildStartupPacket,
@@ -76,6 +86,15 @@ export interface ProxyDeps {
   // and no dial. Optional: absent means nothing is ever refused here, and
   // wake itself stays the authority.
   isWakeRefused?(resourceId: string): boolean
+  // The project's IP allowlist (access.ts): null for no restriction, a list
+  // of canonical entries otherwise. Asked with the routing key's project
+  // before anything is resolved, woken, dialed or counted, so a refused
+  // address never wakes a sleeping database and is never activity. Optional:
+  // absent means every project is open, as before allowlists existed.
+  allowlist?: AllowlistLookup
+  // Told about every allowlist refusal; the daemon rate-limits and logs it
+  // (RefusalLimiter in access.ts). Must not throw.
+  onAccessRefused?(refusal: AccessRefusal): void
   activity: ActivityTracker
 }
 
@@ -158,7 +177,7 @@ function errorMessage(err: unknown): string {
 // The follow-up timer is the hard-kill fallback described above FORCE_CLOSE_GRACE_MS:
 // it guarantees this socket cannot linger past a bounded grace window
 // regardless of whether the peer cooperates.
-function sendErrorAndClose(socket: net.Socket, severity: string, code: string, message: string): void {
+function sendErrorAndClose(socket: ClientSocket, severity: string, code: string, message: string): void {
   if (socket.destroyed || !socket.writable) {
     return
   }
@@ -185,7 +204,24 @@ function sleep(ms: number): Promise<void> {
 // second readMessage call after an encryption negotiation request, or the
 // eventual splice) sees them. Rejects if `timeoutMs` elapses first, or if
 // the socket closes or errors before a complete message arrives.
-function readMessage(socket: net.Socket, timeoutMs: number): Promise<StartupMessage> {
+// What the first bytes of an accepted connection turned out to be, when
+// readMessage is asked to sniff (serverless.ts explains why the serverless
+// driver's HTTP and WebSocket traffic shares this port). Neither can be the
+// start of a valid startup packet: the first byte of a startup packet is the
+// high byte of its length, which is 0 for any length parseStartup accepts,
+// while an HTTP method starts with an uppercase ASCII letter and a TLS
+// record with 0x16.
+type SniffedMessage = StartupMessage | { type: 'http' } | { type: 'tls_hello' }
+
+const TLS_HANDSHAKE_RECORD = 0x16
+
+function sniff(first: number): SniffedMessage | null {
+  if (first >= 0x41 && first <= 0x5a) return { type: 'http' }
+  if (first === TLS_HANDSHAKE_RECORD) return { type: 'tls_hello' }
+  return null
+}
+
+function readMessage(socket: ClientSocket, timeoutMs: number, sniffFirst = false): Promise<SniffedMessage> {
   return new Promise((resolve, reject) => {
     let buffer = Buffer.alloc(0)
     let settled = false
@@ -206,6 +242,17 @@ function readMessage(socket: net.Socket, timeoutMs: number): Promise<StartupMess
 
     const onData = (chunk: Buffer): void => {
       buffer = Buffer.concat([buffer, chunk])
+      const sniffed = sniffFirst && buffer.length > 0 ? sniff(buffer[0]!) : null
+      if (sniffed !== null) {
+        settled = true
+        cleanup()
+        // Paused before the bytes go back, so nothing that arrives before
+        // the next reader attaches is emitted to no listener and lost.
+        socket.pause()
+        socket.unshift(buffer)
+        resolve(sniffed)
+        return
+      }
       let result: ReturnType<typeof parseStartup>
       try {
         result = parseStartup(buffer)
@@ -349,19 +396,20 @@ function raceTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => Error)
 // whether it was serving at all, and `upstream` arrives paused so nothing it
 // sent since is lost before the listeners below exist.
 function spliceAndTrackActivity(
-  client: net.Socket,
+  client: ClientSocket,
   upstream: net.Socket,
   activity: ActivityTracker,
   handle: ConnectionHandle,
   cancels: CancelRegistry,
   target: ProxyTarget,
-  initial: Buffer
+  initial: Buffer,
+  project: string
 ): void {
   // Registered before the backend has said anything, because the address is
   // already known and the key it will send is not. scanBackendStartup fills
   // in backendKey when BackendKeyData arrives; until then lookup refuses to
   // resolve this entry.
-  const route: CancelRoute = { host: target.host, port: target.port, backendKey: null }
+  const route: CancelRoute = { host: target.host, port: target.port, backendKey: null, project }
   const minted = cancels.add(route)
   let closed = false
 
@@ -477,7 +525,7 @@ type BackendAnswerWait =
 //
 // Also watches the client, because a client that gives up while its backend
 // is refusing it must end the hold rather than keep dialing for nobody.
-function awaitBackendAnswer(client: net.Socket, upstream: net.Socket, timeoutMs: number): Promise<BackendAnswerWait> {
+function awaitBackendAnswer(client: ClientSocket, upstream: net.Socket, timeoutMs: number): Promise<BackendAnswerWait> {
   return new Promise((resolve) => {
     let received: Buffer = Buffer.alloc(0)
     let settled = false
@@ -586,7 +634,7 @@ function targetLabel(target: ProxyTarget): string {
 }
 
 async function holdUntilServing(
-  client: net.Socket,
+  client: ClientSocket,
   target: ProxyTarget,
   packet: Buffer,
   deadline: number,
@@ -675,12 +723,24 @@ async function holdUntilServing(
 // what a real Postgres does with a key it does not recognise and what this
 // proxy did with every cancel before routing existed.
 async function handleCancel(
-  socket: net.Socket,
+  socket: ClientSocket,
+  deps: ProxyDeps,
   cancels: CancelRegistry,
+  client: ClientAddress,
   message: Extract<StartupMessage, { type: 'cancel_request' }>
 ): Promise<void> {
   const route = cancels.lookup({ processId: message.processId, secretKey: message.secretKey })
   if (route === null) {
+    socket.end()
+    return
+  }
+
+  // A cancel carries no project, but the key it presents was minted for a
+  // session of one, and that session's project allowlist applies to it: an
+  // address the project refuses cannot interrupt its queries either. Closed
+  // silently like an unknown key, since the protocol has no reply to a
+  // cancel; the daemon log says why.
+  if (route.project !== undefined && !(await allowedOrRefuse(deps, route.project, client, 'cancel'))) {
     socket.end()
     return
   }
@@ -707,11 +767,32 @@ async function handleCancel(
   socket.end()
 }
 
+// The allowlist check, and the report of a refusal. A lookup that throws (the
+// store unreadable) refuses: an allowlist that cannot be read is not one that
+// can be assumed open.
+async function allowedOrRefuse(deps: ProxyDeps, project: string, client: ClientAddress, via: AccessRefusal['via']): Promise<boolean> {
+  let allowed: boolean
+  try {
+    allowed = await clientAllowed(deps.allowlist, project, client)
+  } catch {
+    allowed = false
+  }
+  if (!allowed) {
+    try {
+      deps.onAccessRefused?.({ project, address: client.address, via })
+    } catch {
+      // Logging is never a reason to change the answer.
+    }
+  }
+  return allowed
+}
+
 async function handleStartup(
-  socket: net.Socket,
+  socket: ClientSocket,
   deps: ProxyDeps,
   cancels: CancelRegistry,
   wakeTimeoutMs: number,
+  client: ClientAddress,
   message: Extract<StartupMessage, { type: 'startup' }>
 ): Promise<void> {
   const database = message.params['database']
@@ -721,6 +802,16 @@ async function handleStartup(
   }
 
   const routingKey = parseRoutingKey(database)
+
+  // The project's IP allowlist, first of all: before resolve, so a refused
+  // address learns nothing about what the project holds, and well before
+  // wake and activity.open, so it can neither start a sleeping database nor
+  // keep one awake. 28000 is what Postgres itself answers when pg_hba.conf
+  // has no line for the client's address.
+  if (!(await allowedOrRefuse(deps, routingKey.project, client, 'startup'))) {
+    sendErrorAndClose(socket, 'FATAL', INVALID_AUTHORIZATION, refusalMessage(routingKey.project, client))
+    return
+  }
 
   let target: ProxyTarget | null
   try {
@@ -886,7 +977,7 @@ async function handleStartup(
   if (held.kind === 'client_gone') {
     return
   }
-  spliceAndTrackActivity(socket, held.upstream, deps.activity, held.handle, cancels, target, held.initial)
+  spliceAndTrackActivity(socket, held.upstream, deps.activity, held.handle, cancels, target, held.initial, routingKey.project)
 }
 
 // How a connection arrived, for the encryption negotiation below. `tls` is
@@ -894,16 +985,24 @@ async function handleStartup(
 // `encrypted` is true for a connection handed back by that terminator, which
 // is already inside TLS and must never be asked to negotiate it again.
 interface ConnectionMode {
-  tls: TlsTerminator | null
+  tls: TlsTerminator<ClientAddress> | null
   encrypted: boolean
   // Whether a peer may send its startup in plaintext while TLS is on.
   // isLoopbackAddress in production; a parameter so a test can play a
   // remote client without a second machine.
   plaintextAllowed: (address: string | undefined) => boolean
+  // Where HTTP and WebSocket traffic for the serverless driver goes when the
+  // first bytes say that is what this is. Null for a connection the
+  // serverless front itself made (a WebSocket session or a /sql request),
+  // which is only ever Postgres.
+  serverless: ServerlessFront | null
+  // Who the client is, read from the socket the outer server accepted and
+  // carried through the TLS relay and the serverless front (access.ts).
+  client: ClientAddress
 }
 
 async function handleConnectionInner(
-  socket: net.Socket,
+  socket: ClientSocket,
   deps: ProxyDeps,
   cancels: CancelRegistry,
   wakeTimeoutMs: number,
@@ -922,13 +1021,49 @@ async function handleConnectionInner(
 
   const deadline = Date.now() + STARTUP_TIMEOUT_MS
 
-  let read: StartupMessage
+  let first: SniffedMessage
   try {
-    read = await readMessage(socket, remainingMs(deadline))
+    first = await readMessage(socket, remainingMs(deadline), mode.serverless !== null)
   } catch (err) {
     sendErrorAndClose(socket, 'FATAL', PROTOCOL_VIOLATION, `malformed startup packet: ${errorMessage(err)}`)
     return
   }
+
+  // The serverless driver (issue #155, serverless.ts). An HTTP request or a
+  // WebSocket upgrade goes to the serverless front, with what it needs to
+  // enforce TLS for other machines. A TLS ClientHello with no SSLRequest
+  // before it is an https:// or wss:// client, and goes to the same
+  // terminator an SSLRequest would, whose decrypted connection comes back to
+  // this function and is sniffed again.
+  if (first.type === 'http' && mode.serverless !== null) {
+    mode.serverless.accept(socket, {
+      encrypted: mode.encrypted,
+      tlsConfigured: mode.tls !== null || mode.encrypted,
+      plaintextAllowed: mode.plaintextAllowed,
+      client: mode.client,
+    })
+    return
+  }
+  if (first.type === 'tls_hello') {
+    if (mode.tls !== null && !mode.encrypted) {
+      mode.tls.relay(socket, mode.client)
+      return
+    }
+    sendErrorAndClose(
+      socket,
+      'FATAL',
+      PROTOCOL_VIOLATION,
+      mode.tls === null
+        ? 'this proxy has no TLS certificate configured (proxyTls), so it cannot accept a TLS connection'
+        : 'unexpected TLS handshake inside an encrypted connection'
+    )
+    return
+  }
+  if (first.type === 'http') {
+    sendErrorAndClose(socket, 'FATAL', PROTOCOL_VIOLATION, 'this connection expected the Postgres protocol')
+    return
+  }
+  let read: StartupMessage = first
 
   // Encryption negotiation. GSSENCRequest is always answered 'N': there is
   // no Kerberos here. SSLRequest is answered 'S' when a certificate is
@@ -943,12 +1078,13 @@ async function handleConnectionInner(
     if (!socket.writable) return
     if (read.type === 'ssl_request' && mode.tls !== null && !mode.encrypted) {
       socket.write(Buffer.from('S', 'ascii'))
-      mode.tls.relay(socket)
+      mode.tls.relay(socket, mode.client)
       return
     }
     socket.write(Buffer.from('N', 'ascii'))
     try {
-      read = await readMessage(socket, remainingMs(deadline))
+      // Not sniffed, so always a StartupMessage.
+      read = (await readMessage(socket, remainingMs(deadline))) as StartupMessage
     } catch (err) {
       sendErrorAndClose(socket, 'FATAL', PROTOCOL_VIOLATION, `malformed startup packet: ${errorMessage(err)}`)
       return
@@ -965,7 +1101,7 @@ async function handleConnectionInner(
     // routing key nor calls deps.wake. The registry it reads only holds
     // connections that are spliced right now, so a cancel can never be the
     // thing that starts a container.
-    await handleCancel(socket, cancels, read)
+    await handleCancel(socket, deps, cancels, mode.client, read)
     return
   }
 
@@ -986,7 +1122,7 @@ async function handleConnectionInner(
     return
   }
 
-  await handleStartup(socket, deps, cancels, wakeTimeoutMs, read)
+  await handleStartup(socket, deps, cancels, wakeTimeoutMs, mode.client, read)
 }
 
 export async function startPgProxy(opts: {
@@ -999,6 +1135,15 @@ export async function startPgProxy(opts: {
   tls?: ProxyTlsFiles
   // Tests only. Defaults to isLoopbackAddress, see ConnectionMode.
   plaintextAllowed?: (address: string | undefined) => boolean
+  // Whether a connection comes from this machine, and so is exempt from
+  // every project's IP allowlist (access.ts). Given the address the client
+  // dialed (the socket's local address) and its peer. Defaults to
+  // defaultSameBox: either one loopback. The daemon adds the docker network
+  // gateways its own apps and workers dial; a test plays a remote client
+  // with () => false.
+  sameBox?: (local: string | undefined, peer: string | undefined) => boolean
+  // Tests only: smaller /sql request and response caps than Neon's 10 MiB.
+  serverlessLimits?: { maxRequestBytes?: number; maxResponseBytes?: number }
 }): Promise<{
   close(): Promise<void>
   port: number
@@ -1010,7 +1155,15 @@ export async function startPgProxy(opts: {
   const cancels = new CancelRegistry()
 
   const plaintextAllowed = opts.plaintextAllowed ?? isLoopbackAddress
-  const handle = (socket: net.Socket, mode: Omit<ConnectionMode, 'plaintextAllowed'>): void => {
+  // The serverless driver's endpoints (serverless.ts). What they hand back
+  // is an in-memory connection carrying only Postgres, given to the same
+  // handler with no TLS and no front of its own: TLS for it, if any, was
+  // the outer connection's, and the front already enforced the rule.
+  const front = createServerlessFront({
+    connectToProxy: (stream, client) => handle(stream, { tls: null, encrypted: false, serverless: null, client }),
+    ...opts.serverlessLimits,
+  })
+  const handle = (socket: ClientSocket, mode: Omit<ConnectionMode, 'plaintextAllowed'>): void => {
     handleConnectionInner(socket, opts.deps, cancels, opts.wakeTimeoutMs, { ...mode, plaintextAllowed }).catch((err) => {
       // Belt and suspenders: everything above already converts failures
       // into a real ErrorResponse. If something still throws past that
@@ -1026,13 +1179,24 @@ export async function startPgProxy(opts: {
   const terminator =
     opts.tls === undefined
       ? null
-      : await startTlsTerminator(opts.tls, (socket) => handle(socket, { tls: null, encrypted: true }))
+      : await startTlsTerminator<ClientAddress>(opts.tls, (socket, client) =>
+          handle(socket, { tls: null, encrypted: true, serverless: front, client: client ?? UNKNOWN_CLIENT })
+        )
+  const sameBox = opts.sameBox ?? defaultSameBox
 
   return new Promise((resolve, reject) => {
-    const server = net.createServer((socket) => handle(socket, { tls: terminator, encrypted: false }))
+    const server = net.createServer((socket) =>
+      handle(socket, {
+        tls: terminator,
+        encrypted: false,
+        serverless: front,
+        client: { address: socket.remoteAddress, sameBox: sameBox(socket.localAddress, socket.remoteAddress) },
+      })
+    )
 
     const onStartError = (err: Error): void => {
       void terminator?.close()
+      void front.close()
       reject(err)
     }
     server.once('error', onStartError)
@@ -1056,6 +1220,9 @@ export async function startPgProxy(opts: {
               server.close((err) => (err ? rej(err) : res()))
             }),
             terminator?.close(),
+            // Ends WebSocket sessions and in-flight HTTP requests, which are
+            // accepted sockets the server.close above would otherwise wait on.
+            front.close(),
           ])
         },
       })

@@ -265,3 +265,45 @@ tar. Every other error passes through untouched. How much space was needed
 is not reported: the copy stops at the first write that fails, and nothing
 measures the source first. `hobby init` now warns under 1 GiB free (issue
 #108), which is where the QA run's 330 MB would have been caught.
+
+## Amendment, 2026-11-17: snapshots on Linux with a non-root daemon
+
+The Known gaps item "On Linux a PGDATA is owned by the container's postgres
+uid" is no longer open as a design question; it is built and awaiting the
+CI run that proves it. The first CI smoke run (ubuntu-latest, daemon as the
+`runner` user) failed `hobby snapshot` with `EACCES ... scandir
+'.../primary/pgdata/18/docker'` from `cloneTree` in `takeSnapshot`.
+
+Every snapshot copy and removal in `packages/cli/src/daemon/snapshots.ts`
+now goes through `treeOpsFor` (`packages/cli/src/daemon/tree-ops.ts`), which
+tries the native operation and retries as root in a throwaway container only
+on EACCES or EPERM (`copyTree`, `removeTree`, `packages/core/src/copy.ts`;
+`createContainerTreeOps`, `packages/core/src/docker.ts`;
+docs/branching/CLAUDE.md's amendment of the same date has the mechanism and
+the image choice). That covers:
+
+- `takeSnapshot` and `takeOnlineSnapshot`: the clone into `.partial`, and
+  removing `.partial` on failure.
+- `deleteSnapshot`: the snapshot's data keeps its container owners.
+- `restoreInPlace`: removing a stale `.restoring-<id>`, the clone into it,
+  and removing `.pre-restore-<id>` after a clean restore, which on Linux was
+  previously expected to fail and be reported.
+- `restoreSnapshot --as`: the clone into the new project directory.
+
+**Restore produces the right owner.** The container copy is `cp -a` as root,
+so a PGDATA restored from a snapshot is 70:70 with mode 0700 exactly as it
+was taken, which is what the postgres image needs to start on it. The
+renames in the in-place swap stay native: each is within one parent
+directory the daemon owns, which needs no write permission on the moved
+directory.
+
+**Cost.** With the default `postgres:18-alpine` as the helper image the
+copy is a full copy (busybox `cp` has no `--reflink`), so a non-root daemon
+on Linux records `clone: copy` even on XFS. The free-space floor already
+treats a copy as full size.
+
+**Not proven here.** Measured on macOS only (Docker Desktop masks uids on
+bind mounts; the uid-preserving copy was checked on a named volume inside
+its Linux VM). The CI smoke job on ubuntu-latest is expected to show
+snapshot, restore and delete passing as the `runner` user; until it does,
+this is built, not verified.

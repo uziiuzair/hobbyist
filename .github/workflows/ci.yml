@@ -38,12 +38,71 @@ jobs:
         run: npm run typecheck
 
       # Tests run against compiled output in dist/ rather than sources, so this
-      # builds first. Docker is deliberately not exercised here: the lifecycle
-      # tests run against a fake ComputeRuntime, which is the point of that
-      # seam. Anything that genuinely needs Docker is verified by hand and said
-      # so in the pull request.
+      # builds first. Docker is deliberately not exercised in this job: the
+      # lifecycle tests run against a fake ComputeRuntime, which is the point
+      # of that seam. Real Docker is the `smoke` job below, kept separate so a
+      # red unit suite and a red live run are never confused for each other.
       - name: Test
         run: npm test
+
+  # A live end to end run of the shipped CLI and a real daemon against the
+  # runner's own Docker: postgres through the proxy, sleep and wake, an app
+  # woken over HTTP, a worker producing to a queue from inside its container
+  # and another consuming it, branch, snapshot, eject and rm. See
+  # scripts/smoke.mjs for what each scenario asserts.
+  #
+  # It exists because ubuntu-latest is a real Linux box with Docker, and
+  # several claims were waiting on exactly that: issue #14 (the queue producer
+  # path, which macOS hides by resolving host.docker.internal for every
+  # container) and the Linux ownership gap in docs/branching and docs/backups
+  # (a PGDATA owned by the container's postgres uid, read by a daemon running
+  # as an ordinary user, which is what the runner user is).
+  #
+  # Caddy is off (HOBBY_CADDY_ENABLED=false, set by the script). Apps and
+  # workers are reached through the HTTP wake router with a Host header, which
+  # is the path Caddy itself forwards to; Caddy's own host networking and TLS
+  # are not covered here.
+  smoke:
+    name: live smoke (real Docker, Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # psql is the client the scenarios connect with. Docker and the compose
+      # plugin are already on the runner image.
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      # Pulled up front so the scenario timings are about hobby rather than
+      # the registry. The runtime pulls them anyway if this is ever removed.
+      - name: Pre-pull base images
+        run: |
+          for image in postgres:18-alpine alpine:3.20 oven/bun:1-alpine node:22-bookworm-slim; do
+            docker pull -q "$image" &
+          done
+          wait
+
+      - name: Smoke
+        env:
+          SMOKE_ARTIFACTS: ${{ runner.temp }}/smoke-artifacts
+        run: node scripts/smoke.mjs
+
+      - name: Upload daemon and container logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs
+          path: ${{ runner.temp }}/smoke-artifacts
+          if-no-files-found: warn
+          retention-days: 14
 
   shell:
     name: install script
@@ -100,5 +159,6 @@ jobs:
         run: |
           npm ci
           npm run check:cli
+          npm run check:plugin
           npm run build
           node scripts/check-links.mjs

@@ -7,9 +7,12 @@ import { test } from 'node:test'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import {
+  commonAncestor,
+  createContainerTreeOps,
   createDockerRuntime,
   createFakeRuntime,
   mergeTimestampedLogs,
+  parseCloneOutput,
   pruneImageTags,
   removeImageTags,
   type ExecFn,
@@ -610,4 +613,123 @@ test('removeImageTags removes every tag under the repository, and only the named
   }
   const failures = await removeImageTags(failing, 'hobby/blog-web', null)
   assert.deepEqual(failures, ['remove image hobby/blog-web:1: image is in use'])
+})
+
+// ---------------------------------------------------------------------------
+// createContainerTreeOps: the root-container fallback copyTree and removeTree
+// use. Asserted on argv through an injected exec; the commands themselves
+// were run against real Docker (the comment above CLONE_SCRIPT in docker.ts).
+
+interface Call {
+  cmd: string
+  args: string[]
+}
+
+function treeExec(opts: { local: string[]; stdout?: string; runFails?: string }): { exec: ExecFn; calls: Call[] } {
+  const calls: Call[] = []
+  const exec: ExecFn = async (cmd, args) => {
+    calls.push({ cmd, args })
+    if (args[0] === 'image' && args[1] === 'inspect') {
+      const image = args[args.length - 1] as string
+      if (opts.local.includes(image)) return { stdout: 'sha256:abc\n', stderr: '' }
+      throw Object.assign(new Error('exit 1'), { stdout: '', stderr: `Error: No such image: ${image}` })
+    }
+    if (opts.runFails !== undefined) {
+      throw Object.assign(new Error('exit 1'), { stdout: '', stderr: opts.runFails })
+    }
+    return { stdout: opts.stdout ?? '', stderr: '' }
+  }
+  return { exec, calls }
+}
+
+test('commonAncestor finds the deepest directory holding both paths', () => {
+  assert.equal(commonAncestor('/h/projects/a/primary/pgdata', '/h/projects/b/primary'), '/h/projects')
+  assert.equal(commonAncestor('/h/projects/a', '/h/snapshots/a/x.partial'), '/h')
+  assert.equal(commonAncestor('/h/projects/a', '/h/projects/a/inner'), '/h/projects/a')
+  // A sibling whose name merely starts with ".." is still inside.
+  assert.equal(commonAncestor('/h', '/h/..data'), '/h')
+  assert.equal(commonAncestor('/x/a', '/y/b'), '/')
+})
+
+test('parseCloneOutput reads the report line and refuses anything else', () => {
+  assert.deepEqual(parseCloneOutput('noise\nhobby-clone reflink 12 3456\n'), { mechanism: 'reflink', files: 12, bytes: 3456 })
+  assert.deepEqual(parseCloneOutput('hobby-clone copy 0 0'), { mechanism: 'copy', files: 0, bytes: 0 })
+  assert.throws(() => parseCloneOutput(''), /did not report what it copied/)
+  assert.throws(() => parseCloneOutput('hobby-clone maybe 1 2'), /did not report/)
+})
+
+test('the container clone uses the first local image, mounts one common ancestor, and never pulls', async () => {
+  const { exec, calls } = treeExec({ local: ['postgres:18-alpine', 'caddy:2-alpine'], stdout: 'hobby-clone copy 3 42\n' })
+  const ops = createContainerTreeOps({ images: ['hobby/gone:1', 'postgres:18-alpine', 'caddy:2-alpine'], exec })
+
+  const result = await ops.clone('/h/projects/a/primary/pgdata', '/h/projects/b/primary/pgdata')
+
+  assert.deepEqual(result, { mechanism: 'copy', files: 3, bytes: 42 })
+  const inspected = calls.filter((c) => c.args[0] === 'image').map((c) => c.args[c.args.length - 1])
+  assert.deepEqual(inspected, ['hobby/gone:1', 'postgres:18-alpine'])
+  const run = calls.find((c) => c.args[0] === 'run')
+  assert.ok(run)
+  assert.equal(run.cmd, 'docker')
+  assert.deepEqual(run.args.slice(0, 11), [
+    'run', '--rm', '--pull', 'never', '--user', '0:0', '--entrypoint', 'sh', '-v', '/h/projects:/hobby', 'postgres:18-alpine',
+  ])
+  assert.equal(run.args[11], '-c')
+  assert.match(run.args[12] as string, /cp -a --reflink=always "\$src" "\$dst"/)
+  assert.match(run.args[12] as string, /cp -a "\$src" "\$dst"/)
+  assert.deepEqual(run.args.slice(13), ['sh', '/hobby/a/primary/pgdata', '/hobby/b/primary/pgdata'])
+})
+
+test('the container remove mounts the parent and removes one entry', async () => {
+  const { exec, calls } = treeExec({ local: ['postgres:18-alpine'] })
+  const ops = createContainerTreeOps({ images: ['postgres:18-alpine'], exec })
+
+  await ops.remove('/h/projects/blog')
+  await ops.remove('/h/projects/shop')
+
+  const runs = calls.filter((c) => c.args[0] === 'run')
+  assert.deepEqual(runs[0]?.args, [
+    'run', '--rm', '--pull', 'never', '--user', '0:0', '--entrypoint', 'rm', '-v', '/h/projects:/hobby', 'postgres:18-alpine', '-rf', '/hobby/blog',
+  ])
+  // The image is resolved once per instance, not per call.
+  assert.equal(calls.filter((c) => c.args[0] === 'image').length, 1)
+  assert.equal(runs.length, 2)
+})
+
+test('with no candidate image local, nothing runs and the error lists what was tried', async () => {
+  const { exec, calls } = treeExec({ local: [] })
+  const ops = createContainerTreeOps({ images: ['postgres:18-alpine', 'caddy:2-alpine'], exec })
+
+  await assert.rejects(ops.remove('/h/projects/blog'), /no local image to run it in \(tried postgres:18-alpine, caddy:2-alpine\); nothing is pulled/)
+  assert.equal(calls.filter((c) => c.args[0] === 'run').length, 0)
+})
+
+test('a failing container run surfaces docker stderr', async () => {
+  const { exec } = treeExec({ local: ['postgres:18-alpine'], runFails: 'rm: cannot remove: Device or resource busy' })
+  const ops = createContainerTreeOps({ images: ['postgres:18-alpine'], exec })
+
+  await assert.rejects(ops.remove('/h/projects/blog'), /docker run exited with an error: rm: cannot remove: Device or resource busy/)
+})
+
+test('ensureCreated passes spec.command after the image, one argv entry each, and nothing when absent', async () => {
+  const creates: string[][] = []
+  const exec: ExecFn = async (_cmd, args) => {
+    if (args[0] === 'inspect') throw notFoundError('Error: No such object: x')
+    if (args[0] === 'image') return { stdout: '[{}]\n', stderr: '' }
+    if (args[0] === 'create') {
+      creates.push(args)
+      return { stdout: 'x\n', stderr: '' }
+    }
+    throw new Error(`unexpected call: ${args.join(' ')}`)
+  }
+  const runtime = createDockerRuntime(exec)
+  await runtime.ensureCreated({ ...sampleSpec(), command: ['postgres', '-c', 'shared_buffers=256MB'] })
+  await runtime.ensureCreated(sampleSpec())
+  const withCommand = creates[0]!
+  assert.deepEqual(withCommand.slice(withCommand.indexOf('postgres:18-alpine')), [
+    'postgres:18-alpine',
+    'postgres',
+    '-c',
+    'shared_buffers=256MB',
+  ])
+  assert.equal(creates[1]!.at(-1), 'postgres:18-alpine')
 })

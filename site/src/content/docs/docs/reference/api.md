@@ -57,16 +57,21 @@ be called with a token, only with the password.
 | `GET /v1/health` | Liveness. The one `/v1` route open without a credential |
 | `GET /v1/version` | `{ version }`, the daemon's build. Behind the gate on purpose, unlike health |
 | `GET /v1/preflight` | What `hobby init` reports: Docker, filesystem, every port the daemon binds (`ports.proxy`, `api`, `http`, `queue`, and `caddy` for 80/443 when Caddy is on), how `proxyHost` resolved, the daemon lock, what Studio exposes, host networking |
+| `POST /v1/import` | Copy an existing Postgres in with `pg_dump` and `pg_restore`. Body `{ project, source, resource?, schemas?, excludeSchemas?, strict? }`; `source` is the connection string, never echoed back. 200 with `{ import }`: tables, rows, bytes, duration, extensions, restore errors |
 | `GET` `POST /v1/projects` | List, create. Create accepts `{ name, sleepAfterSeconds? }`; absent, the box-wide default is copied in |
 | `GET` `DELETE /v1/projects/{name}` | Detail with resources, destroy |
 | `POST /v1/projects/{name}/resources` | Create a resource. Body `{ kind, name, ... }`, kind-specific; `queue` needs only a name |
-| `POST /v1/projects/{name}/branch` | A new project from a clone of this one's data. Body `{ name, allowPause? }`, 201 with `{ project, resources, clone, paused, pausedMs, resumeFailures }` |
+| `POST /v1/projects/{name}/branch` | A new project from a clone of this one's data. Body `{ name, allowPause?, expiresInSeconds? }`, 201 with `{ project, resources, clone, paused, pausedMs, resumeFailures }` |
+| `POST /v1/projects/{name}/reset` | Replace a branch's data with a fresh clone of its parent's. Destructive. Body `{ allowPause? }`, 200 with the parent's and the branch's pauses, `restartFailures` and `preResetDirs` |
+| `POST /v1/projects/{name}/expiry` | Body `{ expiresInSeconds }`: seconds from now, or `null` to clear. Branches only |
+| `POST /v1/projects/{name}/diff` | Schema diff against `{ against? }` or the parent, by `pg_dump --schema-only`. Wakes what it compares |
 | `GET /v1/projects/{name}/crons` | `{ crons: [{ worker, resourceId, cron, nextAt, lastAt, lastOutcome }] }`, read-only |
 | `GET /v1/projects/{name}/queues` | `{ queues: [{ resource, depth, oldestMessageAgeSeconds, consumer }] }` |
 | `GET` `POST /v1/projects/{name}/snapshots` | List, newest first (answers for a deleted project), and take one. Body `{ allowPause?, online? }` |
 | `POST /v1/projects/{name}/eject` | Render the compose file. `?release=true` also hands the project over |
 | `POST /v1/projects/{name}/adopt` | Manage a released project again |
 | `POST /v1/projects/{name}/sleep-policy` | Body `{ sleepAfterSeconds }`. `null` pins the project awake, a positive integer is its own idle threshold |
+| `GET` `POST` `DELETE /v1/projects/{name}/allowlist` | The project's IP allowlist as `project.allowlist`. POST `{ add?, remove? }` with addresses and CIDR ranges; DELETE lifts it (`null`). `[]` means this box only |
 | `POST /v1/snapshots/{id}/restore` | Body `{ as?, inPlace?, allowPause? }`. 201 into a new project, 200 in place |
 | `DELETE /v1/snapshots/{id}` | `{ deleted: true }` |
 | `GET` `DELETE /v1/resources/{id}` | Detail, destroy |
@@ -77,6 +82,10 @@ be called with a token, only with the password.
 | `POST /v1/resources/{id}/query` | Run SQL. Body `{ sql, params? }` |
 | `POST /v1/resources/{id}/deploy` | Deploy code to an existing resource |
 | `POST /v1/resources/{id}/env` | Body `{ set?, unset?, replace? }`. Returns `{ resource, keys, stopped }`, names only |
+| `GET /v1/resources/{id}/extensions` | Postgres only. Wakes it. Returns `{ extensions: { declared, installed: [{ name, version }], missing, needsPreload } }` |
+| `POST /v1/resources/{id}/extensions` | Body `{ add?, remove? }`. `add` applies `CREATE EXTENSION IF NOT EXISTS ... CASCADE` before storing; `remove` undeclares and drops nothing. Adding one whose preload library is missing is refused |
+| `GET /v1/resources/{id}/settings` | Postgres only. Never wakes it. Returns `{ settings, needsPreload, available }`, `available` being the allowlist with ranges, defaults and docs links |
+| `POST /v1/resources/{id}/settings` | Body `{ set?, unset?, allowPause? }`. Asleep: replaces the stopped container, applied on next wake. Awake: restarts it (pinned needs `allowPause`); a failed start is rolled back |
 | `GET /v1/resources/{id}/queue/messages` | Peek without leasing. `?limit=` defaults to 10. `{ messages: [{ id, timestampMs, attempts, contentType, body }] }` |
 | `POST /v1/resources/{id}/queue/messages` | Enqueue. Body `{ body, delaySeconds? }`, 201 with `{ id }` |
 | `DELETE /v1/resources/{id}/queue/messages` | Purge. `{ purged }` |

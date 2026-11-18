@@ -9,6 +9,7 @@
 import { resolveConfig, resolvePaths, HobbyError } from '@hobby.sh/core'
 import { createApi, createRemoteClient, DaemonUnreachableError } from './client.js'
 import { activeRemote, type RemoteCredential } from './remote.js'
+import { cmdMcp } from './mcp.js'
 import {
   cmdConnect,
   cmdDaemon,
@@ -17,8 +18,10 @@ import {
   cmdCreate,
   cmdCron,
   cmdDeploy,
+  cmdDiff,
   cmdEject,
   cmdEnv,
+  cmdExpire,
   cmdInit,
   cmdLink,
   cmdLogin,
@@ -30,8 +33,10 @@ import {
   cmdUpdate,
   cmdNew,
   cmdPg,
+  cmdAllow,
   cmdPin,
   cmdQueue,
+  cmdReset,
   cmdRm,
   cmdSleep,
   cmdSnapshot,
@@ -45,6 +50,7 @@ import {
   type Ctx,
   type Flags,
 } from './commands.js'
+import { cmdImport } from './import.js'
 import { EXIT_DAEMON_UNREACHABLE, EXIT_OPERATION_FAILED, EXIT_USAGE, exitCodeForError } from './exit.js'
 
 export interface ReadLineOptions {
@@ -180,9 +186,17 @@ const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]>
   ['new', 'hobby new <name>', 'project + postgres + connection string'],
   ['new', 'hobby new <name> --empty', 'a project with nothing in it'],
   ['new', 'hobby new <name> --pin', 'born pinned: never auto-sleeps'],
+  ['new', 'hobby new <name> --extension <ext>', 'with an extension declared and created (repeatable)'],
+  ['new', 'hobby new <name> --setting <name=value>', 'with a server setting declared (repeatable)'],
   ['ls', 'hobby ls', 'everything, with sleep state'],
   ['branch', 'hobby branch <project> <name>', 'a new project from a copy of its data, unpinned'],
   ['branch', 'hobby branch ... --allow-pause', 'accept pausing a pinned, awake source'],
+  ['branch', 'hobby branch ... --expires <duration>', 'delete the branch after 7d, 36h... once asleep'],
+  ['reset', 'hobby reset <branch> [--allow-pause] [--yes]', "replace its data with its parent's, with confirmation"],
+  ['expire', 'hobby expire <branch> <duration>', 'delete the branch after this long, once asleep'],
+  ['expire', 'hobby expire <branch> --never', 'clear its expiry'],
+  ['diff', 'hobby diff <branch>', "schema diff against its parent; wakes both"],
+  ['diff', 'hobby diff <project> <other>', 'schema diff between two projects; wakes both'],
   ['deploy', 'hobby deploy [path]', 'build a Dockerfile here and serve it'],
   ['deploy', 'hobby deploy [path] --database <r>', 'the same, bound to a sibling database'],
   ['deploy', 'hobby deploy [path] --env-file <f>', 'the same, with variables from a dotenv file'],
@@ -199,16 +213,32 @@ const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]>
   ['env', 'hobby env ls <target>', 'its variable names (never the values)'],
   ['env', 'hobby env unset <target> K...', 'remove variables'],
   ['pg', 'hobby pg create --project <p> <name>', 'the explicit form, for a second database'],
+  ['pg', 'hobby pg ext [ls] <target>', 'declared and installed extensions, with versions'],
+  ['pg', 'hobby pg ext add <target> <ext>...', 'declare and CREATE EXTENSION IF NOT EXISTS'],
+  ['pg', 'hobby pg ext rm <target> <ext>...', 'undeclare; never drops anything'],
+  ['pg', 'hobby pg config [ls] <target> [--all]', 'declared server settings; --all lists what is allowed'],
+  ['pg', 'hobby pg config set <target> <name=value>...', 'set; restarts it if awake, else applies on next wake'],
+  ['pg', 'hobby pg config unset <target> <name>... [--allow-pause]', 'back to the default, applied the same way'],
   ['connect', 'hobby connect <target>', 'open psql against it'],
   ['sleep', 'hobby sleep <target> [--force]', 'put it to sleep; --force ends open sessions and in-flight work'],
   ['wake', 'hobby wake <target>', 'wake it back up'],
   ['pin', 'hobby pin <project>', 'never auto-sleep this project'],
   ['unpin', 'hobby unpin <project> [--sleep-after N]', 'auto-sleep it again'],
+  ['allow', 'hobby allow [ls] <project>', 'which addresses may connect to its databases'],
+  ['allow', 'hobby allow add <project> <address|cidr>...', 'restrict it to these, plus this box'],
+  ['allow', 'hobby allow rm <project> <address|cidr>...', 'remove entries; the last leaves this box only'],
+  ['allow', 'hobby allow off <project>', 'lift the restriction: any address that reaches the proxy'],
   ['logs', 'hobby logs <target> [--tail N]', 'tail its logs'],
   ['rm', 'hobby rm <target> [--yes]', 'destroy, with confirmation'],
   ['eject', 'hobby eject <project>', 'emit docker-compose.yml plus data'],
   ['eject', 'hobby eject <project> --release', 'the same, and stop managing it'],
   ['adopt', 'hobby adopt <project>', 'manage a released project again'],
+  ['import', 'hobby import <project>', 'copy a Postgres in: connection string on stdin (prompted, hidden)'],
+  ['import', 'hobby import <project> --from-file <path>', 'the same, the connection string read from a file'],
+  ['import', 'hobby import <project> --from-env <NAME>', 'the same, from an environment variable, by name'],
+  ['import', 'hobby import ... --resource <name>', 'into that postgres resource, created if absent'],
+  ['import', 'hobby import ... --schema <s> [--exclude-schema <s>]', 'only these schemas (repeatable), e.g. public for Supabase'],
+  ['import', 'hobby import ... --strict', 'one transaction: all or nothing'],
   ['snapshot', 'hobby snapshot <project> [--allow-pause]', 'a local snapshot, everything quiesced'],
   ['snapshot', 'hobby snapshot <project> --online', 'postgres-only projects: no pause, pg_basebackup'],
   ['snapshot', 'hobby snapshot ls <project>', 'its snapshots, newest first'],
@@ -232,6 +262,7 @@ const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]>
   ['token', 'hobby token rm <name>', 'revoke one'],
   ['update', 'hobby update', 'update to the latest release'],
   ['update', 'hobby update --check', 'say whether one is available, change nothing'],
+  ['mcp', 'hobby mcp', "serve the MCP tools over stdio, against this box's daemon"],
   ['studio', 'hobby studio passwd', 'set the studio operator password'],
   ['studio', 'hobby studio', 'print the studio URL and open it'],
   ['version', 'hobby version', 'this CLI and the daemon it talks to'],
@@ -418,6 +449,17 @@ export async function run(argv: string[], io: Io): Promise<number> {
       return await cmdUpdate(io, paths, flags)
     }
 
+    // stdio belongs to the MCP protocol from here on, and the transport is
+    // the unix socket even when a remote is active (ADR 0018), so this runs
+    // before the Api below is built. See mcp.ts.
+    if (cmd === 'mcp') {
+      const { positionals } = parseArgs(rest, {})
+      if (positionals.length > 0) {
+        throw new UsageError(`usage: hobby mcp (got: ${positionals.join(' ')})`)
+      }
+      return await cmdMcp({ socketPath: paths.socketPath, remoteUrl: remote?.url ?? null, err: io.err })
+    }
+
     if (cmd === 'studio') {
       // The subcommand is the first positional, not the first token, so
       // `hobby studio --json` is the verb with a flag rather than "unknown
@@ -449,12 +491,27 @@ export async function run(argv: string[], io: Io): Promise<number> {
         return await cmdVersion(ctx, flags)
       }
       case 'new': {
-        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'empty', 'pin'] })
+        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'empty', 'pin'], multi: ['extension', 'setting'] })
         return await cmdNew(ctx, positionals, flags)
       }
       case 'branch': {
-        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'allow-pause'] })
+        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'allow-pause'], value: ['expires'] })
         return await cmdBranch(ctx, positionals, flags)
+      }
+      case 'reset': {
+        // --yes and --allow-pause are separate gates, as they are for
+        // `snapshot restore --in-place`: one says "replace my data", the
+        // other "pausing a pinned project is fine".
+        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'yes', 'allow-pause'] })
+        return await cmdReset(ctx, positionals, flags)
+      }
+      case 'expire': {
+        const { positionals, flags } = parseArgs(rest, { bool: ['json', 'never'] })
+        return await cmdExpire(ctx, positionals, flags)
+      }
+      case 'diff': {
+        const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+        return await cmdDiff(ctx, positionals, flags)
       }
       case 'ls': {
         const { flags } = parseArgs(rest, { bool: ['json'] })
@@ -465,7 +522,11 @@ export async function run(argv: string[], io: Io): Promise<number> {
         return await cmdCreate(ctx, positionals, flags)
       }
       case 'pg': {
-        const { positionals, flags } = parseArgs(rest, { bool: ['json'], value: ['project'] })
+        const { positionals, flags } = parseArgs(rest, {
+          bool: ['json', 'all', 'allow-pause'],
+          value: ['project'],
+          multi: ['extension', 'setting'],
+        })
         return await cmdPg(ctx, positionals, flags)
       }
       case 'connect': {
@@ -487,6 +548,10 @@ export async function run(argv: string[], io: Io): Promise<number> {
       case 'unpin': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json'], value: ['sleep-after'] })
         return await cmdUnpin(ctx, positionals, flags)
+      }
+      case 'allow': {
+        const { positionals, flags } = parseArgs(rest, { bool: ['json'] })
+        return await cmdAllow(ctx, positionals, flags)
       }
       case 'logs': {
         const { positionals, flags } = parseArgs(rest, { bool: ['json'], value: ['tail'] })
@@ -533,6 +598,14 @@ export async function run(argv: string[], io: Io): Promise<number> {
           value: ['project', 'limit', 'retention'],
         })
         return await cmdQueue(ctx, positionals, flags)
+      }
+      case 'import': {
+        const { positionals, flags } = parseArgs(rest, {
+          bool: ['json', 'strict'],
+          value: ['from-env', 'from-file', 'resource'],
+          multi: ['schema', 'exclude-schema'],
+        })
+        return await cmdImport(ctx, positionals, flags)
       }
       case 'snapshot': {
         // One parseArgs for every `hobby snapshot` shape, as `queue` does

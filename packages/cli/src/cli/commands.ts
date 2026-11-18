@@ -33,18 +33,32 @@ import { startDaemon } from '../daemon/server.js'
 import { MIN_PASSWORD_LENGTH, hasOperatorCredential, setOperatorPassword } from '../daemon/studio/auth.js'
 import { issueToken, readTokens, revokeToken } from '../daemon/studio/tokens.js'
 import type { WireResource } from '../daemon/wire.js'
-import { createRemoteClient, DaemonUnreachableError, type Api, type IgnoredKey, type RawResponse } from './client.js'
+import {
+  createRemoteClient,
+  DaemonUnreachableError,
+  type Api,
+  type ExtensionsResponse,
+  type SetSettingsResponse,
+  type SettingsResponse,
+  type IgnoredKey,
+  type ProjectResponse,
+  type RawResponse,
+} from './client.js'
 import { CLI_VERSION } from '../version.js'
 import { activeRemote, forgetRemote, listRemotes, saveRemote } from './remote.js'
 import { EXIT_UPDATE_AVAILABLE, exitCodeForError } from './exit.js'
 import {
+  allowlistTrailer,
   branchCopyNote,
+  branchTrailer,
   diskWarning,
+  parseDuration,
   hostNetworkingWarning,
   preflightBlockers,
   proxyBindNote,
   reflinkWarning,
   tmpfsWarning,
+  renderAllowlist,
   renderDuration,
   renderPreflight,
   renderQueueLine,
@@ -1077,7 +1091,7 @@ export async function cmdCron(c: Ctx, positionals: string[], flags: Flags): Prom
 export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const name = positionals[0]
   if (name === undefined) {
-    throw new UsageError('usage: hobby new <name> [--empty] [--pin]')
+    throw new UsageError('usage: hobby new <name> [--empty] [--pin] [--extension <ext>...] [--setting <name=value>...]')
   }
 
   // `--pin`: born pinned awake, for the project that must never cold-start
@@ -1123,7 +1137,12 @@ export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promi
   // moments ago.
   let resource
   try {
-    ;({ resource } = await c.api.createResource(project.name, { kind: 'postgres', name: DEFAULT_POSTGRES_NAME }))
+    ;({ resource } = await c.api.createResource(project.name, {
+      kind: 'postgres',
+      name: DEFAULT_POSTGRES_NAME,
+      ...extensionsFrom(flags),
+      ...settingsFrom(flags),
+    }))
   } catch (err) {
     try {
       await c.api.deleteProject(project.name)
@@ -1180,10 +1199,15 @@ export async function cmdNew(c: Ctx, positionals: string[], flags: Flags): Promi
 export async function cmdBranch(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const [source, name] = positionals
   if (source === undefined || name === undefined || positionals.length > 2) {
-    throw new UsageError('usage: hobby branch <source-project> <new-project> [--allow-pause]')
+    throw new UsageError('usage: hobby branch <source-project> <new-project> [--allow-pause] [--expires <duration>]')
   }
+  const expires = flagString(flags, 'expires')
+  const expiresInSeconds = expires === undefined ? undefined : expiryDuration(expires)
 
-  const result = await c.api.branchProject(source, name, { allowPause: flags['allow-pause'] === true })
+  const result = await c.api.branchProject(source, name, {
+    allowPause: flags['allow-pause'] === true,
+    ...(expiresInSeconds === undefined ? {} : { expiresInSeconds }),
+  })
 
   if (flags.json) {
     c.io.out(JSON.stringify(result))
@@ -1201,6 +1225,9 @@ export async function cmdBranch(c: Ctx, positionals: string[], flags: Flags): Pr
           'any open connections to it were closed and will need to reconnect'
       )
     }
+    if (result.project.expiresAt != null) {
+      c.io.out(`it expires at ${new Date(result.project.expiresAt).toISOString()} and is deleted then, once asleep and unpinned`)
+    }
     c.io.out(`connect with: hobby connect ${result.project.name}`)
   }
 
@@ -1211,6 +1238,135 @@ export async function cmdBranch(c: Ctx, positionals: string[], flags: Flags): Pr
   }
   for (const failure of result.resumeFailures) {
     c.io.err(`${source} did not come back after the clone: ${failure}. try \`hobby wake ${source}\``)
+  }
+  return 0
+}
+
+function expiryDuration(text: string): number {
+  const seconds = parseDuration(text)
+  if (seconds === null) {
+    throw new UsageError(`not a duration: ${text} (examples: 7d, 36h, 1d12h, 90m)`)
+  }
+  return seconds
+}
+
+// `hobby reset <branch>`: replace the branch's data with a fresh clone of
+// its parent's (POST /v1/projects/:name/reset; packages/cli/src/daemon/
+// reset.ts). The branch's own data is gone afterwards, so this asks for the
+// branch's name to be typed back exactly as `hobby rm` does, and --yes skips
+// the prompt. --allow-pause is the separate gate `hobby branch` has: it
+// accepts pausing a pinned, awake parent or branch, and says nothing about
+// whether the data may be replaced.
+export async function cmdReset(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const name = positionals[0]
+  if (name === undefined || positionals.length > 1) {
+    throw new UsageError('usage: hobby reset <branch> [--allow-pause] [--yes]')
+  }
+
+  if (!flags.yes) {
+    c.io.out(`type "${name}" to confirm replacing its data with a fresh copy of its parent's, this cannot be undone:`)
+    const typed = await c.io.readLine()
+    if (typed.trim() !== name) {
+      c.io.err('confirmation did not match, aborted')
+      return 1
+    }
+  }
+
+  const result = await c.api.resetBranch(name, { allowPause: flags['allow-pause'] === true })
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+  } else {
+    c.io.out(`reset ${name} to a fresh copy of ${result.parent}`)
+    for (const resource of result.resources) {
+      c.io.out(`  ${renderResourceLine(resource, Date.now(), name)}`)
+    }
+    if (result.parentPaused.length > 0 && result.parentPausedMs !== null) {
+      c.io.out(
+        `${result.parent} was paused for ${result.parentPausedMs}ms while ${result.parentPaused.join(', ')} was cloned; ` +
+          'any open connections to it were closed and will need to reconnect'
+      )
+    }
+    if (result.paused.length > 0 && result.pausedMs !== null) {
+      c.io.out(
+        `${name} was paused for ${result.pausedMs}ms while its data was replaced; ` +
+          'any open connections to it were closed and will need to reconnect'
+      )
+    }
+  }
+
+  if (result.clone === 'copy') {
+    c.io.err(branchCopyNote())
+  }
+  for (const failure of result.parentResumeFailures) {
+    c.io.err(`${result.parent} did not come back after the clone: ${failure}. try \`hobby wake ${result.parent}\``)
+  }
+  for (const failure of result.restartFailures) {
+    c.io.err(`${name} did not come back on its new data: ${failure}`)
+  }
+  for (const dir of result.preResetDirs) {
+    c.io.err(`${name}'s previous data was kept at ${dir}; remove it once you know nothing in it is needed`)
+  }
+  return result.restartFailures.length > 0 ? 1 : 0
+}
+
+// `hobby expire <branch> <duration>` sets when the daemon may delete a
+// branch, counted from now; `hobby expire <branch> --never` clears it.
+// POST /v1/projects/:name/expiry. Only a project made with `hobby branch`
+// can expire, which the daemon enforces.
+export async function cmdExpire(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  const usage = 'usage: hobby expire <branch> <duration> | hobby expire <branch> --never'
+  const [name, duration] = positionals
+  const never = flags.never === true
+  if (name === undefined || positionals.length > 2 || (duration === undefined) === !never) {
+    throw new UsageError(usage)
+  }
+  const result = await c.api.setExpiry(name, never ? null : expiryDuration(duration as string))
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+  } else if (result.project.expiresAt == null) {
+    c.io.out(`${name} no longer expires`)
+  } else {
+    c.io.out(
+      `${name} expires at ${new Date(result.project.expiresAt).toISOString()} and is deleted then, once asleep and unpinned`
+    )
+  }
+  return 0
+}
+
+// `hobby diff <branch>` compares a branch's schema with its parent's;
+// `hobby diff <a> <b>` compares b's with a's (lines only in b are `+`).
+// POST /v1/projects/:name/diff. Prints a unified diff per postgres
+// resource; --json gives the structured result. Exit 0 either way, so the
+// output, not the exit code, says whether anything differs, unlike
+// diff(1): a failed diff and a found difference must not look alike to a
+// script.
+export async function cmdDiff(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
+  if (positionals.length === 0 || positionals.length > 2) {
+    throw new UsageError('usage: hobby diff <branch> | hobby diff <project> <other-project>')
+  }
+  const [first, second] = positionals as [string, string | undefined]
+  const result = second === undefined ? await c.api.diffSchemas(first) : await c.api.diffSchemas(second, first)
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+  } else {
+    for (const resource of result.resources) {
+      if (resource.status === 'changed') {
+        c.io.out(resource.diff.replace(/\n$/, ''))
+      } else if (resource.status === 'only-old') {
+        c.io.out(`${resource.name}: only in ${result.old.project}, not compared`)
+      } else if (resource.status === 'only-new') {
+        c.io.out(`${resource.name}: only in ${result.new.project}, not compared`)
+      }
+    }
+    if (result.identical) {
+      c.io.out(`no schema differences between ${result.old.project} and ${result.new.project}`)
+    }
+  }
+  if (result.woke.length > 0) {
+    c.io.err(`woke ${result.woke.join(', ')} to read the schema; they sleep again once idle`)
   }
   return 0
 }
@@ -1250,7 +1406,10 @@ export async function cmdLs(c: Ctx, flags: Flags): Promise<number> {
     // than that field gets only the pin marker, never a guess from this
     // process's config (issue #110).
     const released = project.releasedAt != null ? `${project.name}  (released, not managed)` : project.name
-    c.io.out(`${released}${sleepPolicyTrailer(project, defaultSleepAfterSeconds)}`)
+    const parentName = project.parentId == null ? null : (projects.find((p) => p.id === project.parentId)?.name ?? null)
+    c.io.out(
+      `${released}${sleepPolicyTrailer(project, defaultSleepAfterSeconds)}${branchTrailer(project, parentName, Date.now())}${allowlistTrailer(project)}`
+    )
     if (resources.length === 0) {
       c.io.out('  (no resources)')
       continue
@@ -1283,9 +1442,21 @@ async function createResourceAndReport(
   project: string,
   kind: CreatableKind,
   name: string,
-  json: boolean
+  json: boolean,
+  extensions: string[] = [],
+  settings: Record<string, string> = {}
 ): Promise<number> {
-  const { resource } = await c.api.createResource(project, { kind, name })
+  const { resource } = await c.api.createResource(
+    project,
+    kind === 'postgres'
+      ? {
+          kind,
+          name,
+          ...(extensions.length > 0 ? { extensions } : {}),
+          ...(Object.keys(settings).length > 0 ? { settings } : {}),
+        }
+      : { kind, name }
+  )
   if (json) {
     c.io.out(JSON.stringify({ resource }))
   } else {
@@ -1315,20 +1486,264 @@ export async function cmdCreate(c: Ctx, positionals: string[], flags: Flags): Pr
   return createResourceAndReport(c, project, kind, name, flags.json === true)
 }
 
+// `--extension <name>`, repeatable, on `hobby new` and `hobby pg create`:
+// declared at creation and created on the database's first boot, so it costs
+// no extra wake. Absent sends no field.
+function extensionsFrom(flags: Flags): { extensions?: string[] } {
+  const raw = flags.extension
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : []
+  return list.length === 0 ? {} : { extensions: list }
+}
+
+// `--setting name=value`, repeatable, on `hobby new` and `hobby pg
+// create`: server settings declared at creation, so the first boot already
+// runs with them. The daemon validates against its allowlist; this only
+// splits on the first `=`.
+function settingsFrom(flags: Flags): { settings?: Record<string, string> } {
+  const raw = flags.setting
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : []
+  if (list.length === 0) return {}
+  return { settings: parseSettingPairs(list) }
+}
+
+function parseSettingPairs(pairs: string[]): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const pair of pairs) {
+    const eq = pair.indexOf('=')
+    if (eq <= 0) {
+      throw new UsageError(`expected name=value, got ${pair}`)
+    }
+    out[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim()
+  }
+  return out
+}
+
+const PG_USAGE =
+  'usage: hobby pg create --project <project> <name> [--extension <ext>...] [--setting <name=value>...] | ' +
+  'hobby pg ext [ls] <target> | hobby pg ext add <target> <ext>... | hobby pg ext rm <target> <ext>... | ' +
+  'hobby pg config [ls] <target> [--all] | hobby pg config set <target> <name=value>... [--allow-pause] | ' +
+  'hobby pg config unset <target> <name>... [--allow-pause]'
+
 // `hobby pg create --project <p> <name>`: kept as the explicit form for
 // anyone who prefers spelling out the kind, an alias for cmdCreate above
 // rather than a second implementation of the same route.
+//
+// `hobby pg ext`: declared extensions and what is installed, over
+// GET/POST /v1/resources/:id/extensions. Under the existing `pg` verb
+// because extensions are a postgres-only idea, the same reason `pg create`
+// lives here. `rm` undeclares and never drops (see setExtensionsRoute).
 export async function cmdPg(c: Ctx, positionals: string[], flags: Flags): Promise<number> {
   const sub = positionals[0]
+  if (sub === 'ext') {
+    return cmdPgExt(c, positionals.slice(1), flags)
+  }
+  if (sub === 'config') {
+    return cmdPgConfig(c, positionals.slice(1), flags)
+  }
   if (sub !== 'create') {
-    throw new UsageError(`usage: hobby pg create --project <project> <name>${sub === undefined ? '' : ` (got: ${sub})`}`)
+    throw new UsageError(sub === undefined ? PG_USAGE : `unknown pg subcommand: ${sub}\n${PG_USAGE}`)
   }
   const name = positionals[1]
   const project = projectFrom(c, flags)
   if (project === undefined || name === undefined) {
-    throw new UsageError('usage: hobby pg create --project <project> <name>')
+    throw new UsageError('usage: hobby pg create --project <project> <name> [--extension <ext>...] [--setting <name=value>...]')
   }
-  return createResourceAndReport(c, project, 'postgres', name, flags.json === true)
+  return createResourceAndReport(
+    c,
+    project,
+    'postgres',
+    name,
+    flags.json === true,
+    extensionsFrom(flags).extensions,
+    settingsFrom(flags).settings
+  )
+}
+
+async function resolvePgTarget(
+  c: Ctx,
+  target: string,
+  what: string = 'extensions'
+): Promise<{ project: Project; resource: WireResource }> {
+  const found = await resolveTarget(c.api, target, c.config.project)
+  if (found.resource.kind !== 'postgres') {
+    throw new UsageError(`${target} is a ${found.resource.kind}, and only a postgres resource has ${what}`)
+  }
+  return found
+}
+
+function printExtensions(c: Ctx, label: string, report: ExtensionsResponse['extensions']): void {
+  c.io.out(label)
+  c.io.out(`  declared: ${report.declared.length === 0 ? '(none)' : report.declared.join(', ')}`)
+  if (report.installed === null) {
+    c.io.out('  installed: not read, it is asleep (`hobby pg ext ls` wakes it to read)')
+    return
+  }
+  c.io.out('  installed:')
+  for (const ext of report.installed) {
+    const mark = report.declared.includes(ext.name) ? '' : '  (not declared)'
+    c.io.out(`    ${ext.name} ${ext.version}${mark}`)
+  }
+  if (report.missing !== null && report.missing.length > 0) {
+    c.io.out(`  declared but not installed: ${report.missing.join(', ')} (\`hobby pg ext add\` creates them again)`)
+  }
+  printPreloadGaps(c, label.replace(/:$/, ''), report.needsPreload ?? [])
+}
+
+// Extensions that exist but answer every use with an error, because the
+// library they need is not preloaded.
+function printPreloadGaps(c: Ctx, target: string, gaps: SettingsResponse['needsPreload']): void {
+  for (const gap of gaps) {
+    c.io.out(
+      gap.allowed
+        ? `  ! ${gap.extension} needs ${gap.library} in shared_preload_libraries, which is not set: hobby pg config set ${target} shared_preload_libraries=${gap.library}`
+        : `  ! ${gap.extension} needs ${gap.library} preloaded, which hobby does not allow`
+    )
+  }
+}
+
+// `hobby pg config`: server settings, over GET/POST
+// /v1/resources/:id/settings. ls never wakes anything. set and unset
+// replace the container: a sleeping database picks the settings up on its
+// next wake, an awake one is restarted (a pause, so a pinned project needs
+// --allow-pause), and a start that fails with them is rolled back.
+async function cmdPgConfig(c: Ctx, args: string[], flags: Flags): Promise<number> {
+  const first = args[0]
+  const op = first === 'set' || first === 'unset' || first === 'ls' ? first : 'ls'
+  const rest = op === 'ls' && first !== 'ls' ? args : args.slice(1)
+
+  if (op === 'ls') {
+    if (rest.length > 1) {
+      throw new UsageError(PG_USAGE)
+    }
+    const target = targetOrLinked(c, rest, PG_USAGE)
+    const { project, resource } = await resolvePgTarget(c, target, 'settings')
+    const result = await c.api.getSettings(resource.id)
+    if (flags.json) {
+      c.io.out(JSON.stringify(result))
+      return 0
+    }
+    printSettings(c, `${project.name}/${resource.name}`, result, flags.all === true)
+    return 0
+  }
+
+  // `set <target> a=b...`, or in a linked directory `set a=b...`: a first
+  // argument with `=` in it is a setting, never a target. `unset` reads as
+  // `hobby pg ext rm` does.
+  const linked = c.config.project ?? null
+  const { target, items } =
+    op === 'set'
+      ? rest[0] !== undefined && !rest[0].includes('=')
+        ? { target: rest[0], items: rest.slice(1) }
+        : { target: linked ?? undefined, items: rest }
+      : rest.length >= 2 || linked === null
+        ? { target: rest[0], items: rest.slice(1) }
+        : { target: linked, items: rest }
+  if (target === undefined || items.length === 0) {
+    throw new UsageError(PG_USAGE)
+  }
+  const { project, resource } = await resolvePgTarget(c, target, 'settings')
+  const label = `${project.name}/${resource.name}`
+  const input =
+    op === 'set'
+      ? { set: parseSettingPairs(items), allowPause: flags['allow-pause'] === true }
+      : { unset: items, allowPause: flags['allow-pause'] === true }
+  const result = await c.api.setSettings(resource.id, input)
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+    return 0
+  }
+  printSettingsChange(c, label, result)
+  return 0
+}
+
+function printSettings(c: Ctx, label: string, result: SettingsResponse, all: boolean): void {
+  const declared = Object.entries(result.settings)
+  c.io.out(`${label}:`)
+  if (declared.length === 0) {
+    c.io.out('  (no settings declared; Postgres runs with its defaults)')
+  }
+  for (const [name, value] of declared) {
+    const info = result.available.find((s) => s.name === name)
+    c.io.out(`  ${name} = ${value}${info !== undefined ? `  (default ${info.default === '' ? 'none' : info.default})` : ''}`)
+  }
+  printPreloadGaps(c, label, result.needsPreload)
+  if (!all) {
+    c.io.out('`hobby pg config ls <target> --all` lists every setting hobby allows, with ranges and docs.')
+    return
+  }
+  c.io.out('allowed:')
+  for (const s of result.available) {
+    const range = s.values !== undefined ? s.values.join('|') : s.min !== undefined ? `${s.min}..${s.max}` : s.type
+    const restart = s.restartRequired ? ', restart' : ''
+    c.io.out(`  ${s.name}  ${range}  (default ${s.default === '' ? 'none' : s.default}${restart})  ${s.summary}`)
+  }
+}
+
+function printSettingsChange(c: Ctx, label: string, result: SetSettingsResponse): void {
+  const declared = Object.entries(result.settings)
+  c.io.out(`${label}:`)
+  for (const [name, value] of declared) {
+    c.io.out(`  ${name} = ${value}`)
+  }
+  if (declared.length === 0) {
+    c.io.out('  (no settings declared; Postgres runs with its defaults)')
+  }
+  switch (result.applied) {
+    case 'unchanged':
+      c.io.out('nothing changed.')
+      break
+    case 'next-start':
+      c.io.out('it is asleep: the settings apply when it next wakes. Nothing was woken.')
+      break
+    case 'restarted':
+      c.io.out(`restarted with the new settings (paused ${result.pausedMs ?? 0}ms).`)
+      break
+  }
+  printPreloadGaps(c, label, result.needsPreload)
+}
+
+async function cmdPgExt(c: Ctx, args: string[], flags: Flags): Promise<number> {
+  const first = args[0]
+  const op = first === 'add' || first === 'rm' || first === 'ls' ? first : 'ls'
+  const rest = op === 'ls' && first !== 'ls' ? args : args.slice(1)
+
+  if (op === 'ls') {
+    if (rest.length > 1) {
+      throw new UsageError(PG_USAGE)
+    }
+    const target = targetOrLinked(c, rest, PG_USAGE)
+    const { project, resource } = await resolvePgTarget(c, target)
+    const result = await c.api.getExtensions(resource.id)
+    if (flags.json) {
+      c.io.out(JSON.stringify(result))
+      return 0
+    }
+    printExtensions(c, `${project.name}/${resource.name}:`, result.extensions)
+    return 0
+  }
+
+  // `hobby pg ext add <target> <ext>...`, or in a linked directory with a
+  // single argument, `hobby pg ext add <ext>`: the same reading as
+  // `hobby env unset`.
+  const linked = c.config.project ?? null
+  const { target, names } =
+    rest.length >= 2 || linked === null
+      ? { target: rest[0], names: rest.slice(1) }
+      : { target: linked, names: rest }
+  if (target === undefined || names.length === 0) {
+    throw new UsageError(PG_USAGE)
+  }
+  const { project, resource } = await resolvePgTarget(c, target)
+  const result = await c.api.setExtensions(resource.id, op === 'add' ? { add: names } : { remove: names })
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+    return 0
+  }
+  printExtensions(c, `${project.name}/${resource.name}:`, result.extensions)
+  if (op === 'rm') {
+    c.io.out('undeclared only. Nothing was dropped; DROP EXTENSION from psql if you mean it.')
+  }
+  return 0
 }
 
 // Turns a postgres:// connection string into the libpq PG* environment
@@ -1474,6 +1889,48 @@ function renderSleepPolicyLine(project: Project): string {
   return project.sleepAfterSeconds === null
     ? `project ${project.name}: pinned awake, never sleeps`
     : `project ${project.name}: sleeps after ${project.sleepAfterSeconds}s idle`
+}
+
+const ALLOW_USAGE = [
+  'usage: hobby allow [ls] <project>',
+  '       hobby allow add <project> <address|cidr>...',
+  '       hobby allow rm <project> <address|cidr>...',
+  '       hobby allow off <project>',
+].join('\n')
+
+// `hobby allow`: the CLI face of GET, POST and DELETE
+// /v1/projects/:name/allowlist, which decide which client addresses the
+// wake-on-connect proxy accepts for a project's databases. Shaped like
+// `hobby pg ext`: a bare project lists, add and rm take entries, and in a
+// linked directory the project may be left out. `off` is its own word
+// because removing the last entry does not open the project (the daemon
+// keeps it restricted to this box), and lifting a restriction should be
+// something nobody does by accident.
+export async function cmdAllow(c: Ctx, args: string[], flags: Flags): Promise<number> {
+  const first = args[0]
+  const op = first === 'add' || first === 'rm' || first === 'ls' || first === 'off' ? first : 'ls'
+  const rest = op === 'ls' && first !== 'ls' ? args : args.slice(1)
+
+  let result: ProjectResponse
+  if (op === 'ls' || op === 'off') {
+    if (rest.length > 1) throw new UsageError(ALLOW_USAGE)
+    const project = targetOrLinked(c, rest, ALLOW_USAGE)
+    result = op === 'ls' ? await c.api.getAllowlist(project) : await c.api.clearAllowlist(project)
+  } else {
+    const linked = c.config.project ?? null
+    const { project, entries } =
+      rest.length >= 2 || linked === null ? { project: rest[0], entries: rest.slice(1) } : { project: linked, entries: rest }
+    if (project === undefined || entries.length === 0) throw new UsageError(ALLOW_USAGE)
+    result = await c.api.setAllowlist(project, op === 'add' ? { add: entries } : { remove: entries })
+  }
+
+  if (flags.json) {
+    c.io.out(JSON.stringify(result))
+    return 0
+  }
+  for (const line of renderAllowlist(result.project)) c.io.out(line)
+  if (op !== 'ls') c.io.out('applies to new connections; sessions already open are not ended.')
+  return 0
 }
 
 // `hobby pin <project>` and `hobby unpin <project> [--sleep-after N]`: the

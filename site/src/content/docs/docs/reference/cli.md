@@ -99,7 +99,7 @@ Takes no flags.
 
 ## Projects and resources
 
-### `hobby new <name> [--empty] [--pin]`
+### `hobby new <name> [--empty] [--pin] [--extension <ext>...] [--setting <name=value>...]`
 
 Creates a project, puts a `postgres` resource named `primary` in it, boots that
 database once so it is initialised, and prints a connection string. The new
@@ -115,6 +115,16 @@ box-wide `sleepAfterSeconds` at the moment it is created; see
 [configuration](/docs/reference/configuration/#settings) for what that means
 when the default later changes.
 
+`--extension <ext>`, repeatable, declares an extension and creates it during
+that first boot (`CREATE EXTENSION IF NOT EXISTS ... CASCADE`), so it costs no
+extra start. An extension the image does not ship is refused, naming the
+image, and nothing is left behind. See `hobby pg ext` below.
+
+`--setting <name=value>`, repeatable, declares a Postgres server setting, so
+the first boot already runs with it. Only allowlisted settings are accepted;
+see `hobby pg config` below. `pg_stat_statements` needs
+`--setting shared_preload_libraries=pg_stat_statements` in the same command.
+
 Accepts `--json`.
 
 ### `hobby ls`
@@ -122,8 +132,11 @@ Accepts `--json`.
 Every project, with every resource and its sleep state. A released project is
 still listed, marked `(released, not managed)`. A pinned project is marked
 `(pinned)`, and one whose idle threshold differs from the daemon's default is
-marked `(sleeps after Ns)`; a project on the default says nothing. An
-`undeployed` app or worker is marked `(no code yet)`.
+marked `(sleeps after Ns)`; a project on the default says nothing. A branch
+is marked with the project it came from, `(branch of blog)`, and with its
+expiry when it has one, `(branch of blog, expires in 6d)`; in `--json` these
+are the project's `parentId` and `expiresAt`. An `undeployed` app or worker is
+marked `(no code yet)`.
 
 A Postgres line ends with how to reach it, `connect: hobby connect
 <project>/<name>`, rather than a port. The container's own host port is in
@@ -164,12 +177,89 @@ not exist yet.
 
 Accepts `--json`.
 
-### `hobby pg create --project <p> <name>`
+### `hobby pg create --project <p> <name> [--extension <ext>...] [--setting <name=value>...]`
 
 The explicit form, for creating a second database. An alias for
-`hobby create postgres`, not a second implementation.
+`hobby create postgres`, not a second implementation. `--extension` and
+`--setting` work as they do on `hobby new`.
 
 Accepts `--json`.
+
+### `hobby pg ext [ls|add|rm] <target>`
+
+The extensions a postgres resource declares, and what its database actually
+has installed, with versions.
+
+```
+hobby pg ext blog                     # same as: hobby pg ext ls blog
+hobby pg ext add blog pg_trgm hstore  # declare, then CREATE EXTENSION IF NOT EXISTS ... CASCADE
+hobby pg ext rm blog hstore           # undeclare only
+```
+
+`ls` and `add` wake a sleeping database, because only a running Postgres can
+say what it has installed. The daemon's session does not count as activity,
+so the database sleeps again on its usual schedule. `add` applies the whole
+declared list, which also recreates a declared extension someone dropped by
+hand. `ls` lists such an extension as declared but not installed.
+
+An extension the image does not ship is refused, the error names the image,
+and the declaration is left unchanged. The image is box-wide today
+(`HOBBY_IMAGE`); choosing one per project is issue #2.
+
+`rm` never drops anything. `DROP EXTENSION` also drops whatever depends on
+the extension, columns included, so run it from psql if you mean it.
+
+Extensions live in the data directory, so they survive sleep, branches,
+snapshots and `hobby eject` with nothing re-applied.
+
+An extension that only works with a preloaded library (`pg_stat_statements`
+in the stock image) is refused by `add` until the library is in
+`shared_preload_libraries`, and the error prints the `hobby pg config set`
+that adds it. `ls` marks one that is installed while its library is not
+preloaded. `pg_cron` is refused outright: its jobs run only while the
+database is awake.
+
+In a linked directory, `hobby pg ext add <ext>` with one argument acts on the
+linked project. Accepts `--json`.
+
+### `hobby pg config [ls|set|unset] <target>`
+
+Postgres server settings for a postgres resource, from an allowlist.
+
+```
+hobby pg config blog                                  # declared settings; never wakes anything
+hobby pg config ls blog --all                         # plus every allowed setting, range and default
+hobby pg config set blog shared_buffers=256MB work_mem=16MB
+hobby pg config set blog shared_preload_libraries=pg_stat_statements
+hobby pg config unset blog work_mem                   # back to the Postgres default
+```
+
+Settings are passed to Postgres as server arguments (`postgres -c
+name=value`) and never written into `postgresql.conf` or
+`postgresql.auto.conf`, so the data directory stays plain. That means every
+change replaces the container, even for a setting Postgres could reload:
+
+- **Asleep:** the container is replaced and nothing is woken. The settings
+  take effect on the next wake.
+- **Awake:** the database is restarted, which is a pause of a second or two.
+  A pinned project needs `--allow-pause`, as `hobby branch` does. A database
+  with a query or transaction running is waited for, then refused if it stays
+  busy. If Postgres will not start with the new settings, the previous ones
+  are restored and it is started again, and the error carries its log lines.
+
+Anything not on the allowlist is refused, and so is a value outside its
+range. `shared_preload_libraries` accepts `pg_stat_statements` and
+`auto_explain`. `pg_prewarm` is left out (ADR 0020: autoprewarm made the first
+queries after a wake slower), and `pg_cron` is refused because its schedule
+silently stops while the database sleeps; worker cron triggers wake what they
+run instead. A setting that belongs to a library (`pg_stat_statements.max`,
+`auto_explain.log_min_duration`) needs that library preloaded.
+
+Branches and snapshot restores carry the settings. `hobby reset` takes the
+parent's, as it takes the parent's data. `hobby eject` writes them into the
+compose file's `command:`.
+
+In a linked directory the target can be left out. Accepts `--json`.
 
 ### `hobby branch <project> <name> [--allow-pause]`
 
@@ -188,7 +278,56 @@ pinned source that is awake is refused unless you pass `--allow-pause`, because
 pinning it said it must stay up. A project holding apps, workers or queues
 cannot be branched yet. Remove a branch with `hobby rm`.
 
+The branch records which project it came from, which is what `hobby reset` and
+`hobby diff` use. `--expires <duration>` (for example `7d`, `36h`, `1d12h` or
+`90m`) gives it an expiry: once that time has passed, the daemon deletes the
+branch on its next sweep, but only while it is asleep and unpinned. A pinned or
+awake branch is skipped, with a line in the daemon log, and deleted once it is
+neither. Branches do not expire unless you ask.
+
 Accepts `--json`.
+
+### `hobby reset <branch> [--allow-pause] [--yes]`
+
+Replaces the branch's data with a fresh copy of its parent's current data, the
+way Neon resets a branch from its parent. Everything written to the branch is
+lost, so it asks you to type the branch's name, as `hobby rm` does; `--yes`
+skips the prompt. The branch keeps its name, port, container and resources, so
+anything pointed at it keeps working; its database user and password become the
+parent's, which live inside the copied data.
+
+The parent is copied exactly as `hobby branch` copies a source: asleep as it
+is, awake paused for the copy and resumed. The branch is then stopped for the
+swap and started again if it was running, and both pauses are printed. A pinned
+parent or branch that is awake is refused unless you pass `--allow-pause`. A
+branch with a session in use is refused rather than cut off. Refused too: a
+project that was not made with `hobby branch` (or was branched before hobby
+recorded parents), a branch whose parent has been removed, and a branch whose
+postgres resources no longer match its parent's by name. The old data is kept
+beside the new until everything has come back up, and its path is printed if
+anything did not. Accepts `--json`.
+
+### `hobby expire <branch> <duration>`
+
+Sets when the daemon may delete a branch, counted from now: `hobby expire
+blog-exp 7d`. `hobby expire <branch> --never` clears it. Only a project made
+with `hobby branch` can expire. The same skip rules as `hobby branch --expires`
+apply: a pinned or awake branch is never deleted by its expiry. Accepts
+`--json`.
+
+### `hobby diff <branch>`
+
+Compares the branch's database schema with its parent's and prints a unified
+diff per postgres resource. `hobby diff <project> <other>` compares any two
+projects, with lines only in `<other>` marked `+`. Each schema comes from
+`pg_dump --schema-only` run inside the database's own container, and resources
+are matched by name; one that exists on only one side is listed, not compared.
+
+It wakes every database it compares that is asleep, and says so on stderr.
+They go back to sleep after the usual idle time: the dump itself is invisible
+to the activity check, so a diff does not keep anything awake. Exits 0 whether
+or not anything differs. Accepts `--json`, which gives each resource's status,
+its diff text and its hunks as data.
 
 ### `hobby rm <target> [--yes]`
 
@@ -348,6 +487,41 @@ Accepts `--json`.
 the hibernator is allowed to do from now on. Different tense, different verb.
 :::
 
+### `hobby allow [ls] <project>`
+
+Shows which client addresses the Postgres proxy accepts for this project's
+databases. With no allowlist (the default) it is any address that can reach
+the proxy, which is what `proxyHost` decides.
+
+### `hobby allow add <project> <address|cidr>...`
+
+Restricts the project to these IPv4 or IPv6 addresses and CIDR ranges, plus
+the box itself. Entries are stored canonical, so `192.168.1.7/24` is shown and
+removed as `192.168.1.0/24`. The list covers every postgres in the project,
+over plain TCP, TLS, cancel requests and the serverless driver's `/sql` and
+WebSocket endpoints. A refused client gets `FATAL 28000` naming the project
+and its address (HTTP 403 on `/sql`), and never wakes a sleeping database.
+
+Connections from the box itself are always accepted: loopback, and the
+docker gateway addresses its own apps and workers dial. A change applies to
+the next connection; sessions already open are not ended. `hobby branch`
+copies the list to the branch. Refusals are logged in the daemon log, at
+most one line per address per minute. Accepts `--json`.
+
+The proxy judges the address of the TCP connection it accepted. A tunnel or
+forwarder on the box (an SSH tunnel, `tailscale serve`) makes every client
+look like loopback, and loopback is always accepted.
+
+### `hobby allow rm <project> <address|cidr>...`
+
+Removes entries. Removing the last one leaves the project accepting this box
+only, never every address. Accepts `--json`.
+
+### `hobby allow off <project>`
+
+Lifts the restriction: any address that reaches the proxy may connect again.
+Accepts `--json`.
+
 ### `hobby logs <target> [--tail N]`
 
 Tails the resource's logs.
@@ -462,7 +636,7 @@ hobby sleep other            # a project named other, since blog has no resource
 Three things follow from a link, in `packages/cli/src/cli/commands.ts`:
 
 - `hobby deploy` and the `create` verbs use it when `--project` is absent.
-- `connect`, `sleep`, `wake`, `logs`, `pin`, `unpin`, `eject`, `adopt`,
+- `connect`, `sleep`, `wake`, `logs`, `pin`, `unpin`, `allow`, `eject`, `adopt`,
   `snapshot` and `snapshot ls` act on it when given no target
   (`targetOrLinked`).
 - A bare name is resolved against the linked project's resources before it is
@@ -547,6 +721,23 @@ prints `{ url }` and opens nothing.
 Sets the operator password. The prompt never echoes. A password shorter than
 12 characters is refused before the confirm prompt, and nothing is changed.
 
+## Agents
+
+### `hobby mcp`
+
+Serves the [MCP tools](/docs/reference/mcp/) over stdio, for an agent client
+to start as a subprocess. It talks to this box's daemon over the unix socket
+and never to the remote from `hobby login`
+([ADR 0018](/docs/decisions/0018-the-cli-talks-to-a-remote-daemon/)); when a
+remote is active it says so on stderr. stdout carries the protocol, so the
+verb prints nothing else there. It starts without a daemon, and each tool call
+then fails with the daemon-unreachable error. It exits when the client closes
+its stdin. Registering it with a client:
+
+```sh
+claude mcp add hobby -- hobby mcp
+```
+
 ## Snapshots
 
 A snapshot is a copy of a whole project's data, taken on this box. It is local:
@@ -604,6 +795,46 @@ Accepts `--json`.
 ### `hobby snapshot rm <project> <id> [--yes]`
 
 Deletes one snapshot, with confirmation. `--yes` skips the prompt.
+
+## Moving a database in
+
+### `hobby import <project> [--from-file <path> | --from-env <NAME>] [--resource <name>] [--schema <s>]... [--exclude-schema <s>]... [--strict]`
+
+Copies an existing Postgres database (Neon, Supabase, RDS, a server on your
+laptop, anything this box can reach) into a Hobbyist project, with stock
+`pg_dump` and `pg_restore`. The project, and a postgres resource named
+`primary`, are created when they do not exist. `--resource` names the postgres
+resource to import into, created when absent. An existing database must be
+empty: an import never restores over data, and there is no flag that makes it.
+
+The connection string is a password, so it is never an argument (an argument
+lands in shell history and in the process list). It is read from stdin by
+default, with a hidden prompt on a terminal or from a pipe; from a file with
+`--from-file`; or from an environment variable with `--from-env`, which takes
+the variable's name.
+
+```sh
+hobby import shop                                  # prompts, input hidden
+op read op://dev/neon/url | hobby import shop      # from a pipe
+hobby import shop --from-file ~/.config/neon-url   # chmod 600 first
+hobby import shop --from-env NEON_DATABASE_URL --schema public
+```
+
+`--schema` keeps only the named schemas (repeatable, `pg_dump` patterns), and
+`--exclude-schema` leaves some out. With `--schema`, the source's extensions
+that this box's image ships are copied too, into their own schemas. `--strict`
+restores in one transaction, so any error rolls the whole restore back; without
+it, `pg_restore` restores everything it can and the errors are summarised.
+
+`pg_dump` runs inside a container from the target's own image, so it cannot
+dump a server newer than that image's Postgres; that is refused before
+anything is copied, as are extensions the image does not ship. `sslmode` in the
+connection string is honoured. Prints tables, rows (estimated by `ANALYZE`),
+bytes, the duration and any restore errors. Exits 1 when `pg_restore` reported
+errors, like `pg_restore` itself. The guide is
+[Move a database into Hobbyist](/docs/guides/import/).
+
+Accepts `--json`.
 
 ## Leaving
 

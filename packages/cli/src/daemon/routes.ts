@@ -11,13 +11,14 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync } from 'node:fs'
-import { rm, rmdir } from 'node:fs/promises'
+import { rmdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   DEFAULT_PORT_BIND,
   HobbyError,
   guardFor,
   type ActivityGuardResult,
+  canonicalAllowlist,
   openDatabaseReadOnly,
   validateName,
   type AppResource,
@@ -32,7 +33,20 @@ import {
   type Resource,
 } from '@hobby.sh/core'
 import { createAppResource, deployApp, type AppSource } from '@hobby.sh/app'
-import { connectionString, createPostgres, runQuery } from '@hobby.sh/pg'
+import {
+  connectionString,
+  createPostgres,
+  missingPreloads,
+  realExtensionOps,
+  refuseMissingPreloads,
+  reportExtensions,
+  runQuery,
+  settingCatalog,
+  settingsCommand,
+  validateExtensionNames,
+  validateSettings,
+  type ExtensionReport,
+} from '@hobby.sh/pg'
 import {
   DEFAULT_RETENTION_SECONDS,
   MAX_RETENTION_SECONDS,
@@ -61,10 +75,16 @@ import {
   resolveWorkerSourcePath,
 } from '@hobby.sh/worker'
 import { branchProject } from './branch.js'
+import { parseExpiresInSeconds, setBranchExpiry } from './expiry.js'
+import { resetBranch } from './reset.js'
+import { applyPostgresSettings } from './pg-settings.js'
+import { diffSchemas } from './schema-diff.js'
 import { CLI_VERSION } from '../version.js'
 import { listCrons } from './crons.js'
 import { clearWakeRefusal, getOrCreateWake, waitForProjectAwakeable, wakeBoundDatabase, type DaemonContext } from './context.js'
+import { readImportRequest, runImport } from './import.js'
 import { runPreflight } from './preflight.js'
+import { treeOpsFor } from './tree-ops.js'
 import {
   deleteSnapshot,
   findSnapshot,
@@ -293,6 +313,53 @@ async function setSleepPolicyRoute(ctx: DaemonContext, req: IncomingMessage, nam
   return { status: 200, body: { project: ctx.store.getProject(project.id) } }
 }
 
+// GET, POST and DELETE /v1/projects/:name/allowlist: which client addresses
+// the wake-on-connect proxy accepts for this project (the 2026-11-17
+// allowlist amendment in docs/proxy/CLAUDE.md). The list lives on the project
+// row and the proxy reads it per connection (createProxyDeps), so a change
+// applies to the next connection; sessions already open are not cut.
+//
+// POST adds and removes entries, canonicalised (core's canonicalAllowlist),
+// so `10.1.2.3/8` is stored and removed as `10.0.0.0/8`. Adding to an open
+// project restricts it. Removing the last entry leaves it restricted to the
+// box itself: taking an address away must never open the project to every
+// address. Only DELETE lifts the restriction, which is `hobby allow off`.
+async function setAllowlistRoute(ctx: DaemonContext, req: IncomingMessage, name: string): Promise<RouteResult> {
+  const route = 'POST /v1/projects/:name/allowlist'
+  const expects = `${route} expects { "add"?: string[], "remove"?: string[] }`
+  const project = getProjectByNameOrThrow(ctx, name)
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const entriesOf = (raw: unknown, field: string): string[] => {
+    if (raw === undefined) return []
+    if (!Array.isArray(raw) || raw.some((entry) => typeof entry !== 'string')) {
+      throw new HobbyError('usage', `${field} must be an array of strings`, expects)
+    }
+    return canonicalAllowlist(raw as string[])
+  }
+  const add = entriesOf(fields['add'], 'add')
+  const remove = entriesOf(fields['remove'], 'remove')
+  if (add.length === 0 && remove.length === 0) {
+    throw new HobbyError('usage', 'nothing to change', expects)
+  }
+  const both = add.filter((entry) => remove.includes(entry))
+  if (both.length > 0) {
+    throw new HobbyError('usage', `${both.join(', ')} is both added and removed in one request`)
+  }
+  const current = project.allowlist ?? []
+  const absent = remove.filter((entry) => !current.includes(entry))
+  if (absent.length > 0) {
+    throw new HobbyError(
+      'not_found',
+      `${absent.join(', ')} ${absent.length === 1 ? 'is' : 'are'} not on project ${project.name}'s allowlist`,
+      current.length === 0 ? 'its allowlist is empty' : `it holds: ${current.join(', ')}`
+    )
+  }
+  const next = canonicalAllowlist([...current.filter((entry) => !remove.includes(entry)), ...add])
+  ctx.store.setProjectAllowlist(project.id, next)
+  return { status: 200, body: { project: ctx.store.getProject(project.id) } }
+}
+
 // What a browser or curl reaches an app or worker at. With Caddy, its
 // hostname over TLS; without, the daemon's own HTTP router on httpPort,
 // which is the only thing listening (issue #94: the CLI used to print an
@@ -354,6 +421,13 @@ async function getProjectRoute(ctx: DaemonContext, name: string): Promise<RouteR
 // itself is gone. Marking each resource `destroying` before tearing it down
 // is what lets reconcile resume this exact operation if the daemon dies
 // partway through it, see reconcile.ts.
+// Exported for the branch expiry sweep (expiry.ts), which deletes an
+// expired branch through exactly the teardown `hobby rm` runs rather than a
+// second one.
+export async function deleteProject(ctx: DaemonContext, name: string): Promise<void> {
+  await deleteProjectRoute(ctx, name)
+}
+
 async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<RouteResult> {
   const project = getProjectByNameOrThrow(ctx, name)
   const resources = ctx.store.listResources(project.id)
@@ -400,10 +474,16 @@ async function deleteProjectRoute(ctx: DaemonContext, name: string): Promise<Rou
   // branching to that name fail with "destination already exists" (issue
   // #178). Only attempted once every kind succeeded: a failed teardown
   // leaves its data where it is for the manual cleanup the error names.
+  //
+  // A worker's state directory holds files its container wrote as root, so
+  // a non-root daemon on Linux is refused here; tree-ops.ts retries as root
+  // in a container. Its image candidates come from `resources`, listed
+  // before the kinds ran, because destroyWorker has removed the worker's own
+  // image by now and tree-ops.ts falls back to images that stay local.
   const projectDir = join(ctx.paths.projectsDir, project.name)
   if (failures.length === 0) {
     try {
-      await rm(projectDir, { recursive: true, force: true })
+      await treeOpsFor(ctx, resources).remove(projectDir)
     } catch (err) {
       failures.push(`remove ${projectDir}: ${errorMessage(err)}`)
     }
@@ -491,14 +571,18 @@ async function branchProjectRoute(ctx: DaemonContext, req: IncomingMessage, sour
     throw new HobbyError(
       'usage',
       'name is required',
-      'POST /v1/projects/:name/branch expects { "name": string, "allowPause"?: boolean }'
+      'POST /v1/projects/:name/branch expects { "name": string, "allowPause"?: boolean, "expiresInSeconds"?: number }'
     )
   }
   const allowPause = fields['allowPause']
   if (allowPause !== undefined && typeof allowPause !== 'boolean') {
     throw new HobbyError('usage', 'allowPause must be a boolean', 'send true to accept pausing a pinned project')
   }
-  const result = await branchProject(ctx, sourceName, name, { allowPause: allowPause === true })
+  // Resolved against the daemon's clock, before anything is cloned, so a
+  // malformed expiry refuses the branch rather than leaving one behind.
+  const expiresInSeconds = parseExpiresInSeconds(fields['expiresInSeconds'], 'POST /v1/projects/:name/branch')
+  const expiresAt = expiresInSeconds === undefined || expiresInSeconds === null ? null : new Date(Date.now() + expiresInSeconds * 1000)
+  const result = await branchProject(ctx, sourceName, name, { allowPause: allowPause === true, expiresAt })
   return {
     status: 201,
     body: {
@@ -510,6 +594,64 @@ async function branchProjectRoute(ctx: DaemonContext, req: IncomingMessage, sour
       resumeFailures: result.resumeFailures,
     },
   }
+}
+
+// POST /v1/projects/:name/reset: replace a branch's data with a fresh clone
+// of its parent's (reset.ts has the order and every refusal). Destructive
+// for the branch, so the CLI and MCP gate it on a typed confirmation and
+// confirm: true respectively, as they gate `rm`; the route itself takes the
+// same allowPause override `branch` does, as a literal boolean only.
+async function resetBranchRoute(ctx: DaemonContext, req: IncomingMessage, name: string): Promise<RouteResult> {
+  const route = 'POST /v1/projects/:name/reset'
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const allowPause = readOptionalBoolean(fields, 'allowPause', route)
+  const result = await resetBranch(ctx, name, { allowPause })
+  return {
+    status: 200,
+    body: {
+      project: result.project,
+      parent: result.parent.name,
+      resources: await toWireResources(ctx, result.resources),
+      clone: result.clone,
+      parentPaused: result.parentPaused,
+      parentPausedMs: result.parentPausedMs,
+      parentResumeFailures: result.parentResumeFailures,
+      paused: result.paused,
+      pausedMs: result.pausedMs,
+      restartFailures: result.restartFailures,
+      preResetDirs: result.preResetDirs,
+    },
+  }
+}
+
+// POST /v1/projects/:name/expiry: set (`expiresInSeconds`: a number of
+// seconds from now, on the daemon's clock) or clear (`null`) a branch's
+// expiry. The field is required, so an empty body is a usage error rather
+// than a silent clear. Refused for a project that was not made as a branch.
+async function setExpiryRoute(ctx: DaemonContext, req: IncomingMessage, name: string): Promise<RouteResult> {
+  const route = 'POST /v1/projects/:name/expiry'
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const expiresInSeconds = parseExpiresInSeconds(fields['expiresInSeconds'], route)
+  if (expiresInSeconds === undefined) {
+    throw new HobbyError('usage', 'expiresInSeconds is required', `${route} expects { "expiresInSeconds": number | null }, null to clear it`)
+  }
+  const project = setBranchExpiry(ctx, name, expiresInSeconds, Date.now())
+  return { status: 200, body: { project } }
+}
+
+// POST /v1/projects/:name/diff: the schema of :name compared against
+// `against`, or against its recorded parent when that is absent. A POST and
+// not a GET because it wakes every database it compares (schema-diff.ts).
+async function diffSchemasRoute(ctx: DaemonContext, req: IncomingMessage, name: string): Promise<RouteResult> {
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const against = fields['against']
+  if (against !== undefined && (typeof against !== 'string' || against.length === 0)) {
+    throw new HobbyError('usage', 'against must be a project name', 'POST /v1/projects/:name/diff expects { "against"?: string }')
+  }
+  return { status: 200, body: await diffSchemas(ctx, name, against) }
 }
 
 // The default port an app's process is asked to listen on. Handed to the
@@ -751,7 +893,12 @@ async function createResourceRoute(
   }
 
   if (kind === 'postgres') {
-    return { resource: await createPostgres(ctx, { project, name }), ignored: [], logs: '' }
+    const extensions =
+      fields['extensions'] === undefined
+        ? []
+        : validateExtensionNames(fields['extensions'], 'POST /v1/projects/:name/resources')
+    const settings = validateSettings(fields['settings'], 'POST /v1/projects/:name/resources')
+    return { resource: await createPostgres(ctx, { project, name, extensions, settings }), ignored: [], logs: '' }
   }
 
   if (kind === 'app') {
@@ -1604,6 +1751,17 @@ function renderCompose(
     // departing user a stack that exits 1 on `docker compose up`, which
     // would break eject's whole reason to exist.
     lines.push(`      - "${cfg.dataDir}:/var/lib/postgresql"`)
+    // The same server arguments containerSpec gives the container hobby
+    // runs (settingsCommand, packages/pg/src/settings.ts), so the ejected
+    // stack starts with the settings it was running with (ADR 0003
+    // invariant 3). Absent when none are declared, which leaves the
+    // image's own CMD, as before. A flow sequence of JSON strings is valid
+    // YAML, and every value was allowlisted and normalized, so none needs
+    // escaping beyond the quotes.
+    const command = settingsCommand(cfg.settings)
+    if (command.length > 0) {
+      lines.push(`    command: [${command.map((arg) => JSON.stringify(arg)).join(', ')}]`)
+    }
   }
 
   for (const app of apps) {
@@ -1815,6 +1973,156 @@ async function queryRoute(ctx: DaemonContext, req: IncomingMessage, id: string):
     return { status: 200, body: result }
   } finally {
     ctx.activity.touch(ready.id)
+  }
+}
+
+// GET and POST /v1/resources/:id/extensions: the declared extensions of a
+// postgres resource, and what its database actually has installed, with
+// versions (docs/engine/CLAUDE.md, 2026-11-17 amendment).
+//
+// Both wake a sleeping database the way the query route does, through the
+// same single-flight getOrCreateWake: "what is installed" is a question
+// only a running Postgres can answer, and asking it is an explicit,
+// per-resource request (like Studio's SQL), never a list page. The
+// declared list alone is on every wire resource (config.extensions) and
+// costs no wake. Every connection here carries HOBBY_APPLICATION_NAME, so
+// it never counts as someone using the database.
+//
+// POST { add?: string[], remove?: string[] }. `add` is applied with
+// CREATE EXTENSION IF NOT EXISTS ... CASCADE before the declaration is
+// written, so a name the image does not ship is refused and the stored
+// declaration never names something that is not there. The whole declared
+// list is re-applied, not just the additions, which also repairs one that
+// was dropped by hand. `remove` only undeclares: nothing is ever dropped,
+// because DROP EXTENSION drops the objects that depend on it, and a
+// platform that deletes a column of vectors because a list got shorter is
+// the "losing data quietly" this project refuses to ship. A remove-only
+// change touches no running Postgres and wakes nothing.
+function declaredExtensions(resource: PostgresResource): string[] {
+  return resource.config.extensions ?? []
+}
+
+async function wakeForExtensions(ctx: DaemonContext, resource: PostgresResource): Promise<PostgresResource> {
+  if (resource.state !== 'running') {
+    await getOrCreateWake(ctx)(resource.id)
+  }
+  return expectPostgres(getResourceOrThrow(ctx, resource.id), 'extensions')
+}
+
+async function getExtensionsRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
+  const resource = await wakeForExtensions(ctx, expectPostgres(getResourceOrThrow(ctx, id), 'extensions'))
+  ctx.activity.touch(resource.id)
+  const installed = await (ctx.extensions ?? realExtensionOps).list(resource.config)
+  const report: ExtensionReport = reportExtensions(declaredExtensions(resource), installed, resource.config.settings)
+  return { status: 200, body: { extensions: report } }
+}
+
+async function setExtensionsRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
+  const route = 'POST /v1/resources/:id/extensions'
+  const resource = expectPostgres(getResourceOrThrow(ctx, id), 'extensions')
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const add = fields['add'] === undefined ? [] : validateExtensionNames(fields['add'], route)
+  const remove = fields['remove'] === undefined ? [] : validateExtensionNames(fields['remove'], route)
+  if (add.length === 0 && remove.length === 0) {
+    throw new HobbyError('usage', 'nothing to change', `${route} expects { "add"?: string[], "remove"?: string[] }`)
+  }
+  const both = add.filter((name) => remove.includes(name))
+  if (both.length > 0) {
+    throw new HobbyError('usage', `${both.join(', ')} is both added and removed in one request`)
+  }
+
+  const current = declaredExtensions(resource)
+  const next = [...current.filter((name) => !remove.includes(name)), ...add.filter((name) => !current.includes(name))]
+
+  // Before any wake: an added extension that only works with a preloaded
+  // library (pg_stat_statements) is refused while that library is not in
+  // the resource's shared_preload_libraries, and the hint is the exact
+  // `hobby pg config set` that preloads it. Once it is preloaded, the add
+  // goes ahead as any other.
+  if (add.length > 0) {
+    const project = getOwningProjectOrThrow(ctx, resource)
+    refuseMissingPreloads(missingPreloads(add, resource.config.settings), resource.config.settings, `${project.name}/${resource.name}`)
+  }
+
+  if (add.length === 0) {
+    ctx.store.updateResourceConfig(resource.id, { ...resource.config, extensions: next })
+    const installed =
+      resource.state === 'running' ? await (ctx.extensions ?? realExtensionOps).list(resource.config) : null
+    return { status: 200, body: { extensions: reportExtensions(next, installed, resource.config.settings), removed: remove } }
+  }
+
+  const ready = await wakeForExtensions(ctx, resource)
+  ctx.activity.touch(ready.id)
+  try {
+    const installed = await (ctx.extensions ?? realExtensionOps).apply(ready.config, next)
+    // Re-read before writing: the wake may have changed state, never config,
+    // but the write must not resurrect a stale state field either.
+    const latest = expectPostgres(getResourceOrThrow(ctx, id), 'extensions')
+    ctx.store.updateResourceConfig(latest.id, { ...latest.config, extensions: next })
+    return { status: 200, body: { extensions: reportExtensions(next, installed, latest.config.settings), removed: remove } }
+  } finally {
+    ctx.activity.touch(ready.id)
+  }
+}
+
+// GET and POST /v1/resources/:id/settings: the server settings a postgres
+// resource declares (packages/pg/src/settings.ts for the allowlist,
+// packages/cli/src/daemon/pg-settings.ts for how a change is applied).
+//
+// GET never wakes anything: the declaration is the stored config, and what
+// Postgres runs with is exactly that, as command-line arguments, from the
+// next start on. It also carries the allowlist (`available`), so the CLI
+// and MCP can show ranges and docs links without a second route.
+//
+// POST { set?: { name: value }, unset?: string[], allowPause?: boolean }.
+// A sleeping database gets a new stopped container at once and the
+// settings on its next wake; an awake one is restarted, which is a pause,
+// so a pinned project needs allowPause.
+async function getSettingsRoute(ctx: DaemonContext, id: string): Promise<RouteResult> {
+  const resource = expectPostgres(getResourceOrThrow(ctx, id), 'settings')
+  return {
+    status: 200,
+    body: {
+      settings: resource.config.settings ?? {},
+      needsPreload: missingPreloads(resource.config.extensions ?? [], resource.config.settings),
+      available: settingCatalog(),
+    },
+  }
+}
+
+async function setSettingsRoute(ctx: DaemonContext, req: IncomingMessage, id: string): Promise<RouteResult> {
+  const route = 'POST /v1/resources/:id/settings'
+  const resource = expectPostgres(getResourceOrThrow(ctx, id), 'settings')
+  const body = await readJsonBody(req)
+  const fields = isRecord(body) ? body : {}
+  const set = fields['set']
+  const unset = fields['unset']
+  if (set !== undefined && !isRecord(set)) {
+    throw new HobbyError('usage', 'set must be an object of name to value', `${route} expects { "set": { "shared_buffers": "256MB" } }`)
+  }
+  if (unset !== undefined && (!Array.isArray(unset) || unset.some((name) => typeof name !== 'string'))) {
+    throw new HobbyError('usage', 'unset must be an array of setting names', `${route} expects { "unset": ["shared_buffers"] }`)
+  }
+  if ((set === undefined || Object.keys(set).length === 0) && (unset === undefined || unset.length === 0)) {
+    throw new HobbyError('usage', 'nothing to change', `${route} expects { "set"?: object, "unset"?: string[], "allowPause"?: boolean }`)
+  }
+  const allowPause = readOptionalBoolean(fields, 'allowPause', route)
+  const project = getOwningProjectOrThrow(ctx, resource)
+  const result = await applyPostgresSettings(ctx, project, resource, {
+    ...(set !== undefined ? { set } : {}),
+    ...(unset !== undefined ? { unset: unset as string[] } : {}),
+    allowPause,
+  })
+  return {
+    status: 200,
+    body: {
+      resource: await toWireResource(ctx, result.resource),
+      settings: result.settings,
+      applied: result.applied,
+      pausedMs: result.pausedMs,
+      needsPreload: result.needsPreload,
+    },
   }
 }
 
@@ -2667,6 +2975,15 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
     return { status: 200, body: { version: CLI_VERSION } }
   }
 
+  // POST /v1/import: copy an existing Postgres into a hobby resource
+  // (import.ts). The body carries the source connection string, which is a
+  // credential: no route echoes a request body, and runImport redacts
+  // everything it surfaces.
+  if (method === 'POST' && segments.length === 2 && segments[1] === 'import') {
+    const request = readImportRequest(await readJsonBody(req))
+    return { status: 200, body: { import: await runImport(ctx, request, { deleteProject }) } }
+  }
+
   if (method === 'GET' && segments.length === 2 && segments[1] === 'preflight') {
     return { status: 200, body: await runPreflight(ctx) }
   }
@@ -2716,6 +3033,21 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       return { status: 200, body: { crons: listCrons(ctx, name) } }
     }
 
+    if (segments.length === 4 && segments[3] === 'allowlist') {
+      const name = decodeURIComponent(segments[2] as string)
+      if (method === 'GET') {
+        return { status: 200, body: { project: getProjectByNameOrThrow(ctx, name) } }
+      }
+      if (method === 'POST') {
+        return await setAllowlistRoute(ctx, req, name)
+      }
+      if (method === 'DELETE') {
+        const project = getProjectByNameOrThrow(ctx, name)
+        ctx.store.setProjectAllowlist(project.id, null)
+        return { status: 200, body: { project: ctx.store.getProject(project.id) } }
+      }
+    }
+
     if (segments.length === 4 && method === 'POST' && segments[3] === 'sleep-policy') {
       const name = decodeURIComponent(segments[2] as string)
       return await setSleepPolicyRoute(ctx, req, name)
@@ -2724,6 +3056,18 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
     if (segments.length === 4 && method === 'POST' && segments[3] === 'branch') {
       const name = decodeURIComponent(segments[2] as string)
       return await branchProjectRoute(ctx, req, name)
+    }
+
+    if (segments.length === 4 && method === 'POST' && segments[3] === 'reset') {
+      return await resetBranchRoute(ctx, req, decodeURIComponent(segments[2] as string))
+    }
+
+    if (segments.length === 4 && method === 'POST' && segments[3] === 'expiry') {
+      return await setExpiryRoute(ctx, req, decodeURIComponent(segments[2] as string))
+    }
+
+    if (segments.length === 4 && method === 'POST' && segments[3] === 'diff') {
+      return await diffSchemasRoute(ctx, req, decodeURIComponent(segments[2] as string))
     }
 
     if (segments.length === 4 && method === 'POST' && segments[3] === 'eject') {
@@ -2779,6 +3123,10 @@ async function dispatch(ctx: DaemonContext, req: IncomingMessage): Promise<Route
       if (method === 'GET' && action === 'connection') return connectionRoute(ctx, id)
       if (method === 'GET' && action === 'logs') return logsRoute(ctx, id, url)
       if (method === 'POST' && action === 'query') return queryRoute(ctx, req, id)
+      if (method === 'GET' && action === 'extensions') return getExtensionsRoute(ctx, id)
+      if (method === 'POST' && action === 'extensions') return setExtensionsRoute(ctx, req, id)
+      if (method === 'GET' && action === 'settings') return getSettingsRoute(ctx, id)
+      if (method === 'POST' && action === 'settings') return setSettingsRoute(ctx, req, id)
       if (method === 'POST' && action === 'deploy') return deployResourceRoute(ctx, req, id)
       if (method === 'POST' && action === 'env') return envRoute(ctx, req, id)
     }

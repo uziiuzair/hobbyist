@@ -12,7 +12,7 @@
 // invents a new route or a new capability.
 
 import { HobbyError, parseTarget } from '@hobby.sh/core'
-import { DaemonUnreachableError, resolveQueueTarget, resolveTarget, type Api } from '@hobby.sh/cli'
+import { DaemonUnreachableError, parseDuration, resolveImportSource, resolveQueueTarget, resolveTarget, type Api } from '@hobby.sh/cli'
 
 // The MCP SDK's CallToolResult shape, reproduced by hand rather than
 // imported, so this file has zero dependency on @modelcontextprotocol/sdk.
@@ -63,12 +63,49 @@ export interface ListArgs {
 
 export interface NewArgs {
   name: string
+  extensions?: string[]
+  settings?: Record<string, string>
+}
+
+export interface PgConfigSetArgs {
+  target: string
+  settings: Record<string, string>
+  allowPause?: boolean
+}
+
+export interface PgConfigUnsetArgs {
+  target: string
+  names: string[]
+  allowPause?: boolean
+}
+
+export interface PgExtArgs {
+  target: string
+  extensions: string[]
 }
 
 export interface BranchArgs {
   source: string
   name: string
   allowPause?: boolean
+  expires?: string
+}
+
+export interface ResetArgs {
+  branch: string
+  allowPause?: boolean
+  confirm: boolean
+}
+
+export interface ExpireArgs {
+  branch: string
+  // A duration such as "7d", or null to clear the expiry.
+  expires: string | null
+}
+
+export interface DiffArgs {
+  project: string
+  against?: string
 }
 
 export interface TargetArgs {
@@ -125,6 +162,16 @@ export interface QueueRmArgs {
   confirm: boolean
 }
 
+export interface ImportArgs {
+  project: string
+  resource?: string
+  sourceEnv?: string
+  sourceFile?: string
+  schemas?: string[]
+  excludeSchemas?: string[]
+  strict?: boolean
+}
+
 export interface QueueSetRetentionArgs {
   target: string
   retentionSeconds: number
@@ -164,7 +211,12 @@ export async function listTool(api: Api): Promise<ToolResult> {
 export async function newTool(api: Api, args: NewArgs): Promise<ToolResult> {
   return run(async () => {
     const { project } = await api.createProject(args.name)
-    const { resource } = await api.createResource(project.name, { kind: 'postgres', name: 'primary' })
+    const { resource } = await api.createResource(project.name, {
+      kind: 'postgres',
+      name: 'primary',
+      ...(args.extensions !== undefined && args.extensions.length > 0 ? { extensions: args.extensions } : {}),
+      ...(args.settings !== undefined && Object.keys(args.settings).length > 0 ? { settings: args.settings } : {}),
+    })
     return {
       project,
       resource,
@@ -179,8 +231,57 @@ export async function newTool(api: Api, args: NewArgs): Promise<ToolResult> {
 // agent exactly as they do to a person. allowPause is passed through only
 // when the agent set it, never defaulted to true: pausing a project someone
 // pinned awake is not a choice this layer gets to make for them.
+//
+// `expires` is parsed with the CLI's own parseDuration (packages/cli/src/cli/
+// output.ts), so "7d" means the same thing to an agent as to `hobby branch
+// --expires 7d`, and is sent only when the agent set it.
 export async function branchTool(api: Api, args: BranchArgs): Promise<ToolResult> {
-  return run(async () => await api.branchProject(args.source, args.name, { allowPause: args.allowPause === true }))
+  return run(async () => {
+    const expiresInSeconds = args.expires === undefined ? undefined : durationOrThrow(args.expires)
+    return await api.branchProject(args.source, args.name, {
+      allowPause: args.allowPause === true,
+      ...(expiresInSeconds === undefined ? {} : { expiresInSeconds }),
+    })
+  })
+}
+
+function durationOrThrow(text: string): number {
+  const seconds = parseDuration(text)
+  if (seconds === null) {
+    throw new HobbyError('usage', `not a duration: ${text}`, 'use a whole number with a unit, for example "7d", "36h", "1d12h" or "90m"')
+  }
+  return seconds
+}
+
+// Mirrors `hobby reset <branch>`: the branch's data is replaced by a fresh
+// copy of its parent's, which destroys the branch's own changes. Gated on
+// confirm: true exactly as hobby_rm is, with no request made otherwise, and
+// allowPause passed through only when the agent set it.
+export async function resetTool(api: Api, args: ResetArgs): Promise<ToolResult> {
+  return run(async () => {
+    if (args.confirm !== true) {
+      throw new HobbyError(
+        'usage',
+        `hobby_reset refused: confirm must be true to reset "${args.branch}"`,
+        'this replaces the branch\'s data with a copy of its parent\'s, and everything written to the branch is lost; ' +
+          'call hobby_reset again with confirm: true only once that is actually intended'
+      )
+    }
+    return await api.resetBranch(args.branch, { allowPause: args.allowPause === true })
+  })
+}
+
+// Mirrors `hobby expire <branch> <duration>` and `hobby expire <branch>
+// --never` (expires: null).
+export async function expireTool(api: Api, args: ExpireArgs): Promise<ToolResult> {
+  return run(async () => await api.setExpiry(args.branch, args.expires === null ? null : durationOrThrow(args.expires)))
+}
+
+// Mirrors `hobby diff`: `project` is the side whose additions are `+`, and
+// `against` the other side, defaulting to project's parent. The same route,
+// so it wakes the same databases.
+export async function diffTool(api: Api, args: DiffArgs): Promise<ToolResult> {
+  return run(async () => await api.diffSchemas(args.project, args.against))
 }
 
 // Mirrors `hobby connect <target>`'s data path (not its psql exec: an
@@ -282,6 +383,87 @@ export async function envListTool(api: Api, args: TargetArgs): Promise<ToolResul
       ...(kind === 'worker' ? { vars: Object.keys(manifest?.vars ?? {}).sort() } : {}),
     }
   })
+}
+
+// The extension tools mirror `hobby pg ext ls|add|rm` over
+// GET/POST /v1/resources/:id/extensions. ls and add wake a sleeping
+// database (only a running Postgres can say what it has installed); rm
+// only undeclares and never drops anything.
+async function pgResourceId(api: Api, target: string, what: string = 'extensions'): Promise<string> {
+  const { resource } = await resolveTarget(api, target)
+  if (resource.kind !== 'postgres') {
+    throw new HobbyError('usage', `${target} is a ${resource.kind}, and only a postgres resource has ${what}`)
+  }
+  return resource.id
+}
+
+export async function pgExtListTool(api: Api, args: TargetArgs): Promise<ToolResult> {
+  return run(async () => await api.getExtensions(await pgResourceId(api, args.target)))
+}
+
+export async function pgExtAddTool(api: Api, args: PgExtArgs): Promise<ToolResult> {
+  return run(async () => await api.setExtensions(await pgResourceId(api, args.target), { add: args.extensions }))
+}
+
+export async function pgExtRmTool(api: Api, args: PgExtArgs): Promise<ToolResult> {
+  return run(async () => await api.setExtensions(await pgResourceId(api, args.target), { remove: args.extensions }))
+}
+
+// The allowlist tools mirror `hobby allow ls|add|rm|off` over
+// GET/POST/DELETE /v1/projects/:name/allowlist. Each returns the project,
+// whose `allowlist` is null (open to any address), [] (this box only) or the
+// canonical entries.
+export interface ProjectArgs {
+  project: string
+}
+
+export interface AllowArgs {
+  project: string
+  entries: string[]
+}
+
+export async function allowListTool(api: Api, args: ProjectArgs): Promise<ToolResult> {
+  return run(async () => await api.getAllowlist(args.project))
+}
+
+export async function allowAddTool(api: Api, args: AllowArgs): Promise<ToolResult> {
+  return run(async () => await api.setAllowlist(args.project, { add: args.entries }))
+}
+
+export async function allowRmTool(api: Api, args: AllowArgs): Promise<ToolResult> {
+  return run(async () => await api.setAllowlist(args.project, { remove: args.entries }))
+}
+
+export async function allowOffTool(api: Api, args: ProjectArgs): Promise<ToolResult> {
+  return run(async () => await api.clearAllowlist(args.project))
+}
+
+// The settings tools mirror `hobby pg config ls|set|unset` over
+// GET/POST /v1/resources/:id/settings. ls never wakes anything. set and
+// unset restart an awake database (a pause; a pinned project needs
+// allowPause) and apply to a sleeping one on its next wake.
+export async function pgConfigListTool(api: Api, args: TargetArgs): Promise<ToolResult> {
+  return run(async () => await api.getSettings(await pgResourceId(api, args.target, 'settings')))
+}
+
+export async function pgConfigSetTool(api: Api, args: PgConfigSetArgs): Promise<ToolResult> {
+  return run(
+    async () =>
+      await api.setSettings(await pgResourceId(api, args.target, 'settings'), {
+        set: args.settings,
+        allowPause: args.allowPause === true,
+      })
+  )
+}
+
+export async function pgConfigUnsetTool(api: Api, args: PgConfigUnsetArgs): Promise<ToolResult> {
+  return run(
+    async () =>
+      await api.setSettings(await pgResourceId(api, args.target, 'settings'), {
+        unset: args.names,
+        allowPause: args.allowPause === true,
+      })
+  )
 }
 
 export async function rmTool(api: Api, args: RmArgs): Promise<ToolResult> {
@@ -405,5 +587,52 @@ export async function queueSetRetentionTool(api: Api, args: QueueSetRetentionArg
   return run(async () => {
     const { resource } = await resolveQueueTarget(api, args.target)
     return await api.setRetention(resource.id, args.retentionSeconds)
+  })
+}
+
+// Mirrors `hobby import <project> --from-env NAME` and `--from-file PATH`.
+// There is deliberately no argument that takes the connection string
+// itself, and no stdin form: anything a model passes as a tool argument is
+// in the conversation, the client's transcript on disk and the provider's
+// context, and a model asked to "import my Neon database" would otherwise
+// be invited to ask for the password and paste it in. Instead the person
+// puts the string where this server process can read it (an environment
+// variable in the MCP server's configuration, or a chmod 600 file) and the
+// model names the reference. This process resolves it with the CLI's own
+// resolveImportSource, so the two surfaces accept the same references and
+// say the same things when one is wrong, and sends it to the daemon over
+// the unix socket. The value never comes back: the daemon's report holds
+// the source's host and database name only, and every error from the
+// daemon is redacted (packages/cli/src/daemon/import.ts).
+//
+// The reference cannot widen what a model could already do: a variable or
+// file that is not a Postgres connection string is refused without its
+// content being quoted, and the import only reads from the source.
+export async function importTool(api: Api, args: ImportArgs): Promise<ToolResult> {
+  return run(async () => {
+    if ((args.sourceEnv === undefined) === (args.sourceFile === undefined)) {
+      throw new HobbyError(
+        'usage',
+        'hobby_import needs exactly one of sourceEnv or sourceFile',
+        'the connection string is never a tool argument: ask the person to set it in an environment variable of this MCP server, ' +
+          'or write it to a file only they can read (chmod 600), and pass the variable name or the path'
+      )
+    }
+    const source = await resolveImportSource(
+      {
+        ...(args.sourceEnv === undefined ? {} : { fromEnv: args.sourceEnv }),
+        ...(args.sourceFile === undefined ? {} : { fromFile: args.sourceFile }),
+      },
+      process.env,
+      null
+    )
+    return await api.importDatabase({
+      project: args.project,
+      source,
+      ...(args.resource === undefined ? {} : { resource: args.resource }),
+      ...(args.schemas !== undefined && args.schemas.length > 0 ? { schemas: args.schemas } : {}),
+      ...(args.excludeSchemas !== undefined && args.excludeSchemas.length > 0 ? { excludeSchemas: args.excludeSchemas } : {}),
+      ...(args.strict === true ? { strict: true } : {}),
+    })
   })
 }

@@ -14,6 +14,7 @@ import http from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { HobbyError, type ErrorCode, type Project } from '@hobby.sh/core'
 import type { WireResource, WireSnapshotManifest } from '../daemon/wire.js'
+import type { ImportReport } from '../daemon/import.js'
 
 // Thrown when the socket does not exist, or exists but nothing answers on
 // it (a stale file, or the daemon crashed). Deliberately not a HobbyError:
@@ -221,6 +222,61 @@ export interface CronListEntry {
 export interface CronListResponse {
   crons: CronListEntry[]
 }
+// GET and POST /v1/resources/:id/extensions. `installed` and `missing` are
+// null only when the database was not read (a remove-only change to a
+// sleeping one); a GET always wakes it and reads.
+export interface ExtensionsResponse {
+  extensions: {
+    declared: string[]
+    installed: Array<{ name: string; version: string }> | null
+    missing: string[] | null
+    // Declared or installed extensions whose library is not preloaded
+    // (packages/pg/src/settings.ts, EXTENSION_PRELOADS).
+    needsPreload?: PreloadGap[]
+  }
+  // POST only: names undeclared by this call. Never dropped from the database.
+  removed?: string[]
+}
+
+export interface PreloadGap {
+  extension: string
+  library: string
+  allowed: boolean
+}
+
+// One allowlisted server setting, as GET /v1/resources/:id/settings
+// reports it (settingCatalog, packages/pg/src/settings.ts).
+export interface SettingInfo {
+  name: string
+  type: string
+  context: string
+  restartRequired: boolean
+  default: string
+  summary: string
+  docs: string
+  min?: string
+  max?: string
+  values?: string[]
+  library?: string
+}
+
+export interface SettingsResponse {
+  settings: Record<string, string>
+  needsPreload: PreloadGap[]
+  available: SettingInfo[]
+}
+
+export interface SetSettingsResponse {
+  resource: WireResource
+  settings: Record<string, string>
+  // unchanged: nothing differed. next-start: it was asleep; its container
+  // was replaced and the settings apply on its next wake. restarted: it
+  // was awake and was restarted with them.
+  applied: 'unchanged' | 'next-start' | 'restarted'
+  pausedMs: number | null
+  needsPreload: PreloadGap[]
+}
+
 export interface EnvResponse {
   resource: WireResource
   keys: string[]
@@ -237,6 +293,42 @@ export interface BranchResponse {
   paused: string[]
   pausedMs: number | null
   resumeFailures: string[]
+}
+// POST /v1/projects/:name/reset. packages/cli/src/daemon/reset.ts's
+// ResetResult, with the parent given by name.
+export interface ResetResponse {
+  project: Project
+  parent: string
+  resources: WireResource[]
+  clone: 'reflink' | 'copy'
+  parentPaused: string[]
+  parentPausedMs: number | null
+  parentResumeFailures: string[]
+  paused: string[]
+  pausedMs: number | null
+  restartFailures: string[]
+  preResetDirs: string[]
+}
+// POST /v1/projects/:name/diff. packages/cli/src/daemon/schema-diff.ts's
+// SchemaDiffResult.
+export interface SchemaDiffHunk {
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  lines: Array<{ op: ' ' | '-' | '+'; text: string }>
+}
+export interface SchemaDiffResponse {
+  old: { project: string }
+  new: { project: string }
+  resources: Array<{
+    name: string
+    status: 'same' | 'changed' | 'only-old' | 'only-new'
+    diff: string
+    hunks: SchemaDiffHunk[]
+  }>
+  woke: string[]
+  identical: boolean
 }
 export interface DeletedResponse {
   deleted: true
@@ -349,6 +441,16 @@ export interface SnapshotRestoreResponse {
   preRestoreDir: string | null
 }
 
+export interface ImportInput {
+  project: string
+  source: string
+  resource?: string
+  schemas?: string[]
+  excludeSchemas?: string[]
+  strict?: boolean
+}
+export type { ImportReport }
+
 export interface Api {
   health(): Promise<HealthResponse>
   version(): Promise<VersionResponse>
@@ -360,15 +462,32 @@ export interface Api {
   // Undefined sends no field, and the daemon applies its own default
   // (issue #110): the box-wide value, not this process's.
   setSleepPolicy(project: string, sleepAfterSeconds: number | null | undefined): Promise<ProjectResponse>
+  // The project's IP allowlist for the wake-on-connect proxy, carried on the
+  // returned project as `allowlist` (null: open to any address).
+  // GET, POST and DELETE /v1/projects/:name/allowlist.
+  getAllowlist(project: string): Promise<ProjectResponse>
+  setAllowlist(project: string, change: { add?: string[]; remove?: string[] }): Promise<ProjectResponse>
+  clearAllowlist(project: string): Promise<ProjectResponse>
   getProject(name: string): Promise<ProjectDetailResponse>
   // A new project whose postgres resources start from a clone of the
   // source's data. allowPause is the pinned-project guard's override.
-  branchProject(source: string, name: string, opts?: { allowPause?: boolean }): Promise<BranchResponse>
+  // expiresInSeconds is an opt-in expiry, counted on the daemon's clock.
+  branchProject(
+    source: string,
+    name: string,
+    opts?: { allowPause?: boolean; expiresInSeconds?: number }
+  ): Promise<BranchResponse>
+  // Replace a branch's data with a fresh clone of its parent's.
+  resetBranch(name: string, opts?: { allowPause?: boolean }): Promise<ResetResponse>
+  // Set a branch's expiry, seconds from now, or clear it with null.
+  setExpiry(name: string, expiresInSeconds: number | null): Promise<ProjectResponse>
+  // The schema of `name` compared against `against`, or its parent.
+  diffSchemas(name: string, against?: string): Promise<SchemaDiffResponse>
   deleteProject(name: string): Promise<DeletedResponse>
   createResource(
     project: string,
     input:
-      | { kind: 'postgres'; name: string }
+      | { kind: 'postgres'; name: string; extensions?: string[]; settings?: Record<string, string> }
       | {
           kind: 'app'
           name: string
@@ -413,6 +532,16 @@ export interface Api {
     id: string,
     input: { set?: Record<string, string>; unset?: string[]; replace?: Record<string, string> }
   ): Promise<EnvResponse>
+  // Declared and installed extensions of a postgres resource. Both wake it.
+  getExtensions(id: string): Promise<ExtensionsResponse>
+  setExtensions(id: string, input: { add?: string[]; remove?: string[] }): Promise<ExtensionsResponse>
+  // Declared server settings and the allowlist. Never wakes anything.
+  getSettings(id: string): Promise<SettingsResponse>
+  // Restarts the database if it is awake (a pause); a pinned one needs allowPause.
+  setSettings(
+    id: string,
+    input: { set?: Record<string, string>; unset?: string[]; allowPause?: boolean }
+  ): Promise<SetSettingsResponse>
   deleteResource(id: string): Promise<DeletedResponse>
   startResource(id: string): Promise<ResourceResponse>
   stopResource(id: string, opts?: { force?: boolean }): Promise<StopResponse>
@@ -442,6 +571,10 @@ export interface Api {
     opts?: { as?: string; inPlace?: boolean; allowPause?: boolean }
   ): Promise<SnapshotRestoreResponse>
   deleteSnapshot(id: string): Promise<DeletedResponse>
+  // POST /v1/import. `source` is the connection string itself, resolved by
+  // the caller from stdin, a file or an environment variable
+  // (resolveImportSource, cli/import.ts); the daemon never echoes it.
+  importDatabase(input: ImportInput): Promise<{ import: ImportReport }>
 }
 
 // Accepts a transport rather than only a socket path (ADR 0018). Every verb
@@ -539,19 +672,35 @@ export function createApi(transport: string | DaemonClient): Api {
         `/v1/projects/${p(project)}/sleep-policy`,
         sleepAfterSeconds === undefined ? {} : { sleepAfterSeconds }
       ),
+    getAllowlist: (project) => call(client, 'GET', `/v1/projects/${p(project)}/allowlist`),
+    setAllowlist: (project, change) => call(client, 'POST', `/v1/projects/${p(project)}/allowlist`, change),
+    clearAllowlist: (project) => call(client, 'DELETE', `/v1/projects/${p(project)}/allowlist`),
     getProject: (name) => call(client, 'GET', `/v1/projects/${p(name)}`),
     branchProject: (source, name, opts) =>
       call(
         client,
         'POST',
         `/v1/projects/${p(source)}/branch`,
-        opts?.allowPause === true ? { name, allowPause: true } : { name }
+        {
+          name,
+          ...(opts?.allowPause === true ? { allowPause: true } : {}),
+          ...(opts?.expiresInSeconds === undefined ? {} : { expiresInSeconds: opts.expiresInSeconds }),
+        }
       ),
+    resetBranch: (name, opts) =>
+      call(client, 'POST', `/v1/projects/${p(name)}/reset`, opts?.allowPause === true ? { allowPause: true } : {}),
+    setExpiry: (name, expiresInSeconds) => call(client, 'POST', `/v1/projects/${p(name)}/expiry`, { expiresInSeconds }),
+    diffSchemas: (name, against) =>
+      call(client, 'POST', `/v1/projects/${p(name)}/diff`, against === undefined ? {} : { against }),
     deleteProject: (name) => call(client, 'DELETE', `/v1/projects/${p(name)}`),
     createResource: (project, input) => call(client, 'POST', `/v1/projects/${p(project)}/resources`, input),
     deployResource: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/deploy`, input ?? {}),
     getResource: (id) => call(client, 'GET', `/v1/resources/${p(id)}`),
     setEnv: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/env`, input),
+    getExtensions: (id) => call(client, 'GET', `/v1/resources/${p(id)}/extensions`),
+    setExtensions: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/extensions`, input),
+    getSettings: (id) => call(client, 'GET', `/v1/resources/${p(id)}/settings`),
+    setSettings: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/settings`, input),
     deleteResource: (id) => call(client, 'DELETE', `/v1/resources/${p(id)}`),
     startResource: (id) => call(client, 'POST', `/v1/resources/${p(id)}/start`),
     stopResource: (id, opts) => call(client, 'POST', `/v1/resources/${p(id)}/stop`, opts?.force === true ? { force: true } : {}),
@@ -583,5 +732,6 @@ export function createApi(transport: string | DaemonClient): Api {
         ...(opts?.allowPause === true ? { allowPause: true } : {}),
       }),
     deleteSnapshot: (id) => call(client, 'DELETE', `/v1/snapshots/${p(id)}`),
+    importDatabase: (input) => call(client, 'POST', '/v1/import', input),
   }
 }

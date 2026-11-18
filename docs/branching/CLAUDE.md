@@ -165,3 +165,175 @@ What that does and does not settle:
   container, where the daemon can read anything. The EACCES exposure described
   above, a daemon running as an ordinary user reading a PGDATA the postgres
   uid owns, has not been exercised either way.
+
+## Amendment, 2026-11-17: parents, reset, expiry and schema diff
+
+The first version said "No parent link is recorded, so there is no list of
+children, no merge, no diff". Three of Neon's branch workflows now exist, on
+the same clone-a-directory mechanism and nothing new underneath it (ADR 0001
+still holds: no storage engine, no page server).
+
+**A branch records its parent.** `Project.parentId` (`packages/core/src/
+types.ts`), a nullable `parent_id` column added by `migrate` in
+`packages/core/src/store.ts`, set by `branchProject`
+(`packages/cli/src/daemon/branch.ts`). By id, not name, so a parent removed
+and a new project later made under its name is never taken for it. Every
+project that existed before has no parent, including branches made before
+this date: reset refuses them and says why. Removing a parent still touches
+no branch. This metadata lives outside the data directory, as ADR 0003's
+consequences already allow, and eject loses it.
+
+**`hobby reset <branch>`** (`POST /v1/projects/:name/reset`,
+`packages/cli/src/daemon/reset.ts`) replaces each of the branch's postgres
+data directories with a fresh clone of the parent's same-named resource.
+
+- The parent is cloned through `cloneSourceAtRest`, the sequence
+  `branchProject` has always used, now shared: quiesce if awake, prove at
+  rest, clone, prove nothing woke, resume, report the pause. The clone goes
+  to `<dataDir>.reset-staging` beside the branch's own, so the branch keeps
+  serving while a slow ext4 copy runs.
+- The branch is then held asleep (`holdProjectAsleep`), quiesced with the
+  snapshot activity guard (a session in use is refused, not cut off),
+  swapped by rename, rebound with `rebindPostgresToClone`
+  (`packages/pg/src/postgres.ts`) and resumed. Kept: resource ids, container
+  names, host ports, data directory paths. Taken from the parent: superuser,
+  password, database name and image, for the reason
+  `createPostgresFromClone` gives (they live inside the cloned cluster). The
+  container is recreated stopped so a changed image applies.
+- Destructive for the branch, so it follows `hobby rm`: type the name back
+  or pass `--yes`; MCP `hobby_reset` needs `confirm: true`. `--allow-pause`
+  is the separate pinned guard and applies to the parent and the branch.
+- The old data stays at `<dataDir>.pre-reset` until every resumed resource
+  came back, and is reported if it is kept. A leftover one refuses the next
+  reset, the rule `restoreInPlace` keeps for `.pre-restore-`.
+- Refused: no parent, parent gone, released branch or parent, postgres
+  resources that differ by name, unsettled states, a parent holding apps,
+  workers or queues. Other kinds inside the branch are left alone apart from
+  being stopped and started with it; their bindings survive because ids do.
+
+**Expiry** (`packages/cli/src/daemon/expiry.ts`). `hobby branch --expires
+7d` or `hobby expire <branch> <duration>|--never` sets `Project.expiresAt`,
+resolved on the daemon's clock (ADR 0018's remote CLI may disagree). Only a
+project with a parent may carry one; the route refuses others, and the sweep
+also ignores any project without a parent. `startExpirySweeper` runs every
+60 seconds from `startDaemon` and is drained on shutdown after the
+hibernator. Durations are parsed by `parseDuration`
+(`packages/cli/src/cli/output.ts`), the inverse of the existing
+`renderDuration`; the repo had no duration parser before, so this is new
+rather than reused.
+
+The decision on conflicts, chosen as skip-and-log over force:
+
+- **Pinned and expired: skipped**, one log line, until it is unpinned or
+  its expiry cleared. Pinning says "keep this up", which outranks a timer
+  set earlier, and only the operator can say which they meant.
+- **Awake and expired: skipped** while any resource is running, starting or
+  stopping, or has a proxied connection open. An unpinned branch sleeps on
+  its own once idle and is deleted on the next sweep, so nothing is cut off.
+- **Released, or held by a snapshot or restore: skipped.**
+- The sweep never wakes anything. Deletion is `deleteProject`
+  (`routes.ts`), the same teardown `hobby rm` runs, under
+  `holdProjectAsleep` so a wake arriving mid-delete waits rather than races,
+  and the at-rest check is repeated under the hold. One line per deletion:
+  `expiry: deleted branch <name> (expired at <iso>)`. Skips are logged once
+  per branch and reason, not every sweep.
+
+`hobby ls` shows `(branch of <parent>, expires in 6d)`; JSON carries
+`parentId` and `expiresAt` on each project.
+
+**`hobby diff <branch>`** or **`hobby diff <a> <b>`** (`POST
+/v1/projects/:name/diff`, `packages/cli/src/daemon/schema-diff.ts`) runs
+`pg_dump --schema-only` inside each database's own container over the local
+socket (`ComputeRuntime.execStream`, as online snapshots run pg_basebackup),
+normalises away the `Dumped from/by` comments and the per-run
+`\restrict`/`\unrestrict` keys, and prints a unified diff
+(`packages/cli/src/daemon/unified-diff.ts`, Myers, three lines of context)
+per same-named postgres pair. `--json` adds hunks as data. Only the
+database the resource was created with is dumped.
+
+It wakes what it compares, through `getOrCreateWake`, and says so in the
+help text, the MCP description and on stderr. It does not keep them awake:
+the dump connects with `application_name=hobby` in its conninfo, which the
+activity guard excludes (`HOBBY_APPLICATION_NAME`,
+`packages/pg/src/activity-guard.ts`), and it neither opens a tracker handle
+nor touches the idle clock. The accepted cost: a database already at its
+idle threshold can be slept by the hibernator mid-dump, and the diff then
+fails with a hint to retry.
+
+**Not done, and stated plainly:**
+
+- **None of this has run against real Docker.** Fake-runtime tests only
+  (`packages/cli/test/branch-workflows.test.ts`). In particular the pg_dump
+  conninfo, the `\restrict` normalisation against the image's real pg_dump,
+  the rename swap of a PGDATA owned by the container uid on Linux, and the
+  container recreation in `rebindPostgresToClone` are unverified.
+- **Linux ownership** is the same open question as branching and snapshots:
+  the clone into staging reads a PGDATA the daemon user may not own, and
+  removing `<dataDir>.pre-reset` with a plain `rm` can fail with EACCES, in
+  which case it is reported and kept, and the next reset refuses until it is
+  moved.
+- No list of children, no merge, and no data diff.
+
+## Amendment, 2026-11-17: Linux ownership is built, and CI is what proves it
+
+"Linux ownership: still open" above, and the same item in the reset
+amendment, are superseded. The first CI smoke run on GitHub's ubuntu-latest,
+with the daemon as the ordinary `runner` user in the docker group (a setup
+the install guide and `scripts/hobby.service` both support), hit exactly the
+predicted failure: `hobby branch` stopped with `EACCES: permission denied,
+scandir '<HOBBY_HOME>/projects/<p>/primary/pgdata/18/docker'` from
+`cloneTree`, because that directory is uid 70, mode 0700.
+
+**What is built.** The fix this file named: the copy runs inside a
+throwaway container, as `createDefaultRemoveDataDir`
+(`packages/pg/src/postgres.ts`) already did for removal.
+
+- `copyTree` and `removeTree` (`packages/core/src/copy.ts`) run the native
+  operation first (`cloneTree`, `fs.rm`) and only on EACCES or EPERM hand it
+  to an `ElevatedTreeOps`. On macOS, and for a root daemon, the native
+  operation succeeds and nothing changes. A failed fallback is one error
+  naming the path, the native refusal and why the retry failed, with the
+  EACCES code kept.
+- `createContainerTreeOps` (`packages/core/src/docker.ts`) is the Docker
+  implementation: `docker run --rm --pull never --user 0:0`, one bind mount
+  of the deepest directory holding source and destination (FICLONE refuses
+  to reflink across two mounts), then `cp -a --reflink=always`, falling back
+  to plain `cp -a` reported as `copy`. `cp -a` as root keeps owner, group,
+  mode and symlinks, which is what Postgres requires of a PGDATA. Removal is
+  `rm -rf` of one entry under a bind-mounted parent.
+- The image is never pulled. `treeOpsFor` (`packages/cli/src/daemon/tree-ops.ts`)
+  lists candidates: the resources' own postgres images (for a PGDATA, the
+  image that wrote it), their app and worker images, the configured default
+  postgres image, every other postgres image on the box, `caddy:2-alpine`,
+  then the worker base image. The first one `docker image inspect` finds is
+  used. The later entries exist because `destroyWorker` removes the worker's
+  image before `hobby rm` removes the project directory.
+- Call sites: `branchProject`'s clone and `discardBranch`'s cleanup
+  (`branch.ts`); `resetBranch`'s clone into staging, staging cleanup and the
+  `.pre-reset` removal (`reset.ts`), so a successful reset no longer leaves
+  `.pre-reset` behind on Linux; and every snapshot path (backups/CLAUDE.md
+  has those).
+
+**Cost on Linux, stated plainly.** The default image, `postgres:18-alpine`,
+has busybox `cp`, which has no `--reflink`. A non-root daemon on Linux
+therefore branches by full copy even on XFS, and `hobby branch` says `copy`.
+A root daemon, or a GNU-cp image earlier in the candidate list, keeps the
+reflink path. Not measured: the container adds one `docker run` per
+resource copied, and its cost has not been timed.
+
+**What is proven where.**
+
+- Unit tests: `packages/core/test/copy.test.ts` (real EACCES made with chmod,
+  fallback injected), `packages/core/test/docker.test.ts` (argv, image
+  choice, no pull), `packages/cli/test/tree-ops.test.ts` (image order,
+  `hobby rm` and a snapshot reaching the fallback).
+- On Docker Desktop 28.4.0 (macOS) against a named volume, which lives in
+  the Linux VM: a uid 1000 process got the CI's EACCES on a 70:70 0700
+  directory, and the container copy reproduced it at the destination as
+  70:70 0700 with `postgres:18-alpine` and `postgres:16`. The helper itself
+  ran end to end against a macOS bind mount.
+- Docker Desktop masks uids on bind mounts, so none of that proves the Linux
+  bind-mount case. **The CI smoke job on ubuntu-latest is the proof**, and it
+  is expected to show `hobby branch`, `hobby snapshot` and `hobby rm` of a
+  project with workers passing as the `runner` user. Until it has, treat this
+  as built, not verified.

@@ -12,6 +12,11 @@
     }
   },
   "dependencies": {
-    "@hobby.sh/core": "*"
+    "@hobby.sh/core": "*",
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "@neondatabase/serverless": "1.2.0",
+    "@types/pg": "^8.20.4"
   }
 }

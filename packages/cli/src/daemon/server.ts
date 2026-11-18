@@ -21,16 +21,17 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { assertSocketPathFits, HobbyError, type ProxyTlsConfig, type Resource } from '@hobby.sh/core'
 import { startAlarmMirror } from '@hobby.sh/do'
-import { startHttpRouter, startPgProxy, TLS_ASK_PATH, type ProxyTlsFiles } from '@hobby.sh/proxy'
+import { defaultSameBox, startHttpRouter, startPgProxy, TLS_ASK_PATH, type ProxyTlsFiles } from '@hobby.sh/proxy'
 import { startQueueTick } from '@hobby.sh/queue'
 import { durableObjectNamespaces } from './alarms.js'
 import { cronState, postScheduled, scheduledWorkers, startCronScheduler } from './crons.js'
 import { createCaddyManager, type CaddyManager } from './caddy.js'
 import { createHttpProxyDeps, createProxyDeps, getOrCreateWake, type DaemonContext } from './context.js'
+import { startExpirySweeper } from './expiry.js'
 import { startHibernator } from './hibernator.js'
 import { startQueueEndpoint } from './queue-endpoint.js'
 import { drainableQueues, queueDeliverFn, queueStateOf, retentionTargets } from './queues.js'
-import { handleRequest } from './routes.js'
+import { deleteProject, handleRequest } from './routes.js'
 import { createStudioApp } from './studio/routes.js'
 import { resolveProxyHosts } from './proxy-hosts.js'
 
@@ -47,6 +48,9 @@ const SOCKET_MODE = 0o600
 // ActivityTracker reads for every resource that is not already a sleep
 // candidate, and only one real Postgres round trip for the ones that are).
 const HIBERNATION_TICK_MS = 10_000
+// Branch expiry is measured in hours and days, so a minute late is nothing,
+// and a sweep that only reads the store costs nothing either.
+const EXPIRY_SWEEP_MS = 60_000
 
 // How often the alarm mirror re-reads pending Durable Object deadlines.
 //
@@ -175,6 +179,28 @@ async function queueEndpointHosts(ctx: DaemonContext): Promise<string[]> {
   const hosts = new Set<string>(['127.0.0.1'])
   if (process.platform !== 'linux') {
     return [...hosts]
+  }
+
+  // The address `--add-host=host.docker.internal:host-gateway` actually
+  // writes into a container's /etc/hosts. Docker resolves host-gateway to the
+  // default bridge's gateway (docker0, usually 172.17.0.1) or to the daemon's
+  // configured host-gateway-ip, NOT to the gateway of the network the
+  // container is attached to. The 2026-08-22 Linux research note measured
+  // 172.17.0.1 for a container on the default network and assumed a project
+  // container would see its own gateway instead; the first CI smoke run on
+  // ubuntu-latest (2026-11-17) showed a producer on hobby-<project>
+  // (gateway 172.19.0.1) failing with "Network connection lost" because the
+  // daemon was bound only to loopback and 172.19.0.1. Binding the default
+  // bridge gateway too is what makes host.docker.internal reach this
+  // listener. A daemon.json host-gateway-ip set to something else is not
+  // read here; that is a documented gap, not a silent one.
+  const bridge = await networkGateway('bridge')
+  if (bridge !== null) {
+    hosts.add(bridge)
+  } else {
+    console.error(
+      'daemon: could not read the default docker bridge gateway; containers reaching the host as host.docker.internal may not reach the queue endpoint or the proxy'
+    )
   }
 
   for (const project of ctx.store.listProjects()) {
@@ -452,6 +478,17 @@ export async function startDaemon(
   // the traffic never leaves the machine, and an app's DATABASE_URL carries
   // no sslmode. A listener on an operator-chosen address keeps ADR 0019's
   // rule exactly as it was.
+  // The docker network gateways this box's own apps and workers dial the
+  // proxy at (host.docker.internal on Linux). A connection that arrived on
+  // one of them, or on loopback, is the box itself and is exempt from every
+  // project's IP allowlist (the 2026-11-17 allowlist amendment in
+  // docs/proxy/CLAUDE.md). Judged by the address the client dialed, not by
+  // which listener took it, because with proxyHost "all" there is no
+  // gateway listener: the 0.0.0.0 one takes that traffic, from container
+  // addresses no allowlist would name. Grows with addProxyGateway below.
+  const gatewayAddresses = new Set<string>(await proxyGatewayHosts(ctx))
+  const sameBox = (local: string | undefined, peer: string | undefined): boolean =>
+    defaultSameBox(local, peer) || (local !== undefined && gatewayAddresses.has(local.replace(/^::ffff:/, '')))
   const startProxyOn = async (host: string, local: boolean): Promise<void> => {
     if (proxyBound.has(host)) return
     proxies.push(
@@ -460,6 +497,7 @@ export async function startDaemon(
         host,
         deps: createProxyDeps(ctx),
         wakeTimeoutMs: ctx.config.wakeTimeoutMs,
+        sameBox,
         ...(proxyTls === undefined ? {} : { tls: proxyTls }),
         ...(local ? { plaintextAllowed: () => true } : {}),
       })
@@ -477,7 +515,7 @@ export async function startDaemon(
   // that cannot be bound is logged, not fatal. A "0.0.0.0" bind already
   // covers them and binding again would fail, hence the `all` check.
   if (!proxyHosts.includes('0.0.0.0')) {
-    for (const gateway of await proxyGatewayHosts(ctx)) {
+    for (const gateway of gatewayAddresses) {
       try {
         await startProxyOn(gateway, true)
       } catch (err) {
@@ -488,6 +526,7 @@ export async function startDaemon(
     }
   }
   const addProxyGateway = async (gateway: string): Promise<void> => {
+    gatewayAddresses.add(gateway)
     if (proxyHosts.includes('0.0.0.0')) return
     try {
       await startProxyOn(gateway, true)
@@ -571,6 +610,10 @@ export async function startDaemon(
   // same ActivityTracker instance the proxy just started using (ctx.activity
   // is one source of truth for both), never polls Postgres on a schedule.
   const hibernator = startHibernator(ctx, { intervalMs: HIBERNATION_TICK_MS })
+
+  // Deletes branches whose opt-in expiry has passed, skipping (and saying
+  // so) any that are pinned, awake or held. See expiry.ts.
+  const expirySweeper = startExpirySweeper(ctx, { intervalMs: EXPIRY_SWEEP_MS, remove: deleteProject })
 
   // The other half of the sleep pair, for the one kind whose work can arrive
   // with no request behind it. A stopped container has no timer, so nothing
@@ -712,6 +755,10 @@ export async function startDaemon(
       // resource and is running stopPostgres, this awaits that tick's
       // drain so it can never run concurrently with the loop below.
       await hibernator.stop()
+
+      // Drained here for the hibernator's reason: a sweep that is mid-way
+      // through deleting a branch must finish before shutdown stops things.
+      await expirySweeper.stop()
 
       // Drained before the proxy closes, for the mirror's own version of the
       // ordering constraint below: a tick that has already decided to wake a

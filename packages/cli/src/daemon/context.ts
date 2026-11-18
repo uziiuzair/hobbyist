@@ -21,6 +21,8 @@ import {
   HobbyError,
   openStore,
   type ComputeRuntime,
+  type ElevatedTreeOps,
+  type ExecFn,
   type HobbyConfig,
   type KindRegistry,
   type Paths,
@@ -30,7 +32,7 @@ import {
   type Store,
 } from '@hobby.sh/core'
 import { appKindHandler } from '@hobby.sh/app'
-import { postgresKindHandler, type ProbeOutcome } from '@hobby.sh/pg'
+import { postgresKindHandler, type ExtensionOps, type ProbeOutcome } from '@hobby.sh/pg'
 import { queueKindHandler } from '@hobby.sh/queue'
 import { workerKindHandler } from '@hobby.sh/worker'
 import {
@@ -39,6 +41,9 @@ import {
   type HttpTarget,
   type ProxyDeps,
   type ProxyTarget,
+  RefusalLimiter,
+  refusalLogLine,
+  type AccessRefusal,
 } from '@hobby.sh/proxy'
 import { createTailnetDetector } from './tailnet.js'
 import { formatRetryDelay, redactWakeError, wakeRetryDelayMs } from './wake-backoff.js'
@@ -95,6 +100,21 @@ export interface DaemonContext {
   // already read a field called `now`, to name an image tag. A fake clock
   // set here for the refusal must not also rename every image a test builds.
   wakeClock?: () => number
+  // PgDeps.extensions, the same structural pass-through as probeFactory:
+  // read by createPostgres and by the extensions route (routes.ts), so a
+  // test can play a Postgres that ships some extensions and not others.
+  // Production leaves it unset and gets real CREATE EXTENSION.
+  extensions?: ExtensionOps
+  // How a copy or removal the daemon was refused (EACCES or EPERM) is
+  // retried as root: tree-ops.ts. Production leaves it unset and gets
+  // createContainerTreeOps (packages/core/src/docker.ts), a throwaway root
+  // container; a test sets it to watch the fallback run without Docker.
+  elevatedTreeOps?: (images: string[]) => ElevatedTreeOps
+  // How `hobby import` runs its throwaway pg_dump/pg_restore container
+  // (import.ts). Production leaves it unset and gets the real docker CLI
+  // (core's defaultDockerExec); a test sets it to read the argv and the
+  // service file on stdin, and to play the script's output.
+  importExec?: ExecFn
 }
 
 // A convenience factory for the real, production wiring: opens the real
@@ -555,6 +575,23 @@ export function getOrCreateWake(ctx: DaemonContext): (resourceId: string) => Pro
 // for real readiness before resolving, satisfying ProxyDeps.wake's
 // contract that it must not resolve until Postgres is actually accepting
 // connections.
+// One limiter per daemon, shared by every proxy listener (one per bind
+// address, server.ts's startProxyOn), so a scanner hitting the box on two
+// addresses still gets one log line a minute, not one per listener.
+const refusalLimiters = new WeakMap<DaemonContext, RefusalLimiter>()
+
+// The daemon log line for an allowlist refusal, rate limited (access.ts in
+// @hobby.sh/proxy). Exported for its test.
+export function logAccessRefusal(ctx: DaemonContext, refusal: AccessRefusal, log: (line: string) => void = console.error): void {
+  let limiter = refusalLimiters.get(ctx)
+  if (limiter === undefined) {
+    limiter = new RefusalLimiter()
+    refusalLimiters.set(ctx, limiter)
+  }
+  const verdict = limiter.admit(refusal.address ?? '(unknown)')
+  if (verdict.log) log(refusalLogLine(refusal, verdict.key, verdict.suppressed))
+}
+
 export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
   async function resolve(projectName: string, databaseSegment: string | null = null): Promise<ProxyTarget | null> {
     const project = ctx.store.getProjectByName(projectName)
@@ -645,6 +682,11 @@ export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
     resolve,
     wake: getOrCreateWake(ctx),
     isWakeRefused: (resourceId: string) => isWakeRefused(ctx, resourceId),
+    // Read per connection, so `hobby allow` takes effect on the next
+    // connection with no restart. A project that does not exist has no
+    // allowlist, and resolve then answers "unknown database" as before.
+    allowlist: (projectName: string) => ctx.store.getProjectByName(projectName)?.allowlist ?? null,
+    onAccessRefused: (refusal: AccessRefusal) => logAccessRefusal(ctx, refusal),
     activity: ctx.activity,
   }
 }

@@ -24,13 +24,20 @@ import type {
 } from './types.js'
 
 export interface Store {
-  createProject(input: { name: string; sleepAfterSeconds: number | null }): Project
+  createProject(input: {
+    name: string
+    sleepAfterSeconds: number | null
+    parentId?: ProjectId | null
+    expiresAt?: Date | null
+  }): Project
   getProject(id: ProjectId): Project | null
   getProjectByName(name: string): Project | null
   listProjects(): Project[]
   deleteProject(id: ProjectId): void
   setProjectReleased(id: ProjectId, at: Date | null): void
   setProjectSleepAfterSeconds(id: ProjectId, sleepAfterSeconds: number | null): void
+  setProjectExpiresAt(id: ProjectId, at: Date | null): void
+  setProjectAllowlist(id: ProjectId, entries: string[] | null): void
   createResource(input: {
     projectId: ProjectId
     kind: ResourceKind
@@ -55,6 +62,9 @@ interface ProjectRow {
   sleep_after_seconds: number | null
   created_at: string
   released_at: string | null
+  parent_id: string | null
+  expires_at: string | null
+  allowlist: string | null
 }
 
 interface ResourceRow {
@@ -103,6 +113,22 @@ function rowToProject(row: ProjectRow): Project {
     sleepAfterSeconds: row.sleep_after_seconds,
     createdAt: new Date(row.created_at),
     releasedAt: row.released_at === null || row.released_at === undefined ? null : new Date(row.released_at),
+    parentId: row.parent_id ?? null,
+    expiresAt: row.expires_at === null || row.expires_at === undefined ? null : new Date(row.expires_at),
+    allowlist: parseAllowlistColumn(row.allowlist),
+  }
+}
+
+// The allowlist column is a JSON array of canonical entries, or NULL for no
+// restriction. Anything else (a hand-edited file) reads as an empty list,
+// which is the narrowest reading: this box only, never "open".
+function parseAllowlistColumn(raw: string | null | undefined): string[] | null {
+  if (raw === null || raw === undefined) return null
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : []
+  } catch {
+    return []
   }
 }
 
@@ -163,6 +189,23 @@ function migrate(db: SqliteDatabase): void {
   if (!columns.some((column) => column.name === 'released_at')) {
     db.exec('ALTER TABLE projects ADD COLUMN released_at TEXT')
   }
+  // Branch workflows, 2026-11-17: the parent a branch was made from, and
+  // an optional expiry. Both nullable with no default, so every row that
+  // existed before reads as "not a branch, never expires", which is the
+  // truth for a project and the honest answer for a branch made before
+  // the parent was recorded (reset refuses it and says why).
+  if (!columns.some((column) => column.name === 'parent_id')) {
+    db.exec('ALTER TABLE projects ADD COLUMN parent_id TEXT')
+  }
+  if (!columns.some((column) => column.name === 'expires_at')) {
+    db.exec('ALTER TABLE projects ADD COLUMN expires_at TEXT')
+  }
+  // Per-project IP allowlists, 2026-11-17: a JSON array of canonical
+  // entries, NULL for none. Every row that existed before reads as NULL,
+  // which is exactly the unrestricted behaviour it had.
+  if (!columns.some((column) => column.name === 'allowlist')) {
+    db.exec('ALTER TABLE projects ADD COLUMN allowlist TEXT')
+  }
 }
 
 export function openStore(path: string): Store {
@@ -201,7 +244,12 @@ export function openStore(path: string): Store {
   }
 
   return {
-    createProject(input: { name: string; sleepAfterSeconds: number | null }): Project {
+    createProject(input: {
+      name: string
+      sleepAfterSeconds: number | null
+      parentId?: ProjectId | null
+      expiresAt?: Date | null
+    }): Project {
       // Checked here rather than relying on the UNIQUE constraint's raised error, so callers
       // always see a HobbyError. Safe today because the daemon is single-process and this
       // check-then-insert is not interleaved with any other write to the same row; if
@@ -213,9 +261,19 @@ export function openStore(path: string): Store {
       const id = randomUUID()
       const createdAt = new Date()
       const networkName = `hobby-${input.name}`
+      const parentId = input.parentId ?? null
+      const expiresAt = input.expiresAt ?? null
       db.prepare(
-        'INSERT INTO projects (id, name, network_name, sleep_after_seconds, created_at) VALUES (?, ?, ?, ?, ?)'
-      ).run(id, input.name, networkName, input.sleepAfterSeconds, createdAt.toISOString())
+        'INSERT INTO projects (id, name, network_name, sleep_after_seconds, created_at, parent_id, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      ).run(
+        id,
+        input.name,
+        networkName,
+        input.sleepAfterSeconds,
+        createdAt.toISOString(),
+        parentId,
+        expiresAt === null ? null : expiresAt.toISOString()
+      )
       return {
         id,
         name: input.name,
@@ -223,6 +281,9 @@ export function openStore(path: string): Store {
         sleepAfterSeconds: input.sleepAfterSeconds,
         createdAt,
         releasedAt: null,
+        parentId,
+        expiresAt,
+        allowlist: null,
       }
     },
 
@@ -241,6 +302,20 @@ export function openStore(path: string): Store {
     // box-wide config default it was created with.
     setProjectSleepAfterSeconds(id: ProjectId, sleepAfterSeconds: number | null): void {
       db.prepare('UPDATE projects SET sleep_after_seconds = ? WHERE id = ?').run(sleepAfterSeconds, id)
+    },
+
+    // Null clears it. Whether the project may carry an expiry at all (only a
+    // branch may) is the caller's rule, not the store's, the same split
+    // setProjectSleepAfterSeconds makes for what a valid threshold is.
+    setProjectExpiresAt(id: ProjectId, at: Date | null): void {
+      db.prepare('UPDATE projects SET expires_at = ? WHERE id = ?').run(at === null ? null : at.toISOString(), id)
+    },
+
+    // Null lifts the restriction; a list (even empty) replaces it. Entries
+    // are validated and made canonical by the caller (core's
+    // canonicalAllowlist), the same split setProjectSleepAfterSeconds makes.
+    setProjectAllowlist(id: ProjectId, entries: string[] | null): void {
+      db.prepare('UPDATE projects SET allowlist = ? WHERE id = ?').run(entries === null ? null : JSON.stringify(entries), id)
     },
 
     getProject,

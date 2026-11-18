@@ -109,6 +109,35 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Preflight" }
 
+  /v1/import:
+    post:
+      summary: "Copy an existing Postgres database into a hobby postgres resource with stock pg_dump and pg_restore, run in a throwaway container from the target's own image (runImport, packages/cli/src/daemon/import.ts). The project, and a postgres resource, are created when absent and removed again if the import fails before restoring. An existing target must be empty (409 otherwise; there is no override). Refused before anything is restored: a source newer than the image's pg_dump, and extensions the image does not ship. The source string is a credential: it reaches pg_dump only through a service file on the container's stdin, and every message in the response is redacted. Blocks until the restore finishes."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [project, source]
+              properties:
+                project: { type: string, description: "Created when it does not exist" }
+                resource: { type: string, description: "A postgres resource in the project, created when absent. Omitted: the project's only postgres, or a new one named primary" }
+                source: { type: string, description: "The source connection string, URI or keyword=value. Clients resolve it from stdin, a file or an environment variable; it is never echoed." }
+                schemas: { type: array, items: { type: string }, description: "pg_dump --schema patterns. When set, the source's extensions the image ships are added with --extension and their schemas created" }
+                excludeSchemas: { type: array, items: { type: string }, description: "pg_dump --exclude-schema patterns" }
+                strict: { type: boolean, default: false, description: "pg_restore --single-transaction --exit-on-error" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  import: { $ref: "#/components/schemas/ImportReport" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
   /v1/projects:
     get:
       summary: List projects.
@@ -192,6 +221,11 @@ paths:
                   properties:
                     kind: { const: postgres }
                     name: { type: string }
+                    extensions: { type: array, items: { type: string }, description: "Extensions to declare and create on the first boot (CREATE EXTENSION IF NOT EXISTS ... CASCADE). One the image does not ship is a usage error and no resource is left behind. Stored as config.extensions" }
+                    settings:
+                      type: object
+                      additionalProperties: { type: string }
+                      description: "Server settings from the allowlist (GET /v1/resources/{id}/settings lists it), passed as postgres -c name=value from the first boot on. A name outside the allowlist or a value outside its range is a usage error and nothing is created. An extension that needs a preload library (pg_stat_statements) is refused unless shared_preload_libraries names it here. Stored as config.settings"
                 - type: object
                   required: [kind, name]
                   properties:
@@ -293,6 +327,53 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /v1/projects/{name}/allowlist:
+    get:
+      summary: "The project's IP allowlist for the wake-on-connect proxy, as Project.allowlist. Same body as GET /v1/projects/{name} without resources."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: "Add and remove allowlist entries (IPv4 or IPv6 addresses and CIDR ranges), stored canonical (192.168.1.7/24 becomes 192.168.1.0/24). Adding to an open project restricts it. Removing the last entry leaves the list empty, which admits only this box, never every address. Applies to the next connection; open sessions are not ended. 400 for an entry that does not parse, 404 for removing an entry that is not there."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                add: { type: array, items: { type: string }, maxItems: 256 }
+                remove: { type: array, items: { type: string } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: "Lift the restriction: allowlist becomes null and any address that can reach the proxy may connect, as before allowlists existed."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+        "404": { $ref: "#/components/responses/Error" }
+
   /v1/projects/{name}/branch:
     post:
       summary: "Make a new project from a clone of this one's postgres data directories (branchProject, packages/cli/src/daemon/branch.ts). A sleeping source is cloned as it rests; an awake one is quiesced and resumed, and the pause is reported. Refused for a source holding an app, worker or queue, a released source, a resource mid-transition or failed, a taken name, or a pinned source that is awake unless allowPause. The branch starts asleep, unpinned, with the box-wide sleep policy."
@@ -307,6 +388,7 @@ paths:
               properties:
                 name: { type: string, description: "The new project's name" }
                 allowPause: { type: boolean, default: false, description: "Accept stopping a pinned, awake source for the copy" }
+                expiresInSeconds: { type: integer, minimum: 1, maximum: 315360000, description: "Optional expiry, seconds from now on the daemon's clock. Absent means the branch never expires." }
       responses:
         "201":
           content:
@@ -320,6 +402,115 @@ paths:
                   paused: { type: array, items: { type: string }, description: "Names of the source's resources stopped for the clone and started again; empty for a sleeping source" }
                   pausedMs: { type: [integer, "null"], description: "How long the source was paused; an upper bound that includes the idle check" }
                   resumeFailures: { type: array, items: { type: string }, description: "Source resources that did not start again after the copy" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{name}/reset:
+    post:
+      summary: "Replace a branch's postgres data with a fresh clone of its parent's (resetBranch, packages/cli/src/daemon/reset.ts). Destroys the branch's data; the CLI asks for the name to be typed back and the MCP tool needs confirm: true. The parent is cloned as branch clones a source (an awake one is quiesced and resumed), then the branch is quiesced, its data directories swapped, each resource rebound (credentials and image from the parent; id, container name and host port kept) and resumed. Refused for a project with no recorded parent, a parent that no longer exists, a released branch or parent, postgres resources that differ by name, a branch whose activity guard reports a session in use, a leftover <dataDir>.pre-reset, a snapshot or restore in progress, and a pinned awake parent or branch unless allowPause."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                allowPause: { type: boolean, default: false, description: "Accept stopping a pinned, awake parent or branch" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+                  parent: { type: string, description: "The parent's name" }
+                  resources: { type: array, items: { $ref: "#/components/schemas/WireResource" } }
+                  clone: { type: string, enum: [reflink, copy] }
+                  parentPaused: { type: array, items: { type: string } }
+                  parentPausedMs: { type: [integer, "null"] }
+                  parentResumeFailures: { type: array, items: { type: string } }
+                  paused: { type: array, items: { type: string }, description: "The branch's resources stopped for the swap and started again" }
+                  pausedMs: { type: [integer, "null"] }
+                  restartFailures: { type: array, items: { type: string }, description: "Branch resources that did not come back on the new data" }
+                  preResetDirs: { type: array, items: { type: string }, description: "Previous data directories kept on disk because something failed; empty on a clean reset" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{name}/expiry:
+    post:
+      summary: "Set or clear a branch's expiry (setBranchExpiry, packages/cli/src/daemon/expiry.ts). Refused with usage for a project that was not made by branching. The daemon deletes an expired branch on its next sweep (every 60 seconds) only while every resource is asleep, no proxied connection is open, it is not pinned, not released and not held by a snapshot or restore; otherwise it logs one line and retries on later sweeps."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expiresInSeconds]
+              properties:
+                expiresInSeconds: { type: [integer, "null"], minimum: 1, maximum: 315360000, description: "Seconds from now on the daemon's clock, or null to clear" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{name}/diff:
+    post:
+      summary: "Compare this project's database schema with another's, or with its recorded parent (diffSchemas, packages/cli/src/daemon/schema-diff.ts). Each same-named postgres pair is dumped with pg_dump --schema-only inside its own container over the local socket, as application_name hobby so the activity guard ignores the session, and diffed as a unified diff with three lines of context. WAKES every compared database that is asleep (listed in woke); it is not counted as a connection, so they sleep again after the usual idle time. A POST because of those wakes."
+      parameters: [{ $ref: "#/components/parameters/projectName" }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                against: { type: string, description: "The project to compare against (the old side, ---). Defaults to the parent." }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  old: { type: object, properties: { project: { type: string } } }
+                  new: { type: object, properties: { project: { type: string } } }
+                  identical: { type: boolean }
+                  woke: { type: array, items: { type: string }, description: "project/resource for each database this diff woke" }
+                  resources:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        status: { type: string, enum: [same, changed, only-old, only-new] }
+                        diff: { type: string, description: "Unified diff text; empty unless changed" }
+                        hunks:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              oldStart: { type: integer }
+                              oldLines: { type: integer }
+                              newStart: { type: integer }
+                              newLines: { type: integer }
+                              lines:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    op: { type: string, enum: [" ", "-", "+"] }
+                                    text: { type: string }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -650,6 +841,87 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /v1/resources/{id}/settings:
+    get:
+      summary: "Declared server settings of a postgres resource, and the allowlist (getSettingsRoute). Never wakes anything: what Postgres runs with is the declaration, as command-line arguments, from its next start on. Other kinds answer usage."
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settings: { type: object, additionalProperties: { type: string } }
+                  needsPreload: { type: array, items: { $ref: "#/components/schemas/PreloadGap" } }
+                  available: { type: array, items: { $ref: "#/components/schemas/SettingInfo" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: "Change the declared settings (setSettingsRoute, applyPostgresSettings in packages/cli/src/daemon/pg-settings.ts). Settings are server arguments, never written to postgresql.conf or postgresql.auto.conf, so every change replaces the container. A sleeping database gets a new stopped container and is not woken (applied: next-start). An awake one is restarted (applied: restarted): a pinned project needs allowPause (409 otherwise), the activity guard must report idle (409 if it stays active or cannot answer), and wakes are held for the swap. A start that fails with the new settings restores the previous ones, starts it again, and answers usage with the failed start's log lines. A released project answers 409."
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                set: { type: object, additionalProperties: { type: [string, number, boolean] } }
+                unset: { type: array, items: { type: string } }
+                allowPause: { type: boolean }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resource: { $ref: "#/components/schemas/WireResource" }
+                  settings: { type: object, additionalProperties: { type: string } }
+                  applied: { enum: [unchanged, next-start, restarted] }
+                  pausedMs: { type: [integer, "null"], description: "Stop to ready, for a restart" }
+                  needsPreload: { type: array, items: { $ref: "#/components/schemas/PreloadGap" }, description: "Declared extensions whose library the new settings do not preload. Allowed, but reported" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/resources/{id}/extensions:
+    get:
+      summary: "Declared and installed extensions of a postgres resource (getExtensionsRoute). Wakes a sleeping database, as the query route does, because only a running Postgres can say what it has installed; the daemon's connection carries application_name hobby and never counts as activity. Other kinds answer usage."
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  extensions: { $ref: "#/components/schemas/ExtensionReport" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: "Change the declared extensions (setExtensionsRoute). `add` wakes the database and applies the whole declared list with CREATE EXTENSION IF NOT EXISTS ... CASCADE before the declaration is stored; a name the image does not ship is refused (usage, naming the image and issue #2) and nothing is stored. `remove` only undeclares: nothing is ever dropped, and a remove-only change wakes nothing."
+      parameters: [{ $ref: "#/components/parameters/resourceId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                add: { type: array, items: { type: string }, description: "An extension that needs a preload library not in the resource's shared_preload_libraries (pg_stat_statements) is refused before any wake, with the hobby pg config set that adds it as the hint" }
+                remove: { type: array, items: { type: string } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  extensions: { $ref: "#/components/schemas/ExtensionReport" }
+                  removed: { type: array, items: { type: string }, description: "Names undeclared by this call. Still installed" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
   /v1/resources/{id}/queue/messages:
     get:
       summary: "Peek at the oldest messages without leasing them (peekQueueRoute), so looking does not change what the consumer receives. Queue resources only."
@@ -853,6 +1125,98 @@ components:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }
 
   schemas:
+    ImportReport:
+      type: object
+      description: "What an import copied (ImportReport, packages/cli/src/daemon/import.ts). Never contains the source string, its password or its user."
+      properties:
+        project: { type: string }
+        resource: { type: string }
+        resourceId: { type: string }
+        created: { type: [string, "null"], enum: [project, resource, null] }
+        source:
+          type: object
+          properties:
+            host: { type: string }
+            database: { type: [string, "null"] }
+            serverVersion: { type: string }
+            bytes: { type: [integer, "null"] }
+            viaHostAlias: { type: boolean, description: "A loopback host was reached as host.docker.internal" }
+        image: { type: string }
+        pgDumpMajor: { type: integer }
+        dumpBytes: { type: integer }
+        dumpTables: { type: integer }
+        tables: { type: integer }
+        rows: { type: integer, description: "pg_class.reltuples after ANALYZE" }
+        rowsAreEstimates: { type: boolean }
+        targetBytes: { type: integer }
+        durationMs: { type: integer }
+        extensions:
+          type: object
+          properties:
+            copied: { type: array, items: { type: string } }
+            notCopied:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  schema: { type: string }
+                  shipped: { type: boolean }
+        restore:
+          type: object
+          properties:
+            errors: { type: integer }
+            messages: { type: array, items: { type: string } }
+            expected: { type: array, items: { type: string } }
+        warnings: { type: array, items: { type: string } }
+
+    PreloadGap:
+      type: object
+      properties:
+        extension: { type: string }
+        library: { type: string }
+        allowed: { type: boolean, description: "False when hobby will not preload the library at all (pg_cron)" }
+
+    SettingInfo:
+      type: object
+      description: "One allowlisted setting (settingCatalog, packages/pg/src/settings.ts)"
+      properties:
+        name: { type: string }
+        type: { enum: [integer, real, bool, enum, memory, duration, libraries] }
+        context: { enum: [postmaster, sighup, superuser, user], description: "pg_settings.context" }
+        restartRequired: { type: boolean, description: "What PostgreSQL requires (context postmaster). hobby replaces the container for every change regardless" }
+        default: { type: string }
+        summary: { type: string }
+        docs: { type: string, description: "PostgreSQL 18 docs link" }
+        min: { type: string }
+        max: { type: string }
+        values: { type: array, items: { type: string } }
+        library: { type: string, description: "The preload library this setting belongs to" }
+
+    ExtensionReport:
+      type: object
+      properties:
+        declared: { type: array, items: { type: string } }
+        installed:
+          description: "Every row of pg_extension, sorted by name, or null when the database was not read (a remove-only change to a sleeping one)"
+          oneOf:
+            - type: "null"
+            - type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  version: { type: string }
+        missing:
+          description: "Declared but not installed (dropped by hand), or null when not read"
+          oneOf:
+            - type: "null"
+            - type: array
+              items: { type: string }
+        needsPreload:
+          type: array
+          description: "Declared or installed extensions whose library is not in the resource's shared_preload_libraries: created, but every use errors"
+          items: { $ref: "#/components/schemas/PreloadGap" }
     ErrorEnvelope:
       type: object
       properties:
@@ -875,6 +1239,12 @@ components:
         sleepAfterSeconds: { type: [integer, "null"], description: "null pins the project awake forever" }
         createdAt: { type: string, format: date-time }
         releasedAt: { type: [string, "null"], format: date-time, description: "Set by eject --release; hobby stops acting on the project while set" }
+        parentId: { type: [string, "null"], description: "The project this one was branched from, by id. null for a project not made by branching, and for branches made before 2026-11-17. May name a project that has since been removed." }
+        expiresAt: { type: [string, "null"], format: date-time, description: "When the expiry sweep may delete this branch (packages/cli/src/daemon/expiry.ts). Only ever set on a branch; a pinned or awake branch is skipped until it is neither." }
+        allowlist:
+          type: [array, "null"]
+          items: { type: string }
+          description: "Which client addresses the Postgres proxy accepts for this project's databases, over TCP, TLS, CancelRequest, /sql and WebSocket. null: any address that reaches the proxy. []: this box only. Otherwise these canonical addresses and CIDR ranges plus this box (loopback and the docker gateways its own apps and workers dial are always allowed). A refused client gets FATAL 28000, or HTTP 403 on /sql, before anything is resolved or woken. Copied to a branch at branch time. Absent from daemons older than 2026-11-17."
 
     SnapshotManifest:
       description: "manifest.json as written by takeSnapshot, with each resource's config redacted the same way a WireResource's is (wire.ts, toWireSnapshotManifest). The file on disk is not redacted."
@@ -1007,6 +1377,8 @@ components:
                 dataDir: { type: string }
                 superuser: { type: string }
                 database: { type: string }
+                extensions: { type: array, items: { type: string }, description: "Declared extensions. Absent when none were ever declared. What is installed is read live from GET /v1/resources/{id}/extensions" }
+                settings: { type: object, additionalProperties: { type: string }, description: "Declared server settings, passed as postgres -c name=value. Absent when none are declared" }
 
     WireAppResource:
       allOf:

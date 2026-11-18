@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "hobby": {
+      "command": "hobby",
+      "args": ["mcp"]
+    }
+  }
+}

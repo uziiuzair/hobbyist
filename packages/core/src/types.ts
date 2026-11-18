@@ -44,6 +44,29 @@ export interface Project {
   // is why handing a project over records a state rather than deleting one.
   // `hobby adopt` clears it and takes the project back.
   releasedAt: Date | null
+  // The project this one was branched from (`hobby branch`), by id rather
+  // than by name, so a parent deleted and a new project later created under
+  // the same name is never mistaken for it. Null for every project that was
+  // not created as a branch, including branches made before this was
+  // recorded (the 2026-11-17 amendment in docs/branching/CLAUDE.md). It is
+  // what `hobby reset` resets to and what `hobby diff` compares against by
+  // default, and nothing else reads it: removing the parent never touches a
+  // branch, and the id simply stops resolving.
+  parentId: ProjectId | null
+  // When the expiry sweep (packages/cli/src/daemon/expiry.ts) may delete
+  // this project. Opt-in, and only ever set on a project with a parentId:
+  // the routes that write it refuse anything else, so `hobby new` projects
+  // can never expire. Null means never.
+  expiresAt: Date | null
+  // Which client addresses the wake-on-connect proxy accepts for this
+  // project's databases, as canonical entries (core's canonicalAllowlist).
+  // Null means no restriction, the behaviour every project had before this
+  // existed. A list, even an empty one, means only those addresses plus this
+  // box itself (loopback and the docker gateways); see the 2026-11-17
+  // allowlist amendment in docs/proxy/CLAUDE.md. Optional because a daemon
+  // older than the field sends a project without it, and a hand-built
+  // fixture may omit it; the store always sets it.
+  allowlist?: string[] | null
 }
 
 // The fields every kind's config carries, so the many existing call sites
@@ -82,6 +105,19 @@ export interface PostgresConfig extends ResourceConfigBase {
   superuser: string
   password: string
   database: string
+  // Extensions this resource declares, applied with CREATE EXTENSION IF NOT
+  // EXISTS at creation and whenever the list changes (packages/pg/src/
+  // extensions.ts). Optional and absent on every row written before the
+  // field existed, which reads as an empty list. A declaration, not a
+  // record of what is installed: that lives in the data directory's own
+  // pg_extension and is read live.
+  extensions?: string[]
+  // Server settings, allowlisted and normalized by packages/pg/src/
+  // settings.ts, passed as `postgres -c name=value` by containerSpec and
+  // by the eject compose file's `command:`, never written into the data
+  // directory. Optional and absent on every row written before the field
+  // existed, which reads as none: the image's default command.
+  settings?: Record<string, string>
 }
 
 // A container the user brought, either built here from their Dockerfile or

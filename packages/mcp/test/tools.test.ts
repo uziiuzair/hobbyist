@@ -9,10 +9,33 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Api, BranchResponse, ConnectionResponse, DeletedResponse, LogsResponse, ProjectDetailResponse, ProjectsResponse, ResourceResponse, WireResource } from '@hobby.sh/cli'
 import type { Project } from '@hobby.sh/core'
-import { branchTool, connectionStringTool, envListTool, envSetTool, envUnsetTool, listTool, logsTool, newTool, rmTool, sleepTool, wakeTool, type ToolResult } from '../src/tools.js'
+import {
+  branchTool,
+  connectionStringTool,
+  diffTool,
+  envListTool,
+  envSetTool,
+  envUnsetTool,
+  expireTool,
+  importTool,
+  listTool,
+  logsTool,
+  newTool,
+  pgConfigListTool,
+  pgConfigSetTool,
+  pgConfigUnsetTool,
+  pgExtAddTool,
+  pgExtListTool,
+  pgExtRmTool,
+  resetTool,
+  rmTool,
+  sleepTool,
+  wakeTool,
+  type ToolResult,
+} from '../src/tools.js'
 
 function project(name: string, id = `${name}-id`): Project {
-  return { id, name, networkName: `hobby-${name}`, sleepAfterSeconds: 300, createdAt: new Date('2026-01-01'), releasedAt: null }
+  return { id, name, networkName: `hobby-${name}`, sleepAfterSeconds: 300, createdAt: new Date('2026-01-01'), releasedAt: null, parentId: null, expiresAt: null }
 }
 
 // The daemon's wire shape (WireResource, packages/cli/src/daemon/wire.ts):
@@ -56,12 +79,22 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     health: notWired('health'),
     version: notWired('version'),
     setEnv: notWired('setEnv'),
+    getExtensions: notWired('getExtensions'),
+    setExtensions: notWired('setExtensions'),
+    getSettings: notWired('getSettings'),
+    setSettings: notWired('setSettings'),
     listCrons: notWired('listCrons'),
     listProjects: notWired('listProjects'),
     createProject: notWired('createProject'),
     setSleepPolicy: notWired('setSleepPolicy'),
+    getAllowlist: notWired('getAllowlist'),
+    setAllowlist: notWired('setAllowlist'),
+    clearAllowlist: notWired('clearAllowlist'),
     getProject: notWired('getProject'),
     branchProject: notWired('branchProject'),
+    resetBranch: notWired('resetBranch'),
+    setExpiry: notWired('setExpiry'),
+    diffSchemas: notWired('diffSchemas'),
     deleteProject: notWired('deleteProject'),
     createResource: notWired('createResource'),
     deployResource: notWired('deployResource'),
@@ -83,6 +116,7 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     listSnapshots: notWired('listSnapshots'),
     restoreSnapshot: notWired('restoreSnapshot'),
     deleteSnapshot: notWired('deleteSnapshot'),
+    importDatabase: notWired('importDatabase'),
   }
   const api = { ...base } as unknown as Record<string, unknown>
   for (const [key, fn] of Object.entries(overrides)) {
@@ -344,4 +378,181 @@ test('hobby_env_set on a postgres is a usage error, with no env call made', asyn
   assert.equal(result.isError, true)
   assert.match(result.content[0]?.text ?? '', /only an app or a worker/)
   assert.deepEqual(calls, ['getProject("blog")'])
+})
+
+test('hobby_pg_ext_ls/add/rm: resolve the target then GET or POST /v1/resources/:id/extensions', async () => {
+  const p = project('blog')
+  const r = resource('primary', p.id)
+  const report = {
+    extensions: { declared: ['pg_trgm'], installed: [{ name: 'pg_trgm', version: '1.6' }, { name: 'plpgsql', version: '1.0' }], missing: [] },
+  }
+  const { api, calls } = fakeApi({
+    getProject: async (): Promise<ProjectDetailResponse> => ({ project: p, resources: [r] }),
+    getExtensions: async () => report,
+    setExtensions: async () => ({ ...report, removed: [] }),
+  })
+  assert.deepEqual(resultText(await pgExtListTool(api, { target: 'blog' })), report)
+  await pgExtAddTool(api, { target: 'blog', extensions: ['pg_trgm'] })
+  await pgExtRmTool(api, { target: 'blog', extensions: ['hstore'] })
+  assert.deepEqual(calls, [
+    'getProject("blog")',
+    `getExtensions("${r.id}")`,
+    'getProject("blog")',
+    `setExtensions("${r.id}", {"add":["pg_trgm"]})`,
+    'getProject("blog")',
+    `setExtensions("${r.id}", {"remove":["hstore"]})`,
+  ])
+})
+
+test('hobby_new passes declared extensions on the resource create, and omits the field when none are given', async () => {
+  const p = project('blog')
+  const r = resource('primary', p.id)
+  const { api, calls } = fakeApi({
+    createProject: async () => ({ project: p }),
+    createResource: async () => ({ resource: r }),
+  })
+  await newTool(api, { name: 'blog', extensions: ['vector'] })
+  await newTool(api, { name: 'blog' })
+  assert.equal(calls[1], 'createResource("blog", {"kind":"postgres","name":"primary","extensions":["vector"]})')
+  assert.equal(calls[3], 'createResource("blog", {"kind":"postgres","name":"primary"})')
+})
+
+test('hobby_pg_ext_add on an app is a usage error, with no extensions call made', async () => {
+  const p = project('blog')
+  const r = appResource('web', p.id, {})
+  const { api, calls } = fakeApi({
+    getProject: async (): Promise<ProjectDetailResponse> => ({ project: p, resources: [r] }),
+  })
+  const result = await pgExtAddTool(api, { target: 'blog', extensions: ['vector'] })
+  assert.equal(result.isError, true)
+  assert.deepEqual(calls, ['getProject("blog")'])
+})
+
+test('hobby_branch: expires is parsed like the CLI flag, and a bad one makes no request', async () => {
+  const { api, calls } = fakeApi({
+    branchProject: async (): Promise<BranchResponse> => ({
+      project: project('blog-exp'),
+      resources: [],
+      clone: 'reflink',
+      paused: [],
+      pausedMs: null,
+      resumeFailures: [],
+    }),
+  })
+  const ok = await branchTool(api, { source: 'blog', name: 'blog-exp', expires: '7d' })
+  assert.equal(ok.isError, undefined)
+  const bad = await branchTool(api, { source: 'blog', name: 'blog-exp', expires: 'next week' })
+  assert.equal(bad.isError, true)
+  assert.deepEqual(calls, ['branchProject("blog", "blog-exp", {"allowPause":false,"expiresInSeconds":604800})'])
+})
+
+test('hobby_reset without confirm: true refuses and makes no request', async () => {
+  const { api, calls } = fakeApi({})
+  const result = await resetTool(api, { branch: 'blog-exp', confirm: false })
+  assert.equal(result.isError, true)
+  assert.match(result.content[0]?.text ?? '', /confirm must be true/)
+  assert.deepEqual(calls, [])
+})
+
+test('hobby_reset with confirm: one POST /v1/projects/:name/reset, allowPause only when set', async () => {
+  const { api, calls } = fakeApi({
+    resetBranch: async () => ({
+      project: project('blog-exp'),
+      parent: 'blog',
+      resources: [],
+      clone: 'reflink',
+      parentPaused: [],
+      parentPausedMs: null,
+      parentResumeFailures: [],
+      paused: [],
+      pausedMs: null,
+      restartFailures: [],
+      preResetDirs: [],
+    }),
+  })
+  await resetTool(api, { branch: 'blog-exp', confirm: true })
+  await resetTool(api, { branch: 'blog-exp', confirm: true, allowPause: true })
+  assert.deepEqual(calls, ['resetBranch("blog-exp", {"allowPause":false})', 'resetBranch("blog-exp", {"allowPause":true})'])
+})
+
+test('hobby_expire sets a parsed duration or clears with null; hobby_diff passes project and against', async () => {
+  const { api, calls } = fakeApi({
+    setExpiry: async () => ({ project: project('blog-exp') }),
+    diffSchemas: async () => ({ old: { project: 'blog' }, new: { project: 'blog-exp' }, resources: [], woke: [], identical: true }),
+  })
+  await expireTool(api, { branch: 'blog-exp', expires: '36h' })
+  await expireTool(api, { branch: 'blog-exp', expires: null })
+  await diffTool(api, { project: 'blog-exp' })
+  await diffTool(api, { project: 'b', against: 'a' })
+  assert.deepEqual(calls, [
+    'setExpiry("blog-exp", 129600)',
+    'setExpiry("blog-exp", null)',
+    'diffSchemas("blog-exp", )',
+    'diffSchemas("b", "a")',
+  ])
+})
+
+// The source is a reference only: a variable name or a path, resolved by
+// this process. The tool result carries the daemon's report and never the
+// string itself, and a call with no reference (or both) makes no request.
+test('hobby_import: resolves sourceEnv in this process and sends one POST /v1/import; never echoes the value', async () => {
+  const secret = 'postgresql://alex:McpS3cret@ep-x.neon.tech/neondb?sslmode=require'
+  process.env['HOBBY_TEST_IMPORT_URL'] = secret
+  try {
+    const report = { project: 'shop', tables: 3 }
+    const { api, calls } = fakeApi({ importDatabase: async () => ({ import: report }) as never })
+    const result = await importTool(api, { project: 'shop', sourceEnv: 'HOBBY_TEST_IMPORT_URL', schemas: ['public'] })
+    assert.equal(result.isError, undefined)
+    assert.deepEqual(resultText(result), { import: report })
+    assert.equal(calls.length, 1)
+    assert.ok(calls[0]?.startsWith('importDatabase('))
+    assert.ok(!result.content[0]?.text.includes('McpS3cret'))
+
+    const none = fakeApi({})
+    const refused = await importTool(none.api, { project: 'shop' })
+    assert.equal(refused.isError, true)
+    assert.match(refused.content[0]?.text ?? '', /exactly one of sourceEnv or sourceFile/)
+    const both = await importTool(none.api, { project: 'shop', sourceEnv: 'HOBBY_TEST_IMPORT_URL', sourceFile: '/x' })
+    assert.equal(both.isError, true)
+    assert.equal(none.calls.length, 0)
+
+    const unset = await importTool(none.api, { project: 'shop', sourceEnv: 'HOBBY_TEST_IMPORT_UNSET' })
+    assert.match(unset.content[0]?.text ?? '', /HOBBY_TEST_IMPORT_UNSET is not set/)
+  } finally {
+    delete process.env['HOBBY_TEST_IMPORT_URL']
+  }
+})
+
+test('hobby_pg_config_ls/set/unset: resolve the target then GET or POST /v1/resources/:id/settings', async () => {
+  const p = project('blog')
+  const r = resource('primary', p.id)
+  const listed = { settings: {}, needsPreload: [], available: [] }
+  const changed = { resource: r, settings: { jit: 'off' }, applied: 'next-start' as const, pausedMs: null, needsPreload: [] }
+  const { api, calls } = fakeApi({
+    getProject: async (): Promise<ProjectDetailResponse> => ({ project: p, resources: [r] }),
+    getSettings: async () => listed,
+    setSettings: async () => changed,
+  })
+  assert.deepEqual(resultText(await pgConfigListTool(api, { target: 'blog' })), listed)
+  await pgConfigSetTool(api, { target: 'blog', settings: { jit: 'off' } })
+  await pgConfigUnsetTool(api, { target: 'blog', names: ['jit'], allowPause: true })
+  assert.deepEqual(calls, [
+    'getProject("blog")',
+    `getSettings("${r.id}")`,
+    'getProject("blog")',
+    `setSettings("${r.id}", {"set":{"jit":"off"},"allowPause":false})`,
+    'getProject("blog")',
+    `setSettings("${r.id}", {"unset":["jit"],"allowPause":true})`,
+  ])
+})
+
+test('hobby_new passes declared settings on the resource create', async () => {
+  const p = project('blog')
+  const r = resource('primary', p.id)
+  const { api, calls } = fakeApi({
+    createProject: async () => ({ project: p }),
+    createResource: async () => ({ resource: r }),
+  })
+  await newTool(api, { name: 'blog', settings: { shared_buffers: '256MB' } })
+  assert.equal(calls[1], 'createResource("blog", {"kind":"postgres","name":"primary","settings":{"shared_buffers":"256MB"}})')
 })

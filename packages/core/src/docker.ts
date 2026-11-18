@@ -5,8 +5,9 @@
 // shell string: that is what keeps this free of command injection.
 
 import { execFile, spawn } from 'node:child_process'
-import { basename, dirname } from 'node:path'
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import type { Readable } from 'node:stream'
+import type { CloneMechanism, CloneResult, ElevatedTreeOps } from './copy.js'
 import { HobbyError } from './errors.js'
 import { DEFAULT_PORT_BIND } from './runtime.js'
 import type { BuildSpec, ComputeRuntime, ContainerId, ContainerSpec, ContainerStatus, ExecStream } from './runtime.js'
@@ -101,6 +102,12 @@ function execWithStdin(cmd: string, args: string[], stdin: Readable): Promise<{ 
       reject(Object.assign(new Error(`input stream failed: ${err.message}`), { stdout, stderr }))
     })
     child.on('error', (err) => reject(Object.assign(err, { stdout, stderr })))
+    // A child that exits before reading all of stdin (a container that
+    // failed to start, a script that stopped early) closes the pipe, and an
+    // EPIPE on child.stdin with no listener is an uncaught exception that
+    // takes the whole daemon down. The exit code below already says what
+    // happened.
+    child.stdin.on('error', () => {})
     child.on('close', (code) => {
       if (code === 0) {
         resolve({ stdout, stderr })
@@ -111,6 +118,10 @@ function execWithStdin(cmd: string, args: string[], stdin: Readable): Promise<{ 
     stdin.pipe(child.stdin)
   })
 }
+
+// The real ExecFn, for a daemon-side caller that runs docker itself with an
+// injectable seam of its own (packages/cli/src/daemon/import.ts).
+export const defaultDockerExec: ExecFn = defaultExec
 
 function errorOf(err: unknown): ExecError {
   if (err && typeof err === 'object') {
@@ -210,14 +221,19 @@ function buildCreateArgs(spec: ContainerSpec): string[] {
   if (spec.network) {
     args.push('--network', spec.network)
   }
-  // host-gateway is docker's own token for "the bridge gateway of whichever
-  // network this container is on", which is the address the daemon's queue
-  // endpoint binds on Linux. Emitting a literal address here instead would be
-  // wrong the moment a project gets a different network.
+  // host-gateway is docker's own token for the host as seen from a
+  // container: the default bridge's gateway (docker0) unless the docker
+  // daemon sets host-gateway-ip. It is NOT the gateway of the network the
+  // container is attached to. The hobby daemon binds that default bridge
+  // gateway on Linux (queueEndpointHosts, packages/cli/src/daemon/server.ts),
+  // so the token is enough and no literal address is emitted here.
   for (const host of spec.extraHosts ?? []) {
     args.push('--add-host', `${host.name}:${host.address}`)
   }
   args.push(spec.image)
+  // After the image, as `docker create IMAGE [COMMAND] [ARG...]` reads it.
+  // Every element is its own argv entry, never a shell string.
+  args.push(...(spec.command ?? []))
   return args
 }
 
@@ -553,6 +569,153 @@ export function createDockerRuntime(exec: ExecFn = defaultExec, spawnFn: SpawnFn
         }
         throw toRuntimeUnavailable('docker network rm', err)
       }
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The Docker implementation of ElevatedTreeOps (packages/core/src/copy.ts):
+// copy or remove a tree as root, inside a throwaway container, for a daemon
+// that is not root on Linux and meets files a container's user owns. The
+// shape is createDefaultRemoveDataDir's (packages/pg/src/postgres.ts), which
+// has removed a PGDATA this way since before branching existed: bind-mount
+// the parent, act on one entry under it, `--rm` the container.
+//
+// The image. Nothing is ever pulled for this: a cleanup that downloads an
+// image is a surprise on a slow link and a failure on an offline box. The
+// caller passes candidates in preference order (for a PGDATA, the resource's
+// own postgres image; see packages/cli/src/daemon/tree-ops.ts for the full
+// order), the first one `docker image inspect` finds locally is used, and
+// `--pull never` on the run makes "no surprise pull" a property of the
+// command rather than of the check before it. None local is an error that
+// lists what was tried.
+//
+// Copy mechanism. `cp -a` (GNU or busybox) preserves owner, group, mode,
+// timestamps and symlinks when run as root, which is what Postgres needs of a
+// PGDATA. `cp -a --reflink=always` is tried first and, if it fails, the
+// partial destination is removed and plain `cp -a` runs, reported as 'copy':
+// the same "only claim a reflink that was forced" rule cloneTree keeps with
+// COPYFILE_FICLONE_FORCE. busybox cp (postgres:*-alpine, caddy:*-alpine)
+// has no --reflink at all, so the fallback in those images is always a full
+// copy; GNU cp (debian-based images) reflinks on XFS or btrfs. Reflinking
+// across two bind mounts fails with EXDEV (FICLONE requires one mount), so
+// the copy mounts the deepest directory holding both src and dst, once.
+//
+// Measured on Docker Desktop 28.4.0 against a named volume (inside the VM,
+// so real Linux ownership): a 0700 directory chowned to 70:70 was unreadable
+// to a uid 1000 process (EACCES on scandir, the CI failure), and the root
+// container's `cp -a` reproduced it at the destination as 70:70 0700 with
+// postgres:18-alpine and postgres:16. Docker Desktop's file sharing masks
+// uids on macOS bind mounts, so this is not proof of the Linux bind-mount
+// case; the CI smoke job on ubuntu-latest is.
+const CLONE_SCRIPT = [
+  'src="$1"; dst="$2"',
+  'if cp -a --reflink=always "$src" "$dst" 2>/dev/null; then m=reflink',
+  'else rm -rf "$dst"; if ! cp -a "$src" "$dst"; then rm -rf "$dst"; exit 1; fi; m=copy; fi',
+  'f=$(find "$dst" \\( -type f -o -type l \\) | wc -l)',
+  'b=$(find "$dst" -type f -exec stat -c %s {} + | awk \'{s+=$1} END {printf "%.0f", s}\')',
+  'echo "hobby-clone $m $f $b"',
+].join('\n')
+
+const MOUNT = '/hobby'
+
+// The deepest directory containing both paths. Both are resolved first, so a
+// relative or dotted path cannot climb out of what is mounted.
+export function commonAncestor(a: string, b: string): string {
+  let dir = resolve(a)
+  const other = resolve(b)
+  for (;;) {
+    const rel = relative(dir, other)
+    if (rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))) {
+      return dir
+    }
+    const parent = dirname(dir)
+    if (parent === dir) {
+      return dir
+    }
+    dir = parent
+  }
+}
+
+function inMount(root: string, path: string): string {
+  const rel = relative(root, resolve(path))
+  return rel === '' ? MOUNT : `${MOUNT}/${rel.split(sep).join('/')}`
+}
+
+export function parseCloneOutput(stdout: string): CloneResult {
+  const line = stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.startsWith('hobby-clone '))
+  const parts = line?.split(/\s+/) ?? []
+  const mechanism = parts[1]
+  const files = Number(parts[2])
+  const bytes = Number(parts[3])
+  if ((mechanism !== 'reflink' && mechanism !== 'copy') || !Number.isFinite(files) || !Number.isFinite(bytes)) {
+    throw new Error(`the copy container did not report what it copied (output: ${JSON.stringify(stdout.trim())})`)
+  }
+  return { mechanism: mechanism as CloneMechanism, files, bytes }
+}
+
+export function createContainerTreeOps(opts: { images: string[]; exec?: ExecFn }): ElevatedTreeOps {
+  const exec = opts.exec ?? defaultExec
+  const candidates = [...new Set(opts.images.filter((image) => image.length > 0))]
+  let chosen: Promise<string> | null = null
+
+  async function localImage(): Promise<string> {
+    for (const image of candidates) {
+      try {
+        await exec('docker', ['image', 'inspect', '--format', '{{.Id}}', image])
+        return image
+      } catch {
+        // Not local (or Docker unreachable, which the run below reports).
+      }
+    }
+    throw new Error(
+      `no local image to run it in (tried ${candidates.length === 0 ? 'none' : candidates.join(', ')}); nothing is pulled for this`
+    )
+  }
+
+  function image(): Promise<string> {
+    chosen ??= localImage().catch((err: unknown) => {
+      chosen = null
+      throw err
+    })
+    return chosen
+  }
+
+  async function run(args: string[]): Promise<string> {
+    try {
+      const { stdout } = await exec('docker', args)
+      return stdout
+    } catch (err: unknown) {
+      const e = errorOf(err)
+      const detail = (e.stderr ?? '').trim() || e.message || String(err)
+      throw new Error(`docker run exited with an error: ${detail}`)
+    }
+  }
+
+  return {
+    async clone(src: string, dst: string): Promise<CloneResult> {
+      const root = commonAncestor(src, dirname(dst))
+      const img = await image()
+      const stdout = await run([
+        'run', '--rm', '--pull', 'never', '--user', '0:0', '--entrypoint', 'sh',
+        '-v', `${root}:${MOUNT}`,
+        img, '-c', CLONE_SCRIPT, 'sh', inMount(root, src), inMount(root, dst),
+      ])
+      return parseCloneOutput(stdout)
+    },
+
+    async remove(path: string): Promise<void> {
+      const target = resolve(path)
+      const parent = dirname(target)
+      const img = await image()
+      await run([
+        'run', '--rm', '--pull', 'never', '--user', '0:0', '--entrypoint', 'rm',
+        '-v', `${parent}:${MOUNT}`,
+        img, '-rf', `${MOUNT}/${basename(target)}`,
+      ])
     },
   }
 }

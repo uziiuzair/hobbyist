@@ -33,9 +33,10 @@ container with its own dockerd on the same host).
 | Durable Object alarms | works, rough edges | An alarm armed 60s out fired 61s after the container was stopped, verified 2026-08-11. Can be up to one mirror tick (10s) late, plus a cold start |
 | `queue` | works, rough edges | Consuming, producing from a container, retries, dead letters and lease expiry all ran against real Docker on macOS, 2026-10-19. The Linux producer fix still owes a Linux re-run, see [Unmeasured](#unmeasured) |
 | Studio | alpha | Browsing, SQL and schema work. Network exposed by design |
-| MCP | works, postgres and queues | Eighteen tools over the daemon API (`packages/mcp/src/server.ts`). No deploy tool |
+| MCP | works, postgres and queues | Twenty-one tools over the daemon API (`packages/mcp/src/server.ts`). No deploy tool |
 | Caddy and TLS | works, off by default | `caddyEnabled` defaults to `false`. Measured on Linux and OrbStack |
 | `hobby branch` | works, rough edges | A new project from a clone of a project's data. Postgres-only projects. Ran against real Docker on ext4 in an Ubuntu 24.04 container, 2026-10-16, with the full-copy warning. Clone times on a reflink filesystem are unmeasured |
+| `hobby reset`, `hobby expire`, `hobby diff` | built, not yet run against Docker | Reset a branch to its parent, expire branches, schema diff with `pg_dump`. Covered by fake-runtime tests only as of 2026-11-17 |
 | `hobby snapshot` | works, rough edges | Take, list, restore into a copy or in place, delete. `--online` for Postgres-only projects. Ran against real Docker on APFS, 2026-10-19. Local to the box; see [Snapshots](/docs/guides/snapshots/) |
 | Remote CLI | works, rough edges | `hobby login <url>` and every command runs against that box with an API token. [ADR 0018](/docs/decisions/0018-the-cli-talks-to-a-remote-daemon/) |
 | The proxy binds loopback | reliable | Default since [ADR 0017](/docs/decisions/0017-the-proxy-binds-loopback-by-default/); `proxyHost` opens it, and `proxyTls` makes `"all"` safe ([ADR 0019](/docs/decisions/0019-the-proxy-terminates-tls/)). `ss` on a fresh install shows `127.0.0.1:5432` |

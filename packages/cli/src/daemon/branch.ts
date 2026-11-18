@@ -18,17 +18,17 @@
 // files, so the result would be a torn directory that may well start, and
 // would be wrong in a way nobody sees until much later.
 //
-// Scope, per the issue: create and destroy only. Destroying a branch is the
-// existing `hobby rm <branch>`, because a branch is an ordinary project the
-// moment this returns. There is no parent link recorded anywhere, so there is
-// nothing for merging, diffing or "what happens to children" to hang off, and
-// removing the source never touches a branch (each owns its own copy).
+// Destroying a branch is the existing `hobby rm <branch>`, because a branch
+// is an ordinary project the moment this returns. Since 2026-11-17 the
+// branch records its parent (Project.parentId) and may carry an expiry
+// (Project.expiresAt): reset.ts resets a branch to its parent, expiry.ts
+// deletes expired branches, schema-diff.ts compares schemas. Removing the
+// source still never touches a branch (each owns its own copy); the parent
+// id simply stops resolving.
 
 import { existsSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
-  cloneTree,
   HobbyError,
   validateName,
   type CloneMechanism,
@@ -41,14 +41,19 @@ import {
 import { createPostgresFromClone } from '@hobby.sh/pg'
 import type { DaemonContext } from './context.js'
 import { quiesce, resume, type QuiesceOptions } from './snapshots.js'
+import { treeOpsFor } from './tree-ops.js'
 
 export interface BranchOptions {
   // The pinned-project guard's explicit override. See assertPauseAllowed.
   allowPause?: boolean
+  // When the expiry sweep may delete the branch (expiry.ts). Absent or null
+  // means never, which is the default: expiry is opt-in.
+  expiresAt?: Date | null
   // Forwarded to quiesce, so a test can supply a guard instead of the real
   // pg_stat_activity check and skip the real two-second retry wait.
   quiesce?: QuiesceOptions
-  // Test seams. Production uses cloneTree and Date.now.
+  // Test seams. Production uses treeOpsFor's clone (tree-ops.ts: cloneTree,
+  // retried as root in a container when the daemon is refused) and Date.now.
   clone?: (src: string, dst: string) => Promise<CloneResult>
   now?: () => number
 }
@@ -96,15 +101,80 @@ function isPostgres(resource: Resource): resource is PostgresResource {
 // that is fully asleep (stopped by hand with `hobby sleep`) pauses nothing,
 // and an unpinned one has already agreed to be stopped whenever it goes
 // idle, so neither needs the flag.
-function assertPauseAllowed(source: Project, running: PostgresResource[], allowPause: boolean): void {
+export function assertPauseAllowed(
+  source: Project,
+  running: Resource[],
+  allowPause: boolean,
+  what: string = 'branching it',
+  howLong: string = 'for the length of the clone'
+): void {
   if (source.sleepAfterSeconds !== null || running.length === 0 || allowPause) {
     return
   }
   throw new HobbyError(
     'conflict',
-    `project ${source.name} is pinned awake, and branching it would stop ${running.map((r) => r.name).join(', ')} for the length of the clone`,
+    `project ${source.name} is pinned awake, and ${what} would stop ${running.map((r) => r.name).join(', ')} ${howLong}`,
     'pass --allow-pause (API: "allowPause": true) to accept the pause, or `hobby sleep` it first'
   )
+}
+
+// The same refusal preflight makes for the source, shared with reset.ts,
+// which clones from a parent exactly as a branch clones from its source.
+export function refuseReleasedSource(source: Project): void {
+  if (source.releasedAt !== null) {
+    throw new HobbyError(
+      'conflict',
+      `project ${source.name} was released and is no longer managed by hobby`,
+      `run \`hobby adopt ${source.name}\` first, after stopping the stack you started from its compose file`
+    )
+  }
+}
+
+// The resources a clone may be taken of: every one a postgres, and every
+// one at rest or running. Shared with reset.ts for its parent, which is a
+// clone source in exactly the sense a branch's source is. See preflight
+// below for why each refusal exists.
+export function cloneableSourceResources(ctx: DaemonContext, source: Project): PostgresResource[] {
+  const all = ctx.store.listResources(source.id)
+  if (all.length === 0) {
+    throw new HobbyError('usage', `project ${source.name} has no resources, so there is nothing to branch`, 'use `hobby new <name> --empty` for an empty project')
+  }
+
+  // Postgres only, for now, and refused rather than skipped. Every other kind
+  // carries state that is keyed to the resource's identity rather than its
+  // directory: a worker's Durable Object storage is named after its resource
+  // id (worker.ts's uniqueKeyFor), a queue's consumer binding and a worker's
+  // queue token are ids and secrets that must not be shared with the source,
+  // and an app or worker hostname is a routed Caddy name. restoreSnapshot's
+  // rewriteConfig (snapshots.ts) shows how large that rewrite surface is,
+  // and each missed field there is a silent failure. Quietly leaving those resources out would instead produce a
+  // branch that looks complete and is not. A branch that refuses is the
+  // honest first version; one that handles them is a later, separate change.
+  const other = all.filter((resource) => resource.kind !== 'postgres')
+  if (other.length > 0) {
+    throw new HobbyError(
+      'usage',
+      `branching copies postgres resources only, and ${source.name} also holds ${other.map((r) => `${r.name} (${r.kind})`).join(', ')}`,
+      'branching projects with apps, workers or queues is not supported yet'
+    )
+  }
+  const resources = all.filter(isPostgres)
+
+  // Only the two resting states are safe to reason about. `starting` and
+  // `stopping` are a container mid-transition, which is neither a clean stop
+  // to clone nor a running instance quiesce knows how to stop (it only
+  // stops `running`), and `failed` means the store does not know what the
+  // container is doing. Refusing is cheap: each of these resolves on its own
+  // in seconds, or with a `hobby wake`/`hobby sleep`.
+  const unsettled = resources.filter((resource) => resource.state !== 'running' && resource.state !== 'sleeping')
+  if (unsettled.length > 0) {
+    throw new HobbyError(
+      'conflict',
+      `cannot branch ${source.name} while ${unsettled.map((r) => `${r.name} is ${r.state}`).join(', ')}`,
+      'retry once it is running or asleep'
+    )
+  }
+  return resources
 }
 
 // Every check that can refuse the request, run before anything is written
@@ -124,13 +194,7 @@ function preflight(ctx: DaemonContext, sourceName: string, targetName: string, a
   // from the compose file eject gave them, and may be open in a Postgres this
   // daemon does not know about. Cloning it would be cloning a live directory
   // with nothing able to quiesce it.
-  if (source.releasedAt !== null) {
-    throw new HobbyError(
-      'conflict',
-      `project ${sourceName} was released and is no longer managed by hobby`,
-      `run \`hobby adopt ${sourceName}\` first, after stopping the stack you started from its compose file`
-    )
-  }
+  refuseReleasedSource(source)
 
   if (ctx.store.getProjectByName(targetName) !== null) {
     throw new HobbyError('name_taken', `a project named ${targetName} already exists`, 'pick a different name for the branch')
@@ -153,45 +217,7 @@ function preflight(ctx: DaemonContext, sourceName: string, targetName: string, a
     )
   }
 
-  const all = ctx.store.listResources(source.id)
-  if (all.length === 0) {
-    throw new HobbyError('usage', `project ${sourceName} has no resources, so there is nothing to branch`, 'use `hobby new <name> --empty` for an empty project')
-  }
-
-  // Postgres only, for now, and refused rather than skipped. Every other kind
-  // carries state that is keyed to the resource's identity rather than its
-  // directory: a worker's Durable Object storage is named after its resource
-  // id (worker.ts's uniqueKeyFor), a queue's consumer binding and a worker's
-  // queue token are ids and secrets that must not be shared with the source,
-  // and an app or worker hostname is a routed Caddy name. restoreSnapshot's
-  // rewriteConfig (snapshots.ts) shows how large that rewrite surface is,
-  // and each missed field there is a silent failure. Quietly leaving those resources out would instead produce a
-  // branch that looks complete and is not. A branch that refuses is the
-  // honest first version; one that handles them is a later, separate change.
-  const other = all.filter((resource) => resource.kind !== 'postgres')
-  if (other.length > 0) {
-    throw new HobbyError(
-      'usage',
-      `branching copies postgres resources only, and ${sourceName} also holds ${other.map((r) => `${r.name} (${r.kind})`).join(', ')}`,
-      'branching projects with apps, workers or queues is not supported yet'
-    )
-  }
-  const resources = all.filter(isPostgres)
-
-  // Only the two resting states are safe to reason about. `starting` and
-  // `stopping` are a container mid-transition, which is neither a clean stop
-  // to clone nor a running instance quiesce knows how to stop (it only
-  // stops `running`), and `failed` means the store does not know what the
-  // container is doing. Refusing is cheap: each of these resolves on its own
-  // in seconds, or with a `hobby wake`/`hobby sleep`.
-  const unsettled = resources.filter((resource) => resource.state !== 'running' && resource.state !== 'sleeping')
-  if (unsettled.length > 0) {
-    throw new HobbyError(
-      'conflict',
-      `cannot branch ${sourceName} while ${unsettled.map((r) => `${r.name} is ${r.state}`).join(', ')}`,
-      'retry once it is running or asleep'
-    )
-  }
+  const resources = cloneableSourceResources(ctx, source)
 
   assertPauseAllowed(
     source,
@@ -220,7 +246,7 @@ interface RestMark {
 // successful start, and nothing else writes it for a postgres), and one
 // still in flight shows as a running container or a non-sleeping state.
 // Either way the copy may be torn, so the whole branch is discarded.
-async function assertAtRest(ctx: DaemonContext, resources: PostgresResource[], marks?: Map<ResourceId, RestMark>): Promise<Map<ResourceId, RestMark>> {
+export async function assertAtRest(ctx: DaemonContext, resources: PostgresResource[], marks?: Map<ResourceId, RestMark>): Promise<Map<ResourceId, RestMark>> {
   const next = new Map<ResourceId, RestMark>()
   for (const original of resources) {
     const current = ctx.store.getResource(original.id)
@@ -242,17 +268,94 @@ async function assertAtRest(ctx: DaemonContext, resources: PostgresResource[], m
   return next
 }
 
+export interface CloneAtRestOptions {
+  // Where each source resource's data directory is cloned to. Must not exist
+  // (cloneTree refuses an existing destination).
+  destination: (resource: PostgresResource) => string
+  // Prefixes the console line logged for a source that did not come back.
+  label: string
+  quiesce?: QuiesceOptions
+  clone: (src: string, dst: string) => Promise<CloneResult>
+  now: () => number
+}
+
+export interface CloneAtRestResult {
+  clone: CloneMechanism
+  paused: string[]
+  pausedMs: number | null
+  resumeFailures: string[]
+}
+
+// The clone sequence branching has always used, lifted out so reset.ts
+// clones a parent through exactly the same steps rather than a second copy
+// of them: quiesce what is running (the caller has already applied the
+// pinned guard), prove every source container is stopped, clone, prove
+// nothing woke during the clone, then resume. The source's pause is the
+// clone and nothing more. A throw from here leaves whatever was cloned
+// before it for the caller to remove, since only the caller knows whether
+// those destinations are its own.
+export async function cloneSourceAtRest(
+  ctx: DaemonContext,
+  source: Project,
+  resources: PostgresResource[],
+  opts: CloneAtRestOptions
+): Promise<CloneAtRestResult> {
+  const running = resources.filter((resource) => resource.state === 'running')
+  const stopped: ResourceId[] = []
+  const mechanisms: CloneMechanism[] = []
+  let pausedMs: number | null = null
+  let resumeFailures: string[] = []
+
+  const pauseStartedAt = running.length > 0 ? opts.now() : null
+  try {
+    if (running.length > 0) {
+      await quiesce(ctx, source, { ...opts.quiesce, onStopped: (id) => stopped.push(id) })
+    }
+    const marks = await assertAtRest(ctx, resources)
+    for (const resource of resources) {
+      const result = await opts.clone(resource.config.dataDir, opts.destination(resource))
+      mechanisms.push(result.mechanism)
+    }
+    await assertAtRest(ctx, resources, marks)
+  } finally {
+    // Resumed before the caller makes anything of the clone, so the
+    // source's pause is the clone and nothing more. Safe to await here for
+    // the same reason takeSnapshot's finally is: resume collects start
+    // failures rather than throwing them.
+    resumeFailures = await resume(ctx, stopped)
+    // Logged as well as returned: when the clone itself failed, the error
+    // propagating from the try above replaces the return value, and a
+    // source that did not come back must not go unmentioned.
+    for (const failure of resumeFailures) {
+      console.error(`${opts.label}: ${failure}`)
+    }
+    if (pauseStartedAt !== null) {
+      pausedMs = opts.now() - pauseStartedAt
+    }
+  }
+
+  return {
+    clone: mechanisms.includes('copy') ? 'copy' : 'reflink',
+    paused: running.map((resource) => resource.name),
+    pausedMs,
+    resumeFailures,
+  }
+}
+
 // Undoes a branch that did not finish: the containers and network made for
 // it, the rows, and the cloned files. Everything here was created by this
 // call and nothing else, which preflight's directory check and the early
 // createProject (which reserves the name) are what guarantee.
 //
-// The clone's files are owned by the daemon's own user (cloneTree copies as
-// that user, and no container has ever started on them to chown them), so a
-// plain rm is enough here, unlike destroyPostgres's container-based removal.
-async function discardBranch(ctx: DaemonContext, project: Project): Promise<string[]> {
+// Usually the clone's files are the daemon's own and a plain rm works. When
+// the clone needed the container fallback (a non-root daemon on Linux,
+// tree-ops.ts) they kept the source's container owner, so the removal goes
+// through the same fallback.
+async function discardBranch(ctx: DaemonContext, project: Project, source: Resource[]): Promise<string[]> {
   const failures: string[] = []
-  for (const resource of ctx.store.listResources(project.id)) {
+  const resources = ctx.store.listResources(project.id)
+  const ops = treeOpsFor(ctx, [...resources, ...source])
+  for (const resource of resources) {
     try {
       await ctx.runtime.remove(resource.config.containerName)
     } catch (err) {
@@ -267,7 +370,7 @@ async function discardBranch(ctx: DaemonContext, project: Project): Promise<stri
   ctx.store.deleteProject(project.id)
   const dir = join(ctx.paths.projectsDir, project.name)
   try {
-    await rm(dir, { recursive: true, force: true })
+    await ops.remove(dir)
   } catch (err) {
     failures.push(`remove ${dir}: ${errorMessage(err)}`)
   }
@@ -281,8 +384,8 @@ export async function branchProject(
   opts: BranchOptions = {}
 ): Promise<BranchResult> {
   const now = opts.now ?? Date.now
-  const clone = opts.clone ?? cloneTree
   const { source, resources } = preflight(ctx, sourceName, targetName, opts.allowPause === true)
+  const clone = opts.clone ?? treeOpsFor(ctx, resources).clone
 
   // Created first, before anything is cloned, so the name is reserved for the
   // whole of what may be a minutes-long copy on ext4. Created last, a
@@ -293,42 +396,31 @@ export async function branchProject(
   // experiments, and inheriting a pin would keep a throwaway copy awake
   // forever. This is the same value `hobby new` without --pin gets
   // (createProjectRoute, routes.ts).
-  const project = ctx.store.createProject({ name: targetName, sleepAfterSeconds: ctx.config.sleepAfterSeconds })
-
-  const running = resources.filter((resource) => resource.state === 'running')
-  const stopped: ResourceId[] = []
-  const mechanisms: CloneMechanism[] = []
-  let pausedMs: number | null = null
-  let resumeFailures: string[] = []
+  //
+  // The parent is recorded by id (Project.parentId's comment has why), and
+  // the expiry only if the caller asked for one.
+  const project = ctx.store.createProject({
+    name: targetName,
+    sleepAfterSeconds: ctx.config.sleepAfterSeconds,
+    parentId: source.id,
+    expiresAt: opts.expiresAt ?? null,
+  })
+  // A branch holds the same data and the same passwords as its source, so
+  // it starts with the source's IP allowlist, copied now. A copy, not a
+  // link: each project's list changes on its own after this (the 2026-11-17
+  // allowlist amendment in docs/proxy/CLAUDE.md).
+  if (source.allowlist != null) {
+    ctx.store.setProjectAllowlist(project.id, [...source.allowlist])
+  }
 
   try {
-    const pauseStartedAt = running.length > 0 ? now() : null
-    try {
-      if (running.length > 0) {
-        await quiesce(ctx, source, { ...opts.quiesce, onStopped: (id) => stopped.push(id) })
-      }
-      const marks = await assertAtRest(ctx, resources)
-      for (const resource of resources) {
-        const result = await clone(resource.config.dataDir, ctx.paths.resourcePath(targetName, resource.name, 'pgdata'))
-        mechanisms.push(result.mechanism)
-      }
-      await assertAtRest(ctx, resources, marks)
-    } finally {
-      // Resumed before the branch's own rows and containers are made, so the
-      // source's pause is the clone and nothing more. Safe to await here for
-      // the same reason takeSnapshot's finally is: resume collects start
-      // failures rather than throwing them.
-      resumeFailures = await resume(ctx, stopped)
-      // Logged as well as returned: when the clone itself failed, the error
-      // propagating from the try above replaces the return value, and a
-      // source that did not come back must not go unmentioned.
-      for (const failure of resumeFailures) {
-        console.error(`branch: ${failure}`)
-      }
-      if (pauseStartedAt !== null) {
-        pausedMs = now() - pauseStartedAt
-      }
-    }
+    const cloned = await cloneSourceAtRest(ctx, source, resources, {
+      destination: (resource) => ctx.paths.resourcePath(targetName, resource.name, 'pgdata'),
+      label: 'branch',
+      ...(opts.quiesce === undefined ? {} : { quiesce: opts.quiesce }),
+      clone,
+      now,
+    })
 
     const created: Resource[] = []
     for (const resource of resources) {
@@ -338,13 +430,13 @@ export async function branchProject(
     return {
       project,
       resources: created,
-      clone: mechanisms.includes('copy') ? 'copy' : 'reflink',
-      paused: running.map((resource) => resource.name),
-      pausedMs,
-      resumeFailures,
+      clone: cloned.clone,
+      paused: cloned.paused,
+      pausedMs: cloned.pausedMs,
+      resumeFailures: cloned.resumeFailures,
     }
   } catch (err: unknown) {
-    const leftovers = await discardBranch(ctx, project)
+    const leftovers = await discardBranch(ctx, project, resources)
     if (leftovers.length > 0) {
       throw new HobbyError(
         'internal',

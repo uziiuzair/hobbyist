@@ -12,6 +12,8 @@ export * from './store.js'
 export * from './copy.js'
 export * from './docker.js'
 export * from './ports.js'
+// Per-project IP allowlists: validated by the daemon, matched by the proxy.
+export * from './allowlist.js'
 // Exported because @hobby.sh/do opens sqlite databases that are not the store:
 // a Durable Object namespace's alarm table, written by workerd. The two-runtime
 // knowledge in sqlite.ts must stay in exactly one file, so the second consumer

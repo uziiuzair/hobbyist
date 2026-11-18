@@ -1,6 +1,6 @@
 # `docs/mcp/` the MCP server
 
-**Status:** BUILT. Eighteen tools registered in `packages/mcp/src/server.ts`
+**Status:** BUILT. Eighteen tools registered (twenty-one since the 2026-11-17 amendment below) in `packages/mcp/src/server.ts`
 over the daemon API on the unix socket, mirroring the CLI verbs for projects,
 databases, env and queues; no deploy tool, and `hobby_new` creates only
 postgres. The body below is the original scope guard and still governs the
@@ -69,3 +69,65 @@ it. Response shaping matters more here than anywhere else in the tool set:
 an agent is handed a secret to set, and what comes back is the key names and
 whether the resource was stopped, never a value. `ls` reads names off the
 daemon's redacted wire config, so there is no tool that could return one.
+
+## Amendment, 2026-11-17: branch workflow tools
+
+Three tools, mirroring three new verbs over three new routes, so the count
+in the status line above is now twenty-one. `hobby_reset` (`hobby reset`,
+`POST /v1/projects/:name/reset`) replaces a branch's data with its parent's
+and is gated on `confirm: true` exactly as `hobby_rm` is: no request is made
+without it. `hobby_expire` (`hobby expire`, `POST /v1/projects/:name/expiry`)
+sets or clears a branch's expiry, and `hobby_branch` gained `expires`; both
+parse the duration with the CLI's own `parseDuration`
+(`packages/cli/src/cli/output.ts`), so "7d" means one thing on both surfaces.
+`hobby_diff` (`hobby diff`, `POST /v1/projects/:name/diff`) wakes what it
+compares and says so in its description. The SDK's tool annotations
+(`readOnlyHint`, `destructiveHint`) are still not used anywhere in
+`packages/mcp/src/server.ts`; the `confirm` argument remains the convention.
+
+## Amendment, 2026-11-17: `hobby mcp` and the agent plugin (issue #128)
+
+**Running it.** `hobby mcp` (`packages/cli/src/cli/mcp.ts`, dispatched in
+`packages/cli/src/cli/main.ts`) is now the supported way to start the
+server: stdio, under whatever runtime runs `hobby`, so the bun-only install
+from `install.sh` needs no `node` and no second launcher. The CLI cannot
+depend on this package, because this package depends on the CLI, so the verb
+loads `@hobby.sh/mcp` with a dynamic import of a specifier held in a variable
+(tsc does not follow it) and resolves it through the workspace's
+node_modules at run time. A separate `hobby-mcp` shim from `install.sh` was
+the other option; it was not taken because it is a second launcher every
+install path has to keep in step, and `hobby mcp` is the command a client
+config wants to hold anyway. `packages/mcp/bin/hobby-mcp.js` still works for
+a checkout with node.
+
+The transport is still the unix socket. ADR 0018 keeps MCP off the remote
+transport, so `hobby mcp` on a machine logged in to a box serves the local
+socket and says so on stderr; to drive a box from an agent, run `hobby mcp`
+on the box. `runStdioServer` (`packages/mcp/src/server.ts`) now takes the
+socket path and streams, and returns a `closed` promise: the SDK's stdio
+transport never notices end of input, so the server closes itself when the
+client hangs up and the verb exits 0. Starting needs no daemon; each tool
+call then fails with `daemon_unreachable` as a tool error.
+
+**The agent plugin.** `plugin/` is a Claude Code plugin (manifest in
+`plugin/.claude-plugin/plugin.json`, listed by the repo-root
+`.claude-plugin/marketplace.json`) whose `plugin/.mcp.json` starts
+`hobby mcp`, plus four skills under `plugin/skills/`: managing Postgres,
+branching for agents, deploying apps and workers, and backups and leaving.
+The skills teach workflows over the same verbs; they add no capability, which
+keeps them inside this folder's hard rule. They tell an agent never to print a
+connection string, to use `--database` or a command substitution into an
+ignored env file instead, and to pass `--yes` or `confirm: true` only after
+the user has confirmed the exact target. `site/scripts/check-plugin-skills.mjs`
+fails when a skill names a verb, flag or MCP tool that does not exist, or
+breaks the skill frontmatter rules; `packages/mcp/test/plugin-skills.test.ts`
+runs it in `npm test`. Install steps are on the site at
+`/docs/guides/agent-plugin/`.
+
+## Amendment, 2026-11-17: `hobby_import`
+
+`hobby_import` mirrors `hobby import` and
+takes the source connection string by reference only, as `sourceEnv` or
+`sourceFile`, resolved in the MCP server process; there is no argument for the
+string itself. The reasoning is in `docs/portability/CLAUDE.md`'s 2026-11-17
+import amendment.
