@@ -57,6 +57,7 @@ Start the daemon from the directory holding your `hobby.json`.
 | `sleepAfterSeconds` | `HOBBY_SLEEP_AFTER_SECONDS` | `300` | The idle threshold a **new** project is given. See below: it is copied at creation, not read live |
 | `wakeTimeoutMs` | `HOBBY_WAKE_TIMEOUT_MS` | `30000` | How long a wake may take before it is a failure |
 | `readinessPollMs` | `HOBBY_READINESS_POLL_MS` | `25` | How often readiness is polled during a wake |
+| `deployDrainMs` | `HOBBY_DEPLOY_DRAIN_MS` | `10000` | How long a redeploy of an awake app keeps the old container running after new requests have moved to the new one, so requests in flight finish. `0` stops it at once |
 | `caddyEnabled` | `HOBBY_CADDY_ENABLED` | `false` | Whether the Caddy front door runs at all. Only `1` or `true` turns it on; anything else is false |
 | `caddyAdminPort` | `HOBBY_CADDY_ADMIN_PORT` | `2019` | Caddy's admin API, on `127.0.0.1`. The daemon writes `$HOBBY_HOME/caddy/Caddyfile` holding only `admin 127.0.0.1:<port>` and mounts it into the container, so the port is honoured on every start. A `hobby-caddy` container created by a daemon older than this (issue #132) still has Caddy's default, 2019: `docker rm -f hobby-caddy` once and start the daemon again |
 | `caddyStudioHost` | `HOBBY_CADDY_STUDIO_HOST` | `null` | The public hostname for Studio. `null` publishes no Studio route |

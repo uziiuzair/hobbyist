@@ -7,6 +7,7 @@
 // what keeps volume lifecycle, backup and branching interactions out of the
 // hardest phase.
 
+import { setTimeout as delay } from 'node:timers/promises'
 import {
   HobbyError,
   routingKeyFor,
@@ -49,6 +50,12 @@ export interface AppDeps {
   // Test seam for the clock that names an image tag. Production uses
   // Date.now; a test needs the tag to be predictable.
   now?: () => number
+  // Test seam for the drain wait between moving the route to a new
+  // container and stopping the old one (rollOver). Production waits for
+  // real; a test records the call so it can assert the order of events
+  // without spending the drain period. Namespaced for the same reason as
+  // appProbeFactory.
+  appDrainWait?: (ms: number) => Promise<void>
 }
 
 // Clear of the postgres range (15432 to 25432, see packages/pg) so a glance
@@ -64,6 +71,33 @@ export const APP_PORT_RANGE = { from: PORT_RANGE_FROM, to: PORT_RANGE_TO } as co
 // its port in ten seconds is not slow, it is broken or listening on the wrong
 // address, and the error message below is more useful than more waiting.
 const STOP_TIMEOUT_SEC = 10
+
+// How long a redeploy of a running app keeps the previous container up after
+// the route has moved to the new one (rollOver). Requests the HTTP router
+// already dialed to the old container's port finish on it; ten seconds covers
+// an ordinary request with room, and `docker stop`'s own SIGTERM grace
+// (STOP_TIMEOUT_SEC) follows it for a process that drains on SIGTERM.
+// Overridden by HobbyConfig.deployDrainMs (HOBBY_DEPLOY_DRAIN_MS).
+export const DEFAULT_DEPLOY_DRAIN_MS = 10_000
+
+// The suffix that tells a rolling deploy's second container name from the
+// first. An underscore because resource names cannot contain one
+// (validateName: ^[a-z][a-z0-9-]{1,62}$), so `hobby-blog-web_b` can never be
+// the plain container name of some other resource called `web-b`, which a
+// hyphen would allow. Docker accepts it ([a-zA-Z0-9][a-zA-Z0-9_.-]+).
+const ALTERNATE_SUFFIX = '_b'
+
+// A running app's redeploy alternates between two container names, so the
+// new one can exist beside the old one (rollOver). The name in use is the
+// one recorded in config.containerName, which every other path (start, stop,
+// logs, rm, env, reconcile, snapshots) already reads, so nothing derives it
+// from the resource name and nothing needs renaming afterwards. Pure string
+// work on the current name rather than on the project and resource names, so
+// a container named by an older daemon or by a snapshot restore alternates
+// the same way.
+export function alternateContainerName(current: string): string {
+  return current.endsWith(ALTERNATE_SUFFIX) ? current.slice(0, -ALTERNATE_SUFFIX.length) : `${current}${ALTERNATE_SUFFIX}`
+}
 
 function appHostname(project: string, resource: string, domain: string): string {
   return `${resource}.${project}.${domain}`.toLowerCase()
@@ -454,6 +488,12 @@ export async function destroyApp(deps: AppDeps, resource: AppResource): Promise<
     failures.push(`remove container: ${errorMessage(err)}`)
   }
 
+  // The other of the two names a rolling deploy alternates between. Normally
+  // absent; present only if the daemon died between starting a new container
+  // and stopping the old one (rollOver), which leaves one that no config
+  // names. Quiet, because absent is the normal answer.
+  await removeContainerQuietly(deps, alternateContainerName(resource.config.containerName))
+
   // Only images WE built. A user-supplied image reference may be shared
   // with anything else on the box, including their own work outside hobby,
   // and deleting it would be reaching well outside what destroying one
@@ -494,7 +534,57 @@ export interface DeployAppResult {
 // environment are both fixed at create time. The previous image is left on
 // disk: it is the only one known to have served, and a deploy that builds
 // cleanly and then fails to listen needs something to go back to.
+//
+// Two paths after the build. An app that is serving right now is redeployed
+// with no gap (rollOver): new container beside the old, route moved once the
+// new one answers, old one stopped after a drain, and it stays `running`. Any
+// other app (asleep, failed, never deployed) is replaced in place and left
+// asleep, as before, since there is nothing serving to keep up.
 export async function deployApp(
+  deps: AppDeps,
+  resource: AppResource,
+  opts: DeployAppOptions = {}
+): Promise<DeployAppResult> {
+  // One deploy per app at a time. Two overlapping rolling deploys would both
+  // pick the same alternate name, and the second would remove the first's
+  // new container as a leftover. The resource is re-read inside the lock, so
+  // a deploy that waited sees the config the previous one committed (its new
+  // container name and port), not the snapshot its caller read beforehand.
+  return withDeployLock(resource.id, async () => {
+    const fresh = deps.store.getResource(resource.id)
+    return deployAppLocked(deps, fresh !== null && fresh.kind === 'app' ? fresh : resource, opts)
+  })
+}
+
+const deployChains = new Map<ResourceId, Promise<void>>()
+
+async function withDeployLock<T>(id: ResourceId, fn: () => Promise<T>): Promise<T> {
+  const previous = deployChains.get(id) ?? Promise.resolve()
+  let release!: () => void
+  const mine = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const chained = previous.then(() => mine)
+  deployChains.set(id, chained)
+  await previous
+  try {
+    return await fn()
+  } finally {
+    release()
+    if (deployChains.get(id) === chained) {
+      deployChains.delete(id)
+    }
+  }
+}
+
+export interface DeployAppOptions {
+  source?: AppSource
+  env?: Record<string, string>
+  containerPort?: number
+  databaseResourceId?: ResourceId | null
+}
+
+async function deployAppLocked(
   deps: AppDeps,
   resource: AppResource,
   // containerPort and databaseResourceId: given, they replace the app's
@@ -502,12 +592,7 @@ export async function deployApp(
   // to be silently dropped); absent, the app keeps what it had. The
   // container is replaced on every deploy anyway, so both take effect at
   // once, PORT and DATABASE_URL included (containerSpec).
-  opts: {
-    source?: AppSource
-    env?: Record<string, string>
-    containerPort?: number
-    databaseResourceId?: ResourceId | null
-  } = {}
+  opts: DeployAppOptions
 ): Promise<DeployAppResult> {
   const project = deps.store.getProject(resource.projectId)
   if (project === null) {
@@ -567,6 +652,21 @@ export async function deployApp(
       ...(opts.containerPort === undefined ? {} : { containerPort: opts.containerPort }),
       ...(opts.databaseResourceId === undefined ? {} : { databaseResourceId: opts.databaseResourceId }),
     }
+    // A running app is redeployed without a gap (rollOver): the new
+    // container comes up beside the old one and the route moves only once it
+    // answers. A sleeping app has nothing serving to keep up, so it takes the
+    // path below, unchanged: replace in place, prove it serves, leave it
+    // asleep for the next request to wake.
+    if (await isServing(deps, resource)) {
+      await rollOver(deps, resource, project.networkName, config)
+      await pruneAfterDeploy(deps, project.name, resource.name, built.tag)
+      const final = deps.store.getResource(resource.id)
+      if (final === null || final.kind !== 'app') {
+        throw new HobbyError('internal', `app ${resource.id} vanished during deploy`)
+      }
+      return { resource: final, image: built.tag, logs: built.logs }
+    }
+
     replaced = true
     deps.store.updateResourceConfig(resource.id, config)
 
@@ -593,9 +693,7 @@ export async function deployApp(
     // the few kept for rollback go (issue #84). Logged, never thrown: the
     // deploy succeeded, and a layer left on disk is not a reason to say
     // otherwise.
-    for (const failure of await pruneImageTags(deps.runtime, buildRepository(project.name, resource.name), built.tag)) {
-      console.error(`app ${resource.name}: ${failure}`)
-    }
+    await pruneAfterDeploy(deps, project.name, resource.name, built.tag)
 
     const final = deps.store.getResource(resource.id)
     if (final === null || final.kind !== 'app') {
@@ -630,6 +728,108 @@ export async function deployApp(
   }
 }
 
+async function pruneAfterDeploy(deps: AppDeps, projectName: string, resourceName: string, tag: string): Promise<void> {
+  for (const failure of await pruneImageTags(deps.runtime, buildRepository(projectName, resourceName), tag)) {
+    console.error(`app ${resourceName}: ${failure}`)
+  }
+}
+
+// Whether the app is serving right now, which is what decides between the
+// two deploy paths. The store's word alone is not enough: a container that
+// died behind the daemon is recorded `running` until reconcile notices, and
+// keeping "it" up would keep nothing up.
+async function isServing(deps: AppDeps, resource: AppResource): Promise<boolean> {
+  if (resource.state !== 'running') {
+    return false
+  }
+  return (await deps.runtime.inspect(resource.config.containerName)).running
+}
+
+function drainMs(deps: AppDeps): number {
+  const configured = deps.config.deployDrainMs
+  return typeof configured === 'number' && Number.isFinite(configured) && configured >= 0
+    ? configured
+    : DEFAULT_DEPLOY_DRAIN_MS
+}
+
+// The zero-downtime redeploy of a running app (Phase A1 of
+// docs/availability/specs/2026-11-18-standby-pair-design.md).
+//
+//   1. Create the new container under the other of the two alternating names
+//      (alternateContainerName) on a freshly allocated host port, and start it.
+//   2. Wait for the same readiness probe every wake uses. If it fails, the new
+//      container is removed and the error is thrown with nothing else changed:
+//      the store still names the old container and port, so the old one never
+//      stopped serving and no route moved.
+//   3. Switch: ONE store write of the whole config, new name and new port
+//      together. That write is the route switch. The HTTP router resolves
+//      every request from the store (createHttpProxyDeps in
+//      packages/cli/src/daemon/context.ts, `port: resource.config.hostPort`),
+//      and Caddy never dials an app at all: it has one static catch-all route
+//      to the router (CaddyFallback in packages/cli/src/daemon/caddy.ts), so
+//      there is no second place to update and nothing to get out of step.
+//   4. Drain: wait drainMs. A request the router already dialed to the old
+//      port is an open socket to the old container and finishes there; every
+//      request resolved after step 3 goes to the new port.
+//   5. Stop and remove the old container. Best effort and logged: the deploy
+//      has already succeeded, and a leftover is removed by the next rolling
+//      deploy (whose alternate name it holds) or by destroyApp.
+//
+// The state stays `running` throughout, so the router never treats the app as
+// asleep mid-deploy and never wakes it on the way.
+async function rollOver(deps: AppDeps, previous: AppResource, network: string, next: AppConfig): Promise<void> {
+  const oldName = previous.config.containerName
+  // The old port is still in the store, so allocatePort skips it; the probe
+  // in allocateHostPort skips anything else bound on the host.
+  const hostPort = await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO, [previous.config.hostPort])
+  const candidate: AppConfig = { ...next, containerName: alternateContainerName(oldName), hostPort }
+
+  // A leftover under the alternate name is from a rolling deploy the daemon
+  // did not live to finish. No config names it, so nothing serves from it.
+  await deps.runtime.stop(candidate.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+  await deps.runtime.remove(candidate.containerName)
+
+  // The deploy is activity: without this, a build longer than the idle
+  // threshold would let the hibernator sleep the old container mid-deploy.
+  deps.activity?.touch(previous.id)
+
+  try {
+    await deps.runtime.ensureNetwork(network)
+    await deps.runtime.ensureCreated(containerSpec(deps, candidate, network))
+    await deps.runtime.start(candidate.containerName)
+
+    const probe = (deps.appProbeFactory ?? defaultProbeFactory(deps))(candidate)
+    const result = await waitListening({
+      probe,
+      pollMs: deps.config.readinessPollMs,
+      timeoutMs: deps.config.wakeTimeoutMs,
+      status: () => deps.runtime.inspect(candidate.containerName),
+    })
+    if (!result.ready) {
+      // Before the removal below: an exit on boot reads the new container's
+      // last log lines, which go with it.
+      throw await notReady(deps, candidate, result)
+    }
+  } catch (err) {
+    await removeContainerQuietly(deps, candidate.containerName)
+    throw err
+  }
+
+  deps.store.updateResourceConfig(previous.id, candidate)
+  deps.store.setResourceState(previous.id, 'running')
+  deps.store.touchResource(previous.id, new Date())
+  deps.activity?.touch(previous.id)
+
+  await (deps.appDrainWait ?? ((ms: number) => delay(ms)))(drainMs(deps))
+
+  try {
+    await deps.runtime.stop(oldName, { timeoutSec: STOP_TIMEOUT_SEC })
+    await deps.runtime.remove(oldName)
+  } catch (err) {
+    console.error(`app ${previous.name}: the new container serves, but the previous one (${oldName}) could not be removed: ${errorMessage(err)}`)
+  }
+}
+
 // A redeploy that fails puts the previous version back (issue #78). The
 // previous tag was always kept on disk for exactly this ("so a failed
 // deploy can roll back to an image that is known to have served",
@@ -661,7 +861,15 @@ async function rollBackDeploy(
   }
   if (!replaced) {
     deps.store.setResourceState(previous.id, previous.state)
-    return withRollbackNote(err, `nothing was changed: ${previous.name} still serves ${previous.config.image}`)
+    // A running app reaches here from rollOver too, whose new container has
+    // already been removed: the old one was never stopped, and saying so is
+    // the whole answer to "is my site down".
+    return withRollbackNote(
+      err,
+      previous.state === 'running'
+        ? `nothing was changed: ${previous.name} kept serving ${previous.config.image} from its running container throughout, and the new container was removed`
+        : `nothing was changed: ${previous.name} still serves ${previous.config.image}`
+    )
   }
   try {
     deps.store.updateResourceConfig(previous.id, previous.config)

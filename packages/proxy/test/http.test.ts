@@ -742,3 +742,70 @@ test('a running resource that still refuses after its one restart is a 502, with
     await router.close()
   }
 })
+
+// Phase A1 (deployApp's rollOver, packages/app/src/app.ts): a redeploy of a
+// running app moves the route by changing the port the store resolves to,
+// then keeps the old container up for a drain period. This is the router's
+// half of that contract, with real sockets: a request already dialed to the
+// old upstream finishes there after the switch, and a request resolved after
+// the switch goes to the new one, with no wake and no error in between.
+test('a request in flight when the route moves finishes on the old upstream, and the next one goes to the new', async () => {
+  let releaseSlow!: () => void
+  const slowGate = new Promise<void>((resolve) => {
+    releaseSlow = resolve
+  })
+  let oldReceived!: () => void
+  const oldGotRequest = new Promise<void>((resolve) => {
+    oldReceived = resolve
+  })
+  const oldServer = createServer((_req, res) => {
+    oldReceived()
+    void slowGate.then(() => {
+      res.writeHead(200)
+      res.end('old version')
+    })
+  })
+  const newServer = createServer((_req, res) => {
+    res.writeHead(200)
+    res.end('new version')
+  })
+  const oldPort = await listenOn(oldServer)
+  const newPort = await listenOn(newServer)
+  let port = oldPort
+  let wakes = 0
+  const activity = new ActivityTracker()
+  const router = await startHttpRouter(
+    {
+      async resolve(hostname: string): Promise<HttpTarget | null> {
+        if (hostname !== 'web.blog.localhost') return null
+        return { resourceId: 'r1', host: '127.0.0.1', port, state: 'running' }
+      },
+      async wake(): Promise<void> {
+        wakes++
+      },
+      activity,
+    },
+    { port: 0 }
+  )
+  try {
+    const inFlight = fetchThrough(router.port, 'web.blog.localhost')
+    await oldGotRequest
+    // The switch: what rollOver's single updateResourceConfig does to the
+    // store, seen from the router's resolve.
+    port = newPort
+    const after = await fetchThrough(router.port, 'web.blog.localhost')
+    assert.equal(after.status, 200)
+    assert.equal(after.body, 'new version')
+    // The drain: the old upstream is still up, and the request that started
+    // on it completes there.
+    releaseSlow()
+    const finished = await inFlight
+    assert.equal(finished.status, 200)
+    assert.equal(finished.body, 'old version')
+    assert.equal(wakes, 0)
+  } finally {
+    await router.close()
+    await closeServer(oldServer)
+    await closeServer(newServer)
+  }
+})

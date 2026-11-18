@@ -129,6 +129,28 @@ builds at a time, apps and workers alike: a deploy that starts while another
 build is running waits for it, and its build output begins with `hobby: build
 queued behind another build`.
 
+## Redeploying a live app
+
+A redeploy of an app that is awake has no gap. The new version starts in a
+second container beside the old one, on its own port, and has to answer
+before anything moves. Once it does, new requests go to it, the old one keeps
+running for 10 seconds so requests already in flight finish, and then it is
+stopped. The app stays awake.
+
+If the new version never starts listening, or crashes on boot, it is removed
+and the old one carries on serving as if nothing happened. The deploy fails
+and says so, and nothing about the running site changed.
+
+An app that is asleep has nothing to keep up, so a redeploy replaces it in
+place, checks the new version starts, and leaves it asleep for the next
+request to wake, as before.
+
+`HOBBY_DEPLOY_DRAIN_MS` changes the 10 seconds. A WebSocket open on the old
+version is not moved: it is closed when the old container stops, and the
+client reconnects to the new one. Workers do not get this yet: a worker
+redeploy still stops the old container before starting the new one, because
+two copies would share its Durable Object and KV storage.
+
 ## Create now, deploy later
 
 ```sh

@@ -373,6 +373,13 @@ error, which then points at it. A successful build is quiet unless
 under the resource's repository (`hobby/<project>-<resource>`, workers with a
 `-worker` suffix) are kept for rollback and older ones removed.
 
+Redeploying an app that is awake starts the new version beside the old one
+and moves traffic only once it answers; the old one drains for
+`deployDrainMs` (10 seconds) and is then stopped, and the app stays awake. If
+the new version fails to start, the old one keeps serving and the deploy
+fails. An app that is asleep is replaced in place and left asleep. Workers
+are always replaced in place. See [Apps](/docs/guides/apps/#redeploying-a-live-app).
+
 A deploy that had to create its project and then fails before putting a
 resource in it removes that project again, so a refused name or a build error
 does not leave an empty project behind. A project that did get a resource,

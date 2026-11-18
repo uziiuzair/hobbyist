@@ -420,3 +420,91 @@ s) turns a hung dispose into a logged exit 1 rather than a SIGKILL. The
 runner is a JS string inside a TS template literal, so
 `packages/worker/test/worker.test.ts` now writes it out and runs `node
 --check` on it.
+
+## Amendment, 2026-11-18: a running app is redeployed with no gap (Phase A1)
+
+Phase A1 of `docs/availability/specs/2026-11-18-standby-pair-design.md`
+(on branch `docs/adr-0023-standby-pair`, not yet on main). Until now every
+app deploy, running or not, went through `replaceContainer`: stop and remove
+the container, recreate it under the same name, prove it serves, then stop it
+and leave the app `sleeping`. A live site was down from the stop until the
+next request finished waking the new container.
+
+**Built.** `deployApp` (`packages/app/src/app.ts`) now has two paths after the
+build, chosen by `isServing` (state `running` AND the recorded container
+actually running, so a container that died behind the daemon does not count):
+
+- **Running: `rollOver`.** The new container is created under the other of
+  two alternating names (`alternateContainerName`: `hobby-<p>-<r>` and
+  `hobby-<p>-<r>_b`; underscore because `validateName` forbids it in resource
+  names, so it cannot collide with a resource called `<r>-b`) on a fresh port
+  from `allocateHostPort`, and started. It must pass the same `waitListening`
+  probe a wake uses. Then ONE `updateResourceConfig` writes the new
+  `containerName` and `hostPort` together, and that write is the route
+  switch: `createHttpProxyDeps` (`packages/cli/src/daemon/context.ts`)
+  resolves `resource.config.hostPort` per request, and Caddy holds no
+  per-app route at all, only the static catch-all to the router
+  (`CaddyFallback`, `packages/cli/src/daemon/caddy.ts`), so there is no second
+  place to update. Then a drain wait, then the old container is stopped and
+  removed (logged, never thrown, if that fails). The app stays `running`
+  throughout and after.
+- **Not running (sleeping, failed, undeployed): unchanged.** Replace in place
+  under the recorded name and port, prove, leave `sleeping`. Nothing is
+  serving, so there is nothing to keep up, and keeping this path means a
+  deploy still does not wake an app nobody is using.
+
+**Naming is recorded, not renamed.** Every path that touches the container
+already reads `config.containerName` and `config.hostPort` rather than
+deriving them: `startApp`, `stopApp`, `destroyApp`, `ensureContainer`, logs
+(`routes.ts` `logsRoute`), the env route's container removal, reconcile
+(`reconcile.ts`), release (`forgetReleasedProject`), eject's compose
+(`renderCompose`, which pins no `container_name`), and snapshots (which
+rewrite both for a new project in `rewriteConfig`). The runtime has no
+rename, and a rename could not move the published port anyway, so the
+config is the record. `destroyApp` also quietly removes the alternate name,
+for a container left by a daemon that died mid-drain; the next rolling
+deploy would remove it too, since that is the name it creates under.
+
+**Failure.** A new container that fails readiness is removed before the
+error is thrown; the config is never written, so the router never moved.
+`rollBackDeploy`'s nothing-replaced branch returns the state to `running` and
+the hint says `kept serving <image> from its running container throughout,
+and the new container was removed`.
+
+**Drain.** `HobbyConfig.deployDrainMs` (`HOBBY_DEPLOY_DRAIN_MS`, default
+`DEFAULT_DEPLOY_DRAIN_MS`, 10 000; 0 allowed). It is real because the HTTP
+router (`packages/proxy/src/http.ts`, `handleRequest`) resolves a target once
+per request and dials it: a request dialed before the switch is an open
+socket to the old port and finishes on the old container as long as it runs,
+which it does for the drain plus `docker stop`'s SIGTERM grace
+(`STOP_TIMEOUT_SEC`). Tested with real sockets in
+`packages/proxy/test/http.test.ts` ("a request in flight when the route moves
+..."). A WebSocket or other upgraded connection is NOT moved: it stays on the
+old container and is closed when that container stops after the drain.
+
+**Concurrency.** `withDeployLock` serialises deploys per app in the daemon
+process and re-reads the resource inside the lock, so two overlapping
+deploys cannot both claim the alternate name.
+
+**Rollback** has no separate verb; it is `rollBackDeploy`, and for a running
+app it never needs to act, since the old container is untouched until the new
+one has passed.
+
+**Workers are not changed, deliberately.** A worker is not served in-process:
+each worker resource is its own container running workerd via Miniflare
+(`containerSpec`, `packages/worker/src/worker.ts`), so a deploy does have a
+gap, the same stop-then-start as before. Running two at once is not safe
+today: both would bind-mount the same `state` and `do` directories and open
+the same KV, D1 and Durable Object SQLite files from two workerd processes,
+which breaks Durable Objects' single-instance guarantee; and the fixed
+`controlPort` (which `deployWorker` carries through on purpose so queue
+delivery never moves) can be published by one container only. Doing it right
+needs either a storage handoff or a per-deploy control port with the queue
+broker following it. Not done; recorded here so nobody assumes A1 covered it.
+
+**Not verified against real Docker** in this change: the unit tests run the
+fake runtime (`packages/app/test/app.test.ts`, the tests after
+`alternateContainerName`). A daemon crash during the drain leaves the old
+container running with no config naming it until the next rolling deploy or
+`hobby rm`; reconcile does not look for it. `hobby logs` after a rolling
+deploy shows the new container only; the old one's output goes with it.
