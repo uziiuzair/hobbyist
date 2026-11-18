@@ -88,6 +88,7 @@ test('hobby pg config set and unset send set, unset and allowPause, and say how 
   await cmdPg(restarted.ctx, ['config', 'unset', 'blog', 'jit'], { 'allow-pause': true })
   assert.deepEqual(restarted.calls, ['setSettings r1 {"unset":["jit"],"allowPause":true}'])
   assert.ok(restarted.out.includes('restarted with the new settings (paused 1200ms).'))
+  assert.ok(restarted.out.includes('sessions open before the restart were ended; new connections made during it were held until it was back, up to the wake timeout.'))
 })
 
 test('in a linked directory the target can be left out', async () => {

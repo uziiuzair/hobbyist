@@ -35,7 +35,7 @@ import {
 import { startPostgres, stopPostgres, type ActivityGuardResult } from '@hobby.sh/pg'
 import { ActivityTracker, type ConnectionHandle } from '@hobby.sh/proxy'
 import { createApp, createProxyDeps, shouldSleep, startHibernator, type DaemonContext } from '../src/index.js'
-import { clearWakeRefusal, createDefaultKindRegistry } from '../src/daemon/context.js'
+import { clearWakeRefusal, createDefaultKindRegistry, holdProjectAsleep } from '../src/daemon/context.js'
 
 function testConfig(overrides: Partial<HobbyConfig> = {}): HobbyConfig {
   return {
@@ -401,6 +401,37 @@ test('tick: an idle running resource past its threshold, with an idle guard, get
   try {
     await step()
     assert.equal(guardCalls, 1, 'the guard must be consulted exactly once for a real sleep candidate')
+    assert.equal(ctx.store.getResource(resourceId)?.state, 'sleeping')
+  } finally {
+    await hibernator.stop()
+  }
+})
+
+test('tick: a project held by an operation (a settings change, a snapshot) is left alone, and slept once it is released', async () => {
+  const clock = { nowMs: 1_000_000 }
+  const activity = new ActivityTracker(() => clock.nowMs)
+  const ctx = buildContext(createFakeRuntime(), activity)
+  const { resourceId } = makeIdleRunningResource(ctx, { projectSleepAfterSeconds: 120, hostPort: 25570 })
+  const project = ctx.store.getProjectByName('blog')!
+
+  activity.close(activity.open(resourceId))
+  clock.nowMs += 130_000
+
+  let guardCalls = 0
+  const guard = async (): Promise<ActivityGuardResult> => {
+    guardCalls++
+    return 'idle'
+  }
+
+  const release = holdProjectAsleep(ctx, project.id, project.name, 'a settings change')
+  const { sleepFor, step } = createStepController()
+  const hibernator = startHibernator(ctx, { intervalMs: 1, now: () => clock.nowMs, sleepFor, checkActiveQuery: guard })
+  try {
+    await step()
+    assert.equal(guardCalls, 0, 'a held project is skipped before the guard')
+    assert.equal(ctx.store.getResource(resourceId)?.state, 'running')
+    release()
+    await step()
     assert.equal(ctx.store.getResource(resourceId)?.state, 'sleeping')
   } finally {
     await hibernator.stop()

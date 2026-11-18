@@ -1697,6 +1697,10 @@ function printSettingsChange(c: Ctx, label: string, result: SetSettingsResponse)
       break
     case 'restarted':
       c.io.out(`restarted with the new settings (paused ${result.pausedMs ?? 0}ms).`)
+      // True of every restart (applyPostgresSettings, pg-settings.ts): the
+      // sessions open at the stop are gone, and a connection made during the
+      // pause waited on the wake hold rather than being refused.
+      c.io.out('sessions open before the restart were ended; new connections made during it were held until it was back, up to the wake timeout.')
       break
   }
   printPreloadGaps(c, label, result.needsPreload)

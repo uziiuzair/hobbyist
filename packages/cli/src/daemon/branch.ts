@@ -39,7 +39,7 @@ import {
   type ResourceId,
 } from '@hobby.sh/core'
 import { createPostgresFromClone } from '@hobby.sh/pg'
-import type { DaemonContext } from './context.js'
+import { holdProjectAsleep, type DaemonContext, type ReleaseHold } from './context.js'
 import { quiesce, resume, type QuiesceOptions } from './snapshots.js'
 import { treeOpsFor } from './tree-ops.js'
 
@@ -246,6 +246,9 @@ interface RestMark {
 // successful start, and nothing else writes it for a postgres), and one
 // still in flight shows as a running container or a non-sleeping state.
 // Either way the copy may be torn, so the whole branch is discarded.
+// (Since 2026-11-18 a source that was awake is held asleep for its clone,
+// cloneSourceAtRest below, so this catches a wake only of a source that was
+// asleep to begin with, or one that slipped in before the hold.)
 export async function assertAtRest(ctx: DaemonContext, resources: PostgresResource[], marks?: Map<ResourceId, RestMark>): Promise<Map<ResourceId, RestMark>> {
   const next = new Map<ResourceId, RestMark>()
   for (const original of resources) {
@@ -306,6 +309,21 @@ export async function cloneSourceAtRest(
   let pausedMs: number | null = null
   let resumeFailures: string[] = []
 
+  // An awake source is held asleep from before its stop until after its
+  // resume (Phase A3, 2026-11-18), the hold a settings change and a snapshot
+  // take. Without it a client connecting mid-clone woke the source, which
+  // failed the branch (assertAtRest below discards a copy whose source
+  // woke). With it the client waits on the fence (buildWake, context.ts) and is served by
+  // the resumed source, bounded by the proxy's wakeTimeoutMs: a slow copy
+  // (ext4, a large source) can outlast that, and that client then gets the
+  // proxy's wake timeout instead of tearing the branch. A source that was
+  // asleep is not held: nothing restarts it, and a wake during its clone is
+  // still caught by assertAtRest as before. Taken outside the try, so a
+  // refusal (another operation holds the source) has stopped nothing.
+  const release: ReleaseHold | null =
+    running.length > 0 ? holdProjectAsleep(ctx, source.id, source.name, `a ${opts.label}`) : null
+  const failed = new Map<string, string>()
+
   const pauseStartedAt = running.length > 0 ? opts.now() : null
   try {
     if (running.length > 0) {
@@ -322,7 +340,8 @@ export async function cloneSourceAtRest(
     // source's pause is the clone and nothing more. Safe to await here for
     // the same reason takeSnapshot's finally is: resume collects start
     // failures rather than throwing them.
-    resumeFailures = await resume(ctx, stopped)
+    resumeFailures = await resume(ctx, stopped, failed)
+    release?.(failed)
     // Logged as well as returned: when the clone itself failed, the error
     // propagating from the try above replaces the return value, and a
     // source that did not come back must not go unmentioned.

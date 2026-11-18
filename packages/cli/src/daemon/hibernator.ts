@@ -6,7 +6,7 @@
 // the only place in this file that touches real time or a real resource.
 
 import { createStopSignal, guardFor, type ActivityGuardResult, type Resource, type ResourceState } from '@hobby.sh/core'
-import { boundDatabase, type DaemonContext } from './context.js'
+import { boundDatabase, isProjectHeld, type DaemonContext } from './context.js'
 
 export interface ShouldSleepInput {
   state: ResourceState
@@ -163,6 +163,16 @@ async function tick(
       continue
     }
 
+    // An operation holds the project (a settings change, a snapshot or
+    // restore, a branch or reset quiescing it): it is stopping and starting
+    // these resources on purpose, or copying one that must stay up, and a
+    // sleep landing in the middle would race its own stop or start. The
+    // operation's end leaves the resource running or asleep as it meant to,
+    // and the next tick decides from there. Phase A3, 2026-11-18.
+    if (isProjectHeld(ctx, resource.projectId)) {
+      continue
+    }
+
     const sleepAfterSeconds = project?.sleepAfterSeconds ?? null
     // Pinned. Checked first, before anything else, including the cheap
     // in-memory activity lookups below: there is nothing left to decide.
@@ -233,6 +243,7 @@ async function tick(
       freshConnections !== 0 ||
       freshResource === null ||
       freshResource.state !== 'running' ||
+      isProjectHeld(ctx, freshResource.projectId) ||
       hasAwakeDependent(ctx, freshResource)
     ) {
       continue

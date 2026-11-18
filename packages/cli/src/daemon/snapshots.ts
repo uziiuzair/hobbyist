@@ -31,7 +31,7 @@ import { APP_PORT_RANGE } from '@hobby.sh/app'
 import { createPostgresFromClone } from '@hobby.sh/pg'
 import { WORKER_PORT_RANGE } from '@hobby.sh/worker'
 import { basebackupPostgres, type UnpackOptions } from './basebackup.js'
-import { holdProjectAsleep, holdProjectExclusive, type DaemonContext } from './context.js'
+import { holdProjectAsleep, holdProjectExclusive, type DaemonContext, type ReleaseHold } from './context.js'
 import { treeOpsFor } from './tree-ops.js'
 
 // Sortable, and lowercase because restore builds project names out of this and
@@ -159,7 +159,13 @@ export async function quiesce(ctx: DaemonContext, project: Project, opts: Quiesc
 // "the snapshot failed" because one resource did not restart would send a
 // reader looking in the wrong place. Started in reverse of quiesce's stop
 // order, the usual shutdown-then-startup symmetry.
-export async function resume(ctx: DaemonContext, ids: ResourceId[]): Promise<string[]> {
+//
+// `failed`, when given, also receives each failure keyed by resource id, in
+// the shape a hold's release takes (ReleaseHold, context.ts): every caller
+// resumes under holdProjectAsleep, and handing it these is what lets a
+// connection waiting on the fence learn that its database did not come
+// back, rather than start it once more by itself.
+export async function resume(ctx: DaemonContext, ids: ResourceId[], failed?: Map<string, string>): Promise<string[]> {
   const failures: string[] = []
   for (const id of [...ids].reverse()) {
     const resource = ctx.store.getResource(id)
@@ -170,6 +176,7 @@ export async function resume(ctx: DaemonContext, ids: ResourceId[]): Promise<str
       await ctx.kinds.get(resource.kind).start(ctx, resource)
     } catch (err: unknown) {
       failures.push(`restart ${resource.name}: ${errorMessage(err)}`)
+      failed?.set(resource.id, errorMessage(err))
     }
   }
   return failures
@@ -280,7 +287,7 @@ export async function takeSnapshot(
   // daemon, a PGDATA (and a worker's state directory) belongs to a container
   // user, and the native operation is refused.
   const ops = treeOpsFor(ctx, ctx.store.listResources(project.id))
-  const release = holdProjectAsleep(ctx, project.id, project.name)
+  const release = holdProjectAsleep(ctx, project.id, project.name, 'a snapshot')
   try {
     await quiesce(ctx, project, { ...opts.quiesce, onStopped: (resourceId) => stopped.push(resourceId) })
 
@@ -317,11 +324,12 @@ export async function takeSnapshot(
     // every start() failure itself and returns failure strings rather than
     // throwing. If that contract ever changed, a throw here would replace
     // whatever error the try/catch above was already carrying.
-    const failures = await resume(ctx, stopped)
+    const failed = new Map<string, string>()
+    const failures = await resume(ctx, stopped, failed)
     for (const failure of failures) {
       console.error(`snapshot: ${failure}`)
     }
-    release()
+    release(failed)
   }
 }
 
@@ -461,7 +469,7 @@ export async function takeOnlineSnapshot(
   // daemon, a PGDATA (and a worker's state directory) belongs to a container
   // user, and the native operation is refused.
   const ops = treeOpsFor(ctx, ctx.store.listResources(project.id))
-  const release = holdProjectExclusive(ctx, project.id, project.name)
+  const release = holdProjectExclusive(ctx, project.id, project.name, 'a snapshot')
   const handles: Array<ReturnType<DaemonContext['activity']['open']>> = []
   try {
     const resources = ctx.store.listResources(project.id).map((resource) => expectKind(resource, 'postgres'))
@@ -901,9 +909,9 @@ async function restoreInPlace(ctx: DaemonContext, found: FoundSnapshot, opts: Re
   // goes, so a quiesce that throws partway still resumes what it stopped.
   const stopped: ResourceId[] = []
   let restartFailures: string[] = []
-  let release: (() => void) | null = null
+  let release: ReleaseHold | null = null
   try {
-    release = holdProjectAsleep(ctx, project.id, project.name)
+    release = holdProjectAsleep(ctx, project.id, project.name, 'a restore')
     await quiesce(ctx, project, { ...opts.quiesce, onStopped: (resourceId) => stopped.push(resourceId) })
 
     if (liveExisted) {
@@ -923,11 +931,12 @@ async function restoreInPlace(ctx: DaemonContext, found: FoundSnapshot, opts: Re
   } finally {
     // resume never throws (its own comment above), which is what makes an
     // unguarded await safe in a finally that may be carrying an error.
-    restartFailures = await resume(ctx, stopped)
+    const failed = new Map<string, string>()
+    restartFailures = await resume(ctx, stopped, failed)
     for (const failure of restartFailures) {
       console.error(`restore: ${failure}`)
     }
-    release?.()
+    release?.(failed)
   }
 
   let preRestoreDir: string | null = liveExisted ? asideDir : null

@@ -246,6 +246,11 @@ change replaces the container, even for a setting Postgres could reload:
   with a query or transaction running is waited for, then refused if it stays
   busy. If Postgres will not start with the new settings, the previous ones
   are restored and it is started again, and the error carries its log lines.
+  Sessions open at the restart end. A new connection made during it, through
+  the proxy on any of its paths (plain, TLS, the serverless driver), waits
+  for the restarted database instead of being refused, for up to the wake
+  timeout (`HOBBY_WAKE_TIMEOUT_MS`), and gets the error if it does not come
+  back.
 
 Anything not on the allowlist is refused, and so is a value outside its
 range. `shared_preload_libraries` accepts `pg_stat_statements` and

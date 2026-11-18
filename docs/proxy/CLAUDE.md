@@ -614,3 +614,111 @@ logging, branch inheritance and the CLI in `packages/cli/test/allowlist.test.ts`
 client on another machine, or under Bun. The same-box rule for container
 traffic on Linux, and on Docker Desktop or OrbStack, is reasoned from the
 code paths above, not measured.
+
+## Amendment, 2026-11-18: new connections wait through a deliberate restart (Phase A3)
+
+**Built.** Phase A3 of `docs/availability/specs/2026-11-18-standby-pair-design.md`
+(on the `docs/adr-0023-standby-pair` branch, not yet on main). When the
+daemon restarts or recreates an awake database on purpose, a new connection
+through the proxy waits for it and is then served by the restarted
+container, instead of being refused. Sessions that were open at the stop
+still end; nothing carries a session across a Postgres restart.
+
+**The mechanism is the existing snapshot fence, not a new state.** The spec
+proposed marking the resource `restarting`. That was not needed: the proxy
+already sends every connection to a non-`running` target through
+`deps.wake`, and a `running` target whose dial is refused through one more
+(`handleStartup` in `packages/proxy/src/proxy.ts`), and `buildWake`
+(`packages/cli/src/daemon/context.ts`) already waits on a project hold taken
+with `holdProjectAsleep` before it starts anything, then returns at once if
+the operation left the resource `running`. A restart drives the store
+through `stopping`, `sleeping`, `starting` (`stopPostgres`, `startPostgres`
+in `packages/pg/src/postgres.ts`), so every connection in that window lands
+on the fence. The proxy itself is unchanged.
+
+**What was already true, and what is new.** `applyPostgresSettings`
+(`packages/cli/src/daemon/pg-settings.ts`) took that hold since 2026-11-17,
+so a connection during a settings change already waited and was served:
+the new tests below pass against the code before this change too. What this
+change adds:
+
+- **A failed restart answers the waiters.** The release function a hold
+  returns (`ReleaseHold`) now takes the resources the operation stopped and
+  could not start again, each with its failed start's message. A wake
+  waiting on that fence throws `heldRestartFailed` (`wake_failed`,
+  "`blog/primary` was restarted by a settings change, and did not come back:
+  ...") as soon as the hold is released, instead of making another start
+  attempt of its own and taking up to `wakeTimeoutMs` to fail again.
+  `applyPostgresSettings` reports its resource when it stopped it and it is
+  not `running` at the end (both the new and the rolled-back start failed).
+  `resume` (`packages/cli/src/daemon/snapshots.ts`) takes an optional map it
+  fills the same way, used by `takeSnapshot`, `restoreSnapshot` in place,
+  `resetBranch` and `cloneSourceAtRest`.
+- **A branch or reset quiescing an awake source holds it.**
+  `cloneSourceAtRest` (`packages/cli/src/daemon/branch.ts`, used by
+  `branchProject` and `resetBranch` for the parent) takes `holdProjectAsleep`
+  on the source when anything in it is running, from before the stop to
+  after the resume. Before, a client connecting mid-clone woke the source,
+  which `assertAtRest` then caught and discarded the whole branch. A source
+  that was asleep is still not held.
+- **The hibernator leaves a held project alone** (`isProjectHeld`, checked
+  twice in `tick`, `packages/cli/src/daemon/hibernator.ts`), so it cannot
+  stop a database in the middle of an operation's own stop and start.
+- **Holds are named.** `holdProjectAsleep` and `holdProjectExclusive` take
+  what the operation is ("a settings change", "a branch", "a reset", "a
+  snapshot", "a restore", "an import", "the removal"), and a second hold is
+  refused as "a settings change of blog is already in progress" rather than
+  always "a snapshot or restore".
+
+**Every path converges.** Plain TCP, TLS (the terminator hands the decrypted
+stream back to `handle` with `encrypted: true`) and the serverless driver's
+`/sql` and WebSocket `/v2` (`connectToProxy` hands an in-memory socket pair
+to the same `handle`) all reach `handleStartup`, which calls `deps.resolve`
+and `deps.wake`. The HTTP router (`http.ts`), the query route and `hobby
+wake` (`waitForProjectAwakeable`) wait on the same fence.
+
+**Bounds and deadlock.** The proxy races the whole wake, fence included,
+against `wakeTimeoutMs` (default 30 s, `HOBBY_WAKE_TIMEOUT_MS`), so a
+restart that outlasts it ends the wait with "wake timed out". The operation
+never waits on its own fence: it stops and starts through the kind handler
+(`handler.stop`, `handler.start`, `resume`) and never through `buildWake`.
+An operation that leaves a resource asleep (a settings change on an asleep
+database, a branch of an asleep source) starts nothing; only a client's own
+connection wakes it afterwards, which is ordinary wake-on-connect.
+
+**Operations covered:** `hobby pg config set|unset` on an awake database,
+including `--allow-pause` on a pinned project; `hobby branch` and `hobby
+reset` pausing an awake source or parent (with `--allow-pause` too); `hobby
+reset`'s quiesce of the branch itself, `hobby snapshot` (quiesced) and
+`hobby snapshot restore --in-place` (all three held before; now they also
+report failed resumes to waiters).
+
+**Deliberately not covered:** `hobby pg ext add|rm` (runs `CREATE
+EXTENSION` over SQL, or only edits the declaration; no restart; a preload
+change goes through settings); `hobby sleep` and `hobby eject --release`
+(they mean to leave it stopped, and a connection afterwards wakes it, or is
+refused for a released project, as before); `hobby snapshot --online` and
+`hobby import` (`holdProjectExclusive`, nothing is restarted); expiry of a
+branch (`expiry.ts`, holds it while removing it, and a waiter then gets
+`resource_not_found` from `buildWake` because the resource is gone); daemon shutdown (the proxy closes first); an app or
+worker env change (`routes.ts`, not Postgres, and not behind this proxy).
+
+**Verified.** `packages/cli/test/restart-wait.test.ts` drives the real
+proxy, `createProxyDeps`, `applyPostgresSettings` and `cloneSourceAtRest`
+against a fake runtime whose stop and start take a stand-in Postgres off
+and back onto the resource's port: a connection during the stop and during
+the start is held and then gets `AuthenticationOk`; one waiting on a restart
+whose new and rollback starts both fail gets the error within
+milliseconds and starts nothing; one waiting past `wakeTimeoutMs` gets
+"wake timed out" inside the budget; a branch holds the awake source's
+clients and serves them after resume. `packages/proxy/test/serverless.test.ts`
+covers `/sql` through the real `@neondatabase/serverless` client, with the
+store saying `stopping` and with it still saying `running` while the port
+refuses, and a failed restart. `packages/cli/test/hibernator.test.ts` covers
+the hibernator skip.
+
+**Not verified.** Not run against real Docker. In particular not measured:
+how often a client lands in Postgres's own shutdown window (`57P03` "the
+database system is shutting down", retried by `holdUntilServing` against
+the old port) versus the fenced window, and whether a TLS or WebSocket
+client's own connect timeout fires before a long restart finishes.

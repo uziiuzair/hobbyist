@@ -157,7 +157,7 @@ export async function sweepExpiredBranches(ctx: DaemonContext, nowMs: number, op
 
     let release: () => void
     try {
-      release = holdProjectAsleep(ctx, project.id, project.name)
+      release = holdProjectAsleep(ctx, project.id, project.name, 'the removal')
     } catch {
       skip(project, 'held')
       continue

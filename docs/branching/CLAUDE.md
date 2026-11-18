@@ -337,3 +337,21 @@ resource copied, and its cost has not been timed.
   is expected to show `hobby branch`, `hobby snapshot` and `hobby rm` of a
   project with workers passing as the `runner` user. Until it has, treat this
   as built, not verified.
+
+## Amendment, 2026-11-18: an awake source is held for its clone (Phase A3)
+
+`cloneSourceAtRest` (`packages/cli/src/daemon/branch.ts`), which `hobby
+branch` and `hobby reset` (for the parent) both use, now takes
+`holdProjectAsleep` on the source when anything in it is running, from
+before the quiesce to after the resume. A client connecting to the source
+mid-clone waits on the wake fence and is served once the source is resumed,
+for up to `wakeTimeoutMs`, instead of waking the source, which made
+`assertAtRest` discard the whole branch. A slow copy (ext4) can outlast that
+budget, and such a client then gets the proxy's wake timeout. A source that
+was asleep is not held, so `assertAtRest` still catches a wake during its
+clone exactly as before. Two consequences: a branch or reset of a source
+that a snapshot, restore or settings change is holding is refused with a
+conflict naming that operation, and the hibernator does not sleep the source
+during the clone (`isProjectHeld`). Details in the same-dated amendment in
+`docs/proxy/CLAUDE.md`. Covered by `packages/cli/test/restart-wait.test.ts`;
+not run against real Docker.

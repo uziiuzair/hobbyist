@@ -474,3 +474,100 @@ test('a WebSocket upgrade on a connection that already carried a /sql request is
     await h.close()
   }
 })
+
+// Phase A3 (2026-11-18): the daemon holds a wake for as long as it is
+// restarting a database on purpose (a settings change, a branch's quiesce;
+// buildWake's fence in packages/cli/src/daemon/context.ts). From the proxy's
+// side that is a wake() that does not settle until the restart is done, and
+// the restarted container may be on a new port. These pin that the
+// serverless path rides the same hold as a plain Postgres client: /sql
+// waits and is served, and a restart that fails is the request's error.
+async function restartHarness(initialState: string): Promise<{
+  port: number
+  wakes: string[]
+  beginRestart: () => Promise<void>
+  finishRestart: () => Promise<void>
+  failRestart: (message: string) => void
+  close: () => Promise<void>
+}> {
+  let pg: FakePostgres | null = await startFakePostgres({ password: PASSWORD, handler })
+  let pgPort = pg.port
+  const state = { value: 'running' }
+  const wakes: string[] = []
+  let settle: { resolve: () => void; reject: (err: Error) => void } | null = null
+  const restart = new Promise<void>((resolve, reject) => (settle = { resolve, reject }))
+  restart.catch(() => {})
+  const deps: ProxyDeps = {
+    resolve: async (project) =>
+      project === 'blog'
+        ? { resourceId: 'res-blog', label: 'blog/primary', host: '127.0.0.1', port: pgPort, state: state.value, database: 'blog' }
+        : null,
+    wake: async (id) => {
+      wakes.push(id)
+      await restart
+    },
+    activity: new ActivityTracker(),
+  }
+  const proxy = await startPgProxy({ port: 0, host: '127.0.0.1', deps, wakeTimeoutMs: 3000 })
+  return {
+    port: proxy.port,
+    wakes,
+    beginRestart: async () => {
+      await pg?.close()
+      pg = null
+      state.value = initialState
+    },
+    finishRestart: async () => {
+      pg = await startFakePostgres({ password: PASSWORD, handler })
+      pgPort = pg.port
+      state.value = 'running'
+      settle?.resolve()
+    },
+    failRestart: (message) => {
+      state.value = 'failed'
+      settle?.reject(new Error(message))
+    },
+    close: async () => {
+      await proxy.close()
+      await pg?.close()
+    },
+  }
+}
+
+for (const initialState of ['stopping', 'running']) {
+  test(`a /sql request during a restart (store says ${initialState}) waits, and is served by the restarted database`, async () => {
+    const h = await restartHarness(initialState)
+    try {
+      useLocal()
+      await h.beginRestart()
+      let settled = false
+      const query = Promise.resolve(neon(url(h.port))`SELECT 1 AS one`).then((rows) => {
+        settled = true
+        return rows
+      })
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      assert.equal(settled, false, 'held, not refused')
+      await h.finishRestart()
+      assert.deepEqual(await query, [{ one: 1 }])
+      assert.deepEqual(h.wakes, ['res-blog'])
+    } finally {
+      await h.close()
+    }
+  })
+}
+
+test('a /sql request waiting on a restart that fails gets that failure as its error', async () => {
+  const h = await restartHarness('stopping')
+  try {
+    useLocal()
+    await h.beginRestart()
+    const query = Promise.resolve(neon(url(h.port))`SELECT 1 AS one`)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const started = Date.now()
+    h.failRestart('blog/primary was restarted by a settings change, and did not come back: container exited immediately')
+    await assert.rejects(query, /was restarted by a settings change, and did not come back/)
+    assert.ok(Date.now() - started < 1500, 'answered when the restart failed, not at the wake timeout')
+  } finally {
+    await h.close()
+  }
+})
