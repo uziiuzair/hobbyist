@@ -102,6 +102,12 @@ function execWithStdin(cmd: string, args: string[], stdin: Readable): Promise<{ 
       reject(Object.assign(new Error(`input stream failed: ${err.message}`), { stdout, stderr }))
     })
     child.on('error', (err) => reject(Object.assign(err, { stdout, stderr })))
+    // A child that exits before reading all of stdin (a container that
+    // failed to start, a script that stopped early) closes the pipe, and an
+    // EPIPE on child.stdin with no listener is an uncaught exception that
+    // takes the whole daemon down. The exit code below already says what
+    // happened.
+    child.stdin.on('error', () => {})
     child.on('close', (code) => {
       if (code === 0) {
         resolve({ stdout, stderr })
@@ -112,6 +118,10 @@ function execWithStdin(cmd: string, args: string[], stdin: Readable): Promise<{ 
     stdin.pipe(child.stdin)
   })
 }
+
+// The real ExecFn, for a daemon-side caller that runs docker itself with an
+// injectable seam of its own (packages/cli/src/daemon/import.ts).
+export const defaultDockerExec: ExecFn = defaultExec
 
 function errorOf(err: unknown): ExecError {
   if (err && typeof err === 'object') {
@@ -221,6 +231,9 @@ function buildCreateArgs(spec: ContainerSpec): string[] {
     args.push('--add-host', `${host.name}:${host.address}`)
   }
   args.push(spec.image)
+  // After the image, as `docker create IMAGE [COMMAND] [ARG...]` reads it.
+  // Every element is its own argv entry, never a shell string.
+  args.push(...(spec.command ?? []))
   return args
 }
 

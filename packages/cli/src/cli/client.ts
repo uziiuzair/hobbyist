@@ -14,6 +14,7 @@ import http from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { HobbyError, type ErrorCode, type Project } from '@hobby.sh/core'
 import type { WireResource, WireSnapshotManifest } from '../daemon/wire.js'
+import type { ImportReport } from '../daemon/import.js'
 
 // Thrown when the socket does not exist, or exists but nothing answers on
 // it (a stale file, or the daemon crashed). Deliberately not a HobbyError:
@@ -229,9 +230,51 @@ export interface ExtensionsResponse {
     declared: string[]
     installed: Array<{ name: string; version: string }> | null
     missing: string[] | null
+    // Declared or installed extensions whose library is not preloaded
+    // (packages/pg/src/settings.ts, EXTENSION_PRELOADS).
+    needsPreload?: PreloadGap[]
   }
   // POST only: names undeclared by this call. Never dropped from the database.
   removed?: string[]
+}
+
+export interface PreloadGap {
+  extension: string
+  library: string
+  allowed: boolean
+}
+
+// One allowlisted server setting, as GET /v1/resources/:id/settings
+// reports it (settingCatalog, packages/pg/src/settings.ts).
+export interface SettingInfo {
+  name: string
+  type: string
+  context: string
+  restartRequired: boolean
+  default: string
+  summary: string
+  docs: string
+  min?: string
+  max?: string
+  values?: string[]
+  library?: string
+}
+
+export interface SettingsResponse {
+  settings: Record<string, string>
+  needsPreload: PreloadGap[]
+  available: SettingInfo[]
+}
+
+export interface SetSettingsResponse {
+  resource: WireResource
+  settings: Record<string, string>
+  // unchanged: nothing differed. next-start: it was asleep; its container
+  // was replaced and the settings apply on its next wake. restarted: it
+  // was awake and was restarted with them.
+  applied: 'unchanged' | 'next-start' | 'restarted'
+  pausedMs: number | null
+  needsPreload: PreloadGap[]
 }
 
 export interface EnvResponse {
@@ -398,6 +441,16 @@ export interface SnapshotRestoreResponse {
   preRestoreDir: string | null
 }
 
+export interface ImportInput {
+  project: string
+  source: string
+  resource?: string
+  schemas?: string[]
+  excludeSchemas?: string[]
+  strict?: boolean
+}
+export type { ImportReport }
+
 export interface Api {
   health(): Promise<HealthResponse>
   version(): Promise<VersionResponse>
@@ -409,6 +462,12 @@ export interface Api {
   // Undefined sends no field, and the daemon applies its own default
   // (issue #110): the box-wide value, not this process's.
   setSleepPolicy(project: string, sleepAfterSeconds: number | null | undefined): Promise<ProjectResponse>
+  // The project's IP allowlist for the wake-on-connect proxy, carried on the
+  // returned project as `allowlist` (null: open to any address).
+  // GET, POST and DELETE /v1/projects/:name/allowlist.
+  getAllowlist(project: string): Promise<ProjectResponse>
+  setAllowlist(project: string, change: { add?: string[]; remove?: string[] }): Promise<ProjectResponse>
+  clearAllowlist(project: string): Promise<ProjectResponse>
   getProject(name: string): Promise<ProjectDetailResponse>
   // A new project whose postgres resources start from a clone of the
   // source's data. allowPause is the pinned-project guard's override.
@@ -428,7 +487,7 @@ export interface Api {
   createResource(
     project: string,
     input:
-      | { kind: 'postgres'; name: string; extensions?: string[] }
+      | { kind: 'postgres'; name: string; extensions?: string[]; settings?: Record<string, string> }
       | {
           kind: 'app'
           name: string
@@ -476,6 +535,13 @@ export interface Api {
   // Declared and installed extensions of a postgres resource. Both wake it.
   getExtensions(id: string): Promise<ExtensionsResponse>
   setExtensions(id: string, input: { add?: string[]; remove?: string[] }): Promise<ExtensionsResponse>
+  // Declared server settings and the allowlist. Never wakes anything.
+  getSettings(id: string): Promise<SettingsResponse>
+  // Restarts the database if it is awake (a pause); a pinned one needs allowPause.
+  setSettings(
+    id: string,
+    input: { set?: Record<string, string>; unset?: string[]; allowPause?: boolean }
+  ): Promise<SetSettingsResponse>
   deleteResource(id: string): Promise<DeletedResponse>
   startResource(id: string): Promise<ResourceResponse>
   stopResource(id: string, opts?: { force?: boolean }): Promise<StopResponse>
@@ -505,6 +571,10 @@ export interface Api {
     opts?: { as?: string; inPlace?: boolean; allowPause?: boolean }
   ): Promise<SnapshotRestoreResponse>
   deleteSnapshot(id: string): Promise<DeletedResponse>
+  // POST /v1/import. `source` is the connection string itself, resolved by
+  // the caller from stdin, a file or an environment variable
+  // (resolveImportSource, cli/import.ts); the daemon never echoes it.
+  importDatabase(input: ImportInput): Promise<{ import: ImportReport }>
 }
 
 // Accepts a transport rather than only a socket path (ADR 0018). Every verb
@@ -602,6 +672,9 @@ export function createApi(transport: string | DaemonClient): Api {
         `/v1/projects/${p(project)}/sleep-policy`,
         sleepAfterSeconds === undefined ? {} : { sleepAfterSeconds }
       ),
+    getAllowlist: (project) => call(client, 'GET', `/v1/projects/${p(project)}/allowlist`),
+    setAllowlist: (project, change) => call(client, 'POST', `/v1/projects/${p(project)}/allowlist`, change),
+    clearAllowlist: (project) => call(client, 'DELETE', `/v1/projects/${p(project)}/allowlist`),
     getProject: (name) => call(client, 'GET', `/v1/projects/${p(name)}`),
     branchProject: (source, name, opts) =>
       call(
@@ -626,6 +699,8 @@ export function createApi(transport: string | DaemonClient): Api {
     setEnv: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/env`, input),
     getExtensions: (id) => call(client, 'GET', `/v1/resources/${p(id)}/extensions`),
     setExtensions: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/extensions`, input),
+    getSettings: (id) => call(client, 'GET', `/v1/resources/${p(id)}/settings`),
+    setSettings: (id, input) => call(client, 'POST', `/v1/resources/${p(id)}/settings`, input),
     deleteResource: (id) => call(client, 'DELETE', `/v1/resources/${p(id)}`),
     startResource: (id) => call(client, 'POST', `/v1/resources/${p(id)}/start`),
     stopResource: (id, opts) => call(client, 'POST', `/v1/resources/${p(id)}/stop`, opts?.force === true ? { force: true } : {}),
@@ -657,5 +732,6 @@ export function createApi(transport: string | DaemonClient): Api {
         ...(opts?.allowPause === true ? { allowPause: true } : {}),
       }),
     deleteSnapshot: (id) => call(client, 'DELETE', `/v1/snapshots/${p(id)}`),
+    importDatabase: (input) => call(client, 'POST', '/v1/import', input),
   }
 }

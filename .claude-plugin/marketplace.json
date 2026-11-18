@@ -1,0 +1,14 @@
+{
+  "name": "hobbyist",
+  "owner": { "name": "Uzair Hayat" },
+  "metadata": {
+    "description": "The Hobbyist agent plugin, installable straight from this repository."
+  },
+  "plugins": [
+    {
+      "name": "hobbyist",
+      "source": "./plugin",
+      "description": "Skills for managing, branching, deploying and backing up a self-hosted Hobbyist box, plus the local `hobby mcp` server over stdio."
+    }
+  ]
+}

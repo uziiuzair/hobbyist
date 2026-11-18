@@ -8,12 +8,17 @@
 // leak here: filesystem permissions on that socket are the whole
 // authentication story, per docs/mcp/CLAUDE.md.
 
+import type { Readable, Writable } from 'node:stream'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { resolvePaths } from '@hobby.sh/core'
 import { createApi, type Api } from '@hobby.sh/cli'
 import { z } from 'zod'
 import {
+  allowAddTool,
+  allowListTool,
+  allowOffTool,
+  allowRmTool,
   branchTool,
   connectionStringTool,
   diffTool,
@@ -21,9 +26,13 @@ import {
   envSetTool,
   envUnsetTool,
   expireTool,
+  importTool,
   listTool,
   logsTool,
   newTool,
+  pgConfigListTool,
+  pgConfigSetTool,
+  pgConfigUnsetTool,
   pgExtAddTool,
   pgExtListTool,
   pgExtRmTool,
@@ -82,6 +91,13 @@ export function createServer(api: Api): McpServer {
           .array(z.string().min(1))
           .optional()
           .describe('extensions to declare and create on first boot, for example ["pg_trgm"]. mirrors --extension'),
+        settings: z
+          .record(z.string(), z.string())
+          .optional()
+          .describe(
+            'server settings from hobby\'s allowlist, for example {"shared_buffers": "256MB"}. mirrors --setting. ' +
+              'pg_stat_statements needs {"shared_preload_libraries": "pg_stat_statements"} here'
+          ),
       },
     },
     async (args) => newTool(api, args)
@@ -128,6 +144,52 @@ export function createServer(api: Api): McpServer {
       },
     },
     async (args) => pgExtRmTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_pg_config_ls',
+    {
+      description:
+        'list a postgres resource\'s declared server settings, every setting hobby allows (type, range, default, ' +
+        'whether Postgres needs a restart for it, docs link), and extensions whose preload library is missing. ' +
+        'mirrors `hobby pg config ls <target> --all`. never wakes anything.',
+      inputSchema: {
+        target: z.string().min(1).describe(TARGET_DESCRIPTION),
+      },
+    },
+    async (args) => pgConfigListTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_pg_config_set',
+    {
+      description:
+        'set server settings on a postgres resource, passed to Postgres as `postgres -c name=value`. mirrors ' +
+        '`hobby pg config set <target> name=value...`. a sleeping database is not woken: the settings apply on its ' +
+        'next wake. an awake one is restarted (a pause of a second or two); a pinned project needs allowPause. a ' +
+        'start that fails with the new settings is rolled back. settings outside the allowlist are refused.',
+      inputSchema: {
+        target: z.string().min(1).describe(TARGET_DESCRIPTION),
+        settings: z.record(z.string(), z.string()).describe('name to value, for example {"work_mem": "16MB"}'),
+        allowPause: z.boolean().optional().describe('accept restarting an awake database in a pinned project'),
+      },
+    },
+    async (args) => pgConfigSetTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_pg_config_unset',
+    {
+      description:
+        'remove declared server settings from a postgres resource, so Postgres uses its defaults for them. mirrors ' +
+        '`hobby pg config unset <target> <name>...`, applied the same way as hobby_pg_config_set.',
+      inputSchema: {
+        target: z.string().min(1).describe(TARGET_DESCRIPTION),
+        names: z.array(z.string().min(1)).min(1).describe('setting names to unset'),
+        allowPause: z.boolean().optional().describe('accept restarting an awake database in a pinned project'),
+      },
+    },
+    async (args) => pgConfigUnsetTool(api, args)
   )
 
   server.registerTool(
@@ -228,6 +290,57 @@ export function createServer(api: Api): McpServer {
       },
     },
     async (args) => connectionStringTool(api, args)
+  )
+
+  const ALLOW_ENTRIES = z
+    .array(z.string().min(1))
+    .min(1)
+    .describe('IPv4 or IPv6 addresses and CIDR ranges, for example ["203.0.113.7", "192.168.1.0/24", "2001:db8::/32"]')
+
+  server.registerTool(
+    'hobby_allow_ls',
+    {
+      description:
+        "show a project's IP allowlist for its databases. mirrors `hobby allow ls <project>`. " +
+        '`project.allowlist` null means any address that reaches the proxy may connect; [] means only this box; ' +
+        'otherwise the listed addresses and ranges plus this box (loopback and its own apps and workers are always allowed).',
+      inputSchema: { project: z.string().min(1).describe('project name') },
+    },
+    async (args) => allowListTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_allow_add',
+    {
+      description:
+        "add addresses or CIDR ranges to a project's IP allowlist, restricting it if it was open. mirrors " +
+        '`hobby allow add <project> <address|cidr>...`. applies to new connections to every postgres in the project; ' +
+        'other addresses get FATAL 28000 (HTTP 403 on /sql) and never wake a sleeping database.',
+      inputSchema: { project: z.string().min(1).describe('project name'), entries: ALLOW_ENTRIES },
+    },
+    async (args) => allowAddTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_allow_rm',
+    {
+      description:
+        "remove entries from a project's IP allowlist. mirrors `hobby allow rm <project> <address|cidr>...`. " +
+        'removing the last entry leaves the project restricted to this box, it never opens it; use hobby_allow_off for that.',
+      inputSchema: { project: z.string().min(1).describe('project name'), entries: ALLOW_ENTRIES },
+    },
+    async (args) => allowRmTool(api, args)
+  )
+
+  server.registerTool(
+    'hobby_allow_off',
+    {
+      description:
+        "lift a project's IP allowlist: any address that can reach the proxy may connect again. mirrors " +
+        '`hobby allow off <project>`.',
+      inputSchema: { project: z.string().min(1).describe('project name') },
+    },
+    async (args) => allowOffTool(api, args)
   )
 
   server.registerTool(
@@ -432,16 +545,82 @@ export function createServer(api: Api): McpServer {
     async (args) => queueSetRetentionTool(api, args)
   )
 
+  server.registerTool(
+    'hobby_import',
+    {
+      description:
+        'copy an existing Postgres database (Neon, Supabase, RDS, a local server) into a hobby project with pg_dump and ' +
+        'pg_restore. mirrors `hobby import <project> --from-env <NAME>` / `--from-file <path>`. the connection string is ' +
+        'NEVER an argument and you should never ask for it in the conversation: ask the person to put it in an environment ' +
+        'variable of this MCP server or in a file only they can read, then pass sourceEnv or sourceFile. the project (and ' +
+        'its postgres resource) is created when absent; an existing database must be empty, nothing is ever restored over ' +
+        'data. only import from a server you trust: the dump is restored as the target superuser. returns tables, rows, ' +
+        'bytes, duration, extensions and a summary of pg_restore errors.',
+      inputSchema: {
+        project: z.string().min(1).describe('the hobby project to import into; created when it does not exist'),
+        resource: z.string().min(1).optional().describe('a postgres resource in the project; created when absent'),
+        sourceEnv: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('NAME of an environment variable of this MCP server that holds the connection string (not the value)'),
+        sourceFile: z.string().min(1).optional().describe('path to a file on this machine holding the connection string'),
+        schemas: z
+          .array(z.string().min(1))
+          .optional()
+          .describe('only these schemas, as pg_dump --schema patterns. ["public"] for Supabase, whose auth and storage schemas need its own extensions'),
+        excludeSchemas: z.array(z.string().min(1)).optional().describe('pg_dump --exclude-schema patterns'),
+        strict: z.boolean().optional().describe('restore in one transaction: any error rolls everything back'),
+      },
+    },
+    async (args) => importTool(api, args)
+  )
+
   return server
 }
 
-// The real entry point: resolves the real $HOBBY_HOME paths, builds a real
-// Api bound to the real unix socket, and connects over stdio. Never called
-// from tests; see test/tools.test.ts for the pure, socket-free path.
-export async function runStdioServer(): Promise<void> {
-  const paths = resolvePaths(process.env)
-  const api = createApi(paths.socketPath)
-  const server = createServer(api)
-  const transport = new StdioServerTransport()
+// What `hobby mcp` (packages/cli/src/cli/mcp.ts) and bin/hobby-mcp.js both
+// call. socketPath defaults to the real $HOBBY_HOME socket; stdin and stdout
+// default to the process's own, and tests pass in-memory streams instead.
+export interface StdioServerOptions {
+  socketPath?: string
+  stdin?: Readable
+  stdout?: Writable
+}
+
+// A running server. `closed` settles when the client hangs up (stdin ends
+// or closes) and the server has been closed in turn, which is when a caller
+// that owns the process may exit.
+export interface StdioServerHandle {
+  closed: Promise<void>
+}
+
+// The real entry point: builds an Api bound to the unix socket and connects
+// over stdio. Starting needs no daemon: the Api connects per request, so a
+// client can initialize and list tools against a box whose daemon is down,
+// and each tool call then fails with the CLI's own daemon_unreachable error.
+// The SDK's StdioServerTransport never listens for end of input itself, so
+// this does, and closes the server when the client goes away.
+export async function runStdioServer(opts: StdioServerOptions = {}): Promise<StdioServerHandle> {
+  const socketPath = opts.socketPath ?? resolvePaths(process.env).socketPath
+  const stdin = opts.stdin ?? process.stdin
+  const stdout = opts.stdout ?? process.stdout
+  const server = createServer(createApi(socketPath))
+  const transport = new StdioServerTransport(stdin, stdout)
+  const closed = new Promise<void>((resolve) => {
+    let done = false
+    const finish = (): void => {
+      if (done) {
+        return
+      }
+      done = true
+      stdin.off('end', finish)
+      stdin.off('close', finish)
+      server.close().then(resolve, resolve)
+    }
+    stdin.once('end', finish)
+    stdin.once('close', finish)
+  })
   await server.connect(transport)
+  return { closed }
 }

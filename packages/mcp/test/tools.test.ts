@@ -17,9 +17,13 @@ import {
   envSetTool,
   envUnsetTool,
   expireTool,
+  importTool,
   listTool,
   logsTool,
   newTool,
+  pgConfigListTool,
+  pgConfigSetTool,
+  pgConfigUnsetTool,
   pgExtAddTool,
   pgExtListTool,
   pgExtRmTool,
@@ -77,10 +81,15 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     setEnv: notWired('setEnv'),
     getExtensions: notWired('getExtensions'),
     setExtensions: notWired('setExtensions'),
+    getSettings: notWired('getSettings'),
+    setSettings: notWired('setSettings'),
     listCrons: notWired('listCrons'),
     listProjects: notWired('listProjects'),
     createProject: notWired('createProject'),
     setSleepPolicy: notWired('setSleepPolicy'),
+    getAllowlist: notWired('getAllowlist'),
+    setAllowlist: notWired('setAllowlist'),
+    clearAllowlist: notWired('clearAllowlist'),
     getProject: notWired('getProject'),
     branchProject: notWired('branchProject'),
     resetBranch: notWired('resetBranch'),
@@ -107,6 +116,7 @@ function fakeApi(overrides: Partial<Api>): { api: Api; calls: string[] } {
     listSnapshots: notWired('listSnapshots'),
     restoreSnapshot: notWired('restoreSnapshot'),
     deleteSnapshot: notWired('deleteSnapshot'),
+    importDatabase: notWired('importDatabase'),
   }
   const api = { ...base } as unknown as Record<string, unknown>
   for (const [key, fn] of Object.entries(overrides)) {
@@ -480,4 +490,69 @@ test('hobby_expire sets a parsed duration or clears with null; hobby_diff passes
     'diffSchemas("blog-exp", )',
     'diffSchemas("b", "a")',
   ])
+})
+
+// The source is a reference only: a variable name or a path, resolved by
+// this process. The tool result carries the daemon's report and never the
+// string itself, and a call with no reference (or both) makes no request.
+test('hobby_import: resolves sourceEnv in this process and sends one POST /v1/import; never echoes the value', async () => {
+  const secret = 'postgresql://alex:McpS3cret@ep-x.neon.tech/neondb?sslmode=require'
+  process.env['HOBBY_TEST_IMPORT_URL'] = secret
+  try {
+    const report = { project: 'shop', tables: 3 }
+    const { api, calls } = fakeApi({ importDatabase: async () => ({ import: report }) as never })
+    const result = await importTool(api, { project: 'shop', sourceEnv: 'HOBBY_TEST_IMPORT_URL', schemas: ['public'] })
+    assert.equal(result.isError, undefined)
+    assert.deepEqual(resultText(result), { import: report })
+    assert.equal(calls.length, 1)
+    assert.ok(calls[0]?.startsWith('importDatabase('))
+    assert.ok(!result.content[0]?.text.includes('McpS3cret'))
+
+    const none = fakeApi({})
+    const refused = await importTool(none.api, { project: 'shop' })
+    assert.equal(refused.isError, true)
+    assert.match(refused.content[0]?.text ?? '', /exactly one of sourceEnv or sourceFile/)
+    const both = await importTool(none.api, { project: 'shop', sourceEnv: 'HOBBY_TEST_IMPORT_URL', sourceFile: '/x' })
+    assert.equal(both.isError, true)
+    assert.equal(none.calls.length, 0)
+
+    const unset = await importTool(none.api, { project: 'shop', sourceEnv: 'HOBBY_TEST_IMPORT_UNSET' })
+    assert.match(unset.content[0]?.text ?? '', /HOBBY_TEST_IMPORT_UNSET is not set/)
+  } finally {
+    delete process.env['HOBBY_TEST_IMPORT_URL']
+  }
+})
+
+test('hobby_pg_config_ls/set/unset: resolve the target then GET or POST /v1/resources/:id/settings', async () => {
+  const p = project('blog')
+  const r = resource('primary', p.id)
+  const listed = { settings: {}, needsPreload: [], available: [] }
+  const changed = { resource: r, settings: { jit: 'off' }, applied: 'next-start' as const, pausedMs: null, needsPreload: [] }
+  const { api, calls } = fakeApi({
+    getProject: async (): Promise<ProjectDetailResponse> => ({ project: p, resources: [r] }),
+    getSettings: async () => listed,
+    setSettings: async () => changed,
+  })
+  assert.deepEqual(resultText(await pgConfigListTool(api, { target: 'blog' })), listed)
+  await pgConfigSetTool(api, { target: 'blog', settings: { jit: 'off' } })
+  await pgConfigUnsetTool(api, { target: 'blog', names: ['jit'], allowPause: true })
+  assert.deepEqual(calls, [
+    'getProject("blog")',
+    `getSettings("${r.id}")`,
+    'getProject("blog")',
+    `setSettings("${r.id}", {"set":{"jit":"off"},"allowPause":false})`,
+    'getProject("blog")',
+    `setSettings("${r.id}", {"unset":["jit"],"allowPause":true})`,
+  ])
+})
+
+test('hobby_new passes declared settings on the resource create', async () => {
+  const p = project('blog')
+  const r = resource('primary', p.id)
+  const { api, calls } = fakeApi({
+    createProject: async () => ({ project: p }),
+    createResource: async () => ({ resource: r }),
+  })
+  await newTool(api, { name: 'blog', settings: { shared_buffers: '256MB' } })
+  assert.equal(calls[1], 'createResource("blog", {"kind":"postgres","name":"primary","settings":{"shared_buffers":"256MB"}})')
 })

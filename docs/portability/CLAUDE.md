@@ -96,3 +96,122 @@ inflexible is the point.
 `hobby eject` is the best asset this project will ever have, because no
 competitor dares ship it. It belongs in the README's first screen, not buried in
 a reference page.
+
+## 2026-11-17 amendment: `hobby import`, the logical way in
+
+**Status:** BUILT. `hobby import <project>` copies an existing Postgres (Neon,
+Supabase, RDS, a local server) into a hobby postgres resource with stock
+`pg_dump` and `pg_restore`: `runImport` in
+`packages/cli/src/daemon/import.ts` behind `POST /v1/import`, the CLI verb in
+`packages/cli/src/cli/import.ts`, the MCP tool `hobby_import`
+(`importTool`, `packages/mcp/src/tools.ts`), the source parser and redactor
+in `packages/pg/src/import-source.ts`. It is the logical-dump sibling of
+issue #179 (adopting a raw data directory), and does not close it.
+
+**How it squares with "Out of scope: migration tooling for other platforms".**
+That line says getting off Neon or Supabase is `pg_dump` and a restore. This is
+exactly that and nothing more: no schema translation, no provider API, no
+continuous sync. What it adds is running the two tools from the target's own
+image so the host needs no client tools and the `pg_dump` version is right,
+and refusing the cases that would otherwise fail halfway.
+
+Decisions, each grounded in the code named:
+
+- **No logical replication.** Xata's migration-tool (read, not copied) follows
+  the dump with a subscription. A subscription is a connection held open
+  against the target for as long as it exists, which keeps it awake: the wedge
+  (ADR 0007) loses to a convenience. An import is one-shot, and `pg_dump` runs
+  with `--no-subscriptions` so a source's own subscriptions are not carried in.
+- **One throwaway container from the target's image** (`importDockerArgs`,
+  `--pull never`, the project's network, `host.docker.internal:host-gateway`).
+  The dump lives in the container's filesystem and goes with `--rm`: nothing
+  on the host to clean up or chown. `pg_dump` cannot dump a newer server, so
+  the script compares the source's `server_version_num` with its own major
+  before dumping and the daemon refuses with both versions and issue #2.
+- **The source string is a credential.** Never an argument (the CLI reads
+  stdin, `--from-file` or `--from-env`); never in any argv, container
+  environment or host file. The daemon renders a libpq service file and writes
+  it to the container's stdin; the script copies it into a 0700 directory
+  inside the container and every tool is told only `service=source`. All tool
+  output passes `redactor` before reaching an error, response or log line,
+  and parse errors name keywords, never values. Tests: `import.test.ts`
+  asserts the argv, the response and the daemon log hold no secret.
+- **MCP takes the source by reference only** (`sourceEnv`, `sourceFile`),
+  resolved in the MCP server process by the CLI's own `resolveImportSource`.
+  A literal argument would put the password into the conversation, the
+  client's transcript on disk and the provider's context, and would invite a
+  model to ask a person to paste it. A reference to a variable or file that is
+  not a connection string is refused without quoting it, and an import only
+  reads from its source.
+- **No flag to restore over a non-empty database.** A target holding any
+  table, view, sequence or function outside an extension (`EMPTY_SQL`) is
+  refused with 409. Restoring into a populated database either merges two
+  datasets unpredictably or, with `pg_restore --clean`, drops the user's
+  objects first: the "losing data quietly" this project refuses to ship. A new
+  project, a new `--resource`, or a snapshot and a manual empty cover every
+  real case. Extensions created with `hobby pg ext add` do not count, so the
+  prepare-then-import path works.
+- **Awake while it runs, asleep after.** An `ActivityTracker.open` handle on
+  the target for the duration (the hibernator never sleeps a resource with an
+  open handle), the restore session named `HOBBY_APPLICATION_NAME` so the
+  pre-sleep guard ignores it, and `holdProjectExclusive` so a snapshot cannot
+  interleave. The idle clock starts when the handle closes.
+- **Schemas.** Default: everything `pg_dump` would dump. `--schema` restricts
+  (the Supabase path, `public`); `pg_dump` then dumps no extensions, so the
+  script adds `--extension` for each source extension the image ships and
+  creates its schema first (Supabase keeps them in `extensions`). Without a
+  restriction, an extension the image lacks is refused before any restore.
+- **Errors.** `pg_restore` continues past errors by default and the report
+  lists up to 20 (`restore.messages`); the CLI exits 1, like `pg_restore`.
+  `--strict` is `--single-transaction --exit-on-error`. A project or resource
+  the import created is removed when it fails before restoring.
+- **Ownership.** `--no-owner --no-acl`: every object belongs to the target's
+  superuser and the source's roles need not exist. Policies naming roles are
+  the common remaining error and are reported.
+
+**Verified** on 2026-11-17, Apple Silicon Mac, Docker Desktop, plain containers
+only (no daemon): `runImport` compiled and driven with a hand-built context
+against a `postgres:16` source on port 37432 (three tables, 3734 rows, four
+contrib extensions, three roles, a policy) into a `postgres:18-alpine` target:
+3 tables and 3734 rows restored, owners mapped to the target superuser, the
+policy reported. Also: a second import into the same database refused as not
+empty; a PostgreSQL 18 source with a `postgres:16-alpine` image refused before
+dumping; a wrong password reported with the password absent; a Supabase-shaped
+database (`auth`, `extensions` schemas) imported with `--schema public`, with
+`uuid-ossp` and `pgcrypto` landing in `extensions` and the foreign key into
+`auth.users` reported; `--strict` rolled back to an empty database.
+
+**Not verified:** a real Neon or Supabase source (the guide's provider notes
+come from their documentation), Linux `host-gateway` reachability of a
+loopback-only source, an image with an older libpq, which may cap service file lines at 256
+bytes (a very long password or `options` value; not checked), an
+interrupted import (the container keeps running if the daemon dies; the
+target is then partly restored), and the CLI and MCP against a running daemon.
+
+## Amendment, 2026-11-17: eject carries server settings in `command:`
+
+A postgres resource can now declare server settings (`docs/engine/CLAUDE.md`,
+amendment of the same date). They are server arguments, `postgres -c
+name=value`, and never written into the data directory, so invariant 2 is
+unchanged: a stock `postgres` pointed at `<host data directory>/18/docker`
+starts it, with Postgres's defaults. What the settings change is what eject
+must emit for invariant 3 to keep meaning "the same database, running the
+same way": `renderCompose` (`packages/cli/src/daemon/routes.ts`) writes a
+`command:` line with exactly the arguments `containerSpec` gives hobby's own
+container, from the same function (`settingsCommand`,
+`packages/pg/src/settings.ts`), for example:
+
+```
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "work_mem=24MB"]
+```
+
+A resource with no settings gets no `command:` and runs the image's own CMD,
+as before. This matters most for `shared_preload_libraries`: an ejected
+database whose catalog holds `pg_stat_statements` would otherwise come up
+with the extension present and every read of it failing. Verified live on
+2026-11-17: the rendered file, started with `docker compose --profile
+hobby-released up -d` on the same data directory, reported every declared
+setting with source `command line`, and `pg_stat_statements` answered.
+Someone leaving can edit or drop the line; it is the only place the settings
+live after a release, which is also why a released project refuses a
+settings change.

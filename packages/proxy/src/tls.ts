@@ -81,19 +81,34 @@ async function startInner(files: ProxyTlsFiles, onConnection: (socket: tls.TLSSo
   })
 }
 
-export interface TlsTerminator {
+export interface TlsTerminator<C = unknown> {
   // Called after the proxy has written 'S'. Takes over the socket: pipes it
   // to the inner TLS server, whose decrypted connection arrives at the
-  // onConnection handler given to startTlsTerminator.
-  relay(client: Duplex): void
+  // onConnection handler given to startTlsTerminator, with `context`.
+  relay(client: Duplex, context: C): void
   close(): Promise<void>
 }
 
-export async function startTlsTerminator(
+// `context` is what the caller knows about the outer connection and the
+// inner one cannot: the inner server sees every connection as coming from
+// the relay on 127.0.0.1, so the real client address (the IP allowlist,
+// access.ts) would be lost here. Recorded against the relay's local port,
+// which is the inner server's view of the remote port, before a byte of the
+// handshake is sent; the same pattern serverless.ts uses for its own relay.
+// A connection whose record is missing gets undefined, which the proxy
+// treats as an unknown client.
+export async function startTlsTerminator<C = unknown>(
   files: ProxyTlsFiles,
-  onConnection: (socket: tls.TLSSocket) => void
-): Promise<TlsTerminator> {
-  let current = await startInner(files, onConnection)
+  onConnection: (socket: tls.TLSSocket, context: C | undefined) => void
+): Promise<TlsTerminator<C>> {
+  const contexts = new Map<number, C>()
+  const deliver = (socket: tls.TLSSocket): void => {
+    const port = socket.remotePort
+    const context = port === undefined ? undefined : contexts.get(port)
+    if (port !== undefined) contexts.delete(port)
+    onConnection(socket, context)
+  }
+  let current = await startInner(files, deliver)
   let rebuilding: Promise<void> | null = null
   let closed = false
 
@@ -110,7 +125,7 @@ export async function startTlsTerminator(
       return Promise.resolve()
     }
     if (stamp === current.stamp) return Promise.resolve()
-    rebuilding = startInner(files, onConnection)
+    rebuilding = startInner(files, deliver)
       .then((next) => {
         if (closed) {
           next.server.close()
@@ -128,14 +143,19 @@ export async function startTlsTerminator(
   }
 
   return {
-    relay(client: Duplex): void {
+    relay(client: Duplex, context: C): void {
       // Paused before anything asynchronous: the client sends its
       // ClientHello the moment it reads the 'S', and a flowing socket with
       // no 'data' listener drops what arrives. pipe() resumes it.
       client.pause()
       refresh().then(() => {
         const upstream = net.createConnection({ host: '127.0.0.1', port: current.port })
+        let key: number | null = null
+        const forget = (): void => {
+          if (key !== null) contexts.delete(key)
+        }
         const finish = (): void => {
+          forget()
           client.destroy()
           upstream.destroy()
         }
@@ -150,8 +170,13 @@ export async function startTlsTerminator(
           client.end()
           setTimeout(() => client.destroy(), FORCE_CLOSE_GRACE_MS).unref()
         })
-        client.pipe(upstream)
-        upstream.pipe(client)
+        upstream.once('connect', () => {
+          key = upstream.localPort ?? null
+          if (key !== null) contexts.set(key, context)
+          client.pipe(upstream)
+          upstream.pipe(client)
+        })
+        upstream.once('close', forget)
       })
     },
     async close(): Promise<void> {

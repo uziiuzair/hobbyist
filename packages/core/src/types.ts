@@ -58,6 +58,15 @@ export interface Project {
   // the routes that write it refuse anything else, so `hobby new` projects
   // can never expire. Null means never.
   expiresAt: Date | null
+  // Which client addresses the wake-on-connect proxy accepts for this
+  // project's databases, as canonical entries (core's canonicalAllowlist).
+  // Null means no restriction, the behaviour every project had before this
+  // existed. A list, even an empty one, means only those addresses plus this
+  // box itself (loopback and the docker gateways); see the 2026-11-17
+  // allowlist amendment in docs/proxy/CLAUDE.md. Optional because a daemon
+  // older than the field sends a project without it, and a hand-built
+  // fixture may omit it; the store always sets it.
+  allowlist?: string[] | null
 }
 
 // The fields every kind's config carries, so the many existing call sites
@@ -103,6 +112,12 @@ export interface PostgresConfig extends ResourceConfigBase {
   // record of what is installed: that lives in the data directory's own
   // pg_extension and is read live.
   extensions?: string[]
+  // Server settings, allowlisted and normalized by packages/pg/src/
+  // settings.ts, passed as `postgres -c name=value` by containerSpec and
+  // by the eject compose file's `command:`, never written into the data
+  // directory. Optional and absent on every row written before the field
+  // existed, which reads as none: the image's default command.
+  settings?: Record<string, string>
 }
 
 // A container the user brought, either built here from their Dockerfile or

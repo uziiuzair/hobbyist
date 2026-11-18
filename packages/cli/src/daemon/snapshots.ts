@@ -65,8 +65,8 @@ export function snapshotDir(paths: Paths, project: string, id: string): string {
   return join(projectSnapshotsDir(paths, project), id)
 }
 
-const DEFAULT_QUIESCE_ATTEMPTS = 5
-const DEFAULT_QUIESCE_WAIT_MS = 2000
+export const DEFAULT_QUIESCE_ATTEMPTS = 5
+export const DEFAULT_QUIESCE_WAIT_MS = 2000
 
 export interface QuiesceOptions {
   attempts?: number
@@ -97,7 +97,7 @@ function defaultSleepFor(ms: number): Promise<void> {
 // skipped resource inside a snapshot produces a backup that is missing a
 // database and does not say so, so an unreachable guard fails the whole
 // snapshot here instead of being quietly deferred.
-async function waitForIdle(
+export async function waitForIdle(
   resource: Resource,
   guard: (resource: Resource) => Promise<ActivityGuardResult>,
   attempts: number,
@@ -991,6 +991,15 @@ export async function restoreSnapshot(
     name: target,
     sleepAfterSeconds: found.manifest.project.sleepAfterSeconds,
   })
+  // The same data as the project it came from, so the same IP allowlist
+  // (the 2026-11-17 allowlist amendment in docs/proxy/CLAUDE.md), copied from
+  // that project as it is now. The manifest does not record one, so a
+  // snapshot restored after its project was deleted comes back open; the
+  // amendment says so.
+  const source = ctx.store.getProjectByName(found.manifest.project.name)
+  if (source?.allowlist != null) {
+    ctx.store.setProjectAllowlist(project.id, [...source.allowlist])
+  }
 
   // Two passes. Every row is created first so that `idMap` (snapshot id to
   // restored id) is complete before any config is rewritten: an app's

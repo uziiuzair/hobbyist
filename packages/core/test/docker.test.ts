@@ -709,3 +709,27 @@ test('a failing container run surfaces docker stderr', async () => {
 
   await assert.rejects(ops.remove('/h/projects/blog'), /docker run exited with an error: rm: cannot remove: Device or resource busy/)
 })
+
+test('ensureCreated passes spec.command after the image, one argv entry each, and nothing when absent', async () => {
+  const creates: string[][] = []
+  const exec: ExecFn = async (_cmd, args) => {
+    if (args[0] === 'inspect') throw notFoundError('Error: No such object: x')
+    if (args[0] === 'image') return { stdout: '[{}]\n', stderr: '' }
+    if (args[0] === 'create') {
+      creates.push(args)
+      return { stdout: 'x\n', stderr: '' }
+    }
+    throw new Error(`unexpected call: ${args.join(' ')}`)
+  }
+  const runtime = createDockerRuntime(exec)
+  await runtime.ensureCreated({ ...sampleSpec(), command: ['postgres', '-c', 'shared_buffers=256MB'] })
+  await runtime.ensureCreated(sampleSpec())
+  const withCommand = creates[0]!
+  assert.deepEqual(withCommand.slice(withCommand.indexOf('postgres:18-alpine')), [
+    'postgres:18-alpine',
+    'postgres',
+    '-c',
+    'shared_buffers=256MB',
+  ])
+  assert.equal(creates[1]!.at(-1), 'postgres:18-alpine')
+})

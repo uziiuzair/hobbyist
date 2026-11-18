@@ -26,6 +26,7 @@ import {
 } from '@hobby.sh/core'
 import { pgProbe, waitReady, type ProbeOutcome } from './readiness.js'
 import { realExtensionOps, type ExtensionOps } from './extensions.js'
+import { missingPreloads, refuseMissingPreloads, settingsCommand, type PostgresSettings } from './settings.js'
 
 export interface PgDeps {
   store: Store
@@ -102,7 +103,12 @@ const PASSWORD_BYTES = 16
 // wake, inside a user's first query.
 const STOP_TIMEOUT_SEC = 30
 
-function containerSpec(config: PostgresConfig, network: string): ContainerSpec {
+// Exported for the eject route's tests and the settings route, which must
+// agree with it on the server arguments. `command` is present only when
+// settings are declared, so a resource without any keeps the image's own
+// CMD, byte for byte the container it always had.
+export function containerSpec(config: PostgresConfig, network: string): ContainerSpec {
+  const command = settingsCommand(config.settings)
   return {
     name: config.containerName,
     image: config.image,
@@ -118,15 +124,23 @@ function containerSpec(config: PostgresConfig, network: string): ContainerSpec {
     ports: [{ host: config.hostPort, container: POSTGRES_CONTAINER_PORT }],
     binds: [{ host: config.dataDir, container: POSTGRES_HOME_CONTAINER_PATH }],
     network,
+    ...(command.length > 0 ? { command } : {}),
   }
 }
 
 export async function createPostgres(
   deps: PgDeps,
-  opts: { project: Project; name: string; extensions?: string[] }
+  opts: { project: Project; name: string; extensions?: string[]; settings?: PostgresSettings }
 ): Promise<PostgresResource> {
   validateName(opts.name)
   const extensions = opts.extensions ?? []
+  const settings = opts.settings ?? {}
+  // Before anything is allocated: an extension that only works with a
+  // preloaded library is refused here, naming the setting, rather than
+  // created and left broken. Declaring the library in the same create
+  // (--setting shared_preload_libraries=...) satisfies it, since the first
+  // boot already runs with the declared settings.
+  refuseMissingPreloads(missingPreloads(extensions, settings), settings, `${opts.project.name}/${opts.name}`)
 
   const hostPort = await allocateHostPort(deps.store, PORT_RANGE_FROM, PORT_RANGE_TO)
   const password = randomBytes(PASSWORD_BYTES).toString('hex')
@@ -142,6 +156,7 @@ export async function createPostgres(
     password,
     database: opts.project.name,
     ...(extensions.length > 0 ? { extensions } : {}),
+    ...(Object.keys(settings).length > 0 ? { settings } : {}),
   }
 
   const resource = deps.store.createResource({
@@ -313,6 +328,12 @@ export async function createPostgresFromClone(
     ...(opts.source.extensions !== undefined && opts.source.extensions.length > 0
       ? { extensions: [...opts.source.extensions] }
       : {}),
+    // Kept as well: the cloned catalog may hold an extension that only
+    // works with a library the source preloads (pg_stat_statements), and
+    // the settings are part of how the source's Postgres was run.
+    ...(opts.source.settings !== undefined && Object.keys(opts.source.settings).length > 0
+      ? { settings: { ...opts.source.settings } }
+      : {}),
   }
 
   const resource = deps.store.createResource({
@@ -374,6 +395,15 @@ export async function rebindPostgresToClone(
     password: opts.source.password,
     database: opts.source.database,
   }
+  // Settings are taken from the source too, the way the image is: a reset
+  // makes the branch its parent again, and the parent's cloned catalog may
+  // hold an extension that only works with a library the parent preloads.
+  // A branch's own settings were the parent's when it was made.
+  if (opts.source.settings !== undefined && Object.keys(opts.source.settings).length > 0) {
+    config.settings = { ...opts.source.settings }
+  } else {
+    delete config.settings
+  }
   // Written first: the data directory already holds the source's cluster,
   // so the old credentials are wrong from this moment whether or not the
   // container work below succeeds.
@@ -392,6 +422,29 @@ export async function rebindPostgresToClone(
   const final = deps.store.getResource(opts.resource.id)
   if (final === null) {
     throw new HobbyError('internal', `resource ${opts.resource.id} vanished while its data was being replaced`)
+  }
+  return expectKind(final, 'postgres')
+}
+
+// Replaces a stopped postgres container with one built from `config`, the
+// data directory untouched. What a settings change needs, since docker
+// cannot change a container's command in place and Postgres does not
+// re-read command-line settings on reload. The caller has the resource
+// stopped and wakes held off (packages/cli/src/daemon/pg-settings.ts);
+// this writes the config first, the same order rebindPostgresToClone
+// uses, so the stored row and the container never disagree for longer
+// than the two docker calls take.
+export async function recreatePostgresContainer(
+  deps: PgDeps,
+  opts: { project: Project; resource: PostgresResource; config: PostgresConfig }
+): Promise<PostgresResource> {
+  deps.store.updateResourceConfig(opts.resource.id, opts.config)
+  await deps.runtime.remove(opts.config.containerName)
+  await deps.runtime.ensureNetwork(opts.project.networkName)
+  await deps.runtime.ensureCreated(containerSpec(opts.config, opts.project.networkName))
+  const final = deps.store.getResource(opts.resource.id)
+  if (final === null) {
+    throw new HobbyError('internal', `resource ${opts.resource.id} vanished while its container was recreated`)
   }
   return expectKind(final, 'postgres')
 }
