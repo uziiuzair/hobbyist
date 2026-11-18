@@ -400,8 +400,15 @@ Redeploying an app that is awake starts the new version beside the old one
 and moves traffic only once it answers; the old one drains for
 `deployDrainMs` (10 seconds) and is then stopped, and the app stays awake. If
 the new version fails to start, the old one keeps serving and the deploy
-fails. An app that is asleep is replaced in place and left asleep. Workers
-are always replaced in place. See [Apps](/docs/guides/apps/#redeploying-a-live-app).
+fails. An app that is asleep is replaced in place and left asleep. See
+[Apps](/docs/guides/apps/#redeploying-a-live-app).
+
+Redeploying a worker that is awake holds new requests, lets the ones in flight
+finish (up to `deployDrainMs`), stops the old version, starts the new one and
+then serves the held requests from it, so no request fails; it stays awake. If
+the new version fails to start, the old one is started again and serves them,
+and the deploy fails. A worker that is asleep is replaced in place and left
+asleep. See [Workers](/docs/guides/workers/#redeploying-a-live-worker).
 
 A deploy that had to create its project and then fails before putting a
 resource in it removes that project again, so a refused name or a build error

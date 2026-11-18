@@ -114,6 +114,12 @@ export interface DaemonContext {
   // (core's defaultDockerExec); a test sets it to read the argv and the
   // service file on stdin, and to play the script's output.
   importExec?: ExecFn
+  // WorkerDeps.holdResourceWakes, the same structural pass-through as
+  // probeFactory: a redeploy of a running worker takes it for its swap
+  // (swapWorker, packages/worker/src/worker.ts). createDaemonContext wires it
+  // to holdResourceWakes below. A hand-built test context without it gets a
+  // running worker redeployed in place, as before Phase A.
+  holdResourceWakes?: (resourceId: string, what: string) => (failure?: string) => void
 }
 
 // A convenience factory for the real, production wiring: opens the real
@@ -126,7 +132,7 @@ export function createDaemonContext(opts: {
   config: HobbyConfig
   runtime?: ComputeRuntime
 }): DaemonContext {
-  return {
+  const ctx: DaemonContext = {
     store: openStore(opts.paths.statePath),
     runtime: opts.runtime ?? createDockerRuntime(),
     paths: opts.paths,
@@ -134,6 +140,19 @@ export function createDaemonContext(opts: {
     activity: new ActivityTracker(),
     kinds: createDefaultKindRegistry(),
     detectTailnet: createTailnetDetector(),
+  }
+  ctx.holdResourceWakes = resourceWakeHoldFor(ctx)
+  return ctx
+}
+
+// DaemonContext.holdResourceWakes for a given context: holdResourceWakes
+// below, in the shape WorkerDeps.holdResourceWakes takes (one resource, one
+// optional failure message). Exported so a daemon-level test can wire the
+// same thing into a context it built by hand.
+export function resourceWakeHoldFor(ctx: DaemonContext): NonNullable<DaemonContext['holdResourceWakes']> {
+  return (resourceId, what) => {
+    const release = holdResourceWakes(ctx, resourceId, what)
+    return (failure) => release(failure === undefined ? undefined : new Map([[resourceId, failure]]))
   }
 }
 
@@ -245,8 +264,19 @@ function buildWake(ctx: DaemonContext): (resourceId: string) => Promise<void> {
       // this resource back, it says so when it releases the hold, and the
       // waiter gets that error at once rather than starting the container
       // a further time on its own (heldRestartFailed below).
-      const hold = wakeFence(ctx, resource.projectId)
-      if (hold !== undefined) {
+      //
+      // A redeploy of a running worker holds that one resource the same way
+      // (holdResourceWakes below, taken by swapWorker in
+      // packages/worker/src/worker.ts): its wakes wait while the old
+      // container drains and the new one starts, and nothing else in the
+      // project is held. Read after the project's hold, and read afresh,
+      // since a swap can begin while a wake waits on a project hold.
+      const projectId = resource.projectId
+      for (const fenceOf of [() => wakeFence(ctx, projectId), () => resourceWakeFence(ctx, resourceId)]) {
+        const hold = fenceOf()
+        if (hold === undefined) {
+          continue
+        }
         await hold.fence
         resource = ctx.store.getResource(resourceId)
         if (resource === null) {
@@ -613,11 +643,71 @@ export function isProjectHeld(ctx: DaemonContext, projectId: string): boolean {
 
 // For a caller that starts a resource without going through the wake
 // function above (startResourceRoute): the same wait, and nothing else.
-export async function waitForProjectAwakeable(ctx: DaemonContext, projectId: string): Promise<void> {
+// Given a resource id, it also waits out that resource's own hold
+// (holdResourceWakes), so `hobby wake` during a worker swap waits for the
+// swap rather than starting a second container under the same name.
+export async function waitForProjectAwakeable(ctx: DaemonContext, projectId: string, resourceId?: string): Promise<void> {
   const hold = wakeFence(ctx, projectId)
   if (hold !== undefined) {
     await hold.fence
   }
+  if (resourceId !== undefined) {
+    const own = resourceWakeFence(ctx, resourceId)
+    if (own !== undefined) {
+      await own.fence
+    }
+  }
+}
+
+// Per-context, keyed by resource id: the one-resource counterpart of
+// projectHolds, taken by a redeploy of a running worker (swapWorker,
+// packages/worker/src/worker.ts, through DaemonContext.holdResourceWakes).
+// The same ProjectHold record and the same fence semantics in buildWake, so
+// a waiter reads `running` and goes on, or reads the failure the release
+// recorded and is told the worker did not come back. Narrower than a project
+// hold on purpose: the worker's in-flight requests may need its database
+// woken while it drains, and a project hold would make that wake wait on the
+// very drain that is waiting for it.
+const resourceHolds = new WeakMap<DaemonContext, Map<string, ProjectHold>>()
+
+export function holdResourceWakes(ctx: DaemonContext, resourceId: string, what: string): ReleaseHold {
+  let holds = resourceHolds.get(ctx)
+  if (holds === undefined) {
+    holds = new Map()
+    resourceHolds.set(ctx, holds)
+  }
+  const existing = holds.get(resourceId)
+  if (existing !== undefined) {
+    throw new HobbyError('conflict', `${existing.what} of this resource is already in progress`, 'wait for it to finish, then try again')
+  }
+  let release: () => void = () => {}
+  const fence = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const hold: ProjectHold = { fence, blocksWake: true, what, failures: new Map() }
+  holds.set(resourceId, hold)
+  const held = holds
+  return (failures) => {
+    for (const [id, message] of failures ?? []) {
+      hold.failures.set(id, message)
+    }
+    if (held.get(resourceId) === hold) {
+      held.delete(resourceId)
+    }
+    release()
+  }
+}
+
+function resourceWakeFence(ctx: DaemonContext, resourceId: string): ProjectHold | undefined {
+  return resourceHolds.get(ctx)?.get(resourceId)
+}
+
+// Whether a resource's own hold is taken right now. Read by the cron
+// scheduler (tickCrons, packages/cli/src/daemon/crons.ts), which leaves a
+// firing due during a worker swap for its next tick instead of counting it
+// as missed.
+export function isResourceWakeHeld(ctx: DaemonContext, resourceId: string): boolean {
+  return resourceHolds.get(ctx)?.has(resourceId) === true
 }
 
 // Memoized per DaemonContext in a WeakMap, the same pattern

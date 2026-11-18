@@ -337,4 +337,10 @@ export interface ActivitySink {
   // container which no longer exists are worse than no information at all,
   // because hibernation would act on them.
   reset(resourceId: ResourceId): void
+  // How many connections the proxy or the HTTP router has open to this
+  // resource right now. Optional because only the daemon's tracker
+  // (ActivityTracker, packages/proxy/src/activity.ts) knows it; read by a
+  // worker redeploy's drain (swapWorker, packages/worker/src/worker.ts),
+  // which waits for in-flight requests to the old container to finish.
+  count?(resourceId: ResourceId): number
 }

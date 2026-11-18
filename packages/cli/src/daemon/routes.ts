@@ -1441,7 +1441,7 @@ async function startResourceRoute(ctx: DaemonContext, id: string): Promise<Route
   // clone an automatic wake would cause (holdProjectAsleep's comment,
   // packages/cli/src/daemon/context.ts), so it waits the same way. Re-read
   // afterwards: the snapshot's own resume may have started it already.
-  await waitForProjectAwakeable(ctx, resource.projectId)
+  await waitForProjectAwakeable(ctx, resource.projectId, resource.id)
   resource = getResourceOrThrow(ctx, id)
   // An explicit start is the way out of a refused wake that does not wait
   // for its backoff (issue #10, see buildWake in context.ts): someone looked

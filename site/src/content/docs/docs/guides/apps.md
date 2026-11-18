@@ -147,9 +147,11 @@ request to wake, as before.
 
 `HOBBY_DEPLOY_DRAIN_MS` changes the 10 seconds. A WebSocket open on the old
 version is not moved: it is closed when the old container stops, and the
-client reconnects to the new one. Workers do not get this yet: a worker
-redeploy still stops the old container before starting the new one, because
-two copies would share its Durable Object and KV storage.
+client reconnects to the new one. Workers are redeployed differently, because
+two copies of a worker would share its Durable Object and KV storage: new
+requests are held while the old version finishes what it is doing, then the
+new one starts and serves them. See
+[Redeploying a live worker](/docs/guides/workers/#redeploying-a-live-worker).
 
 ## Create now, deploy later
 

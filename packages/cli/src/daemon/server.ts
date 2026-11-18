@@ -26,7 +26,7 @@ import { startQueueTick } from '@hobby.sh/queue'
 import { durableObjectNamespaces } from './alarms.js'
 import { cronState, postScheduled, scheduledWorkers, startCronScheduler } from './crons.js'
 import { createCaddyManager, type CaddyManager } from './caddy.js'
-import { createHttpProxyDeps, createProxyDeps, getOrCreateWake, getWakeRefusal, type DaemonContext } from './context.js'
+import { createHttpProxyDeps, createProxyDeps, getOrCreateWake, getWakeRefusal, isResourceWakeHeld, type DaemonContext } from './context.js'
 import { adoptOrStartProxy, proxySocketPath, type ProxyLink } from './proxy-link.js'
 import type { ProxydConfig } from '../proxyd/protocol.js'
 import { startExpirySweeper } from './expiry.js'
@@ -774,6 +774,9 @@ export async function startDaemon(
     workers: () => scheduledWorkers(ctx),
     wake: getOrCreateWake(ctx),
     stateOf: queueStateOf(ctx),
+    // A worker being swapped by a redeploy has its due firings deferred to
+    // the next tick rather than missed (tickCrons).
+    isHeld: (resourceId) => isResourceWakeHeld(ctx, resourceId),
     // A cron firing is activity too (issue #160), for the same reason a
     // queue delivery is.
     fire: async (firing) => {

@@ -118,6 +118,8 @@ export interface HobbyConfig {
   // How long a redeploy of a running app keeps the previous container up
   // after the route has moved to the new one, so requests that started on
   // the old one can finish (deployApp's rolling path, packages/app/src/app.ts).
+  // For a running worker, the most its swap waits for in-flight requests
+  // before stopping the old container (drainWorker, packages/worker/src/worker.ts).
   // Optional so the many test config literals need not name it; absent
   // means 10 seconds (DEFAULT_DEPLOY_DRAIN_MS, packages/app/src/app.ts).
   deployDrainMs?: number

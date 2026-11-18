@@ -10,6 +10,7 @@
 // only once this container is already up.
 
 import { randomUUID } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import {
@@ -33,6 +34,7 @@ import {
   pruneImageTags,
   removeImageTags,
 } from '@hobby.sh/core'
+import { queueDeliveryGuard } from '@hobby.sh/queue'
 import { assertWorkerConfig } from './assert-config.js'
 import { findWranglerManifest, type WranglerManifest } from './manifest.js'
 import {
@@ -55,6 +57,21 @@ export interface WorkerDeps {
   // `probeFactory` for differently typed seams.
   workerProbeFactory?: (config: WorkerConfig) => () => Promise<boolean>
   now?: () => number
+  // The daemon's per-resource wake hold (holdResourceWakes in
+  // packages/cli/src/daemon/context.ts), which a redeploy of a running worker
+  // takes for the length of its swap (swapWorker below). While it is held,
+  // every wake of this resource waits instead of starting a container: the
+  // HTTP router's wake, the alarm mirror's, the queue tick's and the cron
+  // scheduler's all go through that one function. The returned function
+  // releases it; given a message, it tells every waiter the worker did not
+  // come back, with that message.
+  //
+  // Optional because only the running daemon has a wake path to hold. Absent
+  // (a hand-built test context, the CLI's local commands), a running worker
+  // is redeployed the way a sleeping one is, in place, because swapping it
+  // with nothing to hold new requests would let a request start a second
+  // container under the same name halfway through.
+  holdResourceWakes?: (resourceId: ResourceId, what: string) => (failure?: string) => void
 }
 
 // Clear of both the postgres range (15432 to 25432) and the app range (25433
@@ -853,6 +870,13 @@ export function resolveWorkerSourcePath(resource: WorkerResource, projectName: s
 // never wipes a secret set earlier.
 // `context` given replaces the stored one; absent keeps it (a redeploy of a
 // workspace worker does not have to repeat --context); null clears it.
+//
+// Two paths after the build, as for an app (deployApp, packages/app/src/app.ts).
+// A worker that is serving right now is swapped with no failed request
+// (swapWorker below): new requests are held, in-flight ones drain, the old
+// container stops, the new one starts, and the held requests go to it. Any
+// other worker (asleep, failed, never deployed) is replaced in place and left
+// asleep, as before.
 export async function deployWorker(
   deps: WorkerDeps,
   resource: WorkerResource,
@@ -860,7 +884,53 @@ export async function deployWorker(
   // `hobby deploy --database` on a redeploy used to be dropped); absent
   // keeps it. The container is replaced on every deploy, so the hyperdrive
   // binding changes with it.
-  opts: { sourcePath?: string; env?: Record<string, string>; context?: string | null; databaseResourceId?: ResourceId | null } = {}
+  opts: DeployWorkerOptions = {}
+): Promise<DeployWorkerResult> {
+  // One deploy per worker at a time, for the reason deployApp gives: two
+  // overlapping swaps would each stop the other's container. The resource is
+  // re-read inside the lock, so a deploy that waited starts from what the
+  // previous one committed.
+  return withDeployLock(resource.id, async () => {
+    const fresh = deps.store.getResource(resource.id)
+    return deployWorkerLocked(deps, fresh !== null && fresh.kind === 'worker' ? fresh : resource, opts)
+  })
+}
+
+export interface DeployWorkerOptions {
+  sourcePath?: string
+  env?: Record<string, string>
+  context?: string | null
+  databaseResourceId?: ResourceId | null
+}
+
+// The same per-resource chain as packages/app/src/app.ts's withDeployLock,
+// kept here rather than shared: two packages that each serialise their own
+// kind's deploys need twenty lines each, not a dependency edge.
+const deployChains = new Map<ResourceId, Promise<void>>()
+
+async function withDeployLock<T>(id: ResourceId, fn: () => Promise<T>): Promise<T> {
+  const previous = deployChains.get(id) ?? Promise.resolve()
+  let release!: () => void
+  const mine = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const chained = previous.then(() => mine)
+  deployChains.set(id, chained)
+  await previous
+  try {
+    return await fn()
+  } finally {
+    release()
+    if (deployChains.get(id) === chained) {
+      deployChains.delete(id)
+    }
+  }
+}
+
+async function deployWorkerLocked(
+  deps: WorkerDeps,
+  resource: WorkerResource,
+  opts: DeployWorkerOptions
 ): Promise<DeployWorkerResult> {
   const project = deps.store.getProject(resource.projectId)
   if (project === null) {
@@ -880,6 +950,10 @@ export async function deployWorker(
   // See deployApp's `replaced`: false until the new config is committed,
   // so a failure before that point is known to have touched nothing.
   let replaced = false
+  // True once swapWorker has taken over: it restores the previous version
+  // itself, with the worker left running, so rollBackDeploy (which leaves it
+  // asleep) must not run after it.
+  let swapping = false
 
   try {
     const found = findWranglerManifest(sourcePath)
@@ -929,6 +1003,25 @@ export async function deployWorker(
         crons: manifest.crons,
       },
     }
+
+    // A running worker is swapped with every request held rather than
+    // failed (swapWorker). A sleeping one has nothing serving to keep up and
+    // takes the path below, unchanged: replace in place, prove it serves,
+    // leave it asleep for the next request to wake.
+    const hold = deps.holdResourceWakes
+    if (hold !== undefined && (await isServing(deps, resource))) {
+      swapping = true
+      await swapWorker(deps, resource, project, config, hold)
+      for (const failure of await pruneImageTags(deps.runtime, workerRepository(project.name, resource.name), tag)) {
+        console.error(`worker ${resource.name}: ${failure}`)
+      }
+      const final = deps.store.getResource(resource.id)
+      if (final === null || final.kind !== 'worker') {
+        throw new HobbyError('internal', `worker ${resource.id} vanished during deploy`)
+      }
+      return { resource: final, image: tag, ignored: manifest.ignored, logs }
+    }
+
     replaced = true
     deps.store.updateResourceConfig(resource.id, config)
 
@@ -957,6 +1050,9 @@ export async function deployWorker(
     }
     return { resource: final, image: tag, ignored: manifest.ignored, logs }
   } catch (err) {
+    if (swapping) {
+      throw err
+    }
     if (wasUndeployed) {
       // Same rule as deployApp's identical guard (packages/app/src/app.ts):
       // a first deploy can fail after startWorker already created and
@@ -981,6 +1077,166 @@ export async function deployWorker(
       throw err
     }
     throw await rollBackDeploy(deps, resource, project, replaced, err)
+  }
+}
+
+// How long a swap waits for requests already on the old container to finish
+// before stopping it (drainWorker). The same setting and the same default as
+// an app's rolling deploy (DEFAULT_DEPLOY_DRAIN_MS, packages/app/src/app.ts):
+// HobbyConfig.deployDrainMs, HOBBY_DEPLOY_DRAIN_MS. Unlike the app's, which
+// always waits the whole period because the old container keeps serving
+// beside the new one, this one ends as soon as nothing is in flight, because
+// every request arriving meanwhile is being held.
+export const DEFAULT_DEPLOY_DRAIN_MS = 10_000
+
+function drainMs(deps: WorkerDeps): number {
+  const configured = deps.config.deployDrainMs
+  return typeof configured === 'number' && Number.isFinite(configured) && configured >= 0
+    ? configured
+    : DEFAULT_DEPLOY_DRAIN_MS
+}
+
+// Whether the worker is serving right now, which decides between the two
+// deploy paths. Same test as deployApp's isServing: the store's `running` and
+// a container that is actually up, since a container that died behind the
+// daemon is recorded `running` until reconcile notices.
+async function isServing(deps: WorkerDeps, resource: WorkerResource): Promise<boolean> {
+  if (resource.state !== 'running') {
+    return false
+  }
+  return (await deps.runtime.inspect(resource.config.containerName)).running
+}
+
+// Something is still being served by the old container: a request or an
+// upgraded connection the HTTP router opened to it (the activity tracker's
+// live count, which the router opens after resolving and closes when the
+// response ends), or a queue batch the daemon has posted to its control port
+// and not yet had an answer for (an unexpired lease, queueDeliveryGuard).
+// 'unreachable' from the queue guard is not counted: it cannot say, and a
+// batch cut short is redelivered when its lease expires anyway.
+function hasInFlight(deps: WorkerDeps, resource: WorkerResource): boolean {
+  if ((deps.activity?.count?.(resource.id) ?? 0) > 0) {
+    return true
+  }
+  return queueDeliveryGuard(deps.paths, deps.store, resource.id, Date.now()) === 'active'
+}
+
+// Waits for the old container to finish what it is doing, bounded by
+// drainMs. Polled at the readiness poll interval, and never trusted on its
+// first read: a request that resolved the worker as `running` a moment before
+// swapWorker wrote `starting` opens its activity handle a few microtasks
+// later, after its own store read, so a zero seen at once could miss it. One
+// poll interval is far longer than that gap.
+async function drainWorker(deps: WorkerDeps, resource: WorkerResource): Promise<void> {
+  const limit = drainMs(deps)
+  const pollMs = Math.max(1, deps.config.readinessPollMs)
+  const started = Date.now()
+  await delay(Math.min(pollMs, limit))
+  for (;;) {
+    const remaining = limit - (Date.now() - started)
+    if (remaining <= 0 || !hasInFlight(deps, resource)) {
+      return
+    }
+    await delay(Math.min(pollMs, remaining))
+  }
+}
+
+// The redeploy of a running worker: drain, hold, swap.
+//
+// A worker cannot be rolled over the way an app is (rollOver,
+// packages/app/src/app.ts), with two containers side by side. Both would
+// mount the same `state` and `do` directories (containerSpec above), so two
+// workerd processes would open the same KV, D1 and Durable Object SQLite
+// files at once, which breaks the one-instance guarantee a Durable Object is
+// built on; and the fixed controlPort can be published by one container
+// only. So there is a gap, and what this does is make nobody fall into it:
+//
+//   1. Hold. Take the daemon's wake hold on this resource, then record it
+//      `starting`. The HTTP router serves a `running` target directly and
+//      sends anything else through wake() (resolveAndWake,
+//      packages/proxy/src/http.ts), the same path a sleeping worker's first
+//      request takes; with the hold taken, that wake waits instead of
+//      starting anything (buildWake, packages/cli/src/daemon/context.ts). So
+//      from here every NEW request waits, for at most the router's wake
+//      timeout, which is how long it would wait for a sleeping worker too.
+//   2. Drain. Requests and queue batches already on the old container finish
+//      there (drainWorker), for at most deployDrainMs.
+//   3. Swap. Stop and remove the old container (SIGTERM, so the runner's
+//      dispose flushes Durable Object storage, as in stopWorker), write the
+//      new config, and start the new container through startWorker, which
+//      proves readiness and records `running`.
+//   4. Release. Every held wake reads `running` and returns; the router
+//      re-resolves and sends each held request to the new container.
+//
+// If the new container fails, the previous config is written back and the
+// previous image (kept on disk by pruneImageTags for exactly this) is started
+// again, so the held requests are served by the old version and the deploy
+// fails loudly. Only if that restart fails too is the worker left `failed`,
+// and the held wakes are told why rather than starting it once more each.
+async function swapWorker(
+  deps: WorkerDeps,
+  previous: WorkerResource,
+  project: Project,
+  next: WorkerConfig,
+  hold: NonNullable<WorkerDeps['holdResourceWakes']>
+): Promise<void> {
+  const name = previous.config.containerName
+  // The deploy is activity, as in rollOver: a build longer than the idle
+  // threshold must not let the hibernator sleep the worker before the swap.
+  deps.activity?.touch(previous.id)
+  const release = hold(previous.id, 'a redeploy')
+  let failure: string | undefined
+  try {
+    deps.store.setResourceState(previous.id, 'starting')
+    try {
+      await drainWorker(deps, previous)
+      await deps.runtime.stop(name, { timeoutSec: STOP_TIMEOUT_SEC })
+      await deps.runtime.remove(name)
+      deps.store.updateResourceConfig(previous.id, next)
+      const updated = deps.store.getResource(previous.id)
+      if (updated === null || updated.kind !== 'worker') {
+        throw new HobbyError('internal', `worker ${previous.id} vanished during deploy`)
+      }
+      await startWorker(deps, updated)
+    } catch (err) {
+      const restartError = await restartPrevious(deps, previous, project)
+      if (restartError === null) {
+        throw withRollbackNote(
+          err,
+          `nothing was changed: ${previous.name} was started again from its previous image ${previous.config.image} and serves it; requests that arrived during the attempt were held and served by it`
+        )
+      }
+      failure = `${errorMessage(err)}; starting the previous image ${previous.config.image} again failed too: ${restartError}`
+      throw withRollbackNote(
+        err,
+        `the previous image ${previous.config.image} could not be started again either (${restartError}), so ${previous.name} is failed; \`hobby wake\` retries it`
+      )
+    }
+  } finally {
+    release(failure)
+  }
+}
+
+// Puts the previous version back and starts it. Returns null when it serves
+// again, or the message of the start that failed.
+async function restartPrevious(deps: WorkerDeps, previous: WorkerResource, project: Project): Promise<string | null> {
+  try {
+    // Whatever holds the name now (the new container that failed, or the old
+    // one if stopping it was what failed) goes, so the previous spec is
+    // created fresh: the image and the manifest environment are both fixed
+    // at create time.
+    await deps.runtime.stop(previous.config.containerName, { timeoutSec: STOP_TIMEOUT_SEC })
+    await deps.runtime.remove(previous.config.containerName)
+    deps.store.updateResourceConfig(previous.id, previous.config)
+    const restored = deps.store.getResource(previous.id)
+    if (restored === null || restored.kind !== 'worker' || deps.store.getProject(project.id) === null) {
+      throw new HobbyError('internal', `worker ${previous.id} vanished during deploy`)
+    }
+    await startWorker(deps, restored)
+    return null
+  } catch (err) {
+    deps.store.setResourceState(previous.id, 'failed')
+    return errorMessage(err)
   }
 }
 

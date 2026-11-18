@@ -914,10 +914,16 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
       c.io.out('')
       // A live app is rolled over with no gap (Phase A1), so it is still
       // serving; only an app that was asleep, failed or new is left asleep.
+      // A live worker is swapped instead (swapWorker,
+      // packages/worker/src/worker.ts): requests are held while the old
+      // container drains and the new one starts, and WebSockets open on the
+      // old one are closed, which is worth saying because a client sees it.
       c.io.out(
-        result.resource.state === 'running'
-          ? 'It is serving the new version. The old container was stopped after the drain.'
-          : 'It is asleep. The first request wakes it.'
+        result.resource.state !== 'running'
+          ? 'It is asleep. The first request wakes it.'
+          : result.resource.kind === 'worker'
+            ? 'It is serving the new version. Requests that arrived during the swap were held and served by it; WebSockets open on the old version were closed.'
+            : 'It is serving the new version. The old container was stopped after the drain.'
       )
       return 0
     }

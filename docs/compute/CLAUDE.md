@@ -515,3 +515,112 @@ name, and takes `withDeployLock` and re-reads the resource, although
 `startDaemon` binds any listener, so no deploy can be in flight then. Tested in
 `packages/cli/test/reconcile-stray-deploy.test.ts`. `hobby logs` after a rolling
 deploy shows the new container only; the old one's output goes with it.
+
+## Amendment, 2026-11-18: a running worker is redeployed with no failed request (Phase A, workers)
+
+This supersedes the paragraph "**Workers are not changed, deliberately.**" in
+the Phase A1 amendment above, as far as its claim that a worker deploy "does
+have a gap, the same stop-then-start as before". Its reasoning still stands:
+two worker containers cannot run side by side, because both would mount the
+same `state` and `do` directories (`containerSpec`,
+`packages/worker/src/worker.ts`) and open the same KV, D1 and Durable Object
+SQLite files from two workerd processes, and the fixed `controlPort` can be
+published by one container only. So the container gap is still there. What
+changed is that no request falls into it.
+
+**Built: drain, hold, swap.** `deployWorker` now takes a per-worker deploy
+lock (`withDeployLock`, the same chain as the app kind's) and, after the
+build, chooses by `isServing` (state `running` and the container actually
+running). A running worker goes through `swapWorker`:
+
+1. **Hold.** It takes `WorkerDeps.holdResourceWakes` for the resource, then
+   records the worker `starting`. The HTTP router (`resolveAndWake`,
+   `packages/proxy/src/http.ts`) serves only a `running` target directly and
+   sends anything else through `wake()`, the path a sleeping worker's first
+   request takes. The daemon's wake (`buildWake`,
+   `packages/cli/src/daemon/context.ts`) now checks a per-resource hold
+   (`holdResourceWakes`, `resourceWakeFence`) after the project hold A3 uses,
+   with the same `ProjectHold` record and the same outcomes: when the hold is
+   released, a waiter that reads `running` returns and the router re-resolves
+   and proxies; a waiter whose resource the release named as failed gets
+   `heldRestartFailed` ("was restarted by a redeploy, and did not come back")
+   instead of starting a container itself. It is per resource, not per
+   project, on purpose: a request draining on the old container may need the
+   worker's database woken, and a project hold would make that wake wait on
+   the drain that is waiting for it. `createDaemonContext` wires the seam
+   (`resourceWakeHoldFor`); `startResourceRoute` (`hobby wake`) waits on it
+   too, through `waitForProjectAwakeable`'s new resource argument.
+2. **Drain.** `drainWorker` polls, every `readinessPollMs`, until nothing is
+   in flight or `deployDrainMs` (`HOBBY_DEPLOY_DRAIN_MS`, default 10 000) has
+   passed. In flight means the activity tracker's live count for the
+   resource (the router opens a handle per proxied request and upgraded
+   connection, and closes it when the response ends; read through the new
+   optional `ActivitySink.count`, `packages/core/src/types.ts`) or a queue
+   batch under an unexpired lease (`queueDeliveryGuard`). The first read
+   waits one poll interval, so a request that resolved `running` an instant
+   before the state write has opened its handle by then.
+3. **Swap.** Stop (SIGTERM, so the runner's dispose flushes Durable Object
+   storage) and remove the old container, write the new config, and
+   `startWorker` the new one, which proves readiness on the control port and
+   records `running`.
+4. **Release.** Held wakes return and the held requests go to the new
+   container.
+
+**Failure.** If anything in step 2 or 3 throws, `restartPrevious` removes
+whatever holds the container name, writes the previous config back and
+`startWorker`s the previous image (kept on disk by `pruneImageTags`). The
+held requests are served by it, and the deploy fails with the hint `nothing
+was changed: <name> was started again from its previous image <image> and
+serves it; requests that arrived during the attempt were held and served by
+it`. If that start fails too, the worker is `failed`, the hold is released
+with both messages, and every held request gets the error rather than
+another start attempt.
+
+**Every other way in, during the swap:**
+
+| Path | What covers it |
+|---|---|
+| HTTP requests | Held by the wake hold, bounded by the router's `wakeTimeoutMs` |
+| In-flight HTTP requests | Drained (step 2), bounded by `deployDrainMs` |
+| Queue delivery (ADR 0013, `tickOneQueue`, `packages/queue/src/tick.ts`) | A consumer that is not `running` or `sleeping` is skipped for the tick; the message stays in `messages.sqlite` and the next tick after the swap delivers it. A batch already posted is drained by its lease; one cut short anyway is redelivered when its lease expires (at-least-once, unchanged) |
+| Durable Object alarms (ADR 0012, `tickOnce`, `packages/do/src/mirror.ts`) | The mirror calls `wake()` for a due alarm regardless of state, so it waits on the hold and returns once the new version runs. The row stays in `_cf_ALARM` until workerd fires it, and workerd reloads and reschedules every row at startup (`packages/do/src/alarms.ts`), so an overdue alarm fires in the new container. An alarm running in the old container when it stops was not cleared and fires again in the new one |
+| Cron (`tickCrons`, `packages/cli/src/daemon/crons.ts`) | New `isHeld` option, wired to `isResourceWakeHeld` in `startDaemon`: a firing due during the swap is skipped without moving its last-fired time, so the next tick fires it once, with its original `scheduledTime`. Before this, a worker in `starting` had its firing recorded `unreachable` and lost |
+| Control port | Used only by the queue delivery and cron firing above, and by the readiness probe |
+| Hibernator | Acts only on `running`, so it leaves a `starting` worker alone; the deploy touches activity before the hold, as the app path does |
+
+**Kept as before.** A sleeping, failed or never-deployed worker is replaced
+in place and left asleep. A context with no `holdResourceWakes` (hand-built
+test contexts, the CLI's local commands) also takes the in-place path for a
+running worker, because swapping without a hold would let a request start
+the new container under the same name halfway through. A WebSocket open on
+the old container is closed when it stops. The CLI deploy output for a
+running worker says requests were held and WebSockets closed
+(`packages/cli/src/cli/commands.ts`).
+
+**Not done.** A worker with no durable bindings could in principle roll over
+like an app (two containers, a route switch), with no hold at all. It would
+still need a second control port, and the hold already gives zero failed
+requests, so it was not built.
+
+**Limits, stated.** Held requests and the new version's readiness are both
+bounded by `wakeTimeoutMs`, and the readiness wait starts after the drain and
+the stop. A new version that crashes on boot is caught on the first poll
+(`exitedOnBoot`) and the old version is back well inside the budget; one that
+hangs until its readiness times out uses the whole budget, so the requests
+held behind it get a 504 before the old version is back. The alarm mirror
+and the queue tick are sequential loops, so a wake waiting on a swap delays
+their other namespaces and queues by up to the swap's length.
+
+**Tests.** `packages/cli/test/worker-swap.test.ts`, with real sockets
+through the real router, wake and hold: order (in-flight request finishes on
+the old version, then stop, then start, then held requests served by the new
+one, and none reached the old one while held), continuous traffic through a
+redeploy with no failure, a crash-on-boot new version restoring the old one
+and serving the held requests from it, both versions failing, and a queue
+message, an overdue alarm and a due cron mid-swap all delivered afterwards.
+`packages/worker/test/worker.test.ts`: the call order, the drain ending early
+and ending at `deployDrainMs`, the sleeping path taking no hold, and no
+hold seam meaning in place.
+
+**Not verified against real Docker** in this change. The lead's live check is
+the record for that.
