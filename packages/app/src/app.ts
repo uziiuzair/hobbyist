@@ -898,6 +898,38 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+// Removes a container left under the alternate name by a rolling deploy that
+// did not finish: a daemon that died during rollOver's drain leaves the old
+// container running with no config naming it, and one that died before the
+// switch leaves an unrouted new one. Either way the alternate name is never
+// the one serving, since config.containerName is the only name anything
+// routes to. Called by reconcile at daemon start (packages/cli/src/daemon/
+// reconcile.ts). Returns the name removed, or null when there was nothing.
+//
+// Takes the deploy lock even though reconcile runs before the daemon accepts
+// any request (cmdDaemon calls it before startDaemon), so a later caller that
+// runs it while the daemon is serving cannot remove a deploy's new container
+// mid-probe. The resource is re-read inside the lock for the same reason.
+export async function removeStrayAppContainer(deps: AppDeps, resource: AppResource): Promise<string | null> {
+  return withDeployLock(resource.id, async () => {
+    const fresh = deps.store.getResource(resource.id)
+    if (fresh === null || fresh.kind !== 'app') {
+      return null
+    }
+    const recorded = fresh.config.containerName
+    const stray = alternateContainerName(recorded)
+    // Unreachable by construction (the alternate of a name is never the
+    // name), stated anyway because this function's one job is to never
+    // touch the recorded container.
+    if (stray === recorded || !(await deps.runtime.inspect(stray)).exists) {
+      return null
+    }
+    await deps.runtime.stop(stray, { timeoutSec: STOP_TIMEOUT_SEC })
+    await deps.runtime.remove(stray)
+    return stray
+  })
+}
+
 // Narrowing helper for callers holding a Resource from the store.
 export function asApp(resource: Resource): AppResource {
   if (resource.kind !== 'app') {

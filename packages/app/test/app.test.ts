@@ -25,6 +25,7 @@ import {
   createAppResource,
   deployApp,
   destroyApp,
+  removeStrayAppContainer,
   startApp,
   stopApp,
   type AppDeps,
@@ -1172,5 +1173,38 @@ test('overlapping deploys of one running app run one after the other', async () 
   assert.ok(final !== null && final.kind === 'app')
   assert.equal(final.state, 'running')
   assert.equal((await runtime.inspect(final.config.containerName)).running, true)
+  assert.equal(runtime._state.size, 1)
+})
+
+test('removeStrayAppContainer waits for a deploy in progress and never removes the container it left serving', async () => {
+  const deps = buildDeps()
+  const runtime = deps.runtime as ReturnType<typeof createFakeRuntime>
+  const project = makeProject(deps.store)
+  const before = await runningApp(deps, project)
+
+  let releaseDrain!: () => void
+  const drainHeld = new Promise<void>((resolve) => {
+    releaseDrain = resolve
+  })
+  let drainStarted!: () => void
+  const inDrain = new Promise<void>((resolve) => {
+    drainStarted = resolve
+  })
+  deps.appDrainWait = async () => {
+    drainStarted()
+    await drainHeld
+  }
+  deps.now = () => 1_754_870_500_000
+  const deploying = deployApp(deps, before)
+  await inDrain
+  // Mid-drain both containers exist. A cleanup that ran now, outside the
+  // lock and from the stale snapshot, would remove the new one.
+  const cleanup = removeStrayAppContainer(deps, before)
+  await Promise.resolve()
+  assert.equal((await runtime.inspect('hobby-blog-web_b')).running, true)
+  releaseDrain()
+  await deploying
+  assert.equal(await cleanup, null)
+  assert.equal((await runtime.inspect('hobby-blog-web_b')).running, true)
   assert.equal(runtime._state.size, 1)
 })

@@ -504,7 +504,14 @@ broker following it. Not done; recorded here so nobody assumes A1 covered it.
 
 **Not verified against real Docker** in this change: the unit tests run the
 fake runtime (`packages/app/test/app.test.ts`, the tests after
-`alternateContainerName`). A daemon crash during the drain leaves the old
-container running with no config naming it until the next rolling deploy or
-`hobby rm`; reconcile does not look for it. `hobby logs` after a rolling
+`alternateContainerName`). A daemon crash during a rolling deploy leaves a
+container under the alternate name that no config points at (the old one if
+it died during the drain, the unrouted new one if it died before the switch).
+`reconcile` (`packages/cli/src/daemon/reconcile.ts`) removes it at daemon start
+through `removeStrayAppContainer`, logging the name. That function only ever
+targets `alternateContainerName(config.containerName)`, never the recorded
+name, and takes `withDeployLock` and re-reads the resource, although
+`cmdDaemon` (`packages/cli/src/cli/commands.ts`) already runs reconcile before
+`startDaemon` binds any listener, so no deploy can be in flight then. Tested in
+`packages/cli/test/reconcile-stray-deploy.test.ts`. `hobby logs` after a rolling
 deploy shows the new container only; the old one's output goes with it.
