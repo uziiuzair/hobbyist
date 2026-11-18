@@ -16,14 +16,17 @@ Sleep on its own is easy and nearly useless. Wake on its own is meaningless.
 Together they are what makes ten projects fit on a box that could not run ten
 databases at once, and what makes that invisible to whatever connects.
 
-It is also the one thing no self-hostable alternative does:
+It is also the one thing no self-hostable alternative does on one small box:
 
 - **Self-hosted Supabase never sleeps.** It is a large multi-container stack that
   runs at full cost whether or not anything is using it.
-- **Xata's open-source scale-to-zero plugin cannot wake a database.** In their
-  own words, it "can't handle reactivation because the cluster is no longer
-  running once it's hibernated." Automatic reactivation on connection is what
-  they kept in the paid cloud.
+- **Xata's open-source platform wakes a database, but only on Kubernetes.** It
+  brings a hibernated database back when a client connects
+  (`services/gateway/session/cluster_dialer.go` in `xataio/xata`). It runs on a
+  Kubernetes cluster with CloudNativePG, and its own README calls it "overkill"
+  if you just need a single Postgres instance. (2026-11-18: this line used to
+  say Xata could not wake a database. That was true of their earlier
+  scale-to-zero plugin alone, not of the platform they now publish.)
 - **Coolify and Dokploy deploy apps well and do not sleep them.**
 
 ## What happens when you connect

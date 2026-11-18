@@ -54,7 +54,7 @@ across the box, and a literal dot in a database name is reserved.
 SCRAM negotiates between the client and Postgres. The proxy never sees a password
 and never maintains a user store. That is an entire subsystem we do not own.
 (2026-11-17: true for TCP clients. Serverless driver traffic is the one
-exception, proposed in ADR 0021 and described in the amendment of that date
+exception, accepted in ADR 0021 on 2026-11-18 and described in the amendment of that date
 below.)
 
 ## The proxy is also the activity sensor

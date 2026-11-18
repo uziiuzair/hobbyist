@@ -29,9 +29,9 @@ your own backups, which today means `pg_dump`, because
 
 **Everything sleeps, and everything wakes on demand.** This is the single reason
 for the project to exist, and it is the one thing no self-hostable alternative
-does. Self-hosted Supabase never sleeps. Xata's open-source scale-to-zero plugin
-cannot wake a database, which is why reactivation stayed in their paid cloud.
-Coolify and Dokploy deploy apps well and never sleep them.
+does on one small box. Self-hosted Supabase never sleeps. Xata's open-source
+platform wakes a database, but it runs on a Kubernetes cluster. Coolify and
+Dokploy deploy apps well and never sleep them.
 
 Sleep is what makes ten projects fit on one small box. Wake is what makes sleep
 invisible. [How it works](/docs/concepts/sleep-and-wake/).
