@@ -912,7 +912,13 @@ export async function cmdDeploy(c: Ctx, positionals: string[], flags: Flags): Pr
       printEnvCount(c, env, envSource)
       printIgnored(c, result.ignored)
       c.io.out('')
-      c.io.out('It is asleep. The first request wakes it.')
+      // A live app is rolled over with no gap (Phase A1), so it is still
+      // serving; only an app that was asleep, failed or new is left asleep.
+      c.io.out(
+        result.resource.state === 'running'
+          ? 'It is serving the new version. The old container was stopped after the drain.'
+          : 'It is asleep. The first request wakes it.'
+      )
       return 0
     }
 
