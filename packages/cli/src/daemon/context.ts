@@ -17,7 +17,6 @@
 import {
   createDockerRuntime,
   createKindRegistry,
-  DEFAULT_POSTGRES_NAME,
   HobbyError,
   openStore,
   type ComputeRuntime,
@@ -40,11 +39,11 @@ import {
   type HttpProxyDeps,
   type HttpTarget,
   type ProxyDeps,
-  type ProxyTarget,
   RefusalLimiter,
   refusalLogLine,
   type AccessRefusal,
 } from '@hobby.sh/proxy'
+import { allowlistOf, resolveProxyTarget } from './proxy-resolve.js'
 import { createTailnetDetector } from './tailnet.js'
 import { formatRetryDelay, redactWakeError, wakeRetryDelayMs } from './wake-backoff.js'
 
@@ -593,99 +592,15 @@ export function logAccessRefusal(ctx: DaemonContext, refusal: AccessRefusal, log
 }
 
 export function createProxyDeps(ctx: DaemonContext): ProxyDeps {
-  async function resolve(projectName: string, databaseSegment: string | null = null): Promise<ProxyTarget | null> {
-    const project = ctx.store.getProjectByName(projectName)
-    if (project === null) {
-      return null
-    }
-
-    // A released project is one hobby handed over: its data directory now
-    // belongs to whatever the user started from the emitted compose file.
-    // Waking it here would open a second postgres on that same PGDATA, which
-    // is not a conflict the user gets an error about, it is corruption. The
-    // rows are all still here, which is why this is a refusal with a reason
-    // rather than a "no such project".
-    if (project.releasedAt != null) {
-      throw new HobbyError(
-        'conflict',
-        `project ${projectName} was released and is no longer managed by hobby`,
-        'it is running from the compose file hobby eject --release gave you. Run `hobby adopt ' +
-          projectName +
-          '` to take it back, after stopping that stack.'
-      )
-    }
-
-    // Only postgres resources are candidates. Port 5432 speaks one protocol
-    // and a startup packet cannot name an app or a worker, so a project
-    // holding a database and two apps must still route cleanly to the
-    // database rather than reading as ambiguous. Filtering by kind here,
-    // before the count checks below, is what keeps that true: without it,
-    // deploying an app to a project would have broken psql against its
-    // database, which is exactly the kind of cross-phase breakage ADR 0007
-    // guard 1 exists to prevent.
-    const resources = ctx.store.listResources(project.id).filter((r) => r.kind === 'postgres') as PostgresResource[]
-    if (resources.length === 0) {
-      return null
-    }
-
-    // The routing key's dotted segment names a RESOURCE first (issue #66):
-    // `blog.analytics` reaches the postgres called analytics, whatever
-    // database it holds inside, and that is the string `hobby connect
-    // blog/analytics` prints (core's routingKeyFor, the inverse of this
-    // match). Only when no resource has that name does the segment keep its
-    // older meaning, a database inside the default resource, substituted on
-    // the wire by the proxy. A resource and a database sharing a name is
-    // therefore resolved as the resource; name the database through the
-    // resource's own direct string if both are wanted.
-    const byName = databaseSegment === null ? undefined : resources.find((r) => r.name === databaseSegment)
-    if (byName !== undefined) {
-      return targetFor(byName, true)
-    }
-
-    if (resources.length === 1) {
-      return targetFor(resources[0] as PostgresResource, false)
-    }
-
-    // Several, and the key did not name one. The default resource is what a
-    // bare project name has always meant, and `hobby new` creates exactly
-    // it, so a project that grew a second postgres keeps its first string
-    // working, which is what #66 was about: before this, `pg create` cut
-    // off the existing database's connection string the moment it ran.
-    const primary = resources.find((r) => r.name === DEFAULT_POSTGRES_NAME)
-    if (primary !== undefined) {
-      return targetFor(primary, false)
-    }
-    // No default to fall back on: the same error identity the CLI's
-    // resolveTarget (packages/cli/src/cli/commands.ts) uses for a
-    // `project/resource` target it cannot pick, and proxy.ts's try/catch
-    // around deps.resolve turns it into a FATAL on the wire.
-    throw new HobbyError(
-      'ambiguous_target',
-      `project ${projectName} has more than one postgres resource and none is named ${DEFAULT_POSTGRES_NAME}: ${resources.map((r) => r.name).join(', ')}`,
-      `name one as the database: ${resources.map((r) => `${projectName}.${r.name}`).join(' or ')} (\`hobby connect ${projectName}/<name>\` prints the string)`
-    )
-  }
-
-  function targetFor(resource: PostgresResource, databaseSegmentIsResource: boolean): ProxyTarget {
-    return {
-      resourceId: resource.id,
-      label: `${ctx.store.getProject(resource.projectId)?.name ?? resource.projectId}/${resource.name}`,
-      host: '127.0.0.1',
-      port: resource.config.hostPort,
-      state: resource.state,
-      database: resource.config.database,
-      databaseSegmentIsResource,
-    }
-  }
-
   return {
-    resolve,
+    resolve: async (projectName: string, databaseSegment: string | null = null) =>
+      resolveProxyTarget(ctx.store, projectName, databaseSegment),
     wake: getOrCreateWake(ctx),
     isWakeRefused: (resourceId: string) => isWakeRefused(ctx, resourceId),
     // Read per connection, so `hobby allow` takes effect on the next
     // connection with no restart. A project that does not exist has no
     // allowlist, and resolve then answers "unknown database" as before.
-    allowlist: (projectName: string) => ctx.store.getProjectByName(projectName)?.allowlist ?? null,
+    allowlist: (projectName: string) => allowlistOf(ctx.store, projectName),
     onAccessRefused: (refusal: AccessRefusal) => logAccessRefusal(ctx, refusal),
     activity: ctx.activity,
   }

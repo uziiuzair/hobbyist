@@ -1,6 +1,7 @@
 # The proxy outlives the daemon
 
-Status: PROPOSED. Phase A2 of the standby-pair design (branch
+Status: RATIFIED, built on 2026-11-18 (see "As built" at the end); not yet
+verified against a live daemon under Bun. Phase A2 of the standby-pair design (branch
 `docs/adr-0023-standby-pair`, `docs/availability/specs/2026-11-18-standby-pair-design.md`).
 Date:   2026-11-18
 
@@ -69,7 +70,8 @@ proxy treats an address it already listens on as a no-op.
   running as today. Wakes that arrive while the daemon is leaving are answered
   "daemon leaving" and the proxy queues them for the next daemon.
 - *A full stop* is `hobby daemon stop`, a local verb like `hobby daemon`
-  itself: it signals the daemon named in the lock with SIGUSR1, and the
+  itself: it signals the daemon named in the lock with SIGUSR2 (SIGUSR1
+  belongs to the Node inspector), and the
   daemon runs today's whole sequence, telling the proxy to stop (ending its
   sessions) before any resource is stopped, which keeps the ordering rule in
   `performShutdown`. With no daemon running it stops a proxy that is still
@@ -122,3 +124,63 @@ too, since they are accepted by the proxy that never went away.
   a hibernation or a settings restart still ends, as today.
 - The single-process mode stays (`startDaemon` without a proxy process), for
   tests and as `HOBBY_PROXY_MODE=in-process`.
+
+## As built
+
+Code, by piece:
+
+- `packages/cli/src/proxyd/protocol.ts`: the messages (`ProxyMessage`,
+  `DaemonMessage`), `PROXY_LINK_PROTOCOL`, newline-delimited JSON framing
+  (`send`, `onMessages`), `proxyCodeFingerprint` and `proxyConfigKey`.
+- `packages/cli/src/proxyd/host.ts`, `startProxyHost`: the proxy process.
+  `startPgProxy` per bind address, `resolveProxyTarget` and `allowlistOf`
+  over `openStoreReadOnly` (new in `packages/core/src/store.ts`), the wake
+  queue (`pending`, re-sent to each new link, given up with "the hobby daemon
+  is not running" just inside `wakeTimeoutMs`), the refusal cache
+  (`refusedUntil`), and the activity forwarder.
+- `packages/cli/src/proxyd/main.ts` and `packages/cli/bin/hobby-proxy.js`:
+  the process entry. SIGTERM and SIGINT stop it; SIGHUP is ignored.
+- `packages/cli/src/daemon/proxy-resolve.ts`: the resolver, moved out of
+  `createProxyDeps` (`context.ts`) so both processes run the same code.
+- `packages/cli/src/daemon/proxy-link.ts`: `dialProxy`, `attachProxy`,
+  `adoptOrStartProxy`, `spawnProxyProcess` (detached, `process.execPath`,
+  output appended to `$HOBBY_HOME/proxy.log`).
+- `packages/cli/src/daemon/server.ts`: `StartDaemonOptions.proxyProcess`
+  selects the mode; `ShutdownMode` (`restart` on SIGTERM and SIGINT, `stop`
+  on SIGUSR2 and by default for `close()`); `resourcesToStopOnRestart`.
+- `packages/cli/src/cli/commands.ts`: `cmdDaemon` uses the process mode
+  unless `HOBBY_PROXY_MODE=in-process`; `cmdDaemonStop` is `hobby daemon stop`.
+- `packages/cli/src/daemon/preflight.ts`: `hobby init` reports a proxy left
+  by a restart as holding `proxyPort` for the daemon to adopt, not as a
+  blocker.
+- `scripts/hobby.service`: `KillMode=process`.
+
+One change from the design above: a connection to `proxy.sock` gets the hello
+and nothing more until it sends `attach`. The proxy then answers `attached`
+with the live connections as of that instant, and only an attached link can
+send wake results, `listen` or `stop`. Without this, `hobby init` probing the
+socket would have displaced the running daemon's link.
+
+Tests: `packages/cli/test/proxy-process.test.ts`. A session through a fake
+backend carries bytes across a daemon detaching and a second daemon adopting
+(and the second daemon counts it); routing with no daemon, including a
+project written to `state.db` after the proxy opened it; a wake held while a
+leaving daemon is linked and then detached, and performed by the next one; a
+wake with no daemon timing out with a message that says so; a refusal cached
+from a failed wake; a fingerprint mismatch replacing the proxy; a probe not
+displacing the daemon; the real `bin/hobby-proxy.js` spawned as a child under
+Node; `hobby daemon stop` with no daemon; and `startDaemon` itself through a
+restart (busy database kept, idle one stopped, proxy adopted) and a full stop.
+
+Not done or not verified:
+
+- Nothing has run under Bun or against a real daemon, Docker or `psql`.
+  Bun's `child_process.spawn` with `detached: true` and an fd for stdio, and
+  `bun:sqlite` read-only on a WAL database the daemon has open or has closed,
+  are the two runtime behaviours most likely to differ.
+- A proxy that dies while a daemon is running is not respawned until the next
+  daemon start. The daemon logs the dropped link.
+- The HTTP router (apps and workers) still runs in the daemon; its
+  connections still end on a restart.
+- systemd's `KillMode=process` is set in the shipped unit but has not been
+  exercised on a real systemd box.

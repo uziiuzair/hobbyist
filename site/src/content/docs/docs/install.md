@@ -148,6 +148,12 @@ sudo systemctl restart hobby    # under systemd
 # or: stop the `hobby daemon` you started by hand and start it again
 ```
 
+Open database sessions survive the restart: the Postgres proxy is its own
+process and the new daemon adopts it. If the upgrade changed the proxy's own
+code, the daemon restarts the proxy as well, which ends those sessions once,
+and its log says so. The unit sets `KillMode=process` for this; a unit copied
+before that line existed kills the proxy with the daemon, so copy it again.
+
 ## Uninstalling
 
 There is no uninstall command, on purpose: everything it made is in two places
@@ -156,7 +162,7 @@ you can see.
 ```sh
 hobby eject <project> --release   # for each project you want to keep
 hobby rm <project> --yes          # for each project you do not: removes its containers, network and images
-# stop the daemon (systemctl stop hobby, or end `hobby daemon`)
+hobby daemon stop                 # the daemon and the proxy process; then systemctl stop hobby if you installed the unit
 docker ps -a --filter name=hobby- -q | xargs -r docker rm -f     # anything hobby rm did not reach
 docker network ls --filter name=hobby- -q | xargs -r docker network rm
 docker images 'hobby/*' -q | xargs -r docker rmi

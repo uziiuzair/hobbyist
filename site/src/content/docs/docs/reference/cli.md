@@ -95,6 +95,24 @@ Runs the daemon in the foreground. It owns all state and all lifecycle, listens
 on a unix socket for the CLI and MCP, and on loopback TCP for Studio. Only one
 may run at a time, and that is enforced rather than assumed.
 
+The Postgres proxy runs as its own process, which the daemon starts the first
+time and adopts on every later start, so stopping or restarting the daemon
+(SIGTERM, Ctrl-C, `systemctl restart`) leaves open database sessions up. A
+restart after an upgrade that changed the proxy's code restarts the proxy too,
+which ends its sessions, and the daemon's log says so. Its own log is
+`~/.hobby/proxy.log`. `HOBBY_PROXY_MODE=in-process` runs it inside the daemon
+instead, as before.
+
+Takes no flags.
+
+### `hobby daemon stop`
+
+The full stop: the daemon stops its resources as on any shutdown, and stops
+the proxy process too, ending every proxied session. With no daemon running,
+it stops a proxy left behind by one. Run it before leaving hobby for good, so
+nothing keeps the proxy's port. It acts on this machine's processes, so it has
+no API route and no MCP tool.
+
 Takes no flags.
 
 ## Projects and resources

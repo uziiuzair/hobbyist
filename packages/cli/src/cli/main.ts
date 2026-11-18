@@ -13,6 +13,7 @@ import { cmdMcp } from './mcp.js'
 import {
   cmdConnect,
   cmdDaemon,
+  cmdDaemonStop,
   cmdAdopt,
   cmdBranch,
   cmdCreate,
@@ -183,6 +184,7 @@ export function parseArgs(args: string[], spec: FlagSpec): ParsedArgs {
 const USAGE: ReadonlyArray<readonly [verb: string, usage: string, what: string]> = [
   ['init', 'hobby init', 'prepare the host, check the filesystem'],
   ['daemon', 'hobby daemon', 'run the daemon in the foreground'],
+  ['daemon', 'hobby daemon stop', 'stop the daemon and the proxy, ending sessions'],
   ['new', 'hobby new <name>', 'project + postgres + connection string'],
   ['new', 'hobby new <name> --empty', 'a project with nothing in it'],
   ['new', 'hobby new <name> --pin', 'born pinned: never auto-sleeps'],
@@ -402,7 +404,13 @@ export async function run(argv: string[], io: Io): Promise<number> {
       return await cmdInit(io, paths, config, Boolean(flags.json))
     }
     if (cmd === 'daemon') {
-      parseArgs(rest, {})
+      const { positionals } = parseArgs(rest, {})
+      if (positionals[0] === 'stop') {
+        return await cmdDaemonStop(io, paths)
+      }
+      if (positionals.length > 0) {
+        throw new UsageError(`usage: hobby daemon [stop] (got: ${positionals.join(' ')})`)
+      }
       return await cmdDaemon(io, paths, config)
     }
     // studio passwd never talks to the daemon (setOperatorPassword writes

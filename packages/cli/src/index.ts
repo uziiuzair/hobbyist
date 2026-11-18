@@ -4,6 +4,10 @@
 
 export * from './daemon/context.js'
 export * from './daemon/server.js'
+export * from './daemon/proxy-link.js'
+export * from './daemon/proxy-resolve.js'
+export * from './proxyd/host.js'
+export * from './proxyd/protocol.js'
 export * from './daemon/reconcile.js'
 export * from './daemon/preflight.js'
 export * from './daemon/hibernator.js'
@@ -42,6 +46,7 @@ export {
   cmdCron,
   cmdCronLs,
   cmdDaemon,
+  cmdDaemonStop,
   cmdDeploy,
   cmdDiff,
   cmdEject,

@@ -35,6 +35,16 @@ RestartSec=5s
 # partway leaves containers running that the store thinks are stopped.
 TimeoutStopSec=90
 KillSignal=SIGTERM
+# The Postgres proxy runs as its own process, spawned by the daemon, so that a
+# restart or an upgrade leaves proxied sessions up
+# (docs/proxy/specs/2026-11-18-proxy-outlives-the-daemon.md). The default
+# KillMode=control-group would kill it with the daemon on every stop and
+# restart. With KillMode=process only the daemon is signalled: `systemctl
+# restart hobby` keeps sessions, and `systemctl stop hobby` leaves the proxy
+# running too. `hobby daemon stop` is the full stop, proxy included.
+# systemd logs a warning about the left-over process on the next start; that
+# process is the proxy, and the daemon adopts it.
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target
