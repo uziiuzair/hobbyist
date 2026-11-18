@@ -39,10 +39,21 @@ import { HobbyError } from '@hobby.sh/core'
 // hobby ever ships a unit file, it must not set that.
 export const DAEMON_LOCK_PATH = '/tmp/hobby-daemon.lock'
 
+// The signal protocol this daemon speaks, recorded in its lock so a CLI can
+// check before it signals. Version 1: SIGTERM honours a restart request
+// (restart-request.ts) and SIGUSR2 is the full stop. A daemon from before the
+// separate proxy process writes no `signals` field, reads as 0, and treats
+// SIGTERM as a shutdown with the proxy inside it: `hobby daemon restart` aimed
+// at one ends every session instead of keeping them. That is the case the new
+// CLI meets on every upgrade, between swapping the code and restarting the
+// daemon, so the CLI refuses rather than assume (cmdDaemonRestart/Stop).
+export const DAEMON_SIGNAL_PROTOCOL = 1
+
 interface LockRecord {
   pid: number
   home: string
   startedAt: string
+  signals: number
 }
 
 export interface DaemonLock {
@@ -60,6 +71,9 @@ export interface DaemonLockStatus {
   pid: number
   home: string
   startedAt: string
+  // DAEMON_SIGNAL_PROTOCOL of the daemon that wrote the lock; 0 for one that
+  // predates the field.
+  signals: number
   running: boolean
   self: boolean
 }
@@ -74,6 +88,7 @@ export function inspectDaemonLock(path: string = DAEMON_LOCK_PATH): DaemonLockSt
     pid: record.pid,
     home: record.home,
     startedAt: record.startedAt,
+    signals: record.signals,
     running: isAlive(record.pid),
     self: record.pid === process.pid,
   }
@@ -136,6 +151,7 @@ function readLock(path: string): LockRecord | null {
       pid: record.pid,
       home: typeof record.home === 'string' ? record.home : 'an unknown location',
       startedAt: typeof record.startedAt === 'string' ? record.startedAt : 'an unknown time',
+      signals: typeof record.signals === 'number' && Number.isInteger(record.signals) ? record.signals : 0,
     }
   } catch {
     // Unreadable or not JSON: a lock file we cannot understand is treated the
@@ -201,7 +217,7 @@ export function acquireDaemonLock(home: string, path: string = DAEMON_LOCK_PATH)
       continue
     }
 
-    const record: LockRecord = { pid: process.pid, home, startedAt: new Date().toISOString() }
+    const record: LockRecord = { pid: process.pid, home, startedAt: new Date().toISOString(), signals: DAEMON_SIGNAL_PROTOCOL }
     try {
       writeSync(fd, JSON.stringify(record))
     } finally {

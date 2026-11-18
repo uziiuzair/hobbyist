@@ -411,7 +411,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
         return await cmdDaemonStop(io, paths)
       }
       if (positionals[0] === 'restart') {
-        return await cmdDaemonRestart(io)
+        return await cmdDaemonRestart(io, paths)
       }
       if (positionals.length > 0) {
         throw new UsageError(`usage: hobby daemon [stop|restart] (got: ${positionals.join(' ')})`)

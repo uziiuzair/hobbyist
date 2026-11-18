@@ -83,6 +83,11 @@ proxy treats an address it already listens on as a no-op.
   only if its code changed. **An upgrade that changes proxy, core or proxyd
   code drops every proxied session once, at the daemon restart that follows
   it.** Upgrades that change only daemon code keep them.
+- **The first upgrade onto this design restarts through the supervisor, never
+  `hobby daemon restart`.** The daemon still running is the old one: its
+  SIGTERM is a full stop with the proxy inside it. `hobby daemon restart` and
+  `hobby daemon stop` refuse a daemon whose lock carries no `signals` field
+  for exactly this reason (docs/cli/CLAUDE.md, amendment of 2026-11-19).
 
 **The daemon lock.** Unchanged and still the daemon's alone. The proxy takes
 no lock: `proxy.sock` under `HOBBY_HOME` and the bound ports are what keep it

@@ -28,7 +28,8 @@ import { findWranglerManifest } from '@hobby.sh/worker'
 import { createDaemonContext } from '../daemon/context.js'
 import { runPreflight } from '../daemon/preflight.js'
 import { reconcile } from '../daemon/reconcile.js'
-import { acquireDaemonLock, DAEMON_LOCK_PATH, inspectDaemonLock } from '../daemon/single-instance.js'
+import { acquireDaemonLock, DAEMON_LOCK_PATH, DAEMON_SIGNAL_PROTOCOL, inspectDaemonLock } from '../daemon/single-instance.js'
+import type { DaemonLockStatus } from '../daemon/single-instance.js'
 import { startDaemon } from '../daemon/server.js'
 import { attachProxy, dialProxy, isAlive, proxySocketPath } from '../daemon/proxy-link.js'
 import { sigtermModeFromEnv, writeRestartRequest } from '../daemon/restart-request.js'
@@ -391,6 +392,37 @@ export async function cmdDaemon(io: Io, paths: Paths, config: HobbyConfig): Prom
   return 0
 }
 
+// Before `daemon stop` or `daemon restart` signals the pid in the lock, it
+// must be sure the signal means what this CLI thinks it means, to the daemon
+// this CLI is configured for. Two ways that goes wrong, both refused:
+//
+//   - the daemon predates the signal protocol (lock `signals` < 1). Its SIGTERM
+//     is a shutdown with the proxy inside the process, so a "restart" ends
+//     every proxied session at once, and its daemon is slow to finish stopping
+//     while the port is already closed. This is the state of every box during
+//     an upgrade: the code is swapped, `hobby` runs the new CLI, and the old
+//     daemon is still the one in the lock.
+//   - the daemon serves a different HOBBY_HOME. The lock is machine-wide, so
+//     without this a CLI pointed at one home signals the daemon of another.
+function assertSignalTarget(status: DaemonLockStatus, home: string, verb: 'restart' | 'stop'): void {
+  if (status.signals < DAEMON_SIGNAL_PROTOCOL) {
+    throw new HobbyError(
+      'conflict',
+      `the running daemon (pid ${status.pid}, started ${status.startedAt}) is from an earlier hobby that does not understand \`hobby daemon ${verb}\``,
+      verb === 'restart'
+        ? 'signalling it would stop it and the proxy inside it, ending every session. Restart it through its supervisor instead (`systemctl restart hobby`), which ends sessions once; from then on `hobby daemon restart` keeps them'
+        : 'stop it through its supervisor instead (`systemctl stop hobby`)'
+    )
+  }
+  if (resolvePath(status.home) !== resolvePath(home)) {
+    throw new HobbyError(
+      'conflict',
+      `the running daemon (pid ${status.pid}) serves ${status.home}, not ${home}`,
+      `this command is configured for ${home} (HOBBY_HOME); run it with HOBBY_HOME=${status.home} if that daemon is the one you mean`
+    )
+  }
+}
+
 // `hobby daemon stop`: the full stop. The daemon stops its resources as it
 // always has and, unlike SIGTERM (a restart, which leaves the proxy process
 // and its sessions up), stops the proxy process too. Sent as SIGUSR2 to the
@@ -406,6 +438,7 @@ export async function cmdDaemonStop(
   const timeoutMs = opts.timeoutMs ?? 120_000
   const status = inspectDaemonLock(opts.lockPath ?? DAEMON_LOCK_PATH)
   if (status !== null && status.running && !status.self) {
+    assertSignalTarget(status, paths.home, 'stop')
     process.kill(status.pid, 'SIGUSR2')
     const deadline = Date.now() + timeoutMs
     while (isAlive(status.pid) && Date.now() < deadline) {
@@ -444,6 +477,7 @@ export async function cmdDaemonStop(
 // and says so; with no supervisor to start one, it says that instead.
 export async function cmdDaemonRestart(
   io: Io,
+  paths: Paths,
   opts: { lockPath?: string; timeoutMs?: number; restartWaitMs?: number } = {}
 ): Promise<number> {
   const lockPath = opts.lockPath ?? DAEMON_LOCK_PATH
@@ -453,6 +487,7 @@ export async function cmdDaemonRestart(
   if (status === null || !status.running || status.self) {
     throw new HobbyError('usage', 'no daemon is running, so there is nothing to restart', 'start it with `hobby daemon` (or `systemctl start hobby`)')
   }
+  assertSignalTarget(status, paths.home, 'restart')
   writeRestartRequest(status.home, status.pid)
   process.kill(status.pid, 'SIGTERM')
   const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
