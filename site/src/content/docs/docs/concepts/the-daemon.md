@@ -84,7 +84,10 @@ It is its own process, not part of the daemon, so a daemon restart or upgrade
 does not end the sessions it holds. It reads routing from the daemon's state
 file, so connections to databases that are already awake keep working while
 the daemon is down, and a connection that needs a wake waits for the daemon to
-come back, up to the wake timeout. `hobby daemon stop` stops both.
+come back, up to the wake timeout. `hobby daemon stop` stops both. If the
+proxy process dies while the daemon is running, the daemon starts a new one,
+backing off if it keeps dying; after five quick failures in a row it stops
+trying, logs it, and `GET /v1/health` reports `degraded`.
 
 There is an HTTP counterpart for `app` and `worker` resources, on 7433,
 answering the same shape of question for a request instead of a connection.

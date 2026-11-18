@@ -26,6 +26,7 @@ import type { DaemonContext } from './context.js'
 import { resolveProxyHosts } from './proxy-hosts.js'
 import { DAEMON_LOCK_PATH, inspectDaemonLock } from './single-instance.js'
 import { dialProxy, proxySocketPath } from './proxy-link.js'
+import type { ProxyHealth } from './proxy-supervisor.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -95,6 +96,10 @@ export interface PreflightReport {
   // itself, so that port being taken is not a blocker. Absent in reports
   // built before this existed.
   proxyProcess?: { pid: number } | null
+  // The running daemon's supervisor view of that proxy (proxy-supervisor.ts):
+  // restarts, a crash loop it gave up on. Only when this report is served by
+  // a daemon that runs the proxy as its own process; absent otherwise.
+  proxySupervisor?: ProxyHealth
   runtimeAvailable: boolean
   filesystem: {
     // The directory the probe actually ran against: paths.home if it
@@ -432,6 +437,7 @@ export async function runPreflight(ctx: DaemonContext, opts: PreflightOptions = 
 
   return {
     proxyProcess: proxyProcess === null ? null : { pid: proxyProcess.hello.pid },
+    ...(ctx.proxyHealth === undefined ? {} : { proxySupervisor: ctx.proxyHealth() }),
     runtimeAvailable,
     filesystem: {
       path: probeDir,

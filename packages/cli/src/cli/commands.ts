@@ -31,6 +31,7 @@ import { reconcile } from '../daemon/reconcile.js'
 import { acquireDaemonLock, DAEMON_LOCK_PATH, inspectDaemonLock } from '../daemon/single-instance.js'
 import { startDaemon } from '../daemon/server.js'
 import { attachProxy, dialProxy, isAlive, proxySocketPath } from '../daemon/proxy-link.js'
+import { sigtermModeFromEnv, writeRestartRequest } from '../daemon/restart-request.js'
 import { MIN_PASSWORD_LENGTH, hasOperatorCredential, setOperatorPassword } from '../daemon/studio/auth.js'
 import { issueToken, readTokens, revokeToken } from '../daemon/studio/tokens.js'
 import type { WireResource } from '../daemon/wire.js'
@@ -356,6 +357,9 @@ export async function cmdInit(io: Io, paths: Paths, config: HobbyConfig, json: b
 export async function cmdDaemon(io: Io, paths: Paths, config: HobbyConfig): Promise<number> {
   await ensurePrivateDir(paths.home)
   await ensurePrivateDir(paths.projectsDir)
+  // Read before the lock so a bad value refuses to start rather than
+  // surfacing at the first SIGTERM (restart-request.ts).
+  const sigterm = sigtermModeFromEnv(io.env)
 
   // Before reconcile, not after. Reconcile inspects and starts containers, so
   // a second daemon that gets that far has already touched the first one's
@@ -373,6 +377,7 @@ export async function cmdDaemon(io: Io, paths: Paths, config: HobbyConfig): Prom
       socketPath: paths.socketPath,
       apiPort: config.apiPort,
       onShutdown: () => lock.release(),
+      sigterm,
       ...(inProcess ? {} : { proxyProcess: {} }),
     })
   } catch (err) {
@@ -425,6 +430,57 @@ export async function cmdDaemonStop(
   }
   io.out('nothing to stop: no daemon and no proxy are running')
   return 0
+}
+
+// `hobby daemon restart`: a restart that keeps the proxy and its sessions,
+// asked for explicitly. Under the shipped systemd unit a plain SIGTERM is a
+// full stop (HOBBY_SIGTERM=stop, since systemd gives `stop` and `restart` the
+// same SIGTERM), so this is the way to restart there without ending sessions.
+// It writes a restart request naming the daemon's pid and sends SIGTERM
+// (restart-request.ts); the daemon shuts down in restart mode and exits
+// RESTART_EXIT_CODE, which the unit's RestartForceExitStatus= turns into a
+// new start. Like `hobby daemon stop`, a verb about a process on this box
+// with no API route or MCP tool. It waits for a new daemon to take the lock
+// and says so; with no supervisor to start one, it says that instead.
+export async function cmdDaemonRestart(
+  io: Io,
+  opts: { lockPath?: string; timeoutMs?: number; restartWaitMs?: number } = {}
+): Promise<number> {
+  const lockPath = opts.lockPath ?? DAEMON_LOCK_PATH
+  const timeoutMs = opts.timeoutMs ?? 120_000
+  const restartWaitMs = opts.restartWaitMs ?? 30_000
+  const status = inspectDaemonLock(lockPath)
+  if (status === null || !status.running || status.self) {
+    throw new HobbyError('usage', 'no daemon is running, so there is nothing to restart', 'start it with `hobby daemon` (or `systemctl start hobby`)')
+  }
+  writeRestartRequest(status.home, status.pid)
+  process.kill(status.pid, 'SIGTERM')
+  const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+  let deadline = Date.now() + timeoutMs
+  while (isAlive(status.pid) && Date.now() < deadline) {
+    await sleepMs(100)
+  }
+  if (isAlive(status.pid)) {
+    throw new HobbyError(
+      'internal',
+      `the daemon (pid ${status.pid}) is still shutting down after ${Math.round(timeoutMs / 1000)}s`,
+      'it stops idle resources one at a time; check its log, or wait and run this again'
+    )
+  }
+  deadline = Date.now() + restartWaitMs
+  while (Date.now() < deadline) {
+    const next = inspectDaemonLock(lockPath)
+    if (next !== null && next.running && next.pid !== status.pid) {
+      io.out(`daemon restarted (pid ${status.pid} to ${next.pid}); the proxy and its open sessions stayed up`)
+      return 0
+    }
+    await sleepMs(200)
+  }
+  throw new HobbyError(
+    'internal',
+    `the daemon (pid ${status.pid}) stopped for a restart, leaving the proxy and its sessions up, but no new daemon started within ${Math.round(restartWaitMs / 1000)}s`,
+    'start it with `hobby daemon`; under systemd the unit restarts it itself (RestartForceExitStatus=75 in scripts/hobby.service), so check `systemctl status hobby`'
+  )
 }
 
 // The product's central promise: one command, one Postgres. Three calls

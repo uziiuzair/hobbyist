@@ -43,6 +43,7 @@ import {
   refusalLogLine,
   type AccessRefusal,
 } from '@hobby.sh/proxy'
+import type { ProxyHealth } from './proxy-supervisor.js'
 import { allowlistOf, resolveProxyTarget } from './proxy-resolve.js'
 import { createTailnetDetector } from './tailnet.js'
 import { formatRetryDelay, redactWakeError, wakeRetryDelayMs } from './wake-backoff.js'
@@ -120,6 +121,10 @@ export interface DaemonContext {
   // to holdResourceWakes below. A hand-built test context without it gets a
   // running worker redeployed in place, as before Phase A.
   holdResourceWakes?: (resourceId: string, what: string) => (failure?: string) => void
+  // Set by startDaemon when the proxy runs as its own process: the
+  // supervisor's view of it (proxy-supervisor.ts), which GET /v1/health and
+  // GET /v1/preflight report. Unset with the proxy in-process.
+  proxyHealth?: () => ProxyHealth
 }
 
 // A convenience factory for the real, production wiring: opens the real

@@ -765,3 +765,30 @@ workers still runs in the daemon.
 Tested under Node with a fake backend (`packages/cli/test/proxy-process.test.ts`),
 including the real `bin/hobby-proxy.js` as a child process. **Not verified**
 under Bun, with a real daemon, or with Docker.
+
+## Amendment, 2026-11-18: the daemon restarts a proxy process that dies
+
+Closes the gap the amendment above left: a proxy that died while the daemon
+ran stayed dead until the next daemon start, with every database unreachable.
+`superviseProxy` (`packages/cli/src/daemon/proxy-supervisor.ts`), which
+`startDaemon` now uses in place of a bare `adoptOrStartProxy`, watches the
+link. When it closes and the daemon did not ask for it (`beginShutdown` is the
+first thing `performShutdown` does), it checks the hello's pid: gone means a
+new proxy through `adoptOrStartProxy` with the same settings and the gateways
+re-sent; alive means re-dial and re-attach, or, if it does not answer, SIGTERM
+then SIGKILL so the port frees before a new one starts. Never two proxies on
+the port: a new one starts only once the old pid is gone, and
+`adoptOrStartProxy` dials before it spawns.
+
+Backoff 0.5 s doubling to 30 s; 60 s up resets it; 5 fast losses in a row and
+it gives up with a `proxy: GIVING UP` log line. `GET /v1/health` then says
+`{status: "degraded", proxy: "failed"}` (`proxy: "up"` otherwise), and
+`GET /v1/preflight` (`hobby init`) carries the detail as `proxySupervisor`.
+The exit code or signal of a proxy this daemon spawned is in the log line
+(`adoptOrStartProxy`'s new `onExit`).
+
+`$HOBBY_HOME/proxy.sock` is now 0600 right after listen (`SOCKET_MODE`,
+`packages/cli/src/proxyd/protocol.ts`, shared with the daemon's `hobby.sock`).
+
+Tests: `packages/cli/test/proxy-supervisor.test.ts`, with the real
+`bin/hobby-proxy.js` under Node. **Not verified** under Bun or with Docker.

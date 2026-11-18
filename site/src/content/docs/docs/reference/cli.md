@@ -96,12 +96,29 @@ on a unix socket for the CLI and MCP, and on loopback TCP for Studio. Only one
 may run at a time, and that is enforced rather than assumed.
 
 The Postgres proxy runs as its own process, which the daemon starts the first
-time and adopts on every later start, so stopping or restarting the daemon
-(SIGTERM, Ctrl-C, `systemctl restart`) leaves open database sessions up. A
+time and adopts on every later start, so restarting the daemon (SIGTERM,
+Ctrl-C, `hobby daemon restart`) leaves open database sessions up. Under the
+shipped systemd unit SIGTERM is a full stop instead (`HOBBY_SIGTERM=stop`),
+because systemd sends the same SIGTERM for `systemctl stop` and `systemctl
+restart`; there, `hobby daemon restart` is the restart that keeps sessions. If
+the proxy process dies while the daemon runs, the daemon starts a new one. A
 restart after an upgrade that changed the proxy's code restarts the proxy too,
 which ends its sessions, and the daemon's log says so. Its own log is
 `~/.hobby/proxy.log`. `HOBBY_PROXY_MODE=in-process` runs it inside the daemon
 instead, as before.
+
+Takes no flags.
+
+### `hobby daemon restart`
+
+Restarts the daemon and keeps the proxy process and its open sessions. It asks
+the running daemon for a restart (a request file naming its pid, then
+SIGTERM); the daemon shuts down as on any restart and exits with code 75, which
+the systemd unit's `RestartForceExitStatus=75` turns into a new start, and the
+new daemon adopts the proxy. It waits for the new daemon and prints its pid.
+With no supervisor to start one (a `hobby daemon` you ran by hand), it says so
+and exits non-zero; start `hobby daemon` again and it adopts the proxy. It acts
+on this machine's processes, so it has no API route and no MCP tool.
 
 Takes no flags.
 

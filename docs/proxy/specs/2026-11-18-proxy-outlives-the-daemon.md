@@ -179,8 +179,106 @@ Not done or not verified:
   `bun:sqlite` read-only on a WAL database the daemon has open or has closed,
   are the two runtime behaviours most likely to differ.
 - A proxy that dies while a daemon is running is not respawned until the next
-  daemon start. The daemon logs the dropped link.
+  daemon start. The daemon logs the dropped link. (Closed later the same day:
+  see "Supervision" below.)
 - The HTTP router (apps and workers) still runs in the daemon; its
   connections still end on a restart.
 - systemd's `KillMode=process` is set in the shipped unit but has not been
-  exercised on a real systemd box.
+  exercised on a real systemd box. (With it, `systemctl stop hobby` left the
+  proxy holding its port; see "Stop versus restart under systemd" below.)
+
+### Supervision: a proxy that dies is started again (2026-11-18)
+
+Before the split a proxy crash was a daemon crash, and `Restart=on-failure`
+brought both back. After it, a dead proxy left a running daemon with every
+database unreachable until the next daemon start. `superviseProxy`
+(`packages/cli/src/daemon/proxy-supervisor.ts`) wraps `adoptOrStartProxy` and
+watches the link's `closed`:
+
+- The daemon closing the link itself (`beginShutdown`, called first in
+  `performShutdown`, then `detach` or `stopProxy`) never triggers anything.
+- Otherwise it waits up to `reapGraceMs` for the pid from the hello to be gone.
+  Gone: it starts a new proxy through `adoptOrStartProxy` (which dials first,
+  so it never starts a second proxy beside one that answers), re-sends the
+  docker gateways, re-applies `beginLeaving` if set, and logs the old proxy's
+  exit code or signal (`onExit`, new on `adoptOrStartProxy`; unknown for a
+  proxy adopted from an earlier daemon, which is not this daemon's child).
+  Alive: it re-dials and re-attaches the same pid; if that fails it SIGTERMs,
+  then SIGKILLs, the unresponsive proxy so its port frees, then starts anew.
+- Backoff 0.5 s, 1 s, 2 s ... capped at 30 s (`DEFAULT_PROXY_BACKOFF`). A
+  proxy up for 60 s resets the count. After 5 fast losses in a row it stops,
+  logs `proxy: GIVING UP ...` with the last reason and the log path, and
+  `health()` says `failed`.
+- `GET /v1/health` gains `proxy` (`up`, `recovering`, `failed`) and answers
+  `status: degraded` when it is `failed` (`routes.ts`, via
+  `DaemonContext.proxyHealth`). Only the state word there, since the route is
+  unauthenticated on the studio listener. `GET /v1/preflight` carries the full
+  `ProxyHealth` as `proxySupervisor`, and `hobby init` against a running
+  daemon prints a line when the proxy has been restarted or given up on
+  (`renderPreflight`, `packages/cli/src/cli/output.ts`).
+- Startup cannot race it: supervision begins once the first link exists,
+  from the same call. A respawn in flight when shutdown starts finishes, and
+  `detach` / `stopProxy` then act on the proxy it brought up.
+
+The proxy's control socket is now `chmod`ed to `SOCKET_MODE` (0600, moved to
+`packages/cli/src/proxyd/protocol.ts` and shared with `hobby.sock`) right after
+`listen` (`startProxyHost`).
+
+Tests: `packages/cli/test/proxy-supervisor.test.ts`, every proxy the real
+`bin/hobby-proxy.js` under Node: SIGKILL the proxy, a new one comes up on the
+same port, serves a session, counts activity and performs a wake through the
+daemon side; a link taken over with the proxy alive is re-attached to the same
+pid; a crash loop (the port taken by another listener) gives up after three
+attempts and `GET /v1/health` says `degraded`/`failed`; a proxy killed after
+`close('restart')` began is not respawned and its port stays free; the socket
+mode is 0600.
+
+### Stop versus restart under systemd (2026-11-18)
+
+With `KillMode=process` and SIGTERM meaning "restart", `systemctl stop hobby`
+stopped the daemon and left the proxy running, holding `proxyPort`. What
+systemd offers, from systemd.service(5):
+
+- A restart is "implemented as stop operations followed by start operations",
+  so `ExecStop=` and `ExecStopPost=` run on `systemctl restart` as well as on
+  `systemctl stop`. `ExecStop=hobby daemon stop` would end sessions on every
+  restart, which is the thing the split exists to avoid.
+- `$SERVICE_RESULT`, `$EXIT_CODE` and `$EXIT_STATUS` (set for `ExecStop=` and
+  `ExecStopPost=`) describe how the main process ended, not whether a stop or a
+  restart was asked for, and nothing else passed to the daemon or to those
+  commands names the operation. Asking systemd for the unit's pending job
+  type from inside `ExecStop=` is undocumented for this purpose and was not
+  used.
+- `ExecReload=` is for a configuration reload, and its own documentation
+  warns against an asynchronous one; a reload that makes the main process
+  exit was not adopted, because how systemd treats the main process exiting
+  mid-reload is not something the docs promise.
+
+No mechanism tells stop from restart reliably, so the safe default wins:
+
+- The unit sets `Environment=HOBBY_SIGTERM=stop`. `sigtermModeFromEnv`
+  (`packages/cli/src/daemon/restart-request.ts`), read by `cmdDaemon` and
+  passed as `StartDaemonOptions.sigterm`, makes a plain SIGTERM the full stop,
+  proxy included. `systemctl stop hobby` frees the port. `systemctl restart
+  hobby` is now the same full stop followed by a start: **its sessions end.**
+  Outside the unit SIGTERM is still a restart, as before.
+- The restart that keeps sessions is explicit: **`hobby daemon restart`**
+  (`cmdDaemonRestart`, `packages/cli/src/cli/commands.ts`). It writes the
+  daemon's pid to `$HOBBY_HOME/restart-request` (0600) and sends SIGTERM. The
+  daemon's handler (`onSigterm`) takes the request only if it names this pid
+  and is under a minute old, removes it either way, shuts down in restart
+  mode and exits `RESTART_EXIT_CODE` (75). The unit's
+  `RestartForceExitStatus=75` has systemd start the daemon again after
+  `RestartSec`, and with `KillMode=process` the proxy is not touched; the new
+  daemon adopts it. The CLI waits for a new pid in the daemon lock and reports
+  it, or says that nothing restarted the daemon (a `hobby daemon` started by
+  hand has no supervisor), leaving the proxy and its sessions up.
+- A daemon crash still leaves the proxy up for `Restart=on-failure` to bring
+  the daemon back to.
+
+Tests: `HOBBY_SIGTERM` parsing, the restart request (once, only for its pid,
+only while fresh, file mode 0600) and `onSigterm`'s choice of mode and exit
+code, in `packages/cli/test/proxy-supervisor.test.ts`. **Not verified on a
+real systemd box**: that `RestartForceExitStatus=75` restarts after a clean
+restart-mode exit, that `KillMode=process` leaves the proxy alone through it,
+and that `systemctl stop` now frees the port within `TimeoutStopSec`.
