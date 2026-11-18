@@ -403,6 +403,31 @@ restart under systemd"). So:
 - SIGINT is still a restart, exit 0; SIGUSR2 (`hobby daemon stop`) still the
   full stop.
 
+## Amendment, 2026-11-19: `daemon restart` and `daemon stop` check what they signal
+
+Both verbs signal the pid in the machine-wide daemon lock, so before this they
+signalled whatever daemon held it. Two cases went wrong, and both now refuse
+with `conflict` before any signal is sent (`assertSignalTarget`,
+`packages/cli/src/cli/commands.ts`):
+
+- **A daemon from before the separate proxy process.** Its SIGTERM is a
+  shutdown with the proxy inside the process, so `hobby daemon restart` ends
+  every proxied session at once and then waits out a slow shutdown with the
+  port already closed. Every upgrade passes through this state: the code is
+  swapped, `hobby` runs the new CLI, and the old daemon still holds the lock.
+  It happened on a production box (2026-11-18): one `hobby daemon restart`
+  from the new build took the proxy down for five and a half minutes, until
+  the old daemon was killed and restarted by hand. The daemon now records the
+  signal protocol it speaks in its lock (`signals`, `DAEMON_SIGNAL_PROTOCOL` =
+  1, `packages/cli/src/daemon/single-instance.ts`); a lock without it reads as
+  0 and is refused, with the hint to restart through the supervisor once.
+- **A daemon serving another `HOBBY_HOME`.** The lock path is fixed, so a CLI
+  configured for one home signalled the daemon of another. Refused unless the
+  lock's home resolves to this CLI's home.
+
+`hobby daemon stop` with no daemon in the lock still stops a proxy left behind,
+directly over its socket, as before. Tests: `packages/cli/test/daemon-signal-guard.test.ts`.
+
 The daemon also supervises the proxy now: one that dies while the daemon runs
 is started again with backoff, and a crash loop is given up on and reported
 in `GET /v1/health` and `hobby init` (`superviseProxy`,
