@@ -27,8 +27,10 @@ import { durableObjectNamespaces } from './alarms.js'
 import { cronState, postScheduled, scheduledWorkers, startCronScheduler } from './crons.js'
 import { createCaddyManager, type CaddyManager } from './caddy.js'
 import { createHttpProxyDeps, createProxyDeps, getOrCreateWake, getWakeRefusal, type DaemonContext } from './context.js'
-import { adoptOrStartProxy, proxySocketPath, type ProxyLink } from './proxy-link.js'
-import type { ProxydConfig } from '../proxyd/protocol.js'
+import { proxySocketPath } from './proxy-link.js'
+import { onSigterm } from './restart-request.js'
+import { superviseProxy, type ProxyBackoff, type SupervisedProxy } from './proxy-supervisor.js'
+import { SOCKET_MODE, type ProxydConfig } from '../proxyd/protocol.js'
 import { startExpirySweeper } from './expiry.js'
 import { startHibernator } from './hibernator.js'
 import { startQueueEndpoint } from './queue-endpoint.js'
@@ -38,8 +40,6 @@ import { createStudioApp } from './studio/routes.js'
 import { resolveProxyHosts } from './proxy-hosts.js'
 
 const execFileAsync = promisify(execFile)
-
-const SOCKET_MODE = 0o600
 
 // How often the hibernator re-checks every resource for a sleep candidate.
 // docs/hibernation/CLAUDE.md cites Xata's CNPG sidecar polling once a minute
@@ -396,15 +396,24 @@ export interface StartDaemonOptions {
     // Tests only, passed through to adoptOrStartProxy.
     fingerprint?: string
     spawn?: (config: ProxydConfig) => Promise<number | null>
-  }
+    // Tests only: the respawn backoff (proxy-supervisor.ts).
+    backoff?: Partial<ProxyBackoff>
+  }  // What a plain SIGTERM means (restart-request.ts): `restart` by default,
+  // `stop` under the shipped systemd unit (HOBBY_SIGTERM=stop), where
+  // `systemctl stop` and `systemctl restart` cannot be told apart. A SIGTERM
+  // that `hobby daemon restart` asked for is always a restart.
+  sigterm?: ShutdownMode
 }
 
 // How the daemon is going down.
 //
-//   restart  SIGTERM or SIGINT: a service manager restarting it, an upgrade,
-//            Ctrl-C. A separate proxy process is left running with its
+//   restart  SIGINT (Ctrl-C), SIGTERM unless opts.sigterm says `stop`, and a
+//            SIGTERM `hobby daemon restart` asked for (restart-request.ts),
+//            which also exits RESTART_EXIT_CODE so a supervisor starts the
+//            next daemon. A separate proxy process is left running with its
 //            sessions, and so is every resource one of them is using.
-//   stop     SIGUSR2, which `hobby daemon stop` sends, and close() by
+//   stop     SIGUSR2, which `hobby daemon stop` sends, SIGTERM under the
+//            shipped systemd unit (HOBBY_SIGTERM=stop), and close() by
 //            default: the whole thing, the proxy process included.
 //
 // With the proxy in-process the two are the same, since the proxy cannot
@@ -507,11 +516,13 @@ export async function startDaemon(
   // (opts.proxyProcess, what `hobby daemon` uses) it outlives this daemon, so a
   // restart or an upgrade leaves proxied sessions up:
   // docs/proxy/specs/2026-11-18-proxy-outlives-the-daemon.md.
-  let proxyLink: ProxyLink | null = null
+  let proxyLink: SupervisedProxy | null = null
   const proxies: Array<{ port: number; close: () => Promise<void> }> = []
   let addProxyGateway: (gateway: string) => Promise<void>
   if (opts.proxyProcess !== undefined) {
-    const link = await adoptOrStartProxy({
+    // Supervised: a proxy that dies while this daemon runs is started again
+    // (proxy-supervisor.ts), as Restart=on-failure did when it was in-process.
+    const link = await superviseProxy({
       config: {
         socketPath: proxySocketPath(ctx.paths.home),
         statePath: ctx.paths.statePath,
@@ -528,8 +539,10 @@ export async function startDaemon(
       },
       ...(opts.proxyProcess.fingerprint === undefined ? {} : { fingerprint: opts.proxyProcess.fingerprint }),
       ...(opts.proxyProcess.spawn === undefined ? {} : { spawn: opts.proxyProcess.spawn }),
+      ...(opts.proxyProcess.backoff === undefined ? {} : { backoff: opts.proxyProcess.backoff }),
     })
     proxyLink = link
+    ctx.proxyHealth = () => link.health()
     // The gateways the proxy also listens on (issue #53) and counts as this
     // box for allowlists. Sent on adoption too: a gateway the proxy already
     // has is a no-op on its side.
@@ -796,6 +809,8 @@ export async function startDaemon(
       return shutdownPromise
     }
     const keepProxy = mode === 'restart' && proxyLink !== null
+    // Before anything else: a proxy lost from here on is not respawned.
+    proxyLink?.beginShutdown()
     shutdownPromise = (async () => {
       // From here on a wake the proxy asks for is answered "daemon leaving",
       // and the proxy asks the next daemon instead.
@@ -917,24 +932,29 @@ export async function startDaemon(
     return shutdownPromise
   }
 
-  const onSignal = (mode: ShutdownMode) => (): void => {
+  const shutdownAndExit = (mode: ShutdownMode, exitCode: number): void => {
     performShutdown(mode)
-      .then(() => process.exit(0))
+      .then(() => process.exit(exitCode))
       .catch((err: unknown) => {
         console.error(`daemon: shutdown failed: ${errorMessage(err)}`)
         process.exit(1)
       })
   }
 
-  const onRestart = onSignal('restart')
-  const onStop = onSignal('stop')
-  process.on('SIGTERM', onRestart)
+  const onRestart = (): void => shutdownAndExit('restart', 0)
+  const onStop = (): void => shutdownAndExit('stop', 0)
+  const onTerm = (): void => {
+    const { mode, exitCode, requested } = onSigterm(ctx.paths.home, opts.sigterm ?? 'restart')
+    if (requested) console.error('daemon: restarting as `hobby daemon restart` asked; the proxy and its sessions stay up')
+    shutdownAndExit(mode, exitCode)
+  }
+  process.on('SIGTERM', onTerm)
   process.on('SIGINT', onRestart)
   process.on('SIGUSR2', onStop)
 
   return {
     async close(mode: ShutdownMode = 'stop'): Promise<void> {
-      process.off('SIGTERM', onRestart)
+      process.off('SIGTERM', onTerm)
       process.off('SIGINT', onRestart)
       process.off('SIGUSR2', onStop)
       await performShutdown(mode)

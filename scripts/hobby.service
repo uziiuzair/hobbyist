@@ -35,15 +35,36 @@ RestartSec=5s
 # partway leaves containers running that the store thinks are stopped.
 TimeoutStopSec=90
 KillSignal=SIGTERM
+# Stop versus restart, and the separate proxy process.
+#
 # The Postgres proxy runs as its own process, spawned by the daemon, so that a
 # restart or an upgrade leaves proxied sessions up
-# (docs/proxy/specs/2026-11-18-proxy-outlives-the-daemon.md). The default
-# KillMode=control-group would kill it with the daemon on every stop and
-# restart. With KillMode=process only the daemon is signalled: `systemctl
-# restart hobby` keeps sessions, and `systemctl stop hobby` leaves the proxy
-# running too. `hobby daemon stop` is the full stop, proxy included.
-# systemd logs a warning about the left-over process on the next start; that
-# process is the proxy, and the daemon adopts it.
+# (docs/proxy/specs/2026-11-18-proxy-outlives-the-daemon.md). systemd cannot
+# tell the daemon which of `systemctl stop` and `systemctl restart` it is
+# doing: a restart is a stop followed by a start, both send the same
+# KillSignal, ExecStop= and ExecStopPost= run for both, and nothing passed to
+# them names the operation (systemd.service(5), ExecStop=). So:
+#
+#   systemctl stop hobby      a full stop: the daemon, then the proxy, which
+#                             ends its sessions and frees the proxy port.
+#   systemctl restart hobby   the same full stop, then a start. Sessions end.
+#   hobby daemon restart      the restart that keeps the proxy and its open
+#                             sessions: the daemon exits 75 and
+#                             RestartForceExitStatus=75 below starts it again,
+#                             RestartSec later; the new daemon adopts the proxy.
+#   hobby daemon stop         the same full stop as `systemctl stop`.
+#
+# HOBBY_SIGTERM=stop is what makes a plain SIGTERM the full stop
+# (packages/cli/src/daemon/restart-request.ts). Without it SIGTERM keeps the
+# proxy running, which under KillMode=process would leave it holding the port
+# after `systemctl stop`.
+Environment=HOBBY_SIGTERM=stop
+RestartForceExitStatus=75
+# KillMode=process signals only the daemon. The default control-group would
+# also kill the proxy on every exit, including the restart above and a daemon
+# crash, where Restart=on-failure brings the daemon back to adopt the proxy
+# that is still serving. systemd logs a warning about a left-over process on
+# the next start; that process is the proxy, and the daemon adopts it.
 KillMode=process
 
 [Install]

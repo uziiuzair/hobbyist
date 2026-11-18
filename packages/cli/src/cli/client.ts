@@ -162,7 +162,12 @@ async function call<T>(client: DaemonClient, method: string, path: string, body?
 // match reality rather than the richer internal record the daemon actually
 // holds.
 export interface HealthResponse {
+  // `ok`, or `degraded` when the daemon has given up restarting its proxy
+  // process (proxy-supervisor.ts).
   status: string
+  // The proxy process's state, when the proxy runs as its own process:
+  // `up`, `recovering` or `failed`. Absent with the proxy in-process.
+  proxy?: 'up' | 'recovering' | 'failed'
 }
 // GET /v1/version. A daemon older than the route answers it with a `usage`
 // error (unknown route), which `hobby version` reports as "older than this

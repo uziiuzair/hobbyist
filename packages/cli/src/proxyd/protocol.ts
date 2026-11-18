@@ -22,6 +22,12 @@ import type net from 'node:net'
 // proxy speaking another version; it restarts it.
 export const PROXY_LINK_PROTOCOL = 1
 
+// The mode both unix sockets get right after listen: the daemon's API socket
+// (hobby.sock, server.ts) and this proxy's control socket (proxy.sock,
+// proxyd/host.ts). Owner-only. HOBBY_HOME is already 0700, so for proxy.sock
+// this is defence in depth: whoever can dial it can stop the proxy.
+export const SOCKET_MODE = 0o600
+
 // What the proxy process is started with. Serialised into its environment
 // (HOBBY_PROXYD_CONFIG) by the daemon. Nothing here is secret: the TLS entries
 // are file paths, and the key file's bytes are only ever hashed.

@@ -78,14 +78,17 @@ security:
 paths:
   /v1/health:
     get:
-      summary: Liveness. Always unauthenticated, even studio-fronted.
+      summary: "Liveness. Always unauthenticated, even studio-fronted. With the Postgres proxy as its own process, also that process's state as the daemon's supervisor sees it (packages/cli/src/daemon/proxy-supervisor.ts): `failed` means it gave up restarting a crash-looping proxy and every database is unreachable, and makes `status` `degraded`. Only the state word, since this route is unauthenticated; the detail is in /v1/preflight."
       responses:
         "200":
           content:
             application/json:
               schema:
                 type: object
-                properties: { status: { const: ok } }
+                required: [status]
+                properties:
+                  status: { enum: [ok, degraded] }
+                  proxy: { enum: [up, recovering, failed] }
 
   /v1/version:
     get:
@@ -1460,6 +1463,27 @@ components:
     Preflight:
       type: object
       properties:
+        proxyProcess:
+          type: object
+          nullable: true
+          description: "A proxy process answering on $HOBBY_HOME/proxy.sock (preflight.ts). It holds proxyPort for the daemon to adopt, so that port being taken is not a blocker."
+          properties:
+            pid: { type: integer }
+        proxySupervisor:
+          type: object
+          description: "Only when served by a daemon running the proxy as its own process: its supervisor's view (ProxyHealth, proxy-supervisor.ts). state failed means it gave up after maxFastCrashes fast crashes in a row."
+          properties:
+            state: { enum: [up, recovering, failed] }
+            pid: { type: integer, nullable: true }
+            port: { type: integer }
+            restarts: { type: integer }
+            consecutiveFastCrashes: { type: integer }
+            lastLoss:
+              type: object
+              nullable: true
+              properties:
+                at: { type: string }
+                reason: { type: string }
         runtimeAvailable: { type: boolean }
         filesystem:
           type: object

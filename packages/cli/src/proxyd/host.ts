@@ -18,7 +18,7 @@
 // store.
 
 import { existsSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
+import { chmod, rm } from 'node:fs/promises'
 import net from 'node:net'
 import { HobbyError, openStoreReadOnly, type StoreReader } from '@hobby.sh/core'
 import {
@@ -37,6 +37,7 @@ import {
   proxyConfigKey,
   proxyCodeFingerprint,
   send,
+  SOCKET_MODE,
   type DaemonMessage,
   type LiveConnection,
   type ProxydConfig,
@@ -307,6 +308,9 @@ export async function startProxyHost(
       resolve()
     })
   })
+  // Owner-only, the mode the daemon gives hobby.sock: whoever can dial this
+  // socket can stop the proxy or answer its wakes.
+  await chmod(config.socketPath, SOCKET_MODE)
 
   let markStopped: () => void = () => {}
   const stopped = new Promise<void>((resolve) => {

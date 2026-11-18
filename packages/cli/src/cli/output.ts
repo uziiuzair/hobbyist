@@ -329,6 +329,20 @@ export function renderPreflight(report: PreflightReport): string[] {
       ? `proxy port ${report.ports.proxy.port} on ${report.ports.proxy.host}: held by the hobby proxy (pid ${adoptable.pid}), which the daemon adopts`
       : portLine('proxy', report.ports.proxy)
   )
+  // Served by a daemon that supervises its proxy (proxy-supervisor.ts): say
+  // when it has had to restart it, and loudly when it gave up.
+  const supervisor = report.proxySupervisor
+  if (supervisor !== undefined && supervisor.state === 'failed') {
+    lines.push(
+      `proxy process: FAILED, not restarting after ${supervisor.consecutiveFastCrashes - 1} crashes in a row` +
+        `${supervisor.lastLoss === null ? '' : ` (last: ${supervisor.lastLoss.reason})`}; every database is unreachable until the daemon is restarted`
+    )
+  } else if (supervisor !== undefined && (supervisor.state === 'recovering' || supervisor.restarts > 0)) {
+    lines.push(
+      `proxy process: ${supervisor.state === 'recovering' ? 'being restarted' : `up (pid ${supervisor.pid})`}, restarted ${supervisor.restarts} time${supervisor.restarts === 1 ? '' : 's'} by the daemon` +
+        `${supervisor.lastLoss === null ? '' : ` (last loss ${supervisor.lastLoss.at}: ${supervisor.lastLoss.reason})`}`
+    )
+  }
   lines.push(portLine('api (daemon API and studio)', report.ports.api))
   lines.push(portLine('http', report.ports.http))
   lines.push(portLine('queue', report.ports.queue))

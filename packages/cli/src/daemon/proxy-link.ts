@@ -292,6 +292,10 @@ export async function adoptOrStartProxy(opts: {
   // Tests: start the proxy some other way. Returns a promise that settles if
   // it exits before linking (with its exit code), never otherwise.
   spawn?: (config: ProxydConfig) => Promise<number | null>
+  // Called when a proxy this call spawned exits, whenever that is (before
+  // linking or long after), with its exit code or the signal that ended it.
+  // The supervisor (proxy-supervisor.ts) logs it as the reason for a respawn.
+  onExit?: (pid: number, code: number | null, signal: NodeJS.Signals | null) => void
 }): Promise<ProxyLink> {
   const log = opts.log ?? ((line: string) => console.error(line))
   const fingerprint = opts.fingerprint ?? proxyCodeFingerprint()
@@ -322,7 +326,10 @@ export async function adoptOrStartProxy(opts: {
     opts.spawn?.(opts.config) ??
     new Promise<number | null>((resolve) => {
       const child = spawnProxyProcess(opts.config, opts.logPath)
-      child.once('exit', (code) => resolve(code))
+      child.once('exit', (code, signal) => {
+        if (child.pid !== undefined) opts.onExit?.(child.pid, code, signal)
+        resolve(code)
+      })
       child.once('error', () => resolve(null))
     })
   let early: number | null | undefined
