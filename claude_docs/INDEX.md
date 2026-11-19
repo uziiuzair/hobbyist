@@ -40,6 +40,7 @@ The routing rule is in `docs/CLAUDE.md`. The project context is in the root
 | `queues/` | Queues: the broker outside the runtime. Designed 2026-08-13, built and verified against real Docker 2026-08-14 | Phase 2 |
 | `storage/` | S3-compatible buckets, volumes | Phase 3 |
 | `sdk/` | Client libraries, React first | Phase 3 |
+| `availability/` | The standby pair, opt-in for pinned projects. PROPOSED 2026-11-18 (ADR 0023), not built | Proposed |
 | `decisions/` | Architecture decision records, numbered and immutable | n/a |
 
 ## The decisions that define the project
@@ -67,6 +68,7 @@ longer in force.
 | `docs/decisions/0013` | Queues as a resource kind, with the broker held outside the runtime |
 | `docs/decisions/0014` | Resource records exist before code: creating an `app` or `worker` and deploying code into it are two acts, not one |
 | `docs/decisions/0016` | Project snapshots by quiesce and clone, and no point-in-time recovery |
+| `docs/decisions/0023` | PROPOSED: a standby pair, opt-in, for pinned projects that cannot go down |
 
 **The numbering was reserved, not sequential.** Three sessions were filing an
 ADR at once against a `main` that topped out at 0012: `record-before-code`, a
