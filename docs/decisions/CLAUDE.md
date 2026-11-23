@@ -65,6 +65,7 @@ that matters, because it is the difference between a decision and a dogma.
 | [0020](0020-no-autoprewarm-and-no-declared-roles-or-databases.md) | No autoprewarm after a wake, and no declared roles or databases |
 | [0021](0021-the-proxy-sees-passwords-for-serverless-driver-traffic.md) | The proxy handles passwords for serverless driver traffic only, and requires TLS for it from other machines |
 | [0022](0022-no-pg-cron-and-no-preload-outside-an-allowlist.md) | No pg_cron, and no preload library outside an allowlist (`pg_stat_statements`, `auto_explain`) |
+| [0024](0024-a-fleet-of-whole-boxes-joined-by-a-mesh-and-a-shared-index.md) | PROPOSED. A fleet of whole boxes, joined by a Headscale mesh and an etcd index of who owns what |
 
 0007 supersedes the scope section of the original root `CLAUDE.md` and is the one
 to read first if you are wondering why this is bigger than a database tool. 0001
@@ -78,3 +79,7 @@ still protects anything. 0007's other three guards are unaffected.
 autoprewarm after a wake (measured slower for the first queries), and declared
 roles and databases (they would change the routing contract or make the daemon
 a user store). 0019 already records the third, proxy login throttling.
+
+0024 is PROPOSED and reopens part of the root `CLAUDE.md`'s "multi-node
+anything" line: mesh and membership only. 0023 (PROPOSED, #225, a standby
+pair) is held for rework on top of it, which is why 0024 skips that number.
