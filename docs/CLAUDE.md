@@ -83,6 +83,7 @@ docs/<capability>/
 | [`queues/`](queues/) | The broker that holds messages outside the runtime, so a backlog survives sleep and a message can wake its consumer. | Phase 2 |
 | [`storage/`](storage/) | S3-compatible buckets and volumes for compute. | Phase 3 |
 | [`sdk/`](sdk/) | Client libraries, React first, if they earn their place. | Phase 3 |
+| [`fleet/`](fleet/) | Several whole boxes joined by a private mesh and a shared index of who owns what. PROPOSED in ADR 0024, not built. | Multi-node, step 1 |
 
 The When column is the intended build sequence, not a priority ranking. The
 proxy is second on purpose: it is the component most likely to prove the whole
